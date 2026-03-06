@@ -61,3 +61,5 @@ npm run dev
 ## Deploy to Railway
 
 Push to GitHub → Railway auto-deploys via `railway.json`.
+
+<!-- deploy-trigger: swarm-integration -->
