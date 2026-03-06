@@ -76,6 +76,8 @@ toolsRouter.post('/call', async (req: Request, res: Response) => {
     log.info({ tool: call.tool_name, status: toolResult.status, ms: toolResult.duration_ms }, 'Tool call done')
   } finally {
     AgentRegistry.decrementActive(call.agent_id)
+  // Update last_seen for this agent
+  AgentRegistry.heartbeat(call.agent_id)
   }
 })
 
