@@ -43,4 +43,5 @@ export const config = {
 
   // Rate limiting: max concurrent tool calls per agent
   maxConcurrentPerAgent: parseInt(optional('MAX_CONCURRENT_PER_AGENT', '5'), 10),
+  agentOpenAccess: optional('AGENT_OPEN_ACCESS', 'true') === 'true',
 } as const
