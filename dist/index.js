@@ -280,15 +280,31 @@ var AgentRegistry = {
     return Array.from(registry.values());
   },
   canCallTool(agentId, toolName) {
-    const entry = registry.get(agentId);
-    if (!entry) return { allowed: false, reason: `Agent '${agentId}' not registered. POST /agents/register first.` };
+    let entry = registry.get(agentId);
+    // SWARM-1: Auto-register unknown agents instead of blocking
+    if (!entry) {
+      const autoHandshake = {
+        agent_id: agentId,
+        display_name: agentId,
+        source: "auto-discovered",
+        status: "online",
+        capabilities: ["mcp_tools"],
+        allowed_tool_namespaces: ["*"],
+        registered_at: new Date().toISOString(),
+        last_seen_at: new Date().toISOString(),
+      };
+      const autoEntry = { handshake: autoHandshake, registeredAt: new Date(), lastSeenAt: new Date(), activeCalls: 0 };
+      registry.set(agentId, autoEntry);
+      persistToRedis(agentId, autoEntry);
+      entry = autoEntry;
+    }
     if (entry.handshake.status === "offline") return { allowed: false, reason: `Agent '${agentId}' is offline.` };
     const namespaces = entry.handshake.allowed_tool_namespaces;
     if (namespaces.includes("*")) return { allowed: true };
     const namespace = toolName.split(".")[0];
-    if (!namespace) return { allowed: false, reason: `Invalid tool name '${toolName}'. Expected 'namespace.method'.` };
+    if (!namespace) return { allowed: false, reason: "Invalid tool name: missing namespace." };
     if (namespaces.includes(namespace)) return { allowed: true };
-    return { allowed: false, reason: `Agent '${agentId}' not authorized for '${namespace}'. Allowed: [${namespaces.join(", ")}]` };
+    return { allowed: false, reason: `Agent '${agentId}' not authorized for namespace '${namespace}'.` };
   },
   incrementActive(agentId) {
     const e = registry.get(agentId);
