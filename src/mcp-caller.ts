@@ -28,7 +28,7 @@ export async function callMcpTool(opts: McpCallOptions): Promise<OrchestratorToo
   const t0 = Date.now()
   const timeoutMs = opts.timeoutMs ?? config.mcpTimeoutMs
 
-  const url = `${config.backendUrl}/mcp/route`
+  const url = `${config.backendUrl}/api/mcp/route`
   const body = JSON.stringify({ tool: opts.toolName, payload: opts.args })
 
   log.debug({ tool: opts.toolName, url }, 'MCP call start')

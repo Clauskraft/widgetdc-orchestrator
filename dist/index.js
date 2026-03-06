@@ -257,7 +257,7 @@ async function callMcpTool(opts) {
   const log = childLogger(opts.traceId ?? opts.callId);
   const t0 = Date.now();
   const timeoutMs = opts.timeoutMs ?? config.mcpTimeoutMs;
-  const url = `${config.backendUrl}/mcp/route`;
+  const url = `${config.backendUrl}/api/mcp/route`;
   const body = JSON.stringify({ tool: opts.toolName, payload: opts.args });
   log.debug({ tool: opts.toolName, url }, "MCP call start");
   const controller = new AbortController();
@@ -463,7 +463,7 @@ toolsRouter.post("/call", async (req, res) => {
 });
 toolsRouter.get("/namespaces", async (_req, res) => {
   try {
-    const r = await fetch(`${config.backendUrl}/mcp/tools`, {
+    const r = await fetch(`${config.backendUrl}/api/mcp/tools`, {
       headers: { Authorization: `Bearer ${config.backendApiKey}` }
     });
     if (!r.ok) {

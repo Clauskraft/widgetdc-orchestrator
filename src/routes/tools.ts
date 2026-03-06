@@ -79,7 +79,7 @@ toolsRouter.post('/call', async (req: Request, res: Response) => {
 
 toolsRouter.get('/namespaces', async (_req: Request, res: Response) => {
   try {
-    const r = await fetch(`${config.backendUrl}/mcp/tools`, {
+    const r = await fetch(`${config.backendUrl}/api/mcp/tools`, {
       headers: { Authorization: `Bearer ${config.backendApiKey}` },
     })
     if (!r.ok) { res.status(502).json({ success: false, error: { message: `Backend ${r.status}` } }); return }
