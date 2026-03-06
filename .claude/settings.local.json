@@ -7,7 +7,10 @@
       "Bash(node:*)",
       "Bash(BACKEND_API_KEY=test PORT=4099 timeout 3 node:*)",
       "Bash(railway version:*)",
-      "Bash(railway:*)"
+      "Bash(railway:*)",
+      "WebFetch(domain:orchestrator-production-c27e.up.railway.app)",
+      "Bash(curl:*)",
+      "Read(//c/Users/claus/Projetcs/widgetdc-consulting-frontend/src/**)"
     ]
   }
 }
