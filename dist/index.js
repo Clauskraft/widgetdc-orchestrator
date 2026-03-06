@@ -8093,14 +8093,18 @@ var AgentMessage = Type.Object({
   message_id: Type.Optional(Type.String({
     description: "Unique message identifier (assigned by storage layer)"
   })),
-  /** Who sent this message */
-  from: AgentId,
+  /** Who sent this message (known agent or custom ID) */
+  from: Type.Union([AgentId, Type.String()], {
+    description: "Sender agent ID"
+  }),
   /** Who should receive it (or "All" for broadcast) */
-  to: Type.Union([AgentId, Type.Literal("All")], {
+  to: Type.Union([AgentId, Type.Literal("All"), Type.String()], {
     description: "Target recipient or All for broadcast"
   }),
-  /** Technical source identifier (lowercase) */
-  source: AgentMessageSource,
+  /** Technical source identifier (known or custom) */
+  source: Type.Union([AgentMessageSource, Type.String()], {
+    description: 'Technical source identifier (e.g. "claude", "browser")'
+  }),
   /** Conversation thread identifier (groups related messages) */
   thread: Type.Optional(Type.String({
     description: 'Thread ID for grouping related messages (e.g. "widgetdc-sprint-march26")'
@@ -8146,8 +8150,10 @@ var AgentCapability = Type.Union([
   // Can trigger data ingestion
   Type.Literal("git_operations"),
   // Can use git.* tools
-  Type.Literal("audit")
+  Type.Literal("audit"),
   // Can use audit.* tools
+  Type.String()
+  // Extensible: custom capabilities allowed
 ], {
   $id: "AgentCapability",
   description: "Capability flags declaring what an agent is authorized to do"
@@ -8166,10 +8172,14 @@ var AgentHandshake = Type.Object({
   agent_id: Type.String({
     description: "Canonical agent identifier (e.g. CAPTAIN_CLAUDE, GEMINI_ARCHITECT)"
   }),
-  /** Display name (human-readable) */
-  display_name: AgentId,
-  /** Technical source key */
-  source: AgentMessageSource,
+  /** Display name (human-readable, free-form) */
+  display_name: Type.String({
+    description: 'Human-readable display name (e.g. "Consulting Frontend", "Captain Claude")'
+  }),
+  /** Technical source key (known agents or custom) */
+  source: Type.Union([AgentMessageSource, Type.String()], {
+    description: 'Technical source identifier (e.g. "claude", "browser", "custom-agent")'
+  }),
   /** Agent version or build identifier */
   version: Type.Optional(Type.String({
     description: 'Agent version string (e.g. "claude-sonnet-4-5", "gemini-2.0-flash")'
