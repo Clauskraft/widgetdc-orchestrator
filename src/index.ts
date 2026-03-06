@@ -26,6 +26,7 @@ import { chatRouter } from './routes/chat.js'
 import { AgentRegistry } from './agent-registry.js'
 import { getConnectionStats } from './chat-broadcaster.js'
 import { requireApiKey } from './auth.js'
+import { isSlackEnabled } from './slack.js'
 
 const app = express()
 const server = createServer(app)
@@ -56,6 +57,7 @@ app.get('/health', (_req, res) => {
     uptime_seconds: Math.floor(process.uptime()),
     agents_registered: AgentRegistry.all().length,
     ws_connections: getConnectionStats().total,
+    slack_enabled: isSlackEnabled(),
     timestamp: new Date().toISOString(),
   })
 })

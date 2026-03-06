@@ -7,6 +7,7 @@ import { callMcpTool } from '../mcp-caller.js';
 import { broadcastToolResult } from '../chat-broadcaster.js';
 import { config } from '../config.js';
 import { childLogger } from '../logger.js';
+import { notifyToolCall } from '../slack.js';
 export const toolsRouter = Router();
 toolsRouter.post('/call', async (req, res) => {
     const body = req.body;
@@ -55,6 +56,7 @@ toolsRouter.post('/call', async (req, res) => {
         if (result.status === 'success') {
             broadcastToolResult(call.call_id, result.result, call.agent_id);
         }
+        notifyToolCall(call.agent_id, call.tool_name, result.status, result.duration_ms ?? 0, result.error_message);
         log.info({ tool: call.tool_name, status: result.status, ms: result.duration_ms }, 'Tool call done');
     }
     finally {

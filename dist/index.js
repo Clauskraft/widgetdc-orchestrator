@@ -210,6 +210,81 @@ var AgentRegistry = {
   }
 };
 
+// src/slack.ts
+var webhookUrl = process.env["SLACK_WEBHOOK_URL"] ?? "";
+function isSlackEnabled() {
+  return webhookUrl.length > 0;
+}
+async function postToSlack(blocks, text) {
+  if (!isSlackEnabled()) return;
+  try {
+    const res = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, blocks })
+    });
+    if (!res.ok) {
+      logger.warn({ status: res.status }, "Slack webhook failed");
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Slack webhook error");
+  }
+}
+function notifyAgentRegistered(agentId, displayName, namespaces) {
+  postToSlack([
+    {
+      type: "header",
+      text: { type: "plain_text", text: `Agent Registered: ${displayName}`, emoji: true }
+    },
+    {
+      type: "section",
+      fields: [
+        { type: "mrkdwn", text: `*Agent ID:*
+\`${agentId}\`` },
+        { type: "mrkdwn", text: `*Tool Namespaces:*
+${namespaces.join(", ")}` }
+      ]
+    }
+  ], `Agent ${displayName} (${agentId}) registered`);
+}
+function notifyToolCall(agentId, toolName, status, durationMs, errorMessage) {
+  const emoji = status === "success" ? ":white_check_mark:" : ":x:";
+  const color = status === "success" ? "#36a64f" : "#e01e5a";
+  const fields = [
+    { type: "mrkdwn", text: `*Agent:*
+\`${agentId}\`` },
+    { type: "mrkdwn", text: `*Tool:*
+\`${toolName}\`` },
+    { type: "mrkdwn", text: `*Status:*
+${emoji} ${status}` },
+    { type: "mrkdwn", text: `*Duration:*
+${durationMs}ms` }
+  ];
+  if (errorMessage) {
+    fields.push({ type: "mrkdwn", text: `*Error:*
+\`${errorMessage.slice(0, 200)}\`` });
+  }
+  postToSlack([
+    { type: "section", fields },
+    {
+      type: "context",
+      elements: [{ type: "mrkdwn", text: `Orchestrator: \`${config.orchestratorId}\`` }]
+    }
+  ], `${emoji} ${agentId} called ${toolName} \u2192 ${status} (${durationMs}ms)`);
+}
+function notifyChatMessage(from, to, message) {
+  postToSlack([
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `*${from}* \u2192 *${to}*
+${message.slice(0, 500)}`
+      }
+    }
+  ], `${from} \u2192 ${to}: ${message.slice(0, 100)}`);
+}
+
 // src/routes/agents.ts
 var agentsRouter = Router();
 agentsRouter.post("/register", (req, res) => {
@@ -222,6 +297,11 @@ agentsRouter.post("/register", (req, res) => {
     return;
   }
   AgentRegistry.register(body);
+  notifyAgentRegistered(
+    body.agent_id,
+    body.display_name,
+    body.allowed_tool_namespaces
+  );
   res.json({
     success: true,
     data: { agent_id: body.agent_id, registered_at: (/* @__PURE__ */ new Date()).toISOString() }
@@ -484,6 +564,7 @@ toolsRouter.post("/call", async (req, res) => {
     if (result.status === "success") {
       broadcastToolResult(call.call_id, result.result, call.agent_id);
     }
+    notifyToolCall(call.agent_id, call.tool_name, result.status, result.duration_ms ?? 0, result.error_message);
     log.info({ tool: call.tool_name, status: result.status, ms: result.duration_ms }, "Tool call done");
   } finally {
     AgentRegistry.decrementActive(call.agent_id);
@@ -519,6 +600,7 @@ chatRouter.post("/message", (req, res) => {
   }
   const msg = { ...body, timestamp: (/* @__PURE__ */ new Date()).toISOString() };
   broadcastMessage(msg);
+  notifyChatMessage(body.from, body.to, body.message);
   logger.info({ from: msg.from, to: msg.to, type: msg.type }, "Chat message broadcast");
   res.json({ success: true, data: { timestamp: msg.timestamp } });
 });
@@ -567,6 +649,7 @@ app.get("/health", (_req, res) => {
     uptime_seconds: Math.floor(process.uptime()),
     agents_registered: AgentRegistry.all().length,
     ws_connections: getConnectionStats().total,
+    slack_enabled: isSlackEnabled(),
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   });
 });

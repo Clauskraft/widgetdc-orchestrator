@@ -3,6 +3,7 @@
  */
 import { Router, Request, Response } from 'express'
 import { AgentRegistry } from '../agent-registry.js'
+import { notifyAgentRegistered } from '../slack.js'
 
 export const agentsRouter = Router()
 
@@ -18,6 +19,12 @@ agentsRouter.post('/register', (req: Request, res: Response) => {
   }
 
   AgentRegistry.register(body as unknown as Parameters<typeof AgentRegistry.register>[0])
+
+  notifyAgentRegistered(
+    body.agent_id as string,
+    body.display_name as string,
+    body.allowed_tool_namespaces as string[],
+  )
 
   res.json({
     success: true,
