@@ -21,15 +21,21 @@ toolsRouter.post('/call', async (req, res) => {
     }
     const call = body;
     const log = childLogger(call.trace_id ?? call.call_id);
-    // ACL check
-    const acl = AgentRegistry.canCallTool(call.agent_id, call.tool_name);
-    if (!acl.allowed) {
-        log.warn({ agent_id: call.agent_id, tool: call.tool_name }, `ACL denied: ${acl.reason}`);
-        res.status(403).json({
-            call_id: call.call_id, status: 'unauthorized', result: null,
-            error_message: acl.reason, error_code: 'UNAUTHORIZED',
-            duration_ms: 0, completed_at: new Date().toISOString(),
-        });
+    // SWARM-1: ACL — open access mode auto-registers unknown agents
+        if (config_js_1.config.agentOpenAccess) {
+            AgentRegistry.canCallTool(call.agent_id, call.tool_name); // side-effect: auto-register
+        } else {
+            const acl = AgentRegistry.canCallTool(call.agent_id, call.tool_name);
+            if (!acl.allowed) {
+                log.warn({ agent_id: call.agent_id, tool: call.tool_name }, `ACL denied: ${acl.reason}`);
+                res.status(403).json({
+                    call_id: call.call_id, status: 'unauthorized', result: null,
+                    error_message: acl.reason, error_code: 'UNAUTHORIZED',
+                    duration_ms: 0, completed_at: new Date().toISOString(),
+                });
+                return;
+            }
+        }
         return;
     }
     // Concurrency limit
