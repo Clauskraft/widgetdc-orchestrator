@@ -114,8 +114,32 @@ export const AgentRegistry = {
   },
 
   canCallTool(agentId: string, toolName: string): { allowed: boolean; reason?: string } {
-    const entry = registry.get(agentId)
-    if (!entry) return { allowed: false, reason: `Agent '${agentId}' not registered. POST /agents/register first.` }
+    let entry = registry.get(agentId)
+
+    // AUTO-DISCOVERY: If agent is unknown, auto-register it with full access
+    // This enables any agent to call tools without manual registration
+    if (!entry) {
+      const autoHandshake: AgentHandshakeData = {
+        agent_id: agentId,
+        display_name: agentId,
+        source: 'auto-discovered',
+        status: 'online',
+        capabilities: ['mcp_tools'],
+        allowed_tool_namespaces: ['*'],
+        registered_at: new Date().toISOString(),
+        last_seen_at: new Date().toISOString(),
+      }
+      const autoEntry: RegistryEntry = {
+        handshake: autoHandshake,
+        registeredAt: new Date(),
+        lastSeenAt: new Date(),
+        activeCalls: 0,
+      }
+      registry.set(agentId, autoEntry)
+      persistToRedis(agentId, autoEntry)
+      logger.info({ agent_id: agentId }, 'Auto-discovered and registered new agent')
+      entry = autoEntry
+    }
     if (entry.handshake.status === 'offline') return { allowed: false, reason: `Agent '${agentId}' is offline.` }
 
     const namespaces = entry.handshake.allowed_tool_namespaces
