@@ -6,10 +6,13 @@ import { readFileSync } from 'fs'
 
 const pkg = JSON.parse(readFileSync('./package.json', 'utf8'))
 
-// External = npm deps that Railway installs. Contracts are NOT external (bundled in).
+// External = npm deps that Railway installs via npm ci.
+// Contracts + TypeBox are bundled IN (devDeps, not available at Railway runtime).
+const BUNDLE_IN = new Set(['@widgetdc/contracts', '@sinclair/typebox'])
+
 const external = [
-  ...Object.keys(pkg.dependencies || {}).filter(d => d !== '@widgetdc/contracts'),
-  ...Object.keys(pkg.devDependencies || {}),
+  ...Object.keys(pkg.dependencies || {}).filter(d => !BUNDLE_IN.has(d)),
+  ...Object.keys(pkg.devDependencies || {}).filter(d => !BUNDLE_IN.has(d)),
   'node:*',
 ]
 

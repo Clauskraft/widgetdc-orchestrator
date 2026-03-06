@@ -16,10 +16,12 @@
 import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
+import helmet from 'helmet'
 import { createServer } from 'http'
 import { config } from './config.js'
 import { logger } from './logger.js'
 import { initWebSocket } from './chat-broadcaster.js'
+import { initRedis, isRedisEnabled } from './redis.js'
 import { agentsRouter } from './routes/agents.js'
 import { toolsRouter } from './routes/tools.js'
 import { chatRouter } from './routes/chat.js'
@@ -37,6 +39,10 @@ const app = express()
 const server = createServer(app)
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
+app.use(helmet({
+  contentSecurityPolicy: false, // dashboard uses inline styles
+  crossOriginEmbedderPolicy: false,
+}))
 app.use(cors({
   origin: [
     'https://consulting-production-b5d8.up.railway.app',
@@ -69,6 +75,7 @@ app.get('/health', (_req, res) => {
     uptime_seconds: Math.floor(process.uptime()),
     agents_registered: AgentRegistry.all().length,
     ws_connections: getConnectionStats().total,
+    redis_enabled: isRedisEnabled(),
     slack_enabled: isSlackEnabled(),
     timestamp: new Date().toISOString(),
   })
@@ -242,13 +249,22 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 })
 
 // ─── Boot ────────────────────────────────────────────────────────────────────
-initWebSocket(server)
+async function boot() {
+  await initRedis()
+  await AgentRegistry.hydrate()
+  initWebSocket(server)
 
-server.listen(config.port, () => {
-  logger.info(
-    { port: config.port, backend: config.backendUrl, env: config.nodeEnv },
-    '🚀 WidgeTDC Orchestrator ready'
-  )
+  server.listen(config.port, () => {
+    logger.info(
+      { port: config.port, backend: config.backendUrl, env: config.nodeEnv, redis: isRedisEnabled() },
+      'WidgeTDC Orchestrator ready'
+    )
+  })
+}
+
+boot().catch(err => {
+  logger.error({ err: String(err) }, 'Boot failed')
+  process.exit(1)
 })
 
 // Graceful shutdown

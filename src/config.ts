@@ -26,9 +26,8 @@ export const config = {
   geminiApiKey: optional('GEMINI_API_KEY', ''),
   anthropicApiKey: optional('ANTHROPIC_API_KEY', ''),
 
-  // Notion (optional — for Global Chat persistence)
-  notionToken: optional('NOTION_TOKEN', ''),
-  notionChatDbId: optional('NOTION_CHAT_DB_ID', ''),
+  // Redis (optional — for agent registry persistence across restarts)
+  redisUrl: optional('REDIS_URL', ''),
 
   // Orchestrator API key (required for /agents/register and /tools/call)
   orchestratorApiKey: optional('ORCHESTRATOR_API_KEY', ''),

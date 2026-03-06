@@ -1,5 +1,6 @@
 /**
  * routes/tools.ts — MCP tool call endpoint.
+ * Uses TypeBox contract validation at API boundary.
  */
 import { Router, Request, Response } from 'express'
 import { AgentRegistry } from '../agent-registry.js'
@@ -8,29 +9,28 @@ import { broadcastToolResult } from '../chat-broadcaster.js'
 import { config } from '../config.js'
 import { childLogger } from '../logger.js'
 import { notifyToolCall } from '../slack.js'
+import { validate, validateToolCall } from '../validation.js'
+import type { OrchestratorToolCall } from '@widgetdc/contracts/orchestrator'
 
 export const toolsRouter = Router()
 
 toolsRouter.post('/call', async (req: Request, res: Response) => {
-  const body = req.body as Record<string, unknown>
+  const result = validate<OrchestratorToolCall>(validateToolCall, req.body)
 
-  // Basic validation
-  if (!body.call_id || !body.agent_id || !body.tool_name || typeof body.arguments !== 'object') {
+  if (!result.ok) {
     res.status(400).json({
       success: false,
-      error: { code: 'VALIDATION_ERROR', message: 'Required: call_id, agent_id, tool_name, arguments (object)', status_code: 400 },
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Invalid OrchestratorToolCall payload',
+        details: result.errors,
+        status_code: 400,
+      },
     })
     return
   }
 
-  const call = body as {
-    call_id: string
-    agent_id: string
-    tool_name: string
-    arguments: Record<string, unknown>
-    trace_id?: string
-    timeout_ms?: number
-  }
+  const call = result.data
 
   const log = childLogger(call.trace_id ?? call.call_id)
 
@@ -61,19 +61,19 @@ toolsRouter.post('/call', async (req: Request, res: Response) => {
   log.info({ agent_id: call.agent_id, tool: call.tool_name }, 'Tool call start')
 
   try {
-    const result = await callMcpTool({
+    const toolResult = await callMcpTool({
       toolName: call.tool_name,
-      args: call.arguments,
+      args: call.arguments as Record<string, unknown>,
       callId: call.call_id,
       traceId: call.trace_id,
       timeoutMs: call.timeout_ms,
     })
-    res.json(result)
-    if (result.status === 'success') {
-      broadcastToolResult(call.call_id, result.result, call.agent_id)
+    res.json(toolResult)
+    if (toolResult.status === 'success') {
+      broadcastToolResult(call.call_id, toolResult.result, call.agent_id)
     }
-    notifyToolCall(call.agent_id, call.tool_name, result.status, result.duration_ms ?? 0, result.error_message)
-    log.info({ tool: call.tool_name, status: result.status, ms: result.duration_ms }, 'Tool call done')
+    notifyToolCall(call.agent_id, call.tool_name, toolResult.status, toolResult.duration_ms ?? 0, toolResult.error_message)
+    log.info({ tool: call.tool_name, status: toolResult.status, ms: toolResult.duration_ms }, 'Tool call done')
   } finally {
     AgentRegistry.decrementActive(call.agent_id)
   }

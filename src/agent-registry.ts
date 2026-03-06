@@ -1,7 +1,12 @@
 /**
- * agent-registry.ts — In-memory agent registry.
+ * agent-registry.ts — Agent registry with optional Redis persistence.
+ *
+ * In-memory Map is the primary store (fast reads).
+ * If REDIS_URL is set, registrations are persisted to Redis so they
+ * survive restarts. On boot, the registry is hydrated from Redis.
  */
 import { logger } from './logger.js'
+import { getRedis } from './redis.js'
 
 export interface AgentHandshakeData {
   agent_id: string
@@ -24,23 +29,80 @@ interface RegistryEntry {
   activeCalls: number
 }
 
+const REDIS_KEY = 'orchestrator:agents'
 const registry = new Map<string, RegistryEntry>()
 
+/** Persist a single agent entry to Redis (fire-and-forget) */
+function persistToRedis(agentId: string, entry: RegistryEntry): void {
+  const redis = getRedis()
+  if (!redis) return
+  const serialised = JSON.stringify({
+    handshake: entry.handshake,
+    registeredAt: entry.registeredAt.toISOString(),
+    lastSeenAt: entry.lastSeenAt.toISOString(),
+  })
+  redis.hset(REDIS_KEY, agentId, serialised).catch(err => {
+    logger.warn({ err: String(err), agent_id: agentId }, 'Redis persist failed')
+  })
+}
+
+/** Remove an agent from Redis (fire-and-forget) */
+function removeFromRedis(agentId: string): void {
+  const redis = getRedis()
+  if (!redis) return
+  redis.hdel(REDIS_KEY, agentId).catch(() => {})
+}
+
 export const AgentRegistry = {
+  /** Hydrate registry from Redis on startup */
+  async hydrate(): Promise<void> {
+    const redis = getRedis()
+    if (!redis) return
+
+    try {
+      const all = await redis.hgetall(REDIS_KEY)
+      let count = 0
+      for (const [agentId, json] of Object.entries(all)) {
+        try {
+          const data = JSON.parse(json)
+          registry.set(agentId, {
+            handshake: data.handshake,
+            registeredAt: new Date(data.registeredAt),
+            lastSeenAt: new Date(data.lastSeenAt),
+            activeCalls: 0, // reset on restart
+          })
+          count++
+        } catch {
+          logger.warn({ agent_id: agentId }, 'Skipped corrupt Redis entry')
+        }
+      }
+      if (count > 0) {
+        logger.info({ count }, 'Hydrated agent registry from Redis')
+      }
+    } catch (err) {
+      logger.warn({ err: String(err) }, 'Redis hydration failed — starting with empty registry')
+    }
+  },
+
   register(handshake: AgentHandshakeData): void {
     const existing = registry.get(handshake.agent_id)
-    registry.set(handshake.agent_id, {
+    const entry: RegistryEntry = {
       handshake,
       registeredAt: existing?.registeredAt ?? new Date(),
       lastSeenAt: new Date(),
       activeCalls: existing?.activeCalls ?? 0,
-    })
+    }
+    registry.set(handshake.agent_id, entry)
+    persistToRedis(handshake.agent_id, entry)
     logger.info({ agent_id: handshake.agent_id, status: handshake.status }, 'Agent registered')
   },
 
   heartbeat(agentId: string): void {
     const entry = registry.get(agentId)
-    if (entry) entry.lastSeenAt = new Date()
+    if (entry) {
+      entry.lastSeenAt = new Date()
+      persistToRedis(agentId, entry)
+    }
   },
 
   get(agentId: string): RegistryEntry | undefined {

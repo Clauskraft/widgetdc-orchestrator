@@ -133,13 +133,22 @@ async function callMcpToolOnce(
         completed_at: new Date().toISOString(),
       }
     } else {
-      // Plain JSON response
+      // Plain JSON response — strict envelope handling
       const raw = await res.text()
       let result: unknown
       try {
         const parsed = JSON.parse(raw)
-        // Unwrap common envelope shapes
-        result = parsed?.result ?? parsed?.data ?? parsed
+        // Backend MCP route returns { result: ... } envelope.
+        // Accept { result }, { data }, or raw — but log unexpected shapes.
+        if (parsed !== null && typeof parsed === 'object' && 'result' in parsed) {
+          result = parsed.result
+        } else if (parsed !== null && typeof parsed === 'object' && 'data' in parsed) {
+          log.warn({ tool: opts.toolName }, 'MCP response used "data" envelope instead of "result" — consider standardising')
+          result = parsed.data
+        } else {
+          log.warn({ tool: opts.toolName, keys: Object.keys(parsed ?? {}) }, 'MCP response had no standard envelope — passing through raw')
+          result = parsed
+        }
       } catch {
         result = raw
       }

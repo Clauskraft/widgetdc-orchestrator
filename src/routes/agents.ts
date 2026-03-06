@@ -1,34 +1,44 @@
 /**
  * routes/agents.ts — Agent registration & handshake endpoints.
+ * Uses TypeBox contract validation at API boundary.
  */
 import { Router, Request, Response } from 'express'
 import { AgentRegistry } from '../agent-registry.js'
+import type { AgentHandshakeData } from '../agent-registry.js'
 import { notifyAgentRegistered } from '../slack.js'
+import { validate, validateHandshake, cleanToSchema } from '../validation.js'
+import { AgentHandshake } from '@widgetdc/contracts/orchestrator'
 
 export const agentsRouter = Router()
 
 agentsRouter.post('/register', (req: Request, res: Response) => {
-  const body = req.body as Record<string, unknown>
+  const result = validate<AgentHandshakeData>(validateHandshake, req.body)
 
-  if (!body.agent_id || !body.display_name || !body.source || !body.status || !Array.isArray(body.capabilities) || !Array.isArray(body.allowed_tool_namespaces)) {
+  if (!result.ok) {
     res.status(400).json({
       success: false,
-      error: { code: 'VALIDATION_ERROR', message: 'Missing required fields: agent_id, display_name, source, status, capabilities[], allowed_tool_namespaces[]', status_code: 400 },
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Invalid AgentHandshake payload',
+        details: result.errors,
+        status_code: 400,
+      },
     })
     return
   }
 
-  AgentRegistry.register(body as unknown as Parameters<typeof AgentRegistry.register>[0])
+  const handshake = cleanToSchema<AgentHandshakeData>(AgentHandshake, result.data)
+  AgentRegistry.register(handshake)
 
   notifyAgentRegistered(
-    body.agent_id as string,
-    body.display_name as string,
-    body.allowed_tool_namespaces as string[],
+    handshake.agent_id,
+    handshake.display_name,
+    handshake.allowed_tool_namespaces,
   )
 
   res.json({
     success: true,
-    data: { agent_id: body.agent_id, registered_at: new Date().toISOString() },
+    data: { agent_id: handshake.agent_id, registered_at: new Date().toISOString() },
   })
 })
 
