@@ -63,7 +63,16 @@ var wss = null;
 function initWebSocket(server2) {
   wss = new WebSocketServer({ server: server2, path: "/ws" });
   wss.on("connection", (ws, req) => {
-    const agentId = new URL(req.url ?? "/", `http://localhost`).searchParams.get("agent_id") ?? "unknown";
+    const url = new URL(req.url ?? "/", `http://localhost`);
+    const agentId = url.searchParams.get("agent_id") ?? "unknown";
+    if (config.orchestratorApiKey) {
+      const token = url.searchParams.get("api_key") ?? (req.headers["authorization"]?.startsWith("Bearer ") ? req.headers["authorization"].slice(7) : "") ?? "";
+      if (token !== config.orchestratorApiKey) {
+        logger.warn({ agent_id: agentId }, "WebSocket auth rejected");
+        ws.close(4401, "Unauthorized");
+        return;
+      }
+    }
     const conn = { ws, agentId, connectedAt: /* @__PURE__ */ new Date(), lastPingAt: /* @__PURE__ */ new Date() };
     connections.set(agentId, conn);
     logger.info({ agent_id: agentId, total_connections: connections.size }, "WebSocket connected");
@@ -629,9 +638,19 @@ function requireApiKey(req, res, next) {
 }
 
 // src/index.ts
+function esc(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
 var app = express();
 var server = createServer(app);
-app.use(cors({ origin: "*" }));
+app.use(cors({
+  origin: [
+    "https://consulting-production-b5d8.up.railway.app",
+    "https://orchestrator-production-c27e.up.railway.app",
+    /^https?:\/\/localhost(:\d+)?$/
+  ],
+  credentials: true
+}));
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: false }));
 app.use((req, _res, next) => {
@@ -658,17 +677,17 @@ app.get("/", (_req, res) => {
   const ws = getConnectionStats();
   const agentRows = agents.length === 0 ? '<tr><td colspan="5" style="text-align:center;color:#888">No agents registered yet</td></tr>' : agents.map((a) => `
       <tr>
-        <td><strong>${a.handshake.agent_id}</strong></td>
-        <td>${a.handshake.display_name}</td>
-        <td><span class="badge badge-${a.handshake.status}">${a.handshake.status}</span></td>
-        <td>${a.handshake.allowed_tool_namespaces.join(", ")}</td>
+        <td><strong>${esc(a.handshake.agent_id)}</strong></td>
+        <td>${esc(a.handshake.display_name)}</td>
+        <td><span class="badge badge-${esc(a.handshake.status)}">${esc(a.handshake.status)}</span></td>
+        <td>${esc(a.handshake.allowed_tool_namespaces.join(", "))}</td>
         <td>${a.activeCalls}</td>
       </tr>`).join("");
   const wsRows = ws.agents.length === 0 ? '<tr><td colspan="3" style="text-align:center;color:#888">No WebSocket connections</td></tr>' : ws.agents.map((c) => `
       <tr>
-        <td>${c.agent_id}</td>
-        <td><span class="badge badge-online">${c.state}</span></td>
-        <td>${c.connected_at}</td>
+        <td>${esc(c.agent_id)}</td>
+        <td><span class="badge badge-online">${esc(c.state)}</span></td>
+        <td>${esc(c.connected_at)}</td>
       </tr>`).join("");
   res.setHeader("Content-Type", "text/html");
   res.send(`<!DOCTYPE html>

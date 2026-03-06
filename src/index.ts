@@ -28,11 +28,23 @@ import { getConnectionStats } from './chat-broadcaster.js'
 import { requireApiKey } from './auth.js'
 import { isSlackEnabled } from './slack.js'
 
+/** Escape HTML special characters to prevent stored XSS */
+function esc(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+}
+
 const app = express()
 const server = createServer(app)
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
-app.use(cors({ origin: '*' }))
+app.use(cors({
+  origin: [
+    'https://consulting-production-b5d8.up.railway.app',
+    'https://orchestrator-production-c27e.up.railway.app',
+    /^https?:\/\/localhost(:\d+)?$/,
+  ],
+  credentials: true,
+}))
 app.use(express.json({ limit: '2mb' }))
 app.use(express.urlencoded({ extended: false }))
 
@@ -71,10 +83,10 @@ app.get('/', (_req, res) => {
     ? '<tr><td colspan="5" style="text-align:center;color:#888">No agents registered yet</td></tr>'
     : agents.map(a => `
       <tr>
-        <td><strong>${a.handshake.agent_id}</strong></td>
-        <td>${a.handshake.display_name}</td>
-        <td><span class="badge badge-${a.handshake.status}">${a.handshake.status}</span></td>
-        <td>${a.handshake.allowed_tool_namespaces.join(', ')}</td>
+        <td><strong>${esc(a.handshake.agent_id)}</strong></td>
+        <td>${esc(a.handshake.display_name)}</td>
+        <td><span class="badge badge-${esc(a.handshake.status)}">${esc(a.handshake.status)}</span></td>
+        <td>${esc(a.handshake.allowed_tool_namespaces.join(', '))}</td>
         <td>${a.activeCalls}</td>
       </tr>`).join('')
 
@@ -82,9 +94,9 @@ app.get('/', (_req, res) => {
     ? '<tr><td colspan="3" style="text-align:center;color:#888">No WebSocket connections</td></tr>'
     : ws.agents.map(c => `
       <tr>
-        <td>${c.agent_id}</td>
-        <td><span class="badge badge-online">${c.state}</span></td>
-        <td>${c.connected_at}</td>
+        <td>${esc(c.agent_id)}</td>
+        <td><span class="badge badge-online">${esc(c.state)}</span></td>
+        <td>${esc(c.connected_at)}</td>
       </tr>`).join('')
 
   res.setHeader('Content-Type', 'text/html')

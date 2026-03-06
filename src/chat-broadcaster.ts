@@ -28,7 +28,21 @@ export function initWebSocket(server: Server): void {
   wss = new WebSocketServer({ server, path: '/ws' })
 
   wss.on('connection', (ws, req) => {
-    const agentId = new URL(req.url ?? '/', `http://localhost`).searchParams.get('agent_id') ?? 'unknown'
+    const url = new URL(req.url ?? '/', `http://localhost`)
+    const agentId = url.searchParams.get('agent_id') ?? 'unknown'
+
+    // Validate API key if configured
+    if (config.orchestratorApiKey) {
+      const token = url.searchParams.get('api_key')
+        ?? (req.headers['authorization']?.startsWith('Bearer ') ? req.headers['authorization'].slice(7) : '')
+        ?? ''
+      if (token !== config.orchestratorApiKey) {
+        logger.warn({ agent_id: agentId }, 'WebSocket auth rejected')
+        ws.close(4401, 'Unauthorized')
+        return
+      }
+    }
+
     const conn: ConnectedAgent = { ws, agentId, connectedAt: new Date(), lastPingAt: new Date() }
     connections.set(agentId, conn)
 
