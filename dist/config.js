@@ -34,5 +34,7 @@ export const config = {
     mcpTimeoutMs: parseInt(optional('MCP_TIMEOUT_MS', '60000'), 10),
     // Rate limiting: max concurrent tool calls per agent
     maxConcurrentPerAgent: parseInt(optional('MAX_CONCURRENT_PER_AGENT', '5'), 10),
+    // SWARM-1: Open access = auto-register unknown agents (default: true)
+    agentOpenAccess: optional('AGENT_OPEN_ACCESS', 'true') === 'true',
 };
 //# sourceMappingURL=config.js.map
