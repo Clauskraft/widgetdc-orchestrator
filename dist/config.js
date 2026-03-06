@@ -24,6 +24,8 @@ export const config = {
     // Notion (optional — for Global Chat persistence)
     notionToken: optional('NOTION_TOKEN', ''),
     notionChatDbId: optional('NOTION_CHAT_DB_ID', ''),
+    // Orchestrator API key (required for /agents/register and /tools/call)
+    orchestratorApiKey: optional('ORCHESTRATOR_API_KEY', ''),
     // Orchestrator identity
     orchestratorId: optional('ORCHESTRATOR_ID', 'widgetdc-orchestrator-v1'),
     // WebSocket heartbeat interval (ms)

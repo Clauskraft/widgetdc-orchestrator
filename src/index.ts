@@ -25,6 +25,7 @@ import { toolsRouter } from './routes/tools.js'
 import { chatRouter } from './routes/chat.js'
 import { AgentRegistry } from './agent-registry.js'
 import { getConnectionStats } from './chat-broadcaster.js'
+import { requireApiKey } from './auth.js'
 
 const app = express()
 const server = createServer(app)
@@ -41,9 +42,10 @@ app.use((req, _res, next) => {
 })
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
-app.use('/agents', agentsRouter)
-app.use('/tools', toolsRouter)
-app.use('/chat', chatRouter)
+// Auth required for mutating endpoints (if ORCHESTRATOR_API_KEY is set)
+app.use('/agents', requireApiKey, agentsRouter)
+app.use('/tools', requireApiKey, toolsRouter)
+app.use('/chat', requireApiKey, chatRouter)
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {

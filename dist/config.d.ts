@@ -12,6 +12,7 @@ export declare const config: {
     readonly anthropicApiKey: string;
     readonly notionToken: string;
     readonly notionChatDbId: string;
+    readonly orchestratorApiKey: string;
     readonly orchestratorId: string;
     readonly wsHeartbeatMs: number;
     readonly mcpTimeoutMs: number;

@@ -28,6 +28,8 @@ var config = {
   // Notion (optional — for Global Chat persistence)
   notionToken: optional("NOTION_TOKEN", ""),
   notionChatDbId: optional("NOTION_CHAT_DB_ID", ""),
+  // Orchestrator API key (required for /agents/register and /tools/call)
+  orchestratorApiKey: optional("ORCHESTRATOR_API_KEY", ""),
   // Orchestrator identity
   orchestratorId: optional("ORCHESTRATOR_ID", "widgetdc-orchestrator-v1"),
   // WebSocket heartbeat interval (ms)
@@ -253,6 +255,8 @@ agentsRouter.post("/:id/heartbeat", (req, res) => {
 import { Router as Router2 } from "express";
 
 // src/mcp-caller.ts
+var MAX_RETRIES = 2;
+var RETRY_DELAY_MS = 1e3;
 async function callMcpTool(opts) {
   const log = childLogger(opts.traceId ?? opts.callId);
   const t0 = Date.now();
@@ -260,6 +264,30 @@ async function callMcpTool(opts) {
   const url = `${config.backendUrl}/api/mcp/route`;
   const body = JSON.stringify({ tool: opts.toolName, payload: opts.args });
   log.debug({ tool: opts.toolName, url }, "MCP call start");
+  let lastError = null;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      log.debug({ attempt, tool: opts.toolName }, "Retrying after transient error");
+      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
+    }
+    const result = await callMcpToolOnce(opts, url, body, timeoutMs, log, t0);
+    if (result.status !== "error" || !result.error_message?.includes("503")) {
+      return result;
+    }
+    lastError = result.error_message;
+  }
+  return {
+    call_id: opts.callId,
+    status: "error",
+    result: null,
+    error_message: `Failed after ${MAX_RETRIES + 1} attempts: ${lastError}`,
+    error_code: "BACKEND_ERROR",
+    duration_ms: Date.now() - t0,
+    trace_id: opts.traceId ?? null,
+    completed_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+async function callMcpToolOnce(opts, url, body, timeoutMs, log, t0) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -498,6 +526,26 @@ chatRouter.get("/ws-stats", (_req, res) => {
   res.json({ success: true, data: getConnectionStats() });
 });
 
+// src/auth.ts
+function requireApiKey(req, res, next) {
+  if (!config.orchestratorApiKey) {
+    next();
+    return;
+  }
+  const authHeader = req.headers["authorization"] ?? "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  const apiKeyHeader = req.headers["x-api-key"] ?? "";
+  if (token === config.orchestratorApiKey || apiKeyHeader === config.orchestratorApiKey) {
+    next();
+    return;
+  }
+  logger.warn({ path: req.path, ip: req.ip }, "Unauthorized request");
+  res.status(401).json({
+    success: false,
+    error: { code: "UNAUTHORIZED", message: "Valid API key required. Use Authorization: Bearer <key> or X-API-Key header.", status_code: 401 }
+  });
+}
+
 // src/index.ts
 var app = express();
 var server = createServer(app);
@@ -508,9 +556,9 @@ app.use((req, _res, next) => {
   logger.debug({ method: req.method, path: req.path }, "Request");
   next();
 });
-app.use("/agents", agentsRouter);
-app.use("/tools", toolsRouter);
-app.use("/chat", chatRouter);
+app.use("/agents", requireApiKey, agentsRouter);
+app.use("/tools", requireApiKey, toolsRouter);
+app.use("/chat", requireApiKey, chatRouter);
 app.get("/health", (_req, res) => {
   res.json({
     status: "healthy",

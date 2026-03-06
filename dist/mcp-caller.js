@@ -1,12 +1,39 @@
 import { config } from './config.js';
 import { childLogger } from './logger.js';
+const MAX_RETRIES = 2;
+const RETRY_DELAY_MS = 1000;
 export async function callMcpTool(opts) {
     const log = childLogger(opts.traceId ?? opts.callId);
     const t0 = Date.now();
     const timeoutMs = opts.timeoutMs ?? config.mcpTimeoutMs;
-    const url = `${config.backendUrl}/mcp/route`;
+    const url = `${config.backendUrl}/api/mcp/route`;
     const body = JSON.stringify({ tool: opts.toolName, payload: opts.args });
     log.debug({ tool: opts.toolName, url }, 'MCP call start');
+    // Retry loop for transient CDN 503 errors
+    let lastError = null;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        if (attempt > 0) {
+            log.debug({ attempt, tool: opts.toolName }, 'Retrying after transient error');
+            await new Promise(r => setTimeout(r, RETRY_DELAY_MS * attempt));
+        }
+        const result = await callMcpToolOnce(opts, url, body, timeoutMs, log, t0);
+        if (result.status !== 'error' || !result.error_message?.includes('503')) {
+            return result;
+        }
+        lastError = result.error_message;
+    }
+    return {
+        call_id: opts.callId,
+        status: 'error',
+        result: null,
+        error_message: `Failed after ${MAX_RETRIES + 1} attempts: ${lastError}`,
+        error_code: 'BACKEND_ERROR',
+        duration_ms: Date.now() - t0,
+        trace_id: opts.traceId ?? null,
+        completed_at: new Date().toISOString(),
+    };
+}
+async function callMcpToolOnce(opts, url, body, timeoutMs, log, t0) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {

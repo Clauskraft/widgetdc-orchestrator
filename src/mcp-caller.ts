@@ -23,6 +23,9 @@ interface McpCallOptions {
   timeoutMs?: number
 }
 
+const MAX_RETRIES = 2
+const RETRY_DELAY_MS = 1000
+
 export async function callMcpTool(opts: McpCallOptions): Promise<OrchestratorToolResult> {
   const log = childLogger(opts.traceId ?? opts.callId)
   const t0 = Date.now()
@@ -33,6 +36,37 @@ export async function callMcpTool(opts: McpCallOptions): Promise<OrchestratorToo
 
   log.debug({ tool: opts.toolName, url }, 'MCP call start')
 
+  // Retry loop for transient CDN 503 errors
+  let lastError: string | null = null
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      log.debug({ attempt, tool: opts.toolName }, 'Retrying after transient error')
+      await new Promise(r => setTimeout(r, RETRY_DELAY_MS * attempt))
+    }
+
+    const result = await callMcpToolOnce(opts, url, body, timeoutMs, log, t0)
+    if (result.status !== 'error' || !result.error_message?.includes('503')) {
+      return result
+    }
+    lastError = result.error_message
+  }
+
+  return {
+    call_id: opts.callId,
+    status: 'error',
+    result: null,
+    error_message: `Failed after ${MAX_RETRIES + 1} attempts: ${lastError}`,
+    error_code: 'BACKEND_ERROR',
+    duration_ms: Date.now() - t0,
+    trace_id: opts.traceId ?? null,
+    completed_at: new Date().toISOString(),
+  }
+}
+
+async function callMcpToolOnce(
+  opts: McpCallOptions, url: string, body: string,
+  timeoutMs: number, log: ReturnType<typeof childLogger>, t0: number
+): Promise<OrchestratorToolResult> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
 
