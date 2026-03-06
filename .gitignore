@@ -1,0 +1,6 @@
+node_modules/
+# dist/ is committed (pre-built with esbuild, contracts bundled in)
+.env
+*.env.local
+logs/
+*.log
