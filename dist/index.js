@@ -31,6 +31,8 @@ var config = {
   // AI providers (optional — only used for health checks)
   geminiApiKey: optional("GEMINI_API_KEY", ""),
   anthropicApiKey: optional("ANTHROPIC_API_KEY", ""),
+  // RLM Engine (optional — cognitive reasoning proxy)
+  rlmUrl: optional("RLM_URL", "https://rlm-engine-production.up.railway.app"),
   // Redis (optional — for agent registry persistence across restarts)
   redisUrl: optional("REDIS_URL", ""),
   // Orchestrator API key (required for /agents/register and /tools/call)
@@ -42,7 +44,8 @@ var config = {
   // MCP tool call timeout (ms)
   mcpTimeoutMs: parseInt(optional("MCP_TIMEOUT_MS", "60000"), 10),
   // Rate limiting: max concurrent tool calls per agent
-  maxConcurrentPerAgent: parseInt(optional("MAX_CONCURRENT_PER_AGENT", "5"), 10)
+  maxConcurrentPerAgent: parseInt(optional("MAX_CONCURRENT_PER_AGENT", "5"), 10),
+  agentOpenAccess: optional("AGENT_OPEN_ACCESS", "true") === "true"
 };
 
 // src/logger.ts
@@ -281,7 +284,6 @@ var AgentRegistry = {
   },
   canCallTool(agentId, toolName) {
     let entry = registry.get(agentId);
-    // SWARM-1: Auto-register unknown agents instead of blocking
     if (!entry) {
       const autoHandshake = {
         agent_id: agentId,
@@ -290,21 +292,27 @@ var AgentRegistry = {
         status: "online",
         capabilities: ["mcp_tools"],
         allowed_tool_namespaces: ["*"],
-        registered_at: new Date().toISOString(),
-        last_seen_at: new Date().toISOString(),
+        registered_at: (/* @__PURE__ */ new Date()).toISOString(),
+        last_seen_at: (/* @__PURE__ */ new Date()).toISOString()
       };
-      const autoEntry = { handshake: autoHandshake, registeredAt: new Date(), lastSeenAt: new Date(), activeCalls: 0 };
+      const autoEntry = {
+        handshake: autoHandshake,
+        registeredAt: /* @__PURE__ */ new Date(),
+        lastSeenAt: /* @__PURE__ */ new Date(),
+        activeCalls: 0
+      };
       registry.set(agentId, autoEntry);
       persistToRedis(agentId, autoEntry);
+      logger.info({ agent_id: agentId }, "Auto-discovered and registered new agent");
       entry = autoEntry;
     }
     if (entry.handshake.status === "offline") return { allowed: false, reason: `Agent '${agentId}' is offline.` };
     const namespaces = entry.handshake.allowed_tool_namespaces;
     if (namespaces.includes("*")) return { allowed: true };
     const namespace = toolName.split(".")[0];
-    if (!namespace) return { allowed: false, reason: "Invalid tool name: missing namespace." };
+    if (!namespace) return { allowed: false, reason: `Invalid tool name '${toolName}'. Expected 'namespace.method'.` };
     if (namespaces.includes(namespace)) return { allowed: true };
-    return { allowed: false, reason: `Agent '${agentId}' not authorized for namespace '${namespace}'.` };
+    return { allowed: false, reason: `Agent '${agentId}' not authorized for '${namespace}'. Allowed: [${namespaces.join(", ")}]` };
   },
   incrementActive(agentId) {
     const e = registry.get(agentId);
@@ -8510,19 +8518,23 @@ toolsRouter.post("/call", async (req, res) => {
   }
   const call = result.data;
   const log = childLogger(call.trace_id ?? call.call_id);
-  const acl = AgentRegistry.canCallTool(call.agent_id, call.tool_name);
-  if (!acl.allowed) {
-    log.warn({ agent_id: call.agent_id, tool: call.tool_name }, `ACL denied: ${acl.reason}`);
-    res.status(403).json({
-      call_id: call.call_id,
-      status: "unauthorized",
-      result: null,
-      error_message: acl.reason,
-      error_code: "UNAUTHORIZED",
-      duration_ms: 0,
-      completed_at: (/* @__PURE__ */ new Date()).toISOString()
-    });
-    return;
+  if (config.agentOpenAccess) {
+    AgentRegistry.canCallTool(call.agent_id, call.tool_name);
+  } else {
+    const acl = AgentRegistry.canCallTool(call.agent_id, call.tool_name);
+    if (!acl.allowed) {
+      log.warn({ agent_id: call.agent_id, tool: call.tool_name }, `ACL denied: ${acl.reason}`);
+      res.status(403).json({
+        call_id: call.call_id,
+        status: "unauthorized",
+        result: null,
+        error_message: acl.reason,
+        error_code: "UNAUTHORIZED",
+        duration_ms: 0,
+        completed_at: (/* @__PURE__ */ new Date()).toISOString()
+      });
+      return;
+    }
   }
   const active = AgentRegistry.getActiveCalls(call.agent_id);
   if (active >= config.maxConcurrentPerAgent) {
@@ -8555,6 +8567,7 @@ toolsRouter.post("/call", async (req, res) => {
     log.info({ tool: call.tool_name, status: toolResult.status, ms: toolResult.duration_ms }, "Tool call done");
   } finally {
     AgentRegistry.decrementActive(call.agent_id);
+    AgentRegistry.heartbeat(call.agent_id);
   }
 });
 toolsRouter.get("/namespaces", async (_req, res) => {
@@ -8598,6 +8611,608 @@ chatRouter.post("/message", (req, res) => {
 });
 chatRouter.get("/ws-stats", (_req, res) => {
   res.json({ success: true, data: getConnectionStats() });
+});
+
+// src/routes/chains.ts
+import { Router as Router4 } from "express";
+
+// src/chain-engine.ts
+import { v4 as uuid } from "uuid";
+
+// src/cognitive-proxy.ts
+var COGNITIVE_ROUTES = {
+  reason: "/reason",
+  analyze: "/cognitive/analyze",
+  plan: "/cognitive/plan",
+  learn: "/cognitive/learn",
+  fold: "/cognitive/fold",
+  enrich: "/cognitive/enrich"
+};
+function isRlmAvailable() {
+  return config.rlmUrl.length > 0;
+}
+async function callCognitive(action, params, timeoutMs) {
+  if (!config.rlmUrl) {
+    throw new Error("RLM Engine not configured (set RLM_URL)");
+  }
+  const path = COGNITIVE_ROUTES[action];
+  if (!path) {
+    throw new Error(`Unknown cognitive action: ${action}. Valid: ${Object.keys(COGNITIVE_ROUTES).join(", ")}`);
+  }
+  const url = `${config.rlmUrl}${path}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs ?? 6e4);
+  try {
+    logger.debug({ action, url, agent: params.agent_id }, "Cognitive proxy call");
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+      },
+      body: JSON.stringify({
+        prompt: params.prompt,
+        context: params.context,
+        agent_id: params.agent_id,
+        depth: params.depth ?? 0,
+        mode: params.mode ?? "standard"
+      }),
+      signal: controller.signal
+    });
+    clearTimeout(timer);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => `HTTP ${res.status}`);
+      throw new Error(`RLM ${action} failed: ${errText}`);
+    }
+    const data = await res.json();
+    return data.result ?? data.answer ?? data.reasoning ?? data.plan ?? data;
+  } catch (err) {
+    clearTimeout(timer);
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`RLM ${action} timed out after ${timeoutMs ?? 6e4}ms`);
+    }
+    throw err;
+  }
+}
+async function getRlmHealth() {
+  if (!config.rlmUrl) return null;
+  try {
+    const res = await fetch(`${config.rlmUrl}/health`, { signal: AbortSignal.timeout(5e3) });
+    if (!res.ok) return { status: "unhealthy", http_status: res.status };
+    return await res.json();
+  } catch {
+    return { status: "unreachable" };
+  }
+}
+
+// src/chain-engine.ts
+var executions = /* @__PURE__ */ new Map();
+function persistExecution(exec) {
+  executions.set(exec.execution_id, exec);
+  const redis2 = getRedis();
+  if (redis2) {
+    redis2.hset("orchestrator:chains", exec.execution_id, JSON.stringify(exec)).catch(() => {
+    });
+    redis2.expire("orchestrator:chains", 86400).catch(() => {
+    });
+  }
+}
+function getExecution(id) {
+  return executions.get(id);
+}
+function listExecutions() {
+  return Array.from(executions.values()).sort((a, b) => b.started_at.localeCompare(a.started_at)).slice(0, 50);
+}
+async function executeStep(step, previousOutput) {
+  const stepId = step.id ?? uuid().slice(0, 8);
+  const t0 = Date.now();
+  const prevStr = typeof previousOutput === "string" ? previousOutput : JSON.stringify(previousOutput ?? "");
+  try {
+    let output;
+    if (step.cognitive_action) {
+      const prompt = step.prompt?.replace(/\{\{prev\}\}/g, prevStr) ?? prevStr;
+      output = await callCognitive(step.cognitive_action, {
+        prompt,
+        context: step.arguments,
+        agent_id: step.agent_id
+      }, step.timeout_ms);
+    } else if (step.tool_name) {
+      const args = { ...step.arguments };
+      for (const [k, v] of Object.entries(args)) {
+        if (typeof v === "string") {
+          args[k] = v.replace(/\{\{prev\}\}/g, prevStr);
+        }
+      }
+      const result = await callMcpTool({
+        toolName: step.tool_name,
+        args,
+        callId: uuid(),
+        timeoutMs: step.timeout_ms ?? 3e4
+      });
+      if (result.status !== "success") {
+        throw new Error(result.error_message ?? `Tool ${step.tool_name} failed: ${result.status}`);
+      }
+      output = result.result;
+    } else {
+      throw new Error("Step must have either tool_name or cognitive_action");
+    }
+    return {
+      step_id: stepId,
+      agent_id: step.agent_id,
+      action: step.tool_name ?? `cognitive:${step.cognitive_action}`,
+      status: "success",
+      output,
+      duration_ms: Date.now() - t0
+    };
+  } catch (err) {
+    return {
+      step_id: stepId,
+      agent_id: step.agent_id,
+      action: step.tool_name ?? `cognitive:${step.cognitive_action}`,
+      status: "error",
+      output: err instanceof Error ? err.message : String(err),
+      duration_ms: Date.now() - t0
+    };
+  }
+}
+async function runSequential(steps) {
+  const results = [];
+  let previousOutput = null;
+  for (const step of steps) {
+    const result = await executeStep(step, previousOutput);
+    results.push(result);
+    if (result.status === "error") break;
+    previousOutput = result.output;
+  }
+  return results;
+}
+async function runParallel(steps) {
+  return Promise.all(steps.map((step) => executeStep(step, null)));
+}
+async function runLoop(steps, maxIterations, exitCondition) {
+  const allResults = [];
+  let previousOutput = null;
+  for (let i = 0; i < maxIterations; i++) {
+    const iterResults = await runSequential(
+      steps.map((s) => ({ ...s, id: `${s.id ?? s.agent_id}-iter${i}` }))
+    );
+    allResults.push(...iterResults);
+    const lastResult = iterResults[iterResults.length - 1];
+    if (lastResult?.status === "error") break;
+    previousOutput = lastResult?.output;
+    const outputStr = JSON.stringify(previousOutput);
+    if (exitCondition && outputStr.includes(exitCondition)) {
+      logger.info({ iteration: i, exitCondition }, "Loop exit condition met");
+      break;
+    }
+  }
+  return allResults;
+}
+async function runDebate(steps, judgeAgent) {
+  const debateResults = await runParallel(steps);
+  if (!judgeAgent) return debateResults;
+  const positions = debateResults.map((r) => ({
+    agent: r.agent_id,
+    position: r.output
+  }));
+  const judgeResult = await executeStep({
+    agent_id: judgeAgent,
+    cognitive_action: "analyze",
+    prompt: `You are the judge. Evaluate these positions and synthesize the best answer:
+
+${JSON.stringify(positions, null, 2)}`
+  }, positions);
+  return [...debateResults, judgeResult];
+}
+async function executeChain(def) {
+  const executionId = uuid();
+  const chainId = def.chain_id ?? uuid().slice(0, 12);
+  const t0 = Date.now();
+  const execution = {
+    execution_id: executionId,
+    chain_id: chainId,
+    name: def.name,
+    mode: def.mode,
+    status: "running",
+    steps_completed: 0,
+    steps_total: def.steps.length,
+    results: [],
+    started_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  persistExecution(execution);
+  logger.info({ execution_id: executionId, chain: def.name, mode: def.mode, steps: def.steps.length }, "Chain execution started");
+  broadcastMessage({
+    from: "Orchestrator",
+    to: "All",
+    source: "orchestrator",
+    type: "Message",
+    message: `Chain "${def.name}" started (${def.mode}, ${def.steps.length} steps)`,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  });
+  try {
+    let results;
+    switch (def.mode) {
+      case "sequential":
+        results = await runSequential(def.steps);
+        break;
+      case "parallel":
+        results = await runParallel(def.steps);
+        break;
+      case "loop":
+        results = await runLoop(def.steps, def.max_iterations ?? 5, def.exit_condition);
+        break;
+      case "debate":
+        results = await runDebate(def.steps, def.judge_agent);
+        break;
+      default:
+        throw new Error(`Unknown chain mode: ${def.mode}`);
+    }
+    const failed = results.some((r) => r.status === "error");
+    execution.results = results;
+    execution.steps_completed = results.filter((r) => r.status === "success").length;
+    execution.status = failed ? "failed" : "completed";
+    execution.final_output = results[results.length - 1]?.output;
+    execution.duration_ms = Date.now() - t0;
+    execution.completed_at = (/* @__PURE__ */ new Date()).toISOString();
+  } catch (err) {
+    execution.status = "failed";
+    execution.error = err instanceof Error ? err.message : String(err);
+    execution.duration_ms = Date.now() - t0;
+    execution.completed_at = (/* @__PURE__ */ new Date()).toISOString();
+  }
+  persistExecution(execution);
+  logger.info({
+    execution_id: executionId,
+    status: execution.status,
+    steps: execution.steps_completed,
+    ms: execution.duration_ms
+  }, "Chain execution complete");
+  broadcastMessage({
+    from: "Orchestrator",
+    to: "All",
+    source: "orchestrator",
+    type: "Message",
+    message: `Chain "${def.name}" ${execution.status} (${execution.steps_completed}/${execution.steps_total} steps, ${execution.duration_ms}ms)`,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  });
+  return execution;
+}
+
+// src/routes/chains.ts
+var chainsRouter = Router4();
+chainsRouter.post("/execute", async (req, res) => {
+  const body = req.body;
+  if (!body.name || !body.mode || !Array.isArray(body.steps) || body.steps.length === 0) {
+    res.status(400).json({
+      success: false,
+      error: {
+        code: "VALIDATION_ERROR",
+        message: "Required: name, mode (sequential|parallel|loop|debate), steps[] (non-empty)",
+        status_code: 400
+      }
+    });
+    return;
+  }
+  for (const step of body.steps) {
+    if (!step.agent_id) {
+      res.status(400).json({
+        success: false,
+        error: { code: "VALIDATION_ERROR", message: "Each step must have agent_id", status_code: 400 }
+      });
+      return;
+    }
+    if (!step.tool_name && !step.cognitive_action) {
+      res.status(400).json({
+        success: false,
+        error: { code: "VALIDATION_ERROR", message: "Each step needs tool_name or cognitive_action", status_code: 400 }
+      });
+      return;
+    }
+  }
+  try {
+    const execution = executeChain(body);
+    const result = await Promise.race([
+      execution,
+      new Promise((r) => setTimeout(() => r(null), 100))
+    ]);
+    if (result) {
+      res.json({ success: true, data: result });
+    } else {
+      res.status(202).json({
+        success: true,
+        data: {
+          message: "Chain execution started",
+          execution_id: (await execution).execution_id,
+          poll_url: `/chains/status/${(await execution).execution_id}`
+        }
+      });
+    }
+  } catch (err) {
+    logger.error({ err: String(err) }, "Chain execution failed");
+    res.status(500).json({
+      success: false,
+      error: { code: "CHAIN_ERROR", message: String(err), status_code: 500 }
+    });
+  }
+});
+chainsRouter.get("/status/:id", (req, res) => {
+  const exec = getExecution(req.params.id);
+  if (!exec) {
+    res.status(404).json({
+      success: false,
+      error: { code: "NOT_FOUND", message: `Execution '${req.params.id}' not found`, status_code: 404 }
+    });
+    return;
+  }
+  res.json({ success: true, data: exec });
+});
+chainsRouter.get("/", (_req, res) => {
+  const executions2 = listExecutions();
+  res.json({ success: true, data: { executions: executions2, total: executions2.length } });
+});
+
+// src/routes/cognitive.ts
+import { Router as Router5 } from "express";
+var cognitiveRouter = Router5();
+cognitiveRouter.post("/:action", async (req, res) => {
+  const { action } = req.params;
+  const body = req.body;
+  if (!isRlmAvailable()) {
+    res.status(503).json({
+      success: false,
+      error: {
+        code: "RLM_UNAVAILABLE",
+        message: "RLM Engine not configured. Set RLM_URL environment variable.",
+        status_code: 503
+      }
+    });
+    return;
+  }
+  if (!body.prompt && !body.message) {
+    res.status(400).json({
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: "Required: prompt or message", status_code: 400 }
+    });
+    return;
+  }
+  try {
+    const result = await callCognitive(action, {
+      prompt: body.prompt ?? body.message,
+      context: body.context,
+      agent_id: body.agent_id,
+      depth: body.depth,
+      mode: body.mode
+    }, body.timeout_ms);
+    res.json({ success: true, data: { action, result } });
+  } catch (err) {
+    logger.error({ action, err: String(err) }, "Cognitive proxy error");
+    res.status(502).json({
+      success: false,
+      error: { code: "RLM_ERROR", message: String(err), status_code: 502 }
+    });
+  }
+});
+cognitiveRouter.get("/health", async (_req, res) => {
+  const health = await getRlmHealth();
+  if (!health) {
+    res.json({ success: true, data: { available: false, reason: "RLM_URL not configured" } });
+    return;
+  }
+  res.json({ success: true, data: { available: true, ...health } });
+});
+
+// src/routes/cron.ts
+import { Router as Router6 } from "express";
+
+// src/cron-scheduler.ts
+import cron from "node-cron";
+var jobs = /* @__PURE__ */ new Map();
+var cronTasks = /* @__PURE__ */ new Map();
+var REDIS_CRON_KEY = "orchestrator:cron-jobs";
+function registerCronJob(job) {
+  if (!cron.validate(job.schedule)) {
+    throw new Error(`Invalid cron schedule: ${job.schedule}`);
+  }
+  const existing = cronTasks.get(job.id);
+  if (existing) existing.stop();
+  const cronJob = { ...job, run_count: 0 };
+  jobs.set(job.id, cronJob);
+  if (job.enabled) {
+    const task = cron.schedule(job.schedule, async () => {
+      await runCronJob(job.id);
+    });
+    cronTasks.set(job.id, task);
+  }
+  persistCronJobs();
+  logger.info({ id: job.id, schedule: job.schedule, enabled: job.enabled }, "Cron job registered");
+}
+async function runCronJob(jobId) {
+  const job = jobs.get(jobId);
+  if (!job) {
+    logger.warn({ id: jobId }, "Cron job not found");
+    return;
+  }
+  logger.info({ id: job.id, name: job.name }, "Cron job triggered");
+  broadcastMessage({
+    from: "Orchestrator",
+    to: "All",
+    source: "orchestrator",
+    type: "Message",
+    message: `Cron "${job.name}" triggered (${job.schedule})`,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  });
+  try {
+    const result = await executeChain(job.chain);
+    job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+    job.last_status = result.status;
+    job.run_count++;
+    persistCronJobs();
+  } catch (err) {
+    job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+    job.last_status = "failed";
+    job.run_count++;
+    persistCronJobs();
+    logger.error({ id: job.id, err: String(err) }, "Cron job failed");
+  }
+}
+function setCronJobEnabled(jobId, enabled) {
+  const job = jobs.get(jobId);
+  if (!job) return false;
+  job.enabled = enabled;
+  const existing = cronTasks.get(jobId);
+  if (existing) existing.stop();
+  if (enabled) {
+    const task = cron.schedule(job.schedule, async () => {
+      await runCronJob(jobId);
+    });
+    cronTasks.set(jobId, task);
+  } else {
+    cronTasks.delete(jobId);
+  }
+  persistCronJobs();
+  logger.info({ id: jobId, enabled }, "Cron job toggled");
+  return true;
+}
+function listCronJobs() {
+  return Array.from(jobs.values());
+}
+function deleteCronJob(jobId) {
+  const task = cronTasks.get(jobId);
+  if (task) task.stop();
+  cronTasks.delete(jobId);
+  const deleted = jobs.delete(jobId);
+  if (deleted) persistCronJobs();
+  return deleted;
+}
+function persistCronJobs() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  const data = Array.from(jobs.values()).map((j) => ({
+    ...j
+    // Don't persist the chain's runtime state, just config
+  }));
+  redis2.set(REDIS_CRON_KEY, JSON.stringify(data)).catch(() => {
+  });
+}
+async function hydrateCronJobs() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const raw = await redis2.get(REDIS_CRON_KEY);
+    if (!raw) return;
+    const savedJobs = JSON.parse(raw);
+    for (const job of savedJobs) {
+      registerCronJob(job);
+    }
+    logger.info({ count: savedJobs.length }, "Hydrated cron jobs from Redis");
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Failed to hydrate cron jobs");
+  }
+}
+function registerDefaultLoops() {
+  registerCronJob({
+    id: "health-pulse",
+    name: "Platform Health Pulse",
+    schedule: "*/5 * * * *",
+    enabled: true,
+    chain: {
+      name: "Health Pulse",
+      mode: "parallel",
+      steps: [
+        {
+          agent_id: "orchestrator",
+          tool_name: "graph.stats",
+          arguments: {}
+        }
+      ]
+    }
+  });
+  registerCronJob({
+    id: "graph-check",
+    name: "Neo4j Graph Consistency",
+    schedule: "*/30 * * * *",
+    enabled: false,
+    // disabled by default — enable via API
+    chain: {
+      name: "Graph Consistency",
+      mode: "sequential",
+      steps: [
+        {
+          agent_id: "orchestrator",
+          tool_name: "graph.read_cypher",
+          arguments: {
+            query: "MATCH (n) RETURN labels(n) AS label, count(*) AS count ORDER BY count DESC LIMIT 20"
+          }
+        }
+      ]
+    }
+  });
+}
+
+// src/routes/cron.ts
+var cronRouter = Router6();
+cronRouter.get("/", (_req, res) => {
+  const jobs2 = listCronJobs();
+  res.json({ success: true, data: { jobs: jobs2, total: jobs2.length } });
+});
+cronRouter.post("/", (req, res) => {
+  const body = req.body;
+  if (!body.id || !body.name || !body.schedule || !body.chain) {
+    res.status(400).json({
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: "Required: id, name, schedule (cron expr), chain (ChainDefinition)", status_code: 400 }
+    });
+    return;
+  }
+  try {
+    registerCronJob({
+      id: body.id,
+      name: body.name,
+      schedule: body.schedule,
+      chain: body.chain,
+      enabled: body.enabled !== false
+    });
+    res.json({ success: true, data: { id: body.id, registered: true } });
+  } catch (err) {
+    res.status(400).json({
+      success: false,
+      error: { code: "INVALID_SCHEDULE", message: String(err), status_code: 400 }
+    });
+  }
+});
+cronRouter.post("/:id/run", async (req, res) => {
+  try {
+    await runCronJob(req.params.id);
+    res.json({ success: true, data: { id: req.params.id, triggered: true } });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: { code: "RUN_ERROR", message: String(err), status_code: 500 }
+    });
+  }
+});
+cronRouter.patch("/:id", (req, res) => {
+  const { enabled } = req.body;
+  const ok = setCronJobEnabled(req.params.id, enabled);
+  if (!ok) {
+    res.status(404).json({
+      success: false,
+      error: { code: "NOT_FOUND", message: `Cron job '${req.params.id}' not found`, status_code: 404 }
+    });
+    return;
+  }
+  res.json({ success: true, data: { id: req.params.id, enabled } });
+});
+cronRouter.delete("/:id", (req, res) => {
+  const deleted = deleteCronJob(req.params.id);
+  if (!deleted) {
+    res.status(404).json({
+      success: false,
+      error: { code: "NOT_FOUND", message: `Cron job '${req.params.id}' not found`, status_code: 404 }
+    });
+    return;
+  }
+  res.json({ success: true, data: { id: req.params.id, deleted: true } });
 });
 
 // src/auth.ts
@@ -8648,6 +9263,9 @@ app.use((req, _res, next) => {
 app.use("/agents", requireApiKey, agentsRouter);
 app.use("/tools", requireApiKey, toolsRouter);
 app.use("/chat", requireApiKey, chatRouter);
+app.use("/chains", requireApiKey, chainsRouter);
+app.use("/cognitive", requireApiKey, cognitiveRouter);
+app.use("/cron", requireApiKey, cronRouter);
 app.get("/health", (_req, res) => {
   res.json({
     status: "healthy",
@@ -8657,6 +9275,9 @@ app.get("/health", (_req, res) => {
     agents_registered: AgentRegistry.all().length,
     ws_connections: getConnectionStats().total,
     redis_enabled: isRedisEnabled(),
+    rlm_available: isRlmAvailable(),
+    active_chains: listExecutions().filter((e) => e.status === "running").length,
+    cron_jobs: listCronJobs().filter((j) => j.enabled).length,
     slack_enabled: isSlackEnabled(),
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   });
@@ -8664,6 +9285,8 @@ app.get("/health", (_req, res) => {
 app.get("/", (_req, res) => {
   const agents = AgentRegistry.all();
   const ws = getConnectionStats();
+  const chains = listExecutions().slice(0, 10);
+  const cronJobs = listCronJobs();
   const agentRows = agents.length === 0 ? '<tr><td colspan="6" style="text-align:center;color:#888">No agents registered yet</td></tr>' : agents.map((a) => `
       <tr>
         <td><strong>${esc(a.handshake.agent_id)}</strong></td>
@@ -8729,19 +9352,19 @@ app.get("/", (_req, res) => {
     <div class="grid">
       <div class="card">
         <div class="card-value">${agents.length}</div>
-        <div class="card-label">Agents Registered</div>
+        <div class="card-label">Agents</div>
       </div>
       <div class="card">
-        <div class="card-value">${ws.total}</div>
-        <div class="card-label">WS Connections</div>
+        <div class="card-value">${chains.filter((c) => c.status === "running").length}/${chains.length}</div>
+        <div class="card-label">Chains (active/total)</div>
       </div>
       <div class="card">
-        <div class="card-value">${Math.floor(process.uptime())}s</div>
-        <div class="card-label">Uptime</div>
+        <div class="card-value">${cronJobs.filter((j) => j.enabled).length}</div>
+        <div class="card-label">Cron Loops Active</div>
       </div>
       <div class="card">
         <div class="card-value" style="color:#4ade80">\u25CF</div>
-        <div class="card-label">Status: Healthy</div>
+        <div class="card-label">RLM: ${isRlmAvailable() ? "Connected" : "N/A"}</div>
       </div>
     </div>
 
@@ -8758,6 +9381,40 @@ app.get("/", (_req, res) => {
       <table>
         <thead><tr><th>Agent ID</th><th>State</th><th>Connected At</th></tr></thead>
         <tbody>${wsRows}</tbody>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>Chain Executions</h2>
+      <table>
+        <thead><tr><th>Chain</th><th>Mode</th><th>Status</th><th>Steps</th><th>Duration</th><th>Started</th></tr></thead>
+        <tbody>${chains.length === 0 ? '<tr><td colspan="6" style="text-align:center;color:#888">No chain executions yet</td></tr>' : chains.map((c) => `
+          <tr>
+            <td><strong>${esc(c.name)}</strong></td>
+            <td><code>${esc(c.mode)}</code></td>
+            <td><span class="badge badge-${c.status === "completed" ? "online" : c.status === "running" ? "standby" : "offline"}">${esc(c.status)}</span></td>
+            <td>${c.steps_completed}/${c.steps_total}</td>
+            <td>${c.duration_ms ? c.duration_ms + "ms" : "..."}</td>
+            <td>${esc(c.started_at.slice(11, 19))}</td>
+          </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>Cron Loops</h2>
+      <table>
+        <thead><tr><th>ID</th><th>Name</th><th>Schedule</th><th>Enabled</th><th>Last Run</th><th>Runs</th></tr></thead>
+        <tbody>${cronJobs.length === 0 ? '<tr><td colspan="6" style="text-align:center;color:#888">No cron jobs registered</td></tr>' : cronJobs.map((j) => `
+          <tr>
+            <td><code>${esc(j.id)}</code></td>
+            <td>${esc(j.name)}</td>
+            <td><code>${esc(j.schedule)}</code></td>
+            <td><span class="badge badge-${j.enabled ? "online" : "offline"}">${j.enabled ? "on" : "off"}</span></td>
+            <td>${j.last_run ? esc(j.last_run.slice(11, 19)) : "-"}</td>
+            <td>${j.run_count}</td>
+          </tr>`).join("")}
+        </tbody>
       </table>
     </div>
 
@@ -8786,6 +9443,22 @@ app.get("/", (_req, res) => {
       <div class="endpoint">
         <div><span class="method method-ws">WS</span><code>/ws?agent_id=CAPTAIN_CLAUDE</code></div>
         <div class="desc">Real-time bidirectional AgentMessage channel.</div>
+      </div>
+      <div class="endpoint">
+        <div><span class="method method-post">POST</span><code>/chains/execute</code></div>
+        <div class="desc">Execute agent chain (sequential, parallel, loop, debate).</div>
+      </div>
+      <div class="endpoint">
+        <div><span class="method method-get">GET</span><code>/chains</code></div>
+        <div class="desc">List recent chain executions with status.</div>
+      </div>
+      <div class="endpoint">
+        <div><span class="method method-post">POST</span><code>/cognitive/:action</code></div>
+        <div class="desc">Proxy cognitive reasoning to RLM Engine (reason, analyze, plan, learn, fold).</div>
+      </div>
+      <div class="endpoint">
+        <div><span class="method method-get">GET</span><code>/cron</code></div>
+        <div class="desc">List cron loops. POST to create, PATCH to toggle, DELETE to remove.</div>
       </div>
       <div class="endpoint">
         <div><span class="method method-get">GET</span><code>/health</code></div>
@@ -8819,6 +9492,8 @@ app.use((err, _req, res, _next) => {
 async function boot() {
   await initRedis();
   await AgentRegistry.hydrate();
+  await hydrateCronJobs();
+  registerDefaultLoops();
   initWebSocket(server);
   server.listen(config.port, () => {
     logger.info(

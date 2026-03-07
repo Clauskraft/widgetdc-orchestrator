@@ -26,6 +26,9 @@ export const config = {
   geminiApiKey: optional('GEMINI_API_KEY', ''),
   anthropicApiKey: optional('ANTHROPIC_API_KEY', ''),
 
+  // RLM Engine (optional — cognitive reasoning proxy)
+  rlmUrl: optional('RLM_URL', 'https://rlm-engine-production.up.railway.app'),
+
   // Redis (optional — for agent registry persistence across restarts)
   redisUrl: optional('REDIS_URL', ''),
 

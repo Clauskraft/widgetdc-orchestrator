@@ -25,10 +25,16 @@ import { initRedis, isRedisEnabled } from './redis.js'
 import { agentsRouter } from './routes/agents.js'
 import { toolsRouter } from './routes/tools.js'
 import { chatRouter } from './routes/chat.js'
+import { chainsRouter } from './routes/chains.js'
+import { cognitiveRouter } from './routes/cognitive.js'
+import { cronRouter } from './routes/cron.js'
 import { AgentRegistry } from './agent-registry.js'
 import { getConnectionStats } from './chat-broadcaster.js'
 import { requireApiKey } from './auth.js'
 import { isSlackEnabled } from './slack.js'
+import { isRlmAvailable } from './cognitive-proxy.js'
+import { hydrateCronJobs, registerDefaultLoops, listCronJobs } from './cron-scheduler.js'
+import { listExecutions } from './chain-engine.js'
 
 /** Escape HTML special characters to prevent stored XSS */
 function esc(s: string): string {
@@ -65,6 +71,9 @@ app.use((req, _res, next) => {
 app.use('/agents', requireApiKey, agentsRouter)
 app.use('/tools', requireApiKey, toolsRouter)
 app.use('/chat', requireApiKey, chatRouter)
+app.use('/chains', requireApiKey, chainsRouter)
+app.use('/cognitive', requireApiKey, cognitiveRouter)
+app.use('/cron', requireApiKey, cronRouter)
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
@@ -76,6 +85,9 @@ app.get('/health', (_req, res) => {
     agents_registered: AgentRegistry.all().length,
     ws_connections: getConnectionStats().total,
     redis_enabled: isRedisEnabled(),
+    rlm_available: isRlmAvailable(),
+    active_chains: listExecutions().filter(e => e.status === 'running').length,
+    cron_jobs: listCronJobs().filter(j => j.enabled).length,
     slack_enabled: isSlackEnabled(),
     timestamp: new Date().toISOString(),
   })
@@ -85,6 +97,8 @@ app.get('/health', (_req, res) => {
 app.get('/', (_req, res) => {
   const agents = AgentRegistry.all()
   const ws = getConnectionStats()
+  const chains = listExecutions().slice(0, 10)
+  const cronJobs = listCronJobs()
 
   const agentRows = agents.length === 0
     ? '<tr><td colspan="6" style="text-align:center;color:#888">No agents registered yet</td></tr>'
@@ -157,19 +171,19 @@ app.get('/', (_req, res) => {
     <div class="grid">
       <div class="card">
         <div class="card-value">${agents.length}</div>
-        <div class="card-label">Agents Registered</div>
+        <div class="card-label">Agents</div>
       </div>
       <div class="card">
-        <div class="card-value">${ws.total}</div>
-        <div class="card-label">WS Connections</div>
+        <div class="card-value">${chains.filter(c => c.status === 'running').length}/${chains.length}</div>
+        <div class="card-label">Chains (active/total)</div>
       </div>
       <div class="card">
-        <div class="card-value">${Math.floor(process.uptime())}s</div>
-        <div class="card-label">Uptime</div>
+        <div class="card-value">${cronJobs.filter(j => j.enabled).length}</div>
+        <div class="card-label">Cron Loops Active</div>
       </div>
       <div class="card">
         <div class="card-value" style="color:#4ade80">●</div>
-        <div class="card-label">Status: Healthy</div>
+        <div class="card-label">RLM: ${isRlmAvailable() ? 'Connected' : 'N/A'}</div>
       </div>
     </div>
 
@@ -186,6 +200,44 @@ app.get('/', (_req, res) => {
       <table>
         <thead><tr><th>Agent ID</th><th>State</th><th>Connected At</th></tr></thead>
         <tbody>${wsRows}</tbody>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>Chain Executions</h2>
+      <table>
+        <thead><tr><th>Chain</th><th>Mode</th><th>Status</th><th>Steps</th><th>Duration</th><th>Started</th></tr></thead>
+        <tbody>${chains.length === 0
+          ? '<tr><td colspan="6" style="text-align:center;color:#888">No chain executions yet</td></tr>'
+          : chains.map(c => `
+          <tr>
+            <td><strong>${esc(c.name)}</strong></td>
+            <td><code>${esc(c.mode)}</code></td>
+            <td><span class="badge badge-${c.status === 'completed' ? 'online' : c.status === 'running' ? 'standby' : 'offline'}">${esc(c.status)}</span></td>
+            <td>${c.steps_completed}/${c.steps_total}</td>
+            <td>${c.duration_ms ? c.duration_ms + 'ms' : '...'}</td>
+            <td>${esc(c.started_at.slice(11, 19))}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>Cron Loops</h2>
+      <table>
+        <thead><tr><th>ID</th><th>Name</th><th>Schedule</th><th>Enabled</th><th>Last Run</th><th>Runs</th></tr></thead>
+        <tbody>${cronJobs.length === 0
+          ? '<tr><td colspan="6" style="text-align:center;color:#888">No cron jobs registered</td></tr>'
+          : cronJobs.map(j => `
+          <tr>
+            <td><code>${esc(j.id)}</code></td>
+            <td>${esc(j.name)}</td>
+            <td><code>${esc(j.schedule)}</code></td>
+            <td><span class="badge badge-${j.enabled ? 'online' : 'offline'}">${j.enabled ? 'on' : 'off'}</span></td>
+            <td>${j.last_run ? esc(j.last_run.slice(11, 19)) : '-'}</td>
+            <td>${j.run_count}</td>
+          </tr>`).join('')}
+        </tbody>
       </table>
     </div>
 
@@ -214,6 +266,22 @@ app.get('/', (_req, res) => {
       <div class="endpoint">
         <div><span class="method method-ws">WS</span><code>/ws?agent_id=CAPTAIN_CLAUDE</code></div>
         <div class="desc">Real-time bidirectional AgentMessage channel.</div>
+      </div>
+      <div class="endpoint">
+        <div><span class="method method-post">POST</span><code>/chains/execute</code></div>
+        <div class="desc">Execute agent chain (sequential, parallel, loop, debate).</div>
+      </div>
+      <div class="endpoint">
+        <div><span class="method method-get">GET</span><code>/chains</code></div>
+        <div class="desc">List recent chain executions with status.</div>
+      </div>
+      <div class="endpoint">
+        <div><span class="method method-post">POST</span><code>/cognitive/:action</code></div>
+        <div class="desc">Proxy cognitive reasoning to RLM Engine (reason, analyze, plan, learn, fold).</div>
+      </div>
+      <div class="endpoint">
+        <div><span class="method method-get">GET</span><code>/cron</code></div>
+        <div class="desc">List cron loops. POST to create, PATCH to toggle, DELETE to remove.</div>
       </div>
       <div class="endpoint">
         <div><span class="method method-get">GET</span><code>/health</code></div>
@@ -253,6 +321,8 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 async function boot() {
   await initRedis()
   await AgentRegistry.hydrate()
+  await hydrateCronJobs()
+  registerDefaultLoops()
   initWebSocket(server)
 
   server.listen(config.port, () => {
