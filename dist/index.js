@@ -8284,6 +8284,7 @@ agentsRouter.get("/", (_req, res) => {
   const agents = AgentRegistry.all().map((e) => ({
     agent_id: e.handshake.agent_id,
     display_name: e.handshake.display_name,
+    version: e.handshake.version ?? null,
     status: e.handshake.status,
     capabilities: e.handshake.capabilities,
     allowed_tool_namespaces: e.handshake.allowed_tool_namespaces,
@@ -8663,10 +8664,11 @@ app.get("/health", (_req, res) => {
 app.get("/", (_req, res) => {
   const agents = AgentRegistry.all();
   const ws = getConnectionStats();
-  const agentRows = agents.length === 0 ? '<tr><td colspan="5" style="text-align:center;color:#888">No agents registered yet</td></tr>' : agents.map((a) => `
+  const agentRows = agents.length === 0 ? '<tr><td colspan="6" style="text-align:center;color:#888">No agents registered yet</td></tr>' : agents.map((a) => `
       <tr>
         <td><strong>${esc(a.handshake.agent_id)}</strong></td>
         <td>${esc(a.handshake.display_name)}</td>
+        <td><code style="color:#a78bfa">${esc(a.handshake.version ?? "n/a")}</code></td>
         <td><span class="badge badge-${esc(a.handshake.status)}">${esc(a.handshake.status)}</span></td>
         <td>${esc(a.handshake.allowed_tool_namespaces.join(", "))}</td>
         <td>${a.activeCalls}</td>
@@ -8746,7 +8748,7 @@ app.get("/", (_req, res) => {
     <div class="section">
       <h2>Registered Agents</h2>
       <table>
-        <thead><tr><th>Agent ID</th><th>Display Name</th><th>Status</th><th>Tool Namespaces</th><th>Active Calls</th></tr></thead>
+        <thead><tr><th>Agent ID</th><th>Display Name</th><th>Model / Version</th><th>Status</th><th>Tool Namespaces</th><th>Active Calls</th></tr></thead>
         <tbody>${agentRows}</tbody>
       </table>
     </div>

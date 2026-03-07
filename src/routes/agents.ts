@@ -46,6 +46,7 @@ agentsRouter.get('/', (_req: Request, res: Response) => {
   const agents = AgentRegistry.all().map(e => ({
     agent_id: e.handshake.agent_id,
     display_name: e.handshake.display_name,
+    version: e.handshake.version ?? null,
     status: e.handshake.status,
     capabilities: e.handshake.capabilities,
     allowed_tool_namespaces: e.handshake.allowed_tool_namespaces,
