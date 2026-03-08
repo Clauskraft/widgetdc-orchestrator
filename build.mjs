@@ -2,7 +2,7 @@
 // Bundles everything into a single dist/index.js (ESM, Node 20 target)
 // @widgetdc/contracts is bundled IN (file: dep, not available on Railway)
 import * as esbuild from 'esbuild'
-import { readFileSync } from 'fs'
+import { readFileSync, mkdirSync, copyFileSync } from 'fs'
 
 const pkg = JSON.parse(readFileSync('./package.json', 'utf8'))
 
@@ -31,4 +31,8 @@ await esbuild.build({
   },
 })
 
-console.log('✅ Build complete → dist/index.js')
+// Copy frontend to dist/public/
+mkdirSync('dist/public', { recursive: true })
+copyFileSync('frontend/index.html', 'dist/public/index.html')
+
+console.log('✅ Build complete → dist/index.js + dist/public/')

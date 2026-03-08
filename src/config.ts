@@ -35,6 +35,10 @@ export const config = {
   // Orchestrator API key (required for /agents/register and /tools/call)
   orchestratorApiKey: optional('ORCHESTRATOR_API_KEY', ''),
 
+  // OpenClaw gateway (optional — for terminal/agent spawning)
+  openclawUrl: optional('OPENCLAW_URL', ''),
+  openclawToken: optional('OPENCLAW_GATEWAY_TOKEN', ''),
+
   // Orchestrator identity
   orchestratorId: optional('ORCHESTRATOR_ID', 'widgetdc-orchestrator-v1'),
 

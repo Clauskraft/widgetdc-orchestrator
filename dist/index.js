@@ -11,6 +11,8 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import { createServer } from "http";
+import path from "path";
+import { fileURLToPath } from "url";
 
 // src/config.ts
 import "dotenv/config";
@@ -37,6 +39,9 @@ var config = {
   redisUrl: optional("REDIS_URL", ""),
   // Orchestrator API key (required for /agents/register and /tools/call)
   orchestratorApiKey: optional("ORCHESTRATOR_API_KEY", ""),
+  // OpenClaw gateway (optional — for terminal/agent spawning)
+  openclawUrl: optional("OPENCLAW_URL", ""),
+  openclawToken: optional("OPENCLAW_GATEWAY_TOKEN", ""),
   // Orchestrator identity
   orchestratorId: optional("ORCHESTRATOR_ID", "widgetdc-orchestrator-v1"),
   // WebSocket heartbeat interval (ms)
@@ -2277,32 +2282,32 @@ var ValueErrorIterator = class {
     return next.done ? void 0 : next.value;
   }
 };
-function Create(errorType, schema, path, value, errors = []) {
+function Create(errorType, schema, path2, value, errors = []) {
   return {
     type: errorType,
     schema,
-    path,
+    path: path2,
     value,
-    message: GetErrorFunction()({ errorType, path, schema, value, errors }),
+    message: GetErrorFunction()({ errorType, path: path2, schema, value, errors }),
     errors
   };
 }
-function* FromAny2(schema, references, path, value) {
+function* FromAny2(schema, references, path2, value) {
 }
-function* FromArgument2(schema, references, path, value) {
+function* FromArgument2(schema, references, path2, value) {
 }
-function* FromArray4(schema, references, path, value) {
+function* FromArray4(schema, references, path2, value) {
   if (!IsArray(value)) {
-    return yield Create(ValueErrorType.Array, schema, path, value);
+    return yield Create(ValueErrorType.Array, schema, path2, value);
   }
   if (IsDefined2(schema.minItems) && !(value.length >= schema.minItems)) {
-    yield Create(ValueErrorType.ArrayMinItems, schema, path, value);
+    yield Create(ValueErrorType.ArrayMinItems, schema, path2, value);
   }
   if (IsDefined2(schema.maxItems) && !(value.length <= schema.maxItems)) {
-    yield Create(ValueErrorType.ArrayMaxItems, schema, path, value);
+    yield Create(ValueErrorType.ArrayMaxItems, schema, path2, value);
   }
   for (let i = 0; i < value.length; i++) {
-    yield* Visit4(schema.items, references, `${path}/${i}`, value[i]);
+    yield* Visit4(schema.items, references, `${path2}/${i}`, value[i]);
   }
   if (schema.uniqueItems === true && !function() {
     const set = /* @__PURE__ */ new Set();
@@ -2316,116 +2321,116 @@ function* FromArray4(schema, references, path, value) {
     }
     return true;
   }()) {
-    yield Create(ValueErrorType.ArrayUniqueItems, schema, path, value);
+    yield Create(ValueErrorType.ArrayUniqueItems, schema, path2, value);
   }
   if (!(IsDefined2(schema.contains) || IsDefined2(schema.minContains) || IsDefined2(schema.maxContains))) {
     return;
   }
   const containsSchema = IsDefined2(schema.contains) ? schema.contains : Never();
-  const containsCount = value.reduce((acc, value2, index) => Visit4(containsSchema, references, `${path}${index}`, value2).next().done === true ? acc + 1 : acc, 0);
+  const containsCount = value.reduce((acc, value2, index) => Visit4(containsSchema, references, `${path2}${index}`, value2).next().done === true ? acc + 1 : acc, 0);
   if (containsCount === 0) {
-    yield Create(ValueErrorType.ArrayContains, schema, path, value);
+    yield Create(ValueErrorType.ArrayContains, schema, path2, value);
   }
   if (IsNumber(schema.minContains) && containsCount < schema.minContains) {
-    yield Create(ValueErrorType.ArrayMinContains, schema, path, value);
+    yield Create(ValueErrorType.ArrayMinContains, schema, path2, value);
   }
   if (IsNumber(schema.maxContains) && containsCount > schema.maxContains) {
-    yield Create(ValueErrorType.ArrayMaxContains, schema, path, value);
+    yield Create(ValueErrorType.ArrayMaxContains, schema, path2, value);
   }
 }
-function* FromAsyncIterator2(schema, references, path, value) {
+function* FromAsyncIterator2(schema, references, path2, value) {
   if (!IsAsyncIterator(value))
-    yield Create(ValueErrorType.AsyncIterator, schema, path, value);
+    yield Create(ValueErrorType.AsyncIterator, schema, path2, value);
 }
-function* FromBigInt2(schema, references, path, value) {
+function* FromBigInt2(schema, references, path2, value) {
   if (!IsBigInt(value))
-    return yield Create(ValueErrorType.BigInt, schema, path, value);
+    return yield Create(ValueErrorType.BigInt, schema, path2, value);
   if (IsDefined2(schema.exclusiveMaximum) && !(value < schema.exclusiveMaximum)) {
-    yield Create(ValueErrorType.BigIntExclusiveMaximum, schema, path, value);
+    yield Create(ValueErrorType.BigIntExclusiveMaximum, schema, path2, value);
   }
   if (IsDefined2(schema.exclusiveMinimum) && !(value > schema.exclusiveMinimum)) {
-    yield Create(ValueErrorType.BigIntExclusiveMinimum, schema, path, value);
+    yield Create(ValueErrorType.BigIntExclusiveMinimum, schema, path2, value);
   }
   if (IsDefined2(schema.maximum) && !(value <= schema.maximum)) {
-    yield Create(ValueErrorType.BigIntMaximum, schema, path, value);
+    yield Create(ValueErrorType.BigIntMaximum, schema, path2, value);
   }
   if (IsDefined2(schema.minimum) && !(value >= schema.minimum)) {
-    yield Create(ValueErrorType.BigIntMinimum, schema, path, value);
+    yield Create(ValueErrorType.BigIntMinimum, schema, path2, value);
   }
   if (IsDefined2(schema.multipleOf) && !(value % schema.multipleOf === BigInt(0))) {
-    yield Create(ValueErrorType.BigIntMultipleOf, schema, path, value);
+    yield Create(ValueErrorType.BigIntMultipleOf, schema, path2, value);
   }
 }
-function* FromBoolean2(schema, references, path, value) {
+function* FromBoolean2(schema, references, path2, value) {
   if (!IsBoolean(value))
-    yield Create(ValueErrorType.Boolean, schema, path, value);
+    yield Create(ValueErrorType.Boolean, schema, path2, value);
 }
-function* FromConstructor2(schema, references, path, value) {
-  yield* Visit4(schema.returns, references, path, value.prototype);
+function* FromConstructor2(schema, references, path2, value) {
+  yield* Visit4(schema.returns, references, path2, value.prototype);
 }
-function* FromDate2(schema, references, path, value) {
+function* FromDate2(schema, references, path2, value) {
   if (!IsDate(value))
-    return yield Create(ValueErrorType.Date, schema, path, value);
+    return yield Create(ValueErrorType.Date, schema, path2, value);
   if (IsDefined2(schema.exclusiveMaximumTimestamp) && !(value.getTime() < schema.exclusiveMaximumTimestamp)) {
-    yield Create(ValueErrorType.DateExclusiveMaximumTimestamp, schema, path, value);
+    yield Create(ValueErrorType.DateExclusiveMaximumTimestamp, schema, path2, value);
   }
   if (IsDefined2(schema.exclusiveMinimumTimestamp) && !(value.getTime() > schema.exclusiveMinimumTimestamp)) {
-    yield Create(ValueErrorType.DateExclusiveMinimumTimestamp, schema, path, value);
+    yield Create(ValueErrorType.DateExclusiveMinimumTimestamp, schema, path2, value);
   }
   if (IsDefined2(schema.maximumTimestamp) && !(value.getTime() <= schema.maximumTimestamp)) {
-    yield Create(ValueErrorType.DateMaximumTimestamp, schema, path, value);
+    yield Create(ValueErrorType.DateMaximumTimestamp, schema, path2, value);
   }
   if (IsDefined2(schema.minimumTimestamp) && !(value.getTime() >= schema.minimumTimestamp)) {
-    yield Create(ValueErrorType.DateMinimumTimestamp, schema, path, value);
+    yield Create(ValueErrorType.DateMinimumTimestamp, schema, path2, value);
   }
   if (IsDefined2(schema.multipleOfTimestamp) && !(value.getTime() % schema.multipleOfTimestamp === 0)) {
-    yield Create(ValueErrorType.DateMultipleOfTimestamp, schema, path, value);
+    yield Create(ValueErrorType.DateMultipleOfTimestamp, schema, path2, value);
   }
 }
-function* FromFunction2(schema, references, path, value) {
+function* FromFunction2(schema, references, path2, value) {
   if (!IsFunction(value))
-    yield Create(ValueErrorType.Function, schema, path, value);
+    yield Create(ValueErrorType.Function, schema, path2, value);
 }
-function* FromImport2(schema, references, path, value) {
+function* FromImport2(schema, references, path2, value) {
   const definitions = globalThis.Object.values(schema.$defs);
   const target = schema.$defs[schema.$ref];
-  yield* Visit4(target, [...references, ...definitions], path, value);
+  yield* Visit4(target, [...references, ...definitions], path2, value);
 }
-function* FromInteger2(schema, references, path, value) {
+function* FromInteger2(schema, references, path2, value) {
   if (!IsInteger(value))
-    return yield Create(ValueErrorType.Integer, schema, path, value);
+    return yield Create(ValueErrorType.Integer, schema, path2, value);
   if (IsDefined2(schema.exclusiveMaximum) && !(value < schema.exclusiveMaximum)) {
-    yield Create(ValueErrorType.IntegerExclusiveMaximum, schema, path, value);
+    yield Create(ValueErrorType.IntegerExclusiveMaximum, schema, path2, value);
   }
   if (IsDefined2(schema.exclusiveMinimum) && !(value > schema.exclusiveMinimum)) {
-    yield Create(ValueErrorType.IntegerExclusiveMinimum, schema, path, value);
+    yield Create(ValueErrorType.IntegerExclusiveMinimum, schema, path2, value);
   }
   if (IsDefined2(schema.maximum) && !(value <= schema.maximum)) {
-    yield Create(ValueErrorType.IntegerMaximum, schema, path, value);
+    yield Create(ValueErrorType.IntegerMaximum, schema, path2, value);
   }
   if (IsDefined2(schema.minimum) && !(value >= schema.minimum)) {
-    yield Create(ValueErrorType.IntegerMinimum, schema, path, value);
+    yield Create(ValueErrorType.IntegerMinimum, schema, path2, value);
   }
   if (IsDefined2(schema.multipleOf) && !(value % schema.multipleOf === 0)) {
-    yield Create(ValueErrorType.IntegerMultipleOf, schema, path, value);
+    yield Create(ValueErrorType.IntegerMultipleOf, schema, path2, value);
   }
 }
-function* FromIntersect4(schema, references, path, value) {
+function* FromIntersect4(schema, references, path2, value) {
   let hasError = false;
   for (const inner of schema.allOf) {
-    for (const error of Visit4(inner, references, path, value)) {
+    for (const error of Visit4(inner, references, path2, value)) {
       hasError = true;
       yield error;
     }
   }
   if (hasError) {
-    return yield Create(ValueErrorType.Intersect, schema, path, value);
+    return yield Create(ValueErrorType.Intersect, schema, path2, value);
   }
   if (schema.unevaluatedProperties === false) {
     const keyCheck = new RegExp(KeyOfPattern(schema));
     for (const valueKey of Object.getOwnPropertyNames(value)) {
       if (!keyCheck.test(valueKey)) {
-        yield Create(ValueErrorType.IntersectUnevaluatedProperties, schema, `${path}/${valueKey}`, value);
+        yield Create(ValueErrorType.IntersectUnevaluatedProperties, schema, `${path2}/${valueKey}`, value);
       }
     }
   }
@@ -2433,59 +2438,59 @@ function* FromIntersect4(schema, references, path, value) {
     const keyCheck = new RegExp(KeyOfPattern(schema));
     for (const valueKey of Object.getOwnPropertyNames(value)) {
       if (!keyCheck.test(valueKey)) {
-        const next = Visit4(schema.unevaluatedProperties, references, `${path}/${valueKey}`, value[valueKey]).next();
+        const next = Visit4(schema.unevaluatedProperties, references, `${path2}/${valueKey}`, value[valueKey]).next();
         if (!next.done)
           yield next.value;
       }
     }
   }
 }
-function* FromIterator2(schema, references, path, value) {
+function* FromIterator2(schema, references, path2, value) {
   if (!IsIterator(value))
-    yield Create(ValueErrorType.Iterator, schema, path, value);
+    yield Create(ValueErrorType.Iterator, schema, path2, value);
 }
-function* FromLiteral2(schema, references, path, value) {
+function* FromLiteral2(schema, references, path2, value) {
   if (!(value === schema.const))
-    yield Create(ValueErrorType.Literal, schema, path, value);
+    yield Create(ValueErrorType.Literal, schema, path2, value);
 }
-function* FromNever2(schema, references, path, value) {
-  yield Create(ValueErrorType.Never, schema, path, value);
+function* FromNever2(schema, references, path2, value) {
+  yield Create(ValueErrorType.Never, schema, path2, value);
 }
-function* FromNot2(schema, references, path, value) {
-  if (Visit4(schema.not, references, path, value).next().done === true)
-    yield Create(ValueErrorType.Not, schema, path, value);
+function* FromNot2(schema, references, path2, value) {
+  if (Visit4(schema.not, references, path2, value).next().done === true)
+    yield Create(ValueErrorType.Not, schema, path2, value);
 }
-function* FromNull2(schema, references, path, value) {
+function* FromNull2(schema, references, path2, value) {
   if (!IsNull(value))
-    yield Create(ValueErrorType.Null, schema, path, value);
+    yield Create(ValueErrorType.Null, schema, path2, value);
 }
-function* FromNumber2(schema, references, path, value) {
+function* FromNumber2(schema, references, path2, value) {
   if (!TypeSystemPolicy.IsNumberLike(value))
-    return yield Create(ValueErrorType.Number, schema, path, value);
+    return yield Create(ValueErrorType.Number, schema, path2, value);
   if (IsDefined2(schema.exclusiveMaximum) && !(value < schema.exclusiveMaximum)) {
-    yield Create(ValueErrorType.NumberExclusiveMaximum, schema, path, value);
+    yield Create(ValueErrorType.NumberExclusiveMaximum, schema, path2, value);
   }
   if (IsDefined2(schema.exclusiveMinimum) && !(value > schema.exclusiveMinimum)) {
-    yield Create(ValueErrorType.NumberExclusiveMinimum, schema, path, value);
+    yield Create(ValueErrorType.NumberExclusiveMinimum, schema, path2, value);
   }
   if (IsDefined2(schema.maximum) && !(value <= schema.maximum)) {
-    yield Create(ValueErrorType.NumberMaximum, schema, path, value);
+    yield Create(ValueErrorType.NumberMaximum, schema, path2, value);
   }
   if (IsDefined2(schema.minimum) && !(value >= schema.minimum)) {
-    yield Create(ValueErrorType.NumberMinimum, schema, path, value);
+    yield Create(ValueErrorType.NumberMinimum, schema, path2, value);
   }
   if (IsDefined2(schema.multipleOf) && !(value % schema.multipleOf === 0)) {
-    yield Create(ValueErrorType.NumberMultipleOf, schema, path, value);
+    yield Create(ValueErrorType.NumberMultipleOf, schema, path2, value);
   }
 }
-function* FromObject2(schema, references, path, value) {
+function* FromObject2(schema, references, path2, value) {
   if (!TypeSystemPolicy.IsObjectLike(value))
-    return yield Create(ValueErrorType.Object, schema, path, value);
+    return yield Create(ValueErrorType.Object, schema, path2, value);
   if (IsDefined2(schema.minProperties) && !(Object.getOwnPropertyNames(value).length >= schema.minProperties)) {
-    yield Create(ValueErrorType.ObjectMinProperties, schema, path, value);
+    yield Create(ValueErrorType.ObjectMinProperties, schema, path2, value);
   }
   if (IsDefined2(schema.maxProperties) && !(Object.getOwnPropertyNames(value).length <= schema.maxProperties)) {
-    yield Create(ValueErrorType.ObjectMaxProperties, schema, path, value);
+    yield Create(ValueErrorType.ObjectMaxProperties, schema, path2, value);
   }
   const requiredKeys = Array.isArray(schema.required) ? schema.required : [];
   const knownKeys = Object.getOwnPropertyNames(schema.properties);
@@ -2493,12 +2498,12 @@ function* FromObject2(schema, references, path, value) {
   for (const requiredKey of requiredKeys) {
     if (unknownKeys.includes(requiredKey))
       continue;
-    yield Create(ValueErrorType.ObjectRequiredProperty, schema.properties[requiredKey], `${path}/${EscapeKey(requiredKey)}`, void 0);
+    yield Create(ValueErrorType.ObjectRequiredProperty, schema.properties[requiredKey], `${path2}/${EscapeKey(requiredKey)}`, void 0);
   }
   if (schema.additionalProperties === false) {
     for (const valueKey of unknownKeys) {
       if (!knownKeys.includes(valueKey)) {
-        yield Create(ValueErrorType.ObjectAdditionalProperties, schema, `${path}/${EscapeKey(valueKey)}`, value[valueKey]);
+        yield Create(ValueErrorType.ObjectAdditionalProperties, schema, `${path2}/${EscapeKey(valueKey)}`, value[valueKey]);
       }
     }
   }
@@ -2506,235 +2511,235 @@ function* FromObject2(schema, references, path, value) {
     for (const valueKey of unknownKeys) {
       if (knownKeys.includes(valueKey))
         continue;
-      yield* Visit4(schema.additionalProperties, references, `${path}/${EscapeKey(valueKey)}`, value[valueKey]);
+      yield* Visit4(schema.additionalProperties, references, `${path2}/${EscapeKey(valueKey)}`, value[valueKey]);
     }
   }
   for (const knownKey of knownKeys) {
     const property = schema.properties[knownKey];
     if (schema.required && schema.required.includes(knownKey)) {
-      yield* Visit4(property, references, `${path}/${EscapeKey(knownKey)}`, value[knownKey]);
+      yield* Visit4(property, references, `${path2}/${EscapeKey(knownKey)}`, value[knownKey]);
       if (ExtendsUndefinedCheck(schema) && !(knownKey in value)) {
-        yield Create(ValueErrorType.ObjectRequiredProperty, property, `${path}/${EscapeKey(knownKey)}`, void 0);
+        yield Create(ValueErrorType.ObjectRequiredProperty, property, `${path2}/${EscapeKey(knownKey)}`, void 0);
       }
     } else {
       if (TypeSystemPolicy.IsExactOptionalProperty(value, knownKey)) {
-        yield* Visit4(property, references, `${path}/${EscapeKey(knownKey)}`, value[knownKey]);
+        yield* Visit4(property, references, `${path2}/${EscapeKey(knownKey)}`, value[knownKey]);
       }
     }
   }
 }
-function* FromPromise2(schema, references, path, value) {
+function* FromPromise2(schema, references, path2, value) {
   if (!IsPromise(value))
-    yield Create(ValueErrorType.Promise, schema, path, value);
+    yield Create(ValueErrorType.Promise, schema, path2, value);
 }
-function* FromRecord2(schema, references, path, value) {
+function* FromRecord2(schema, references, path2, value) {
   if (!TypeSystemPolicy.IsRecordLike(value))
-    return yield Create(ValueErrorType.Object, schema, path, value);
+    return yield Create(ValueErrorType.Object, schema, path2, value);
   if (IsDefined2(schema.minProperties) && !(Object.getOwnPropertyNames(value).length >= schema.minProperties)) {
-    yield Create(ValueErrorType.ObjectMinProperties, schema, path, value);
+    yield Create(ValueErrorType.ObjectMinProperties, schema, path2, value);
   }
   if (IsDefined2(schema.maxProperties) && !(Object.getOwnPropertyNames(value).length <= schema.maxProperties)) {
-    yield Create(ValueErrorType.ObjectMaxProperties, schema, path, value);
+    yield Create(ValueErrorType.ObjectMaxProperties, schema, path2, value);
   }
   const [patternKey, patternSchema] = Object.entries(schema.patternProperties)[0];
   const regex = new RegExp(patternKey);
   for (const [propertyKey, propertyValue] of Object.entries(value)) {
     if (regex.test(propertyKey))
-      yield* Visit4(patternSchema, references, `${path}/${EscapeKey(propertyKey)}`, propertyValue);
+      yield* Visit4(patternSchema, references, `${path2}/${EscapeKey(propertyKey)}`, propertyValue);
   }
   if (typeof schema.additionalProperties === "object") {
     for (const [propertyKey, propertyValue] of Object.entries(value)) {
       if (!regex.test(propertyKey))
-        yield* Visit4(schema.additionalProperties, references, `${path}/${EscapeKey(propertyKey)}`, propertyValue);
+        yield* Visit4(schema.additionalProperties, references, `${path2}/${EscapeKey(propertyKey)}`, propertyValue);
     }
   }
   if (schema.additionalProperties === false) {
     for (const [propertyKey, propertyValue] of Object.entries(value)) {
       if (regex.test(propertyKey))
         continue;
-      return yield Create(ValueErrorType.ObjectAdditionalProperties, schema, `${path}/${EscapeKey(propertyKey)}`, propertyValue);
+      return yield Create(ValueErrorType.ObjectAdditionalProperties, schema, `${path2}/${EscapeKey(propertyKey)}`, propertyValue);
     }
   }
 }
-function* FromRef2(schema, references, path, value) {
-  yield* Visit4(Deref(schema, references), references, path, value);
+function* FromRef2(schema, references, path2, value) {
+  yield* Visit4(Deref(schema, references), references, path2, value);
 }
-function* FromRegExp2(schema, references, path, value) {
+function* FromRegExp2(schema, references, path2, value) {
   if (!IsString(value))
-    return yield Create(ValueErrorType.String, schema, path, value);
+    return yield Create(ValueErrorType.String, schema, path2, value);
   if (IsDefined2(schema.minLength) && !(value.length >= schema.minLength)) {
-    yield Create(ValueErrorType.StringMinLength, schema, path, value);
+    yield Create(ValueErrorType.StringMinLength, schema, path2, value);
   }
   if (IsDefined2(schema.maxLength) && !(value.length <= schema.maxLength)) {
-    yield Create(ValueErrorType.StringMaxLength, schema, path, value);
+    yield Create(ValueErrorType.StringMaxLength, schema, path2, value);
   }
   const regex = new RegExp(schema.source, schema.flags);
   if (!regex.test(value)) {
-    return yield Create(ValueErrorType.RegExp, schema, path, value);
+    return yield Create(ValueErrorType.RegExp, schema, path2, value);
   }
 }
-function* FromString2(schema, references, path, value) {
+function* FromString2(schema, references, path2, value) {
   if (!IsString(value))
-    return yield Create(ValueErrorType.String, schema, path, value);
+    return yield Create(ValueErrorType.String, schema, path2, value);
   if (IsDefined2(schema.minLength) && !(value.length >= schema.minLength)) {
-    yield Create(ValueErrorType.StringMinLength, schema, path, value);
+    yield Create(ValueErrorType.StringMinLength, schema, path2, value);
   }
   if (IsDefined2(schema.maxLength) && !(value.length <= schema.maxLength)) {
-    yield Create(ValueErrorType.StringMaxLength, schema, path, value);
+    yield Create(ValueErrorType.StringMaxLength, schema, path2, value);
   }
   if (IsString(schema.pattern)) {
     const regex = new RegExp(schema.pattern);
     if (!regex.test(value)) {
-      yield Create(ValueErrorType.StringPattern, schema, path, value);
+      yield Create(ValueErrorType.StringPattern, schema, path2, value);
     }
   }
   if (IsString(schema.format)) {
     if (!format_exports.Has(schema.format)) {
-      yield Create(ValueErrorType.StringFormatUnknown, schema, path, value);
+      yield Create(ValueErrorType.StringFormatUnknown, schema, path2, value);
     } else {
       const format = format_exports.Get(schema.format);
       if (!format(value)) {
-        yield Create(ValueErrorType.StringFormat, schema, path, value);
+        yield Create(ValueErrorType.StringFormat, schema, path2, value);
       }
     }
   }
 }
-function* FromSymbol2(schema, references, path, value) {
+function* FromSymbol2(schema, references, path2, value) {
   if (!IsSymbol(value))
-    yield Create(ValueErrorType.Symbol, schema, path, value);
+    yield Create(ValueErrorType.Symbol, schema, path2, value);
 }
-function* FromTemplateLiteral2(schema, references, path, value) {
+function* FromTemplateLiteral2(schema, references, path2, value) {
   if (!IsString(value))
-    return yield Create(ValueErrorType.String, schema, path, value);
+    return yield Create(ValueErrorType.String, schema, path2, value);
   const regex = new RegExp(schema.pattern);
   if (!regex.test(value)) {
-    yield Create(ValueErrorType.StringPattern, schema, path, value);
+    yield Create(ValueErrorType.StringPattern, schema, path2, value);
   }
 }
-function* FromThis2(schema, references, path, value) {
-  yield* Visit4(Deref(schema, references), references, path, value);
+function* FromThis2(schema, references, path2, value) {
+  yield* Visit4(Deref(schema, references), references, path2, value);
 }
-function* FromTuple4(schema, references, path, value) {
+function* FromTuple4(schema, references, path2, value) {
   if (!IsArray(value))
-    return yield Create(ValueErrorType.Tuple, schema, path, value);
+    return yield Create(ValueErrorType.Tuple, schema, path2, value);
   if (schema.items === void 0 && !(value.length === 0)) {
-    return yield Create(ValueErrorType.TupleLength, schema, path, value);
+    return yield Create(ValueErrorType.TupleLength, schema, path2, value);
   }
   if (!(value.length === schema.maxItems)) {
-    return yield Create(ValueErrorType.TupleLength, schema, path, value);
+    return yield Create(ValueErrorType.TupleLength, schema, path2, value);
   }
   if (!schema.items) {
     return;
   }
   for (let i = 0; i < schema.items.length; i++) {
-    yield* Visit4(schema.items[i], references, `${path}/${i}`, value[i]);
+    yield* Visit4(schema.items[i], references, `${path2}/${i}`, value[i]);
   }
 }
-function* FromUndefined2(schema, references, path, value) {
+function* FromUndefined2(schema, references, path2, value) {
   if (!IsUndefined(value))
-    yield Create(ValueErrorType.Undefined, schema, path, value);
+    yield Create(ValueErrorType.Undefined, schema, path2, value);
 }
-function* FromUnion4(schema, references, path, value) {
+function* FromUnion4(schema, references, path2, value) {
   if (Check(schema, references, value))
     return;
-  const errors = schema.anyOf.map((variant) => new ValueErrorIterator(Visit4(variant, references, path, value)));
-  yield Create(ValueErrorType.Union, schema, path, value, errors);
+  const errors = schema.anyOf.map((variant) => new ValueErrorIterator(Visit4(variant, references, path2, value)));
+  yield Create(ValueErrorType.Union, schema, path2, value, errors);
 }
-function* FromUint8Array2(schema, references, path, value) {
+function* FromUint8Array2(schema, references, path2, value) {
   if (!IsUint8Array(value))
-    return yield Create(ValueErrorType.Uint8Array, schema, path, value);
+    return yield Create(ValueErrorType.Uint8Array, schema, path2, value);
   if (IsDefined2(schema.maxByteLength) && !(value.length <= schema.maxByteLength)) {
-    yield Create(ValueErrorType.Uint8ArrayMaxByteLength, schema, path, value);
+    yield Create(ValueErrorType.Uint8ArrayMaxByteLength, schema, path2, value);
   }
   if (IsDefined2(schema.minByteLength) && !(value.length >= schema.minByteLength)) {
-    yield Create(ValueErrorType.Uint8ArrayMinByteLength, schema, path, value);
+    yield Create(ValueErrorType.Uint8ArrayMinByteLength, schema, path2, value);
   }
 }
-function* FromUnknown2(schema, references, path, value) {
+function* FromUnknown2(schema, references, path2, value) {
 }
-function* FromVoid2(schema, references, path, value) {
+function* FromVoid2(schema, references, path2, value) {
   if (!TypeSystemPolicy.IsVoidLike(value))
-    yield Create(ValueErrorType.Void, schema, path, value);
+    yield Create(ValueErrorType.Void, schema, path2, value);
 }
-function* FromKind2(schema, references, path, value) {
+function* FromKind2(schema, references, path2, value) {
   const check = type_exports.Get(schema[Kind]);
   if (!check(schema, value))
-    yield Create(ValueErrorType.Kind, schema, path, value);
+    yield Create(ValueErrorType.Kind, schema, path2, value);
 }
-function* Visit4(schema, references, path, value) {
+function* Visit4(schema, references, path2, value) {
   const references_ = IsDefined2(schema.$id) ? [...references, schema] : references;
   const schema_ = schema;
   switch (schema_[Kind]) {
     case "Any":
-      return yield* FromAny2(schema_, references_, path, value);
+      return yield* FromAny2(schema_, references_, path2, value);
     case "Argument":
-      return yield* FromArgument2(schema_, references_, path, value);
+      return yield* FromArgument2(schema_, references_, path2, value);
     case "Array":
-      return yield* FromArray4(schema_, references_, path, value);
+      return yield* FromArray4(schema_, references_, path2, value);
     case "AsyncIterator":
-      return yield* FromAsyncIterator2(schema_, references_, path, value);
+      return yield* FromAsyncIterator2(schema_, references_, path2, value);
     case "BigInt":
-      return yield* FromBigInt2(schema_, references_, path, value);
+      return yield* FromBigInt2(schema_, references_, path2, value);
     case "Boolean":
-      return yield* FromBoolean2(schema_, references_, path, value);
+      return yield* FromBoolean2(schema_, references_, path2, value);
     case "Constructor":
-      return yield* FromConstructor2(schema_, references_, path, value);
+      return yield* FromConstructor2(schema_, references_, path2, value);
     case "Date":
-      return yield* FromDate2(schema_, references_, path, value);
+      return yield* FromDate2(schema_, references_, path2, value);
     case "Function":
-      return yield* FromFunction2(schema_, references_, path, value);
+      return yield* FromFunction2(schema_, references_, path2, value);
     case "Import":
-      return yield* FromImport2(schema_, references_, path, value);
+      return yield* FromImport2(schema_, references_, path2, value);
     case "Integer":
-      return yield* FromInteger2(schema_, references_, path, value);
+      return yield* FromInteger2(schema_, references_, path2, value);
     case "Intersect":
-      return yield* FromIntersect4(schema_, references_, path, value);
+      return yield* FromIntersect4(schema_, references_, path2, value);
     case "Iterator":
-      return yield* FromIterator2(schema_, references_, path, value);
+      return yield* FromIterator2(schema_, references_, path2, value);
     case "Literal":
-      return yield* FromLiteral2(schema_, references_, path, value);
+      return yield* FromLiteral2(schema_, references_, path2, value);
     case "Never":
-      return yield* FromNever2(schema_, references_, path, value);
+      return yield* FromNever2(schema_, references_, path2, value);
     case "Not":
-      return yield* FromNot2(schema_, references_, path, value);
+      return yield* FromNot2(schema_, references_, path2, value);
     case "Null":
-      return yield* FromNull2(schema_, references_, path, value);
+      return yield* FromNull2(schema_, references_, path2, value);
     case "Number":
-      return yield* FromNumber2(schema_, references_, path, value);
+      return yield* FromNumber2(schema_, references_, path2, value);
     case "Object":
-      return yield* FromObject2(schema_, references_, path, value);
+      return yield* FromObject2(schema_, references_, path2, value);
     case "Promise":
-      return yield* FromPromise2(schema_, references_, path, value);
+      return yield* FromPromise2(schema_, references_, path2, value);
     case "Record":
-      return yield* FromRecord2(schema_, references_, path, value);
+      return yield* FromRecord2(schema_, references_, path2, value);
     case "Ref":
-      return yield* FromRef2(schema_, references_, path, value);
+      return yield* FromRef2(schema_, references_, path2, value);
     case "RegExp":
-      return yield* FromRegExp2(schema_, references_, path, value);
+      return yield* FromRegExp2(schema_, references_, path2, value);
     case "String":
-      return yield* FromString2(schema_, references_, path, value);
+      return yield* FromString2(schema_, references_, path2, value);
     case "Symbol":
-      return yield* FromSymbol2(schema_, references_, path, value);
+      return yield* FromSymbol2(schema_, references_, path2, value);
     case "TemplateLiteral":
-      return yield* FromTemplateLiteral2(schema_, references_, path, value);
+      return yield* FromTemplateLiteral2(schema_, references_, path2, value);
     case "This":
-      return yield* FromThis2(schema_, references_, path, value);
+      return yield* FromThis2(schema_, references_, path2, value);
     case "Tuple":
-      return yield* FromTuple4(schema_, references_, path, value);
+      return yield* FromTuple4(schema_, references_, path2, value);
     case "Undefined":
-      return yield* FromUndefined2(schema_, references_, path, value);
+      return yield* FromUndefined2(schema_, references_, path2, value);
     case "Union":
-      return yield* FromUnion4(schema_, references_, path, value);
+      return yield* FromUnion4(schema_, references_, path2, value);
     case "Uint8Array":
-      return yield* FromUint8Array2(schema_, references_, path, value);
+      return yield* FromUint8Array2(schema_, references_, path2, value);
     case "Unknown":
-      return yield* FromUnknown2(schema_, references_, path, value);
+      return yield* FromUnknown2(schema_, references_, path2, value);
     case "Void":
-      return yield* FromVoid2(schema_, references_, path, value);
+      return yield* FromVoid2(schema_, references_, path2, value);
     default:
       if (!type_exports.Has(schema_[Kind]))
         throw new ValueErrorsUnknownTypeError(schema);
-      return yield* FromKind2(schema_, references_, path, value);
+      return yield* FromKind2(schema_, references_, path2, value);
   }
 }
 function Errors(...args) {
@@ -2752,58 +2757,58 @@ var TransformDecodeCheckError = class extends TypeBoxError {
   }
 };
 var TransformDecodeError = class extends TypeBoxError {
-  constructor(schema, path, value, error) {
+  constructor(schema, path2, value, error) {
     super(error instanceof Error ? error.message : "Unknown error");
     this.schema = schema;
-    this.path = path;
+    this.path = path2;
     this.value = value;
     this.error = error;
   }
 };
-function Default(schema, path, value) {
+function Default(schema, path2, value) {
   try {
     return IsTransform(schema) ? schema[TransformKind].Decode(value) : value;
   } catch (error) {
-    throw new TransformDecodeError(schema, path, value, error);
+    throw new TransformDecodeError(schema, path2, value, error);
   }
 }
-function FromArray5(schema, references, path, value) {
-  return IsArray(value) ? Default(schema, path, value.map((value2, index) => Visit5(schema.items, references, `${path}/${index}`, value2))) : Default(schema, path, value);
+function FromArray5(schema, references, path2, value) {
+  return IsArray(value) ? Default(schema, path2, value.map((value2, index) => Visit5(schema.items, references, `${path2}/${index}`, value2))) : Default(schema, path2, value);
 }
-function FromIntersect5(schema, references, path, value) {
+function FromIntersect5(schema, references, path2, value) {
   if (!IsObject(value) || IsValueType(value))
-    return Default(schema, path, value);
+    return Default(schema, path2, value);
   const knownEntries = KeyOfPropertyEntries(schema);
   const knownKeys = knownEntries.map((entry) => entry[0]);
   const knownProperties = { ...value };
   for (const [knownKey, knownSchema] of knownEntries)
     if (knownKey in knownProperties) {
-      knownProperties[knownKey] = Visit5(knownSchema, references, `${path}/${knownKey}`, knownProperties[knownKey]);
+      knownProperties[knownKey] = Visit5(knownSchema, references, `${path2}/${knownKey}`, knownProperties[knownKey]);
     }
   if (!IsTransform(schema.unevaluatedProperties)) {
-    return Default(schema, path, knownProperties);
+    return Default(schema, path2, knownProperties);
   }
   const unknownKeys = Object.getOwnPropertyNames(knownProperties);
   const unevaluatedProperties = schema.unevaluatedProperties;
   const unknownProperties = { ...knownProperties };
   for (const key of unknownKeys)
     if (!knownKeys.includes(key)) {
-      unknownProperties[key] = Default(unevaluatedProperties, `${path}/${key}`, unknownProperties[key]);
+      unknownProperties[key] = Default(unevaluatedProperties, `${path2}/${key}`, unknownProperties[key]);
     }
-  return Default(schema, path, unknownProperties);
+  return Default(schema, path2, unknownProperties);
 }
-function FromImport3(schema, references, path, value) {
+function FromImport3(schema, references, path2, value) {
   const additional = globalThis.Object.values(schema.$defs);
   const target = schema.$defs[schema.$ref];
-  const result = Visit5(target, [...references, ...additional], path, value);
-  return Default(schema, path, result);
+  const result = Visit5(target, [...references, ...additional], path2, value);
+  return Default(schema, path2, result);
 }
-function FromNot3(schema, references, path, value) {
-  return Default(schema, path, Visit5(schema.not, references, path, value));
+function FromNot3(schema, references, path2, value) {
+  return Default(schema, path2, Visit5(schema.not, references, path2, value));
 }
-function FromObject3(schema, references, path, value) {
+function FromObject3(schema, references, path2, value) {
   if (!IsObject(value))
-    return Default(schema, path, value);
+    return Default(schema, path2, value);
   const knownKeys = KeyOfPropertyKeys(schema);
   const knownProperties = { ...value };
   for (const key of knownKeys) {
@@ -2811,90 +2816,90 @@ function FromObject3(schema, references, path, value) {
       continue;
     if (IsUndefined(knownProperties[key]) && (!IsUndefined3(schema.properties[key]) || TypeSystemPolicy.IsExactOptionalProperty(knownProperties, key)))
       continue;
-    knownProperties[key] = Visit5(schema.properties[key], references, `${path}/${key}`, knownProperties[key]);
+    knownProperties[key] = Visit5(schema.properties[key], references, `${path2}/${key}`, knownProperties[key]);
   }
   if (!IsSchema(schema.additionalProperties)) {
-    return Default(schema, path, knownProperties);
+    return Default(schema, path2, knownProperties);
   }
   const unknownKeys = Object.getOwnPropertyNames(knownProperties);
   const additionalProperties = schema.additionalProperties;
   const unknownProperties = { ...knownProperties };
   for (const key of unknownKeys)
     if (!knownKeys.includes(key)) {
-      unknownProperties[key] = Default(additionalProperties, `${path}/${key}`, unknownProperties[key]);
+      unknownProperties[key] = Default(additionalProperties, `${path2}/${key}`, unknownProperties[key]);
     }
-  return Default(schema, path, unknownProperties);
+  return Default(schema, path2, unknownProperties);
 }
-function FromRecord3(schema, references, path, value) {
+function FromRecord3(schema, references, path2, value) {
   if (!IsObject(value))
-    return Default(schema, path, value);
+    return Default(schema, path2, value);
   const pattern = Object.getOwnPropertyNames(schema.patternProperties)[0];
   const knownKeys = new RegExp(pattern);
   const knownProperties = { ...value };
   for (const key of Object.getOwnPropertyNames(value))
     if (knownKeys.test(key)) {
-      knownProperties[key] = Visit5(schema.patternProperties[pattern], references, `${path}/${key}`, knownProperties[key]);
+      knownProperties[key] = Visit5(schema.patternProperties[pattern], references, `${path2}/${key}`, knownProperties[key]);
     }
   if (!IsSchema(schema.additionalProperties)) {
-    return Default(schema, path, knownProperties);
+    return Default(schema, path2, knownProperties);
   }
   const unknownKeys = Object.getOwnPropertyNames(knownProperties);
   const additionalProperties = schema.additionalProperties;
   const unknownProperties = { ...knownProperties };
   for (const key of unknownKeys)
     if (!knownKeys.test(key)) {
-      unknownProperties[key] = Default(additionalProperties, `${path}/${key}`, unknownProperties[key]);
+      unknownProperties[key] = Default(additionalProperties, `${path2}/${key}`, unknownProperties[key]);
     }
-  return Default(schema, path, unknownProperties);
+  return Default(schema, path2, unknownProperties);
 }
-function FromRef3(schema, references, path, value) {
+function FromRef3(schema, references, path2, value) {
   const target = Deref(schema, references);
-  return Default(schema, path, Visit5(target, references, path, value));
+  return Default(schema, path2, Visit5(target, references, path2, value));
 }
-function FromThis3(schema, references, path, value) {
+function FromThis3(schema, references, path2, value) {
   const target = Deref(schema, references);
-  return Default(schema, path, Visit5(target, references, path, value));
+  return Default(schema, path2, Visit5(target, references, path2, value));
 }
-function FromTuple5(schema, references, path, value) {
-  return IsArray(value) && IsArray(schema.items) ? Default(schema, path, schema.items.map((schema2, index) => Visit5(schema2, references, `${path}/${index}`, value[index]))) : Default(schema, path, value);
+function FromTuple5(schema, references, path2, value) {
+  return IsArray(value) && IsArray(schema.items) ? Default(schema, path2, schema.items.map((schema2, index) => Visit5(schema2, references, `${path2}/${index}`, value[index]))) : Default(schema, path2, value);
 }
-function FromUnion5(schema, references, path, value) {
+function FromUnion5(schema, references, path2, value) {
   for (const subschema of schema.anyOf) {
     if (!Check(subschema, references, value))
       continue;
-    const decoded = Visit5(subschema, references, path, value);
-    return Default(schema, path, decoded);
+    const decoded = Visit5(subschema, references, path2, value);
+    return Default(schema, path2, decoded);
   }
-  return Default(schema, path, value);
+  return Default(schema, path2, value);
 }
-function Visit5(schema, references, path, value) {
+function Visit5(schema, references, path2, value) {
   const references_ = Pushref(schema, references);
   const schema_ = schema;
   switch (schema[Kind]) {
     case "Array":
-      return FromArray5(schema_, references_, path, value);
+      return FromArray5(schema_, references_, path2, value);
     case "Import":
-      return FromImport3(schema_, references_, path, value);
+      return FromImport3(schema_, references_, path2, value);
     case "Intersect":
-      return FromIntersect5(schema_, references_, path, value);
+      return FromIntersect5(schema_, references_, path2, value);
     case "Not":
-      return FromNot3(schema_, references_, path, value);
+      return FromNot3(schema_, references_, path2, value);
     case "Object":
-      return FromObject3(schema_, references_, path, value);
+      return FromObject3(schema_, references_, path2, value);
     case "Record":
-      return FromRecord3(schema_, references_, path, value);
+      return FromRecord3(schema_, references_, path2, value);
     case "Ref":
-      return FromRef3(schema_, references_, path, value);
+      return FromRef3(schema_, references_, path2, value);
     case "Symbol":
-      return Default(schema_, path, value);
+      return Default(schema_, path2, value);
     case "This":
-      return FromThis3(schema_, references_, path, value);
+      return FromThis3(schema_, references_, path2, value);
     case "Tuple":
-      return FromTuple5(schema_, references_, path, value);
+      return FromTuple5(schema_, references_, path2, value);
     case "Union":
-      return FromUnion5(schema_, references_, path, value);
+      return FromUnion5(schema_, references_, path2, value);
     default:
-      return Default(schema_, path, value);
+      return Default(schema_, path2, value);
   }
 }
 function TransformDecode(schema, references, value) {
@@ -2911,33 +2916,33 @@ var TransformEncodeCheckError = class extends TypeBoxError {
   }
 };
 var TransformEncodeError = class extends TypeBoxError {
-  constructor(schema, path, value, error) {
+  constructor(schema, path2, value, error) {
     super(`${error instanceof Error ? error.message : "Unknown error"}`);
     this.schema = schema;
-    this.path = path;
+    this.path = path2;
     this.value = value;
     this.error = error;
   }
 };
-function Default2(schema, path, value) {
+function Default2(schema, path2, value) {
   try {
     return IsTransform(schema) ? schema[TransformKind].Encode(value) : value;
   } catch (error) {
-    throw new TransformEncodeError(schema, path, value, error);
+    throw new TransformEncodeError(schema, path2, value, error);
   }
 }
-function FromArray6(schema, references, path, value) {
-  const defaulted = Default2(schema, path, value);
-  return IsArray(defaulted) ? defaulted.map((value2, index) => Visit6(schema.items, references, `${path}/${index}`, value2)) : defaulted;
+function FromArray6(schema, references, path2, value) {
+  const defaulted = Default2(schema, path2, value);
+  return IsArray(defaulted) ? defaulted.map((value2, index) => Visit6(schema.items, references, `${path2}/${index}`, value2)) : defaulted;
 }
-function FromImport4(schema, references, path, value) {
+function FromImport4(schema, references, path2, value) {
   const additional = globalThis.Object.values(schema.$defs);
   const target = schema.$defs[schema.$ref];
-  const result = Default2(schema, path, value);
-  return Visit6(target, [...references, ...additional], path, result);
+  const result = Default2(schema, path2, value);
+  return Visit6(target, [...references, ...additional], path2, result);
 }
-function FromIntersect6(schema, references, path, value) {
-  const defaulted = Default2(schema, path, value);
+function FromIntersect6(schema, references, path2, value) {
+  const defaulted = Default2(schema, path2, value);
   if (!IsObject(value) || IsValueType(value))
     return defaulted;
   const knownEntries = KeyOfPropertyEntries(schema);
@@ -2945,7 +2950,7 @@ function FromIntersect6(schema, references, path, value) {
   const knownProperties = { ...defaulted };
   for (const [knownKey, knownSchema] of knownEntries)
     if (knownKey in knownProperties) {
-      knownProperties[knownKey] = Visit6(knownSchema, references, `${path}/${knownKey}`, knownProperties[knownKey]);
+      knownProperties[knownKey] = Visit6(knownSchema, references, `${path2}/${knownKey}`, knownProperties[knownKey]);
     }
   if (!IsTransform(schema.unevaluatedProperties)) {
     return knownProperties;
@@ -2955,15 +2960,15 @@ function FromIntersect6(schema, references, path, value) {
   const properties = { ...knownProperties };
   for (const key of unknownKeys)
     if (!knownKeys.includes(key)) {
-      properties[key] = Default2(unevaluatedProperties, `${path}/${key}`, properties[key]);
+      properties[key] = Default2(unevaluatedProperties, `${path2}/${key}`, properties[key]);
     }
   return properties;
 }
-function FromNot4(schema, references, path, value) {
-  return Default2(schema.not, path, Default2(schema, path, value));
+function FromNot4(schema, references, path2, value) {
+  return Default2(schema.not, path2, Default2(schema, path2, value));
 }
-function FromObject4(schema, references, path, value) {
-  const defaulted = Default2(schema, path, value);
+function FromObject4(schema, references, path2, value) {
+  const defaulted = Default2(schema, path2, value);
   if (!IsObject(defaulted))
     return defaulted;
   const knownKeys = KeyOfPropertyKeys(schema);
@@ -2973,7 +2978,7 @@ function FromObject4(schema, references, path, value) {
       continue;
     if (IsUndefined(knownProperties[key]) && (!IsUndefined3(schema.properties[key]) || TypeSystemPolicy.IsExactOptionalProperty(knownProperties, key)))
       continue;
-    knownProperties[key] = Visit6(schema.properties[key], references, `${path}/${key}`, knownProperties[key]);
+    knownProperties[key] = Visit6(schema.properties[key], references, `${path2}/${key}`, knownProperties[key]);
   }
   if (!IsSchema(schema.additionalProperties)) {
     return knownProperties;
@@ -2983,12 +2988,12 @@ function FromObject4(schema, references, path, value) {
   const properties = { ...knownProperties };
   for (const key of unknownKeys)
     if (!knownKeys.includes(key)) {
-      properties[key] = Default2(additionalProperties, `${path}/${key}`, properties[key]);
+      properties[key] = Default2(additionalProperties, `${path2}/${key}`, properties[key]);
     }
   return properties;
 }
-function FromRecord4(schema, references, path, value) {
-  const defaulted = Default2(schema, path, value);
+function FromRecord4(schema, references, path2, value) {
+  const defaulted = Default2(schema, path2, value);
   if (!IsObject(value))
     return defaulted;
   const pattern = Object.getOwnPropertyNames(schema.patternProperties)[0];
@@ -2996,7 +3001,7 @@ function FromRecord4(schema, references, path, value) {
   const knownProperties = { ...defaulted };
   for (const key of Object.getOwnPropertyNames(value))
     if (knownKeys.test(key)) {
-      knownProperties[key] = Visit6(schema.patternProperties[pattern], references, `${path}/${key}`, knownProperties[key]);
+      knownProperties[key] = Visit6(schema.patternProperties[pattern], references, `${path2}/${key}`, knownProperties[key]);
     }
   if (!IsSchema(schema.additionalProperties)) {
     return knownProperties;
@@ -3006,65 +3011,65 @@ function FromRecord4(schema, references, path, value) {
   const properties = { ...knownProperties };
   for (const key of unknownKeys)
     if (!knownKeys.test(key)) {
-      properties[key] = Default2(additionalProperties, `${path}/${key}`, properties[key]);
+      properties[key] = Default2(additionalProperties, `${path2}/${key}`, properties[key]);
     }
   return properties;
 }
-function FromRef4(schema, references, path, value) {
+function FromRef4(schema, references, path2, value) {
   const target = Deref(schema, references);
-  const resolved = Visit6(target, references, path, value);
-  return Default2(schema, path, resolved);
+  const resolved = Visit6(target, references, path2, value);
+  return Default2(schema, path2, resolved);
 }
-function FromThis4(schema, references, path, value) {
+function FromThis4(schema, references, path2, value) {
   const target = Deref(schema, references);
-  const resolved = Visit6(target, references, path, value);
-  return Default2(schema, path, resolved);
+  const resolved = Visit6(target, references, path2, value);
+  return Default2(schema, path2, resolved);
 }
-function FromTuple6(schema, references, path, value) {
-  const value1 = Default2(schema, path, value);
-  return IsArray(schema.items) ? schema.items.map((schema2, index) => Visit6(schema2, references, `${path}/${index}`, value1[index])) : [];
+function FromTuple6(schema, references, path2, value) {
+  const value1 = Default2(schema, path2, value);
+  return IsArray(schema.items) ? schema.items.map((schema2, index) => Visit6(schema2, references, `${path2}/${index}`, value1[index])) : [];
 }
-function FromUnion6(schema, references, path, value) {
+function FromUnion6(schema, references, path2, value) {
   for (const subschema of schema.anyOf) {
     if (!Check(subschema, references, value))
       continue;
-    const value1 = Visit6(subschema, references, path, value);
-    return Default2(schema, path, value1);
+    const value1 = Visit6(subschema, references, path2, value);
+    return Default2(schema, path2, value1);
   }
   for (const subschema of schema.anyOf) {
-    const value1 = Visit6(subschema, references, path, value);
+    const value1 = Visit6(subschema, references, path2, value);
     if (!Check(schema, references, value1))
       continue;
-    return Default2(schema, path, value1);
+    return Default2(schema, path2, value1);
   }
-  return Default2(schema, path, value);
+  return Default2(schema, path2, value);
 }
-function Visit6(schema, references, path, value) {
+function Visit6(schema, references, path2, value) {
   const references_ = Pushref(schema, references);
   const schema_ = schema;
   switch (schema[Kind]) {
     case "Array":
-      return FromArray6(schema_, references_, path, value);
+      return FromArray6(schema_, references_, path2, value);
     case "Import":
-      return FromImport4(schema_, references_, path, value);
+      return FromImport4(schema_, references_, path2, value);
     case "Intersect":
-      return FromIntersect6(schema_, references_, path, value);
+      return FromIntersect6(schema_, references_, path2, value);
     case "Not":
-      return FromNot4(schema_, references_, path, value);
+      return FromNot4(schema_, references_, path2, value);
     case "Object":
-      return FromObject4(schema_, references_, path, value);
+      return FromObject4(schema_, references_, path2, value);
     case "Record":
-      return FromRecord4(schema_, references_, path, value);
+      return FromRecord4(schema_, references_, path2, value);
     case "Ref":
-      return FromRef4(schema_, references_, path, value);
+      return FromRef4(schema_, references_, path2, value);
     case "This":
-      return FromThis4(schema_, references_, path, value);
+      return FromThis4(schema_, references_, path2, value);
     case "Tuple":
-      return FromTuple6(schema_, references_, path, value);
+      return FromTuple6(schema_, references_, path2, value);
     case "Union":
-      return FromUnion6(schema_, references_, path, value);
+      return FromUnion6(schema_, references_, path2, value);
     default:
-      return Default2(schema_, path, value);
+      return Default2(schema_, path2, value);
   }
 }
 function TransformEncode(schema, references, value) {
@@ -4940,18 +4945,18 @@ __export(pointer_exports, {
   ValuePointerRootSetError: () => ValuePointerRootSetError
 });
 var ValuePointerRootSetError = class extends TypeBoxError {
-  constructor(value, path, update) {
+  constructor(value, path2, update) {
     super("Cannot set root value");
     this.value = value;
-    this.path = path;
+    this.path = path2;
     this.update = update;
   }
 };
 var ValuePointerRootDeleteError = class extends TypeBoxError {
-  constructor(value, path) {
+  constructor(value, path2) {
     super("Cannot delete root value");
     this.value = value;
-    this.path = path;
+    this.path = path2;
   }
 };
 function Escape(component) {
@@ -5095,82 +5100,82 @@ var ValueDiffError = class extends TypeBoxError {
     this.value = value;
   }
 };
-function CreateUpdate(path, value) {
-  return { type: "update", path, value };
+function CreateUpdate(path2, value) {
+  return { type: "update", path: path2, value };
 }
-function CreateInsert(path, value) {
-  return { type: "insert", path, value };
+function CreateInsert(path2, value) {
+  return { type: "insert", path: path2, value };
 }
-function CreateDelete(path) {
-  return { type: "delete", path };
+function CreateDelete(path2) {
+  return { type: "delete", path: path2 };
 }
 function AssertDiffable(value) {
   if (globalThis.Object.getOwnPropertySymbols(value).length > 0)
     throw new ValueDiffError(value, "Cannot diff objects with symbols");
 }
-function* ObjectType4(path, current, next) {
+function* ObjectType4(path2, current, next) {
   AssertDiffable(current);
   AssertDiffable(next);
   if (!IsStandardObject(next))
-    return yield CreateUpdate(path, next);
+    return yield CreateUpdate(path2, next);
   const currentKeys = globalThis.Object.getOwnPropertyNames(current);
   const nextKeys = globalThis.Object.getOwnPropertyNames(next);
   for (const key of nextKeys) {
     if (HasPropertyKey(current, key))
       continue;
-    yield CreateInsert(`${path}/${key}`, next[key]);
+    yield CreateInsert(`${path2}/${key}`, next[key]);
   }
   for (const key of currentKeys) {
     if (!HasPropertyKey(next, key))
       continue;
     if (Equal(current, next))
       continue;
-    yield* Visit13(`${path}/${key}`, current[key], next[key]);
+    yield* Visit13(`${path2}/${key}`, current[key], next[key]);
   }
   for (const key of currentKeys) {
     if (HasPropertyKey(next, key))
       continue;
-    yield CreateDelete(`${path}/${key}`);
+    yield CreateDelete(`${path2}/${key}`);
   }
 }
-function* ArrayType4(path, current, next) {
+function* ArrayType4(path2, current, next) {
   if (!IsArray(next))
-    return yield CreateUpdate(path, next);
+    return yield CreateUpdate(path2, next);
   for (let i = 0; i < Math.min(current.length, next.length); i++) {
-    yield* Visit13(`${path}/${i}`, current[i], next[i]);
+    yield* Visit13(`${path2}/${i}`, current[i], next[i]);
   }
   for (let i = 0; i < next.length; i++) {
     if (i < current.length)
       continue;
-    yield CreateInsert(`${path}/${i}`, next[i]);
+    yield CreateInsert(`${path2}/${i}`, next[i]);
   }
   for (let i = current.length - 1; i >= 0; i--) {
     if (i < next.length)
       continue;
-    yield CreateDelete(`${path}/${i}`);
+    yield CreateDelete(`${path2}/${i}`);
   }
 }
-function* TypedArrayType2(path, current, next) {
+function* TypedArrayType2(path2, current, next) {
   if (!IsTypedArray(next) || current.length !== next.length || globalThis.Object.getPrototypeOf(current).constructor.name !== globalThis.Object.getPrototypeOf(next).constructor.name)
-    return yield CreateUpdate(path, next);
+    return yield CreateUpdate(path2, next);
   for (let i = 0; i < Math.min(current.length, next.length); i++) {
-    yield* Visit13(`${path}/${i}`, current[i], next[i]);
+    yield* Visit13(`${path2}/${i}`, current[i], next[i]);
   }
 }
-function* ValueType2(path, current, next) {
+function* ValueType2(path2, current, next) {
   if (current === next)
     return;
-  yield CreateUpdate(path, next);
+  yield CreateUpdate(path2, next);
 }
-function* Visit13(path, current, next) {
+function* Visit13(path2, current, next) {
   if (IsStandardObject(current))
-    return yield* ObjectType4(path, current, next);
+    return yield* ObjectType4(path2, current, next);
   if (IsArray(current))
-    return yield* ArrayType4(path, current, next);
+    return yield* ArrayType4(path2, current, next);
   if (IsTypedArray(current))
-    return yield* TypedArrayType2(path, current, next);
+    return yield* TypedArrayType2(path2, current, next);
   if (IsValueType(current))
-    return yield* ValueType2(path, current, next);
+    return yield* ValueType2(path2, current, next);
   throw new ValueDiffError(current, "Unable to diff value");
 }
 function Diff(current, next) {
@@ -5227,9 +5232,9 @@ var ValueMutateError = class extends TypeBoxError {
     super(message);
   }
 };
-function ObjectType5(root, path, current, next) {
+function ObjectType5(root, path2, current, next) {
   if (!IsStandardObject2(current)) {
-    pointer_exports.Set(root, path, Clone2(next));
+    pointer_exports.Set(root, path2, Clone2(next));
   } else {
     const currentKeys = Object.getOwnPropertyNames(current);
     const nextKeys = Object.getOwnPropertyNames(next);
@@ -5244,43 +5249,43 @@ function ObjectType5(root, path, current, next) {
       }
     }
     for (const nextKey of nextKeys) {
-      Visit14(root, `${path}/${nextKey}`, current[nextKey], next[nextKey]);
+      Visit14(root, `${path2}/${nextKey}`, current[nextKey], next[nextKey]);
     }
   }
 }
-function ArrayType5(root, path, current, next) {
+function ArrayType5(root, path2, current, next) {
   if (!IsArray(current)) {
-    pointer_exports.Set(root, path, Clone2(next));
+    pointer_exports.Set(root, path2, Clone2(next));
   } else {
     for (let index = 0; index < next.length; index++) {
-      Visit14(root, `${path}/${index}`, current[index], next[index]);
+      Visit14(root, `${path2}/${index}`, current[index], next[index]);
     }
     current.splice(next.length);
   }
 }
-function TypedArrayType3(root, path, current, next) {
+function TypedArrayType3(root, path2, current, next) {
   if (IsTypedArray(current) && current.length === next.length) {
     for (let i = 0; i < current.length; i++) {
       current[i] = next[i];
     }
   } else {
-    pointer_exports.Set(root, path, Clone2(next));
+    pointer_exports.Set(root, path2, Clone2(next));
   }
 }
-function ValueType3(root, path, current, next) {
+function ValueType3(root, path2, current, next) {
   if (current === next)
     return;
-  pointer_exports.Set(root, path, next);
+  pointer_exports.Set(root, path2, next);
 }
-function Visit14(root, path, current, next) {
+function Visit14(root, path2, current, next) {
   if (IsArray(next))
-    return ArrayType5(root, path, current, next);
+    return ArrayType5(root, path2, current, next);
   if (IsTypedArray(next))
-    return TypedArrayType3(root, path, current, next);
+    return TypedArrayType3(root, path2, current, next);
   if (IsStandardObject2(next))
-    return ObjectType5(root, path, current, next);
+    return ObjectType5(root, path2, current, next);
   if (IsValueType(next))
-    return ValueType3(root, path, current, next);
+    return ValueType3(root, path2, current, next);
 }
 function IsNonMutableValue(value) {
   return IsTypedArray(value) || IsValueType(value);
@@ -8635,11 +8640,11 @@ async function callCognitive(action, params, timeoutMs) {
   if (!config.rlmUrl) {
     throw new Error("RLM Engine not configured (set RLM_URL)");
   }
-  const path = COGNITIVE_ROUTES[action];
-  if (!path) {
+  const path2 = COGNITIVE_ROUTES[action];
+  if (!path2) {
     throw new Error(`Unknown cognitive action: ${action}. Valid: ${Object.keys(COGNITIVE_ROUTES).join(", ")}`);
   }
-  const url = `${config.rlmUrl}${path}`;
+  const url = `${config.rlmUrl}${path2}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs ?? 6e4);
   try {
@@ -9215,6 +9220,85 @@ cronRouter.delete("/:id", (req, res) => {
   res.json({ success: true, data: { id: req.params.id, deleted: true } });
 });
 
+// src/routes/dashboard.ts
+import { Router as Router7 } from "express";
+var dashboardRouter = Router7();
+dashboardRouter.get("/data", async (_req, res) => {
+  const agents = AgentRegistry.all().map((a) => ({
+    agent_id: a.handshake.agent_id,
+    display_name: a.handshake.display_name,
+    source: a.handshake.source,
+    version: a.handshake.version ?? "n/a",
+    status: a.handshake.status,
+    capabilities: a.handshake.capabilities,
+    allowed_tool_namespaces: a.handshake.allowed_tool_namespaces,
+    active_calls: a.activeCalls,
+    registered_at: a.registeredAt.toISOString(),
+    last_seen_at: a.lastSeenAt.toISOString()
+  }));
+  const wsStats = getConnectionStats();
+  const chains = listExecutions().slice(0, 50);
+  const cronJobs = listCronJobs();
+  const rlmAvailable = isRlmAvailable();
+  let rlmHealth = null;
+  if (rlmAvailable) {
+    try {
+      rlmHealth = await getRlmHealth();
+    } catch {
+    }
+  }
+  res.json({
+    agents,
+    wsStats,
+    chains,
+    cronJobs,
+    rlmAvailable,
+    rlmHealth,
+    config: {
+      backendUrl: config.backendUrl,
+      orchestratorId: config.orchestratorId,
+      nodeEnv: config.nodeEnv
+    },
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  });
+});
+
+// src/routes/openclaw.ts
+import { Router as Router8 } from "express";
+var openclawRouter = Router8();
+openclawRouter.all("/proxy/*", async (req, res) => {
+  const openclawUrl = config.openclawUrl;
+  if (!openclawUrl) {
+    res.status(503).json({ success: false, error: "OPENCLAW_URL not configured" });
+    return;
+  }
+  const targetPath = req.params[0] ?? "";
+  const token = config.openclawToken;
+  try {
+    const headers = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const fetchOpts = {
+      method: req.method,
+      headers
+    };
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      fetchOpts.body = JSON.stringify(req.body);
+    }
+    const response = await fetch(`${openclawUrl}/${targetPath}`, fetchOpts);
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      const data = await response.json();
+      res.status(response.status).json(data);
+    } else {
+      const text = await response.text();
+      res.status(response.status).type(contentType).send(text);
+    }
+  } catch (err) {
+    logger.warn({ err: String(err), path: targetPath }, "OpenClaw proxy error");
+    res.status(502).json({ success: false, error: "OpenClaw gateway unreachable" });
+  }
+});
+
 // src/auth.ts
 function requireApiKey(req, res, next) {
   if (!config.orchestratorApiKey) {
@@ -9236,14 +9320,12 @@ function requireApiKey(req, res, next) {
 }
 
 // src/index.ts
-function esc(s) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-}
+var __dirname = path.dirname(fileURLToPath(import.meta.url));
 var app = express();
 var server = createServer(app);
 app.use(helmet({
   contentSecurityPolicy: false,
-  // dashboard uses inline styles
+  // SPA uses inline styles + scripts
   crossOriginEmbedderPolicy: false
 }));
 app.use(cors({
@@ -9260,12 +9342,15 @@ app.use((req, _res, next) => {
   logger.debug({ method: req.method, path: req.path }, "Request");
   next();
 });
+app.use(express.static(path.join(__dirname, "public")));
 app.use("/agents", requireApiKey, agentsRouter);
 app.use("/tools", requireApiKey, toolsRouter);
 app.use("/chat", requireApiKey, chatRouter);
 app.use("/chains", requireApiKey, chainsRouter);
 app.use("/cognitive", requireApiKey, cognitiveRouter);
 app.use("/cron", requireApiKey, cronRouter);
+app.use("/api/dashboard", dashboardRouter);
+app.use("/api/openclaw", requireApiKey, openclawRouter);
 app.get("/health", (_req, res) => {
   res.json({
     status: "healthy",
@@ -9283,198 +9368,7 @@ app.get("/health", (_req, res) => {
   });
 });
 app.get("/", (_req, res) => {
-  const agents = AgentRegistry.all();
-  const ws = getConnectionStats();
-  const chains = listExecutions().slice(0, 10);
-  const cronJobs = listCronJobs();
-  const agentRows = agents.length === 0 ? '<tr><td colspan="6" style="text-align:center;color:#888">No agents registered yet</td></tr>' : agents.map((a) => `
-      <tr>
-        <td><strong>${esc(a.handshake.agent_id)}</strong></td>
-        <td>${esc(a.handshake.display_name)}</td>
-        <td><code style="color:#a78bfa">${esc(a.handshake.version ?? "n/a")}</code></td>
-        <td><span class="badge badge-${esc(a.handshake.status)}">${esc(a.handshake.status)}</span></td>
-        <td>${esc(a.handshake.allowed_tool_namespaces.join(", "))}</td>
-        <td>${a.activeCalls}</td>
-      </tr>`).join("");
-  const wsRows = ws.agents.length === 0 ? '<tr><td colspan="3" style="text-align:center;color:#888">No WebSocket connections</td></tr>' : ws.agents.map((c) => `
-      <tr>
-        <td>${esc(c.agent_id)}</td>
-        <td><span class="badge badge-online">${esc(c.state)}</span></td>
-        <td>${esc(c.connected_at)}</td>
-      </tr>`).join("");
-  res.setHeader("Content-Type", "text/html");
-  res.send(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="refresh" content="10">
-  <title>WidgeTDC Orchestrator</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; }
-    .header { background: linear-gradient(135deg, #1a1f2e 0%, #0d1321 100%); border-bottom: 1px solid #2d3748; padding: 24px 32px; }
-    .header h1 { font-size: 1.75rem; font-weight: 700; color: #fff; letter-spacing: -0.5px; }
-    .header h1 span { color: #6366f1; }
-    .header p { color: #718096; margin-top: 4px; font-size: 0.875rem; }
-    .container { max-width: 1200px; margin: 0 auto; padding: 32px; }
-    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 32px; }
-    .card { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 12px; padding: 20px; }
-    .card-value { font-size: 2rem; font-weight: 700; color: #6366f1; }
-    .card-label { color: #718096; font-size: 0.8rem; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
-    .section { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 12px; padding: 24px; margin-bottom: 24px; }
-    .section h2 { font-size: 1rem; font-weight: 600; color: #a0aec0; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 16px; }
-    table { width: 100%; border-collapse: collapse; }
-    th { text-align: left; padding: 8px 12px; color: #718096; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid #2d3748; }
-    td { padding: 12px; border-bottom: 1px solid #1e2433; font-size: 0.875rem; vertical-align: middle; }
-    tr:last-child td { border-bottom: none; }
-    .badge { padding: 2px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; }
-    .badge-online, .badge-open { background: #14532d; color: #4ade80; }
-    .badge-standby { background: #713f12; color: #fbbf24; }
-    .badge-offline { background: #2d1b1b; color: #f87171; }
-    .badge-degraded { background: #2d1b1b; color: #f87171; }
-    .endpoint { background: #0f1117; border: 1px solid #2d3748; border-radius: 8px; padding: 16px; margin-bottom: 8px; }
-    .endpoint code { font-family: 'Fira Code', monospace; font-size: 0.875rem; }
-    .method { padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 700; margin-right: 8px; }
-    .method-post { background: #1a2e3b; color: #38bdf8; }
-    .method-get { background: #14532d; color: #4ade80; }
-    .method-ws { background: #3b1f5e; color: #c084fc; }
-    .desc { color: #718096; font-size: 0.8rem; margin-top: 6px; }
-    .url-badge { background: #2d3748; padding: 8px 12px; border-radius: 6px; font-family: monospace; font-size: 0.8rem; color: #a0aec0; display: inline-block; margin: 4px 0; }
-  </style>
-</head>
-<body>
-  <div class="header">
-    <h1>WidgeTDC <span>Orchestrator</span></h1>
-    <p>Multi-agent coordination layer \xB7 Railway deployment \xB7 Auto-refresh every 10s</p>
-  </div>
-  <div class="container">
-    <div class="grid">
-      <div class="card">
-        <div class="card-value">${agents.length}</div>
-        <div class="card-label">Agents</div>
-      </div>
-      <div class="card">
-        <div class="card-value">${chains.filter((c) => c.status === "running").length}/${chains.length}</div>
-        <div class="card-label">Chains (active/total)</div>
-      </div>
-      <div class="card">
-        <div class="card-value">${cronJobs.filter((j) => j.enabled).length}</div>
-        <div class="card-label">Cron Loops Active</div>
-      </div>
-      <div class="card">
-        <div class="card-value" style="color:#4ade80">\u25CF</div>
-        <div class="card-label">RLM: ${isRlmAvailable() ? "Connected" : "N/A"}</div>
-      </div>
-    </div>
-
-    <div class="section">
-      <h2>Registered Agents</h2>
-      <table>
-        <thead><tr><th>Agent ID</th><th>Display Name</th><th>Model / Version</th><th>Status</th><th>Tool Namespaces</th><th>Active Calls</th></tr></thead>
-        <tbody>${agentRows}</tbody>
-      </table>
-    </div>
-
-    <div class="section">
-      <h2>WebSocket Connections</h2>
-      <table>
-        <thead><tr><th>Agent ID</th><th>State</th><th>Connected At</th></tr></thead>
-        <tbody>${wsRows}</tbody>
-      </table>
-    </div>
-
-    <div class="section">
-      <h2>Chain Executions</h2>
-      <table>
-        <thead><tr><th>Chain</th><th>Mode</th><th>Status</th><th>Steps</th><th>Duration</th><th>Started</th></tr></thead>
-        <tbody>${chains.length === 0 ? '<tr><td colspan="6" style="text-align:center;color:#888">No chain executions yet</td></tr>' : chains.map((c) => `
-          <tr>
-            <td><strong>${esc(c.name)}</strong></td>
-            <td><code>${esc(c.mode)}</code></td>
-            <td><span class="badge badge-${c.status === "completed" ? "online" : c.status === "running" ? "standby" : "offline"}">${esc(c.status)}</span></td>
-            <td>${c.steps_completed}/${c.steps_total}</td>
-            <td>${c.duration_ms ? c.duration_ms + "ms" : "..."}</td>
-            <td>${esc(c.started_at.slice(11, 19))}</td>
-          </tr>`).join("")}
-        </tbody>
-      </table>
-    </div>
-
-    <div class="section">
-      <h2>Cron Loops</h2>
-      <table>
-        <thead><tr><th>ID</th><th>Name</th><th>Schedule</th><th>Enabled</th><th>Last Run</th><th>Runs</th></tr></thead>
-        <tbody>${cronJobs.length === 0 ? '<tr><td colspan="6" style="text-align:center;color:#888">No cron jobs registered</td></tr>' : cronJobs.map((j) => `
-          <tr>
-            <td><code>${esc(j.id)}</code></td>
-            <td>${esc(j.name)}</td>
-            <td><code>${esc(j.schedule)}</code></td>
-            <td><span class="badge badge-${j.enabled ? "online" : "offline"}">${j.enabled ? "on" : "off"}</span></td>
-            <td>${j.last_run ? esc(j.last_run.slice(11, 19)) : "-"}</td>
-            <td>${j.run_count}</td>
-          </tr>`).join("")}
-        </tbody>
-      </table>
-    </div>
-
-    <div class="section">
-      <h2>API Endpoints</h2>
-      <div class="endpoint">
-        <div><span class="method method-post">POST</span><code>/tools/call</code></div>
-        <div class="desc">Submit an OrchestratorToolCall \u2192 returns OrchestratorToolResult. Requires registered agent_id.</div>
-      </div>
-      <div class="endpoint">
-        <div><span class="method method-get">GET</span><code>/tools/namespaces</code></div>
-        <div class="desc">Discover available MCP tool namespaces from Railway backend.</div>
-      </div>
-      <div class="endpoint">
-        <div><span class="method method-post">POST</span><code>/agents/register</code></div>
-        <div class="desc">Register an agent with capabilities and tool ACL.</div>
-      </div>
-      <div class="endpoint">
-        <div><span class="method method-get">GET</span><code>/agents</code></div>
-        <div class="desc">List all registered agents.</div>
-      </div>
-      <div class="endpoint">
-        <div><span class="method method-post">POST</span><code>/chat/message</code></div>
-        <div class="desc">Send an AgentMessage \u2014 broadcasts to all WebSocket connections.</div>
-      </div>
-      <div class="endpoint">
-        <div><span class="method method-ws">WS</span><code>/ws?agent_id=CAPTAIN_CLAUDE</code></div>
-        <div class="desc">Real-time bidirectional AgentMessage channel.</div>
-      </div>
-      <div class="endpoint">
-        <div><span class="method method-post">POST</span><code>/chains/execute</code></div>
-        <div class="desc">Execute agent chain (sequential, parallel, loop, debate).</div>
-      </div>
-      <div class="endpoint">
-        <div><span class="method method-get">GET</span><code>/chains</code></div>
-        <div class="desc">List recent chain executions with status.</div>
-      </div>
-      <div class="endpoint">
-        <div><span class="method method-post">POST</span><code>/cognitive/:action</code></div>
-        <div class="desc">Proxy cognitive reasoning to RLM Engine (reason, analyze, plan, learn, fold).</div>
-      </div>
-      <div class="endpoint">
-        <div><span class="method method-get">GET</span><code>/cron</code></div>
-        <div class="desc">List cron loops. POST to create, PATCH to toggle, DELETE to remove.</div>
-      </div>
-      <div class="endpoint">
-        <div><span class="method method-get">GET</span><code>/health</code></div>
-        <div class="desc">Health check endpoint for Railway uptime monitoring.</div>
-      </div>
-    </div>
-
-    <div class="section">
-      <h2>Backend Configuration</h2>
-      <div class="url-badge">Backend URL: ${config.backendUrl}</div><br>
-      <div class="url-badge">Orchestrator ID: ${config.orchestratorId}</div><br>
-      <div class="url-badge">Node ENV: ${config.nodeEnv}</div>
-    </div>
-  </div>
-</body>
-</html>`);
+  res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 app.use((req, res) => {
   res.status(404).json({
