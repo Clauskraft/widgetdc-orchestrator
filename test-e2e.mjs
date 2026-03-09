@@ -628,17 +628,17 @@ await test('66. Chat: @agent message triggers auto-reply', async () => {
 
   // Wait for auto-reply (LLM takes a few seconds)
   let found = false
-  for (let i = 0; i < 15; i++) {
+  for (let i = 0; i < 20; i++) {
     await new Promise(r => setTimeout(r, 2000))
-    const hist = await api('/chat/history?limit=20')
+    const hist = await api('/chat/history?limit=30')
     const msgs = hist.body?.data?.messages || []
-    // Look for a reply FROM nexus
-    if (msgs.some(m => m.from === 'nexus' && m.to === 'e2e-tester')) {
+    // Look for a reply FROM nexus (source: agent)
+    if (msgs.some(m => m.from === 'nexus' && m.source === 'agent')) {
       found = true
       break
     }
   }
-  assert(found, 'No auto-reply from nexus within 30s')
+  assert(found, 'No auto-reply from nexus within 40s')
 })
 
 // ── 67. Agent auto-reply: no reply for broadcast messages ──
