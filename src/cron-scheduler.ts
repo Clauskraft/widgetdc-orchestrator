@@ -210,4 +210,53 @@ export function registerDefaultLoops(): void {
       ],
     },
   })
+
+  // Failure memory digest — surfaces recent failure patterns every 6 hours
+  registerCronJob({
+    id: 'failure-digest',
+    name: 'FailureMemory Digest',
+    schedule: '0 */6 * * *',
+    enabled: true,
+    chain: {
+      name: 'Failure Digest',
+      mode: 'sequential',
+      steps: [
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'graph.read_cypher',
+          arguments: {
+            query: "MATCH (f:FailureMemory) WHERE f.last_seen > datetime() - duration('PT6H') OR f.created_at > datetime() - duration('PT6H') RETURN f.category AS category, f.pattern AS pattern, f.hit_count AS hits, f.resolution AS resolution ORDER BY f.hit_count DESC LIMIT 10",
+          },
+        },
+      ],
+    },
+  })
+
+  // Evolution event tracker — records graph health snapshot hourly
+  registerCronJob({
+    id: 'evolution-tracker',
+    name: 'Evolution Event Tracker',
+    schedule: '0 * * * *',
+    enabled: true,
+    chain: {
+      name: 'Evolution Tracker',
+      mode: 'parallel',
+      steps: [
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'graph.read_cypher',
+          arguments: {
+            query: "MATCH (e:EvolutionEvent) WHERE e.timestamp > datetime() - duration('PT24H') RETURN avg(toFloat(e.pass_rate)) AS avg_pass_rate, count(e) AS events_24h, max(e.timestamp) AS latest",
+          },
+        },
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'graph.read_cypher',
+          arguments: {
+            query: "MATCH (f:FailureMemory) RETURN count(f) AS total_failures, sum(f.hit_count) AS total_hits",
+          },
+        },
+      ],
+    },
+  })
 }

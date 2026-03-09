@@ -62,6 +62,78 @@ async function graphQuery(cypher) {
   return result?.results || result || []
 }
 
+async function graphWrite(cypher) {
+  return await backend('graph.write_cypher', { query: cypher })
+}
+
+// ─── FailureMemory Ingestion ────────────────────────────────────────────────
+async function ingestFailureMemory() {
+  console.log('\n🧠 Ingesting FailureMemory from graph...')
+  try {
+    const failures = await graphQuery(
+      "MATCH (f:FailureMemory) RETURN f.pattern AS pattern, f.category AS category, f.resolution AS resolution, f.source AS source ORDER BY f.created_at DESC LIMIT 30"
+    )
+    if (failures.length === 0) {
+      console.log('  No FailureMemory nodes found')
+      return []
+    }
+    const insights = failures
+      .filter(f => f.pattern || f.resolution)
+      .map(f => `[${f.category || 'general'}] ${f.pattern || ''} → ${f.resolution || '(unresolved)'}`)
+    console.log(`  📥 Loaded ${insights.length} failure patterns from graph`)
+    return insights
+  } catch (err) {
+    console.log(`  ⚠️ Failed to load FailureMemory: ${err.message}`)
+    return []
+  }
+}
+
+// ─── Persist EvolutionEvent to graph ────────────────────────────────────────
+async function writeEvolutionEvent(iteration, passed, failed, total, categories) {
+  try {
+    await graphWrite(`
+      CREATE (e:EvolutionEvent {
+        type: 'evolution_test',
+        iteration: ${iteration},
+        pass_rate: ${(passed / total * 100).toFixed(1)},
+        passed: ${passed},
+        failed: ${failed},
+        total: ${total},
+        categories: '${categories}',
+        source: 'evolution-loop',
+        timestamp: datetime()
+      })
+      WITH e
+      MERGE (hub:HubNode:EvolutionHub {name: 'Evolution Log'})
+      MERGE (e)-[:LOGGED_IN]->(hub)
+      RETURN e.iteration AS iter
+    `)
+  } catch {}
+}
+
+// ─── Persist FailureMemory nodes for new failures ───────────────────────────
+async function writeFailureMemory(failedCases) {
+  for (const f of failedCases.slice(0, 10)) {
+    try {
+      const pattern = (f.error || '').replace(/'/g, "\\'").slice(0, 500)
+      const name = (f.name || '').replace(/'/g, "\\'").slice(0, 200)
+      await graphWrite(`
+        MERGE (f:FailureMemory {
+          pattern: '${pattern}',
+          category: '${f.category || 'unknown'}',
+          test_name: '${name}'
+        })
+        ON CREATE SET f.created_at = datetime(), f.source = 'evolution-loop', f.hit_count = 1
+        ON MATCH SET f.last_seen = datetime(), f.hit_count = coalesce(f.hit_count, 0) + 1
+        WITH f
+        MERGE (hub:HubNode:EvolutionHub {name: 'Evolution Log'})
+        MERGE (f)-[:DISCOVERED_IN]->(hub)
+        RETURN f.pattern AS p
+      `)
+    } catch {}
+  }
+}
+
 // ─── Graph Discovery ────────────────────────────────────────────────────────
 async function discoverGraphContext() {
   console.log('\n🔍 Discovering graph context...')
@@ -259,8 +331,20 @@ function generateUseCases(graphCtx, iteration, previousLearnings) {
     ],
   ]
 
-  const cases = CASE_BANKS[iteration - 1] || CASE_BANKS[0]
-  console.log(`  📋 ${cases.length} cases for iteration ${iteration}`)
+  // Cycle through banks for iterations > 5
+  const bankIndex = (iteration - 1) % CASE_BANKS.length
+  const cases = CASE_BANKS[bankIndex].map(c => ({
+    ...c,
+    id: `${iteration}-${c.id.split('-')[1]}`,  // Unique ID per iteration
+  }))
+  // Re-generate unique IDs for agent registration and tool calls
+  cases.forEach(c => {
+    if (c.body?.agent_id?.startsWith('evo-')) c.body.agent_id = `evo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    if (c.body?.call_id) c.body.call_id = uid()
+    if (c.body?.timestamp) c.body.timestamp = ts()
+    if (c.body?.message?.includes('evo-broadcast-')) c.body.message = `evo-broadcast-${Date.now()}`
+  })
+  console.log(`  📋 ${cases.length} cases for iteration ${iteration} (bank ${bankIndex + 1}/5)`)
   return cases
 }
 
@@ -426,8 +510,13 @@ async function run() {
   console.log(`║  Iterations: ${MAX_ITERATIONS} | Cases/iter: ${CASES_PER_ITER} | Total: ${MAX_ITERATIONS * CASES_PER_ITER}      ║`)
   console.log('╚══════════════════════════════════════════════════════════╝')
 
-  // Discover graph context once
+  // Discover graph context + ingest historical failure patterns
   const graphCtx = await discoverGraphContext()
+  const failurePatterns = await ingestFailureMemory()
+  if (failurePatterns.length > 0) {
+    learnings.push(...failurePatterns.slice(0, 15))
+    console.log(`  📚 Seeded ${Math.min(failurePatterns.length, 15)} learnings from FailureMemory`)
+  }
 
   for (let iter = 1; iter <= MAX_ITERATIONS; iter++) {
     console.log(`\n${'═'.repeat(60)}`)
@@ -470,8 +559,13 @@ async function run() {
       }
     }
 
-    // 4. Persist results to memory
-    await persistResults(iter, results, learnings.slice(-10))
+    // 4. Persist results to memory + graph
+    const categories = [...new Set(results.map(r => r.category))].join(', ')
+    await Promise.allSettled([
+      persistResults(iter, results, learnings.slice(-10)),
+      writeEvolutionEvent(iter, passed, failed, results.length, categories),
+      failedCases.length > 0 ? writeFailureMemory(failedCases) : Promise.resolve(),
+    ])
 
     console.log(`\n📊 Cumulative: ${totalPassed} passed, ${totalFailed} failed across ${iter} iterations`)
   }
