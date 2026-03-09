@@ -119,6 +119,171 @@ function getSSEClientCount() {
   return clients.length;
 }
 
+// src/redis.ts
+import Redis from "ioredis";
+var redisUrl = process.env["REDIS_URL"] ?? "";
+var redis = null;
+function getRedis() {
+  return redis;
+}
+function isRedisEnabled() {
+  return redis !== null;
+}
+async function initRedis() {
+  if (!redisUrl) {
+    logger.info("REDIS_URL not set \u2014 agent registry will be in-memory only (volatile)");
+    return;
+  }
+  try {
+    redis = new Redis(redisUrl, {
+      maxRetriesPerRequest: 3,
+      retryStrategy(times) {
+        if (times > 5) return null;
+        return Math.min(times * 200, 2e3);
+      },
+      lazyConnect: true
+    });
+    await redis.connect();
+    logger.info("Redis connected \u2014 agent registry persistence enabled");
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Redis connection failed \u2014 falling back to in-memory only");
+    redis = null;
+  }
+}
+
+// src/chat-store.ts
+var REDIS_KEY = "orchestrator:messages";
+var REDIS_THREADS_KEY = "orchestrator:threads";
+var REDIS_PINS_KEY = "orchestrator:pinned";
+var MAX_MESSAGES = 2e3;
+var TTL_SECONDS = 7 * 24 * 3600;
+var memoryMessages = [];
+function msgId() {
+  return `msg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+async function storeMessage(msg) {
+  memoryMessages.unshift(msg);
+  if (memoryMessages.length > MAX_MESSAGES) memoryMessages = memoryMessages.slice(0, MAX_MESSAGES);
+  try {
+    if (isRedisEnabled()) {
+      const redis2 = getRedis();
+      if (redis2) {
+        await redis2.lpush(REDIS_KEY, JSON.stringify(msg));
+        await redis2.ltrim(REDIS_KEY, 0, MAX_MESSAGES - 1);
+        await redis2.expire(REDIS_KEY, TTL_SECONDS);
+        if (msg.thread_id) {
+          const threadMeta = JSON.stringify({
+            thread_id: msg.thread_id,
+            last_reply: msg.timestamp,
+            reply_count: 0
+            // incremented separately
+          });
+          await redis2.hset(REDIS_THREADS_KEY, msg.thread_id, threadMeta);
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Chat store Redis write failed");
+  }
+}
+async function getHistory(limit = 100, offset = 0, target) {
+  let messages = [];
+  try {
+    if (isRedisEnabled()) {
+      const redis2 = getRedis();
+      if (redis2) {
+        const raw = await redis2.lrange(REDIS_KEY, offset, offset + limit * 2 - 1);
+        messages = raw.map((r) => JSON.parse(r));
+      }
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Chat store Redis read failed");
+  }
+  if (messages.length === 0) {
+    messages = memoryMessages.slice(offset, offset + limit * 2);
+  }
+  if (target && target !== "All") {
+    messages = messages.filter(
+      (m) => m.from === target || m.to === target || m.to === "All"
+    );
+  }
+  return messages.slice(0, limit);
+}
+async function getThread(threadId) {
+  const all = await getHistory(MAX_MESSAGES, 0);
+  return all.filter((m) => m.thread_id === threadId || m.id === threadId).sort((a, b) => (a.timestamp || "").localeCompare(b.timestamp || ""));
+}
+async function searchMessages(query, limit = 50) {
+  const all = await getHistory(MAX_MESSAGES, 0);
+  const q = query.toLowerCase();
+  return all.filter((m) => (m.message || "").toLowerCase().includes(q) || (m.from || "").toLowerCase().includes(q)).slice(0, limit);
+}
+async function togglePin(messageId, pin) {
+  try {
+    if (isRedisEnabled()) {
+      const redis2 = getRedis();
+      if (redis2) {
+        if (pin) await redis2.sadd(REDIS_PINS_KEY, messageId);
+        else await redis2.srem(REDIS_PINS_KEY, messageId);
+      }
+    }
+  } catch {
+  }
+  const msg = memoryMessages.find((m) => m.id === messageId);
+  if (msg) msg.pinned = pin;
+}
+async function getPinnedMessages() {
+  let pinnedIds = [];
+  try {
+    if (isRedisEnabled()) {
+      const redis2 = getRedis();
+      if (redis2) pinnedIds = await redis2.smembers(REDIS_PINS_KEY);
+    }
+  } catch {
+  }
+  if (pinnedIds.length === 0) {
+    return memoryMessages.filter((m) => m.pinned);
+  }
+  const all = await getHistory(MAX_MESSAGES, 0);
+  return all.filter((m) => pinnedIds.includes(m.id));
+}
+async function hydrateMessages() {
+  try {
+    if (isRedisEnabled()) {
+      const redis2 = getRedis();
+      if (redis2) {
+        const raw = await redis2.lrange(REDIS_KEY, 0, MAX_MESSAGES - 1);
+        memoryMessages = raw.map((r) => JSON.parse(r));
+        logger.info({ count: memoryMessages.length }, "Chat history hydrated from Redis");
+      }
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Chat history hydration failed");
+  }
+}
+function getConversationSummaries() {
+  const convMap = /* @__PURE__ */ new Map();
+  for (const m of memoryMessages) {
+    const partner = m.from === "command-center" ? m.to : m.from;
+    if (!partner) continue;
+    const existing = convMap.get(partner);
+    if (!existing) {
+      convMap.set(partner, {
+        lastMessage: (m.message || "").slice(0, 80),
+        lastTime: m.timestamp,
+        count: 1
+      });
+    } else {
+      existing.count++;
+      if (m.timestamp > existing.lastTime) {
+        existing.lastMessage = (m.message || "").slice(0, 80);
+        existing.lastTime = m.timestamp;
+      }
+    }
+  }
+  return Array.from(convMap.entries()).map(([target, data]) => ({ target, ...data, messageCount: data.count })).sort((a, b) => (b.lastTime || "").localeCompare(a.lastTime || ""));
+}
+
 // src/chat-broadcaster.ts
 var connections = /* @__PURE__ */ new Map();
 var wss = null;
@@ -198,8 +363,23 @@ function handleIncomingMessage(fromAgentId, msg) {
   }
 }
 function broadcastMessage(msg) {
-  broadcastSSE("message", msg);
-  const payload = JSON.stringify({ type: "message", data: msg });
+  const storedMsg = {
+    id: msg.id || msgId(),
+    from: msg.from,
+    to: msg.to,
+    source: msg.source,
+    type: msg.type,
+    message: msg.message,
+    timestamp: msg.timestamp || (/* @__PURE__ */ new Date()).toISOString(),
+    thread_id: msg.thread_id,
+    parent_id: msg.parent_id,
+    files: msg.files,
+    metadata: msg.metadata
+  };
+  storeMessage(storedMsg).catch(() => {
+  });
+  broadcastSSE("message", { ...msg, id: storedMsg.id });
+  const payload = JSON.stringify({ type: "message", data: { ...msg, id: storedMsg.id } });
   let sent = 0;
   for (const [, conn] of connections.entries()) {
     if (conn.ws.readyState === WebSocket.OPEN) {
@@ -232,43 +412,11 @@ function getConnectionStats() {
   };
 }
 
-// src/redis.ts
-import Redis from "ioredis";
-var redisUrl = process.env["REDIS_URL"] ?? "";
-var redis = null;
-function getRedis() {
-  return redis;
-}
-function isRedisEnabled() {
-  return redis !== null;
-}
-async function initRedis() {
-  if (!redisUrl) {
-    logger.info("REDIS_URL not set \u2014 agent registry will be in-memory only (volatile)");
-    return;
-  }
-  try {
-    redis = new Redis(redisUrl, {
-      maxRetriesPerRequest: 3,
-      retryStrategy(times) {
-        if (times > 5) return null;
-        return Math.min(times * 200, 2e3);
-      },
-      lazyConnect: true
-    });
-    await redis.connect();
-    logger.info("Redis connected \u2014 agent registry persistence enabled");
-  } catch (err) {
-    logger.warn({ err: String(err) }, "Redis connection failed \u2014 falling back to in-memory only");
-    redis = null;
-  }
-}
-
 // src/routes/agents.ts
 import { Router } from "express";
 
 // src/agent-registry.ts
-var REDIS_KEY = "orchestrator:agents";
+var REDIS_KEY2 = "orchestrator:agents";
 var registry = /* @__PURE__ */ new Map();
 function persistToRedis(agentId, entry) {
   const redis2 = getRedis();
@@ -278,14 +426,14 @@ function persistToRedis(agentId, entry) {
     registeredAt: entry.registeredAt.toISOString(),
     lastSeenAt: entry.lastSeenAt.toISOString()
   });
-  redis2.hset(REDIS_KEY, agentId, serialised).catch((err) => {
+  redis2.hset(REDIS_KEY2, agentId, serialised).catch((err) => {
     logger.warn({ err: String(err), agent_id: agentId }, "Redis persist failed");
   });
 }
 function removeFromRedis(agentId) {
   const redis2 = getRedis();
   if (!redis2) return;
-  redis2.hdel(REDIS_KEY, agentId).catch(() => {
+  redis2.hdel(REDIS_KEY2, agentId).catch(() => {
   });
 }
 var AgentRegistry = {
@@ -294,7 +442,7 @@ var AgentRegistry = {
     const redis2 = getRedis();
     if (!redis2) return;
     try {
-      const all = await redis2.hgetall(REDIS_KEY);
+      const all = await redis2.hgetall(REDIS_KEY2);
       let count = 0;
       for (const [agentId, json] of Object.entries(all)) {
         try {
@@ -393,7 +541,7 @@ var AgentRegistry = {
     const count = registry.size;
     registry.clear();
     const redis2 = getRedis();
-    if (redis2) await redis2.del(REDIS_KEY).catch(() => {
+    if (redis2) await redis2.del(REDIS_KEY2).catch(() => {
     });
     return count;
   },
@@ -8714,11 +8862,387 @@ chatRouter.post("/message", (req, res) => {
     });
     return;
   }
-  const msg = { ...result.data, timestamp: (/* @__PURE__ */ new Date()).toISOString() };
+  const msg = {
+    ...result.data,
+    id: msgId(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    thread_id: req.body.thread_id,
+    parent_id: req.body.parent_id,
+    files: req.body.files
+  };
   broadcastMessage(msg);
   notifyChatMessage(msg.from, msg.to, msg.message);
   logger.info({ from: msg.from, to: msg.to, type: msg.type }, "Chat message broadcast");
-  res.json({ success: true, data: { timestamp: msg.timestamp } });
+  res.json({ success: true, data: { id: msg.id, timestamp: msg.timestamp } });
+});
+chatRouter.get("/history", async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+  const offset = parseInt(req.query.offset) || 0;
+  const target = req.query.target;
+  const messages = await getHistory(limit, offset, target);
+  res.json({ success: true, data: { messages, total: messages.length, limit, offset } });
+});
+chatRouter.get("/threads/:id", async (req, res) => {
+  const messages = await getThread(req.params.id);
+  res.json({ success: true, data: { thread_id: req.params.id, messages, count: messages.length } });
+});
+chatRouter.post("/threads", (req, res) => {
+  const { parent_id, from, message, type } = req.body;
+  if (!parent_id || !from || !message) {
+    res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "parent_id, from, message required" } });
+    return;
+  }
+  const threadMsg = {
+    from,
+    to: "All",
+    source: "human",
+    type: type || "Message",
+    message,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    thread_id: parent_id,
+    // replies are linked to the parent
+    parent_id
+  };
+  broadcastMessage(threadMsg);
+  res.json({ success: true, data: { thread_id: parent_id, timestamp: threadMsg.timestamp } });
+});
+chatRouter.get("/search", async (req, res) => {
+  const query = req.query.q;
+  if (!query || query.length < 2) {
+    res.status(400).json({ success: false, error: { code: "QUERY_TOO_SHORT", message: "Search query must be at least 2 characters" } });
+    return;
+  }
+  const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+  const results = await searchMessages(query, limit);
+  res.json({ success: true, data: { query, results, count: results.length } });
+});
+chatRouter.post("/pin", async (req, res) => {
+  const { message_id, pin } = req.body;
+  if (!message_id) {
+    res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "message_id required" } });
+    return;
+  }
+  await togglePin(message_id, pin !== false);
+  res.json({ success: true, data: { message_id, pinned: pin !== false } });
+});
+chatRouter.get("/pinned", async (_req, res) => {
+  const pinned = await getPinnedMessages();
+  res.json({ success: true, data: { messages: pinned, count: pinned.length } });
+});
+chatRouter.get("/conversations", (_req, res) => {
+  const conversations = getConversationSummaries();
+  res.json({ success: true, data: { conversations } });
+});
+chatRouter.post("/capture", async (req, res) => {
+  const { message_ids, summary, tags } = req.body;
+  if (!message_ids?.length && !summary) {
+    res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "message_ids or summary required" } });
+    return;
+  }
+  try {
+    let context = summary || "";
+    if (message_ids?.length) {
+      const all = await getHistory(2e3, 0);
+      const selected = all.filter((m) => message_ids.includes(m.id));
+      context = selected.map((m) => `[${m.from}] ${m.message}`).join("\n");
+      if (summary) context = summary + "\n\n---\nSource messages:\n" + context;
+    }
+    const sragRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+      },
+      body: JSON.stringify({
+        tool: "srag.ingest",
+        args: {
+          content: context,
+          source: "command-center-chat",
+          tags: tags || ["chat-capture"],
+          metadata: { captured_at: (/* @__PURE__ */ new Date()).toISOString(), message_count: message_ids?.length || 0 }
+        }
+      }),
+      signal: AbortSignal.timeout(3e4)
+    });
+    const sragData = await sragRes.json().catch(() => null);
+    broadcastMessage({
+      from: "System",
+      to: "All",
+      source: "system",
+      type: "Message",
+      message: `\u{1F4DA} Knowledge captured: ${message_ids?.length || 0} messages \u2192 SRAG (tags: ${(tags || ["chat-capture"]).join(", ")})`,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    logger.info({ message_count: message_ids?.length, tags }, "Chat knowledge captured to SRAG");
+    res.json({ success: true, data: { captured: message_ids?.length || 1, srag_result: sragData } });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Knowledge capture failed");
+    res.status(502).json({ success: false, error: { code: "CAPTURE_FAILED", message: String(err) } });
+  }
+});
+chatRouter.post("/summarize", async (req, res) => {
+  const { target, limit: msgLimit, thread_id } = req.body;
+  const limit = Math.min(msgLimit || 50, 200);
+  try {
+    let messages;
+    if (thread_id) {
+      messages = await getThread(thread_id);
+    } else {
+      messages = await getHistory(limit, 0, target);
+    }
+    if (messages.length === 0) {
+      res.json({ success: true, data: { summary: "No messages to summarize." } });
+      return;
+    }
+    const transcript = messages.sort((a, b) => (a.timestamp || "").localeCompare(b.timestamp || "")).map((m) => `[${(m.timestamp || "").slice(11, 19)}] ${m.from}: ${m.message}`).join("\n").slice(0, 8e3);
+    const llmRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+      },
+      body: JSON.stringify({
+        tool: "llm.chat",
+        args: {
+          model: "deepseek-chat",
+          messages: [{
+            role: "user",
+            content: `Summarize this conversation concisely. Include key decisions, action items, and outcomes. Reply in the same language as the conversation.
+
+${transcript}`
+          }],
+          max_tokens: 500
+        }
+      }),
+      signal: AbortSignal.timeout(6e4)
+    });
+    const llmData = await llmRes.json().catch(() => null);
+    const summary = llmData?.result?.content || llmData?.result?.message || llmData?.result || "Summary generation failed";
+    broadcastMessage({
+      from: "System",
+      to: "All",
+      source: "system",
+      type: "Message",
+      message: `\u{1F4CB} **Conversation Summary**
+${typeof summary === "string" ? summary : JSON.stringify(summary)}`,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    res.json({ success: true, data: { summary, message_count: messages.length } });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Summarize failed");
+    res.status(502).json({ success: false, error: { code: "SUMMARIZE_FAILED", message: String(err) } });
+  }
+});
+chatRouter.post("/debate", async (req, res) => {
+  const { agents, topic, rounds } = req.body;
+  if (!agents?.length || agents.length < 2 || !topic) {
+    res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "agents (2+) and topic required" } });
+    return;
+  }
+  const debateId = `debate-${Date.now().toString(36)}`;
+  const maxRounds = Math.min(rounds || 2, 5);
+  broadcastMessage({
+    from: "System",
+    to: "All",
+    source: "system",
+    type: "Message",
+    message: `\u{1F3AF} **Debate Started**: "${topic}"
+Participants: ${agents.join(", ")} | Rounds: ${maxRounds}`,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    thread_id: debateId
+  });
+  runDebate(debateId, agents, topic, maxRounds).catch((err) => {
+    logger.error({ err: String(err), debateId }, "Debate failed");
+    broadcastMessage({
+      from: "System",
+      to: "All",
+      source: "system",
+      type: "Message",
+      message: `\u274C Debate "${topic}" failed: ${err.message}`,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      thread_id: debateId
+    });
+  });
+  res.json({ success: true, data: { debate_id: debateId, agents, topic, rounds: maxRounds } });
+});
+async function runDebate(debateId, agents, topic, rounds) {
+  const responses = [];
+  for (let round = 1; round <= rounds; round++) {
+    for (const agent of agents) {
+      const prevContext = responses.length > 0 ? "\n\nPrevious arguments:\n" + responses.map((r) => `[${r.agent} R${r.round}]: ${r.response}`).join("\n") : "";
+      const prompt = round === 1 ? `You are agent "${agent}" in a structured debate. Topic: "${topic}". Present your argument concisely (max 200 words).` : `You are agent "${agent}" in round ${round} of a debate on "${topic}". Review the previous arguments and provide your rebuttal or refined position (max 200 words).${prevContext}`;
+      try {
+        const llmRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+          },
+          body: JSON.stringify({
+            tool: "llm.chat",
+            args: {
+              model: "deepseek-chat",
+              messages: [{ role: "user", content: prompt }],
+              max_tokens: 300
+            }
+          }),
+          signal: AbortSignal.timeout(6e4)
+        });
+        const data = await llmRes.json().catch(() => null);
+        const response = data?.result?.content || data?.result?.message || data?.result || "(no response)";
+        const responseStr = typeof response === "string" ? response : JSON.stringify(response);
+        responses.push({ agent, round, response: responseStr });
+        broadcastMessage({
+          from: agent,
+          to: "All",
+          source: "system",
+          type: "Message",
+          message: `**[Round ${round}]** ${responseStr}`,
+          timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+          thread_id: debateId
+        });
+      } catch {
+        responses.push({ agent, round, response: "(timeout)" });
+      }
+    }
+  }
+  const allArgs = responses.map((r) => `[${r.agent} R${r.round}]: ${r.response}`).join("\n");
+  try {
+    const synthRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+      },
+      body: JSON.stringify({
+        tool: "llm.chat",
+        args: {
+          model: "deepseek-chat",
+          messages: [{ role: "user", content: `Synthesize the following debate on "${topic}" into a final summary. Identify areas of agreement, disagreement, and recommended action. Be concise (max 300 words).
+
+${allArgs}` }],
+          max_tokens: 400
+        }
+      }),
+      signal: AbortSignal.timeout(6e4)
+    });
+    const synthData = await synthRes.json().catch(() => null);
+    const synthesis = synthData?.result?.content || synthData?.result?.message || synthData?.result || "(synthesis failed)";
+    broadcastMessage({
+      from: "System",
+      to: "All",
+      source: "system",
+      type: "Message",
+      message: `\u{1F4CA} **Debate Synthesis**: "${topic}"
+
+${typeof synthesis === "string" ? synthesis : JSON.stringify(synthesis)}`,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      thread_id: debateId
+    });
+  } catch {
+  }
+}
+var CHAT_TEMPLATES = [
+  {
+    id: "incident-response",
+    name: "Incident Response",
+    description: "Alert agents, gather status, coordinate fix",
+    steps: [
+      { action: "message", to: "All", message: "\u{1F6A8} INCIDENT: {topic} \u2014 all agents report status" },
+      { action: "command", command: "/chain health-check omega:graph.health command-center:graph.stats" },
+      { action: "message", to: "omega", message: "@omega run SITREP for {topic}" }
+    ]
+  },
+  {
+    id: "knowledge-harvest",
+    name: "Knowledge Harvest",
+    description: "Query SRAG + graph, capture insights",
+    steps: [
+      { action: "command", command: "/rag {topic}" },
+      { action: "command", command: "/reason Analyze knowledge gaps for: {topic}" },
+      { action: "capture", tags: ["harvest", "knowledge"] }
+    ]
+  },
+  {
+    id: "agent-debrief",
+    name: "Agent Debrief",
+    description: "Collect status from all agents, summarize",
+    steps: [
+      { action: "message", to: "All", message: "\u{1F4CB} Debrief request: all agents report current status and findings" },
+      { action: "command", command: "/chain debrief omega:graph.stats" },
+      { action: "summarize" }
+    ]
+  },
+  {
+    id: "competitive-analysis",
+    name: "Competitive Analysis",
+    description: "Cross-domain intelligence via debate + RAG",
+    steps: [
+      { action: "command", command: "/rag {topic} competitive landscape" },
+      { action: "debate", agents: ["omega", "master"], topic: "{topic}" },
+      { action: "capture", tags: ["competitive", "analysis"] }
+    ]
+  },
+  {
+    id: "daily-standup",
+    name: "Daily Standup",
+    description: "Quick health check + summary of yesterday",
+    steps: [
+      { action: "command", command: "/chain standup command-center:graph.stats" },
+      { action: "summarize", limit: 100 },
+      { action: "message", to: "All", message: "\u2705 Standup complete. Next actions logged." }
+    ]
+  }
+];
+chatRouter.get("/templates", (_req, res) => {
+  res.json({ success: true, data: { templates: CHAT_TEMPLATES } });
+});
+chatRouter.post("/templates/:id/run", async (req, res) => {
+  const template = CHAT_TEMPLATES.find((t) => t.id === req.params.id);
+  if (!template) {
+    res.status(404).json({ success: false, error: { code: "NOT_FOUND", message: `Template ${req.params.id} not found` } });
+    return;
+  }
+  const topic = req.body.topic || "general";
+  broadcastMessage({
+    from: "System",
+    to: "All",
+    source: "system",
+    type: "Message",
+    message: `\u{1F680} Running template: **${template.name}** \u2014 ${template.description} (topic: ${topic})`,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  });
+  let stepsRun = 0;
+  for (const step of template.steps) {
+    if (step.action === "message") {
+      const msg = (step.message || "").replace(/\{topic\}/g, topic);
+      broadcastMessage({
+        from: "command-center",
+        to: step.to || "All",
+        source: "system",
+        type: "Message",
+        message: msg,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      });
+      stepsRun++;
+    }
+  }
+  res.json({
+    success: true,
+    data: {
+      template_id: template.id,
+      name: template.name,
+      topic,
+      steps_total: template.steps.length,
+      steps_executed: stepsRun,
+      steps: template.steps.map((s) => ({
+        ...s,
+        message: s.message?.replace(/\{topic\}/g, topic),
+        command: s.command?.replace(/\{topic\}/g, topic),
+        topic: s.topic?.replace(/\{topic\}/g, topic)
+      }))
+    }
+  });
 });
 chatRouter.get("/ws-stats", (_req, res) => {
   res.json({ success: true, data: getConnectionStats() });
@@ -8932,7 +9456,7 @@ async function runLoop(steps, maxIterations, exitCondition) {
   }
   return allResults;
 }
-async function runDebate(steps, judgeAgent) {
+async function runDebate2(steps, judgeAgent) {
   const debateResults = await runParallel(steps);
   if (!judgeAgent) return debateResults;
   const positions = debateResults.map((r) => ({
@@ -8986,7 +9510,7 @@ async function executeChain(def) {
         results = await runLoop(def.steps, def.max_iterations ?? 5, def.exit_condition);
         break;
       case "debate":
-        results = await runDebate(def.steps, def.judge_agent);
+        results = await runDebate2(def.steps, def.judge_agent);
         break;
       default:
         throw new Error(`Unknown chain mode: ${def.mode}`);
@@ -9685,18 +10209,18 @@ llmRouter.post("/chat", async (req, res) => {
 import { Router as Router10 } from "express";
 
 // src/audit.ts
-var REDIS_KEY2 = "orchestrator:audit";
+var REDIS_KEY3 = "orchestrator:audit";
 var MAX_ENTRIES = 1e3;
-var TTL_SECONDS = 30 * 24 * 3600;
+var TTL_SECONDS2 = 30 * 24 * 3600;
 var memoryAudit = [];
 async function logAudit(entry) {
   try {
     if (isRedisEnabled()) {
       const redis2 = getRedis();
       if (redis2) {
-        await redis2.lpush(REDIS_KEY2, JSON.stringify(entry));
-        await redis2.ltrim(REDIS_KEY2, 0, MAX_ENTRIES - 1);
-        await redis2.expire(REDIS_KEY2, TTL_SECONDS);
+        await redis2.lpush(REDIS_KEY3, JSON.stringify(entry));
+        await redis2.ltrim(REDIS_KEY3, 0, MAX_ENTRIES - 1);
+        await redis2.expire(REDIS_KEY3, TTL_SECONDS2);
         return;
       }
     }
@@ -9711,7 +10235,7 @@ async function getAuditLog(limit = 100, offset = 0) {
     if (isRedisEnabled()) {
       const redis2 = getRedis();
       if (redis2) {
-        const raw = await redis2.lrange(REDIS_KEY2, offset, offset + limit - 1);
+        const raw = await redis2.lrange(REDIS_KEY3, offset, offset + limit - 1);
         return raw.map((r) => JSON.parse(r));
       }
     }
@@ -10071,6 +10595,7 @@ async function boot() {
   await initRedis();
   await AgentRegistry.hydrate();
   seedAgents();
+  await hydrateMessages();
   await hydrateCronJobs();
   registerDefaultLoops();
   initWebSocket(server);

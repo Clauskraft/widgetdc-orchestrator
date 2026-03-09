@@ -44,6 +44,7 @@ import { isRlmAvailable } from './cognitive-proxy.js'
 import { hydrateCronJobs, registerDefaultLoops, listCronJobs } from './cron-scheduler.js'
 import { listExecutions } from './chain-engine.js'
 import { seedAgents } from './agent-seeds.js'
+import { hydrateMessages } from './chat-store.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -144,6 +145,7 @@ async function boot() {
   await initRedis()
   await AgentRegistry.hydrate()
   seedAgents()
+  await hydrateMessages()
   await hydrateCronJobs()
   registerDefaultLoops()
   initWebSocket(server)

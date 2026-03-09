@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WidgeTDC Command Center v2.6</title>
+  <title>WidgeTDC Command Center v2.7</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..800&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -171,6 +171,7 @@
     .chat-drop-overlay { position: absolute; inset: 0; background: rgba(99,102,241,0.1); border: 2px dashed var(--accent); border-radius: 12px; display: none; align-items: center; justify-content: center; z-index: 50; backdrop-filter: blur(4px); }
     .chat-drop-overlay.show { display: flex; }
     .chat-drop-overlay span { color: var(--accent2); font-size: 0.9rem; font-weight: 600; }
+    .msg-action-menu button:hover { background: var(--accent-muted) !important; color: var(--text) !important; border-radius: 4px; }
     .chat-messages { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
     .chat-feed { flex: 1; overflow-y: auto; padding: 8px 0; scroll-behavior: smooth; }
     .chat-feed::-webkit-scrollbar { width: 6px; }
@@ -889,6 +890,146 @@ function renderChatSidebar() {
 
 function filterChatSidebar() { renderChatSidebar() }
 
+// ─── Persistent Chat History ─────────────────────────────────────────────────
+async function loadChatHistory() {
+  try {
+    const res = await api('/chat/history?limit=200')
+    const msgs = res.data?.messages || []
+    if (msgs.length > 0) {
+      // Merge with existing (dedup by id or timestamp+from)
+      const existing = new Set(chatMessages.map(m => (m.id || '') + (m.timestamp || '') + (m.from || '')))
+      let added = 0
+      for (const m of msgs) {
+        const key = (m.id || '') + (m.timestamp || '') + (m.from || '')
+        if (!existing.has(key)) {
+          chatMessages.push(m)
+          existing.add(key)
+          added++
+        }
+      }
+      // Sort by timestamp
+      chatMessages.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''))
+      if (chatMessages.length > 500) chatMessages = chatMessages.slice(-500)
+      if (added > 0) renderChat()
+      console.log('Chat history loaded:', added, 'new messages')
+    }
+  } catch (err) { console.warn('Chat history load failed:', err) }
+}
+
+// ─── Thread Replies ──────────────────────────────────────────────────────────
+let activeThread = null
+
+function openThread(msgId) {
+  activeThread = msgId
+  renderChat()
+  // Show thread indicator
+  const feed = document.getElementById('chat-feed')
+  const threadMsgs = chatMessages.filter(m => m.thread_id === msgId || m.id === msgId)
+  if (threadMsgs.length > 0) {
+    const threadHtml = `<div style="background:var(--accent-muted);border-left:3px solid var(--accent);padding:8px 16px;margin:8px 20px;border-radius:0 8px 8px 0;font-size:0.78rem;display:flex;align-items:center;gap:8px">
+      <span style="color:var(--accent2);font-weight:600">Thread</span>
+      <span style="color:var(--text3)">${threadMsgs.length} message${threadMsgs.length > 1 ? 's' : ''}</span>
+      <button class="secondary" style="margin-left:auto;padding:2px 8px;font-size:0.68rem" onclick="closeThread()">Close Thread</button>
+    </div>`
+    feed.insertAdjacentHTML('afterbegin', threadHtml)
+  }
+}
+
+function closeThread() {
+  activeThread = null
+  renderChat()
+}
+
+function replyToThread(parentId) {
+  activeThread = parentId
+  const input = document.getElementById('chat-input')
+  input.placeholder = 'Reply in thread...'
+  input.focus()
+}
+
+// ─── Message Actions (pin, thread, capture) ──────────────────────────────────
+function msgActions(msgId) {
+  const existing = document.getElementById('msg-actions-' + msgId)
+  if (existing) { existing.remove(); return }
+  // Remove any other open action menus
+  document.querySelectorAll('.msg-action-menu').forEach(el => el.remove())
+  const msgEl = document.querySelector(`[data-msg-id="${msgId}"]`)
+  if (!msgEl) return
+  const menu = document.createElement('div')
+  menu.className = 'msg-action-menu'
+  menu.id = 'msg-actions-' + msgId
+  menu.style.cssText = 'position:absolute;right:20px;top:0;background:var(--bg3);border:1px solid var(--border3);border-radius:8px;padding:4px;display:flex;gap:2px;z-index:10;box-shadow:var(--shadow-md);animation:scale-in 0.12s var(--ease-out)'
+  menu.innerHTML = `
+    <button style="padding:4px 8px;font-size:0.7rem;background:transparent;color:var(--text2);box-shadow:none" onclick="replyToThread('${msgId}')" title="Reply in thread">🧵</button>
+    <button style="padding:4px 8px;font-size:0.7rem;background:transparent;color:var(--text2);box-shadow:none" onclick="pinMessage('${msgId}')" title="Pin message">📌</button>
+    <button style="padding:4px 8px;font-size:0.7rem;background:transparent;color:var(--text2);box-shadow:none" onclick="captureMessage('${msgId}')" title="Capture to knowledge">📚</button>
+  `
+  msgEl.style.position = 'relative'
+  msgEl.appendChild(menu)
+}
+
+async function pinMessage(msgId) {
+  try {
+    await api('/chat/pin', { method: 'POST', body: JSON.stringify({ message_id: msgId, pin: true }) })
+    addLocalMsg('System', '📌 Message pinned', 'Message')
+  } catch (err) { addLocalMsg('System', 'Pin failed: ' + err.message, 'Alert') }
+  document.querySelectorAll('.msg-action-menu').forEach(el => el.remove())
+}
+
+async function captureMessage(msgId) {
+  try {
+    await api('/chat/capture', { method: 'POST', body: JSON.stringify({ message_ids: [msgId], tags: ['manual-capture'] }) })
+    addLocalMsg('System', '📚 Message captured to knowledge base', 'Message')
+  } catch (err) { addLocalMsg('System', 'Capture failed: ' + err.message, 'Alert') }
+  document.querySelectorAll('.msg-action-menu').forEach(el => el.remove())
+}
+
+// ─── Chat Search ─────────────────────────────────────────────────────────────
+async function searchChat(query) {
+  if (!query || query.length < 2) return
+  try {
+    const res = await api('/chat/search?q=' + encodeURIComponent(query) + '&limit=20')
+    const results = res.data?.results || []
+    if (results.length === 0) {
+      addLocalMsg('System', `No results for "${query}"`, 'Message')
+      return
+    }
+    addLocalMsg('System', `🔍 ${results.length} results for "${query}":\n` +
+      results.slice(0, 10).map(m => `[${(m.timestamp||'').slice(11,19)}] **${m.from}**: ${(m.message||'').slice(0,80)}`).join('\n'),
+      'Message')
+  } catch (err) { addLocalMsg('System', 'Search failed: ' + err.message, 'Alert') }
+}
+
+// ─── Templates ───────────────────────────────────────────────────────────────
+let chatTemplates = []
+async function loadTemplates() {
+  try {
+    const res = await api('/chat/templates')
+    chatTemplates = res.data?.templates || []
+  } catch {}
+}
+
+async function runTemplate(templateId, topic) {
+  try {
+    const res = await api('/chat/templates/' + templateId + '/run', {
+      method: 'POST',
+      body: JSON.stringify({ topic: topic || 'general' })
+    })
+    const d = res.data
+    if (d?.steps) {
+      for (const step of d.steps) {
+        if (step.action === 'command' && step.command) {
+          // Auto-execute commands from template
+          const input = document.getElementById('chat-input')
+          input.value = step.command
+          await sendChat()
+          await new Promise(r => setTimeout(r, 1000))
+        }
+      }
+    }
+  } catch (err) { addLocalMsg('System', 'Template failed: ' + err.message, 'Alert') }
+}
+
 // ─── File Attachments ────────────────────────────────────────────────────────
 function handleFileSelect(e) {
   const files = Array.from(e.target.files || [])
@@ -960,7 +1101,10 @@ function agentInitials(name) { if (!name) return '?'; const parts = name.replace
 function renderChat() {
   const feed = document.getElementById('chat-feed')
   const wasAtBottom = feed.scrollTop + feed.clientHeight >= feed.scrollHeight - 50
-  const filtered = chatTarget === 'All' ? chatMessages : chatMessages.filter(m => m.from === chatTarget || m.to === chatTarget || m.to === 'All')
+  let filtered = chatTarget === 'All' ? chatMessages : chatMessages.filter(m => m.from === chatTarget || m.to === chatTarget || m.to === 'All')
+  if (activeThread) {
+    filtered = filtered.filter(m => m.thread_id === activeThread || m.id === activeThread)
+  }
   const msgs = filtered.slice(-200)
 
   let html = ''
@@ -992,7 +1136,14 @@ function renderChat() {
       }).join('') + '</div>'
     }
 
-    html += `<div class="msg ${groupStart ? 'group-start' : ''} ${isSelf ? 'msg-self' : ''} ${isSystem ? 'msg-system' : ''}">
+    const threadCount = m.id ? chatMessages.filter(x => x.thread_id === m.id).length : 0
+    const threadIndicator = threadCount > 0
+      ? `<div style="margin-top:4px;font-size:0.72rem;color:var(--accent2);cursor:pointer" onclick="openThread('${m.id}')">🧵 ${threadCount} repl${threadCount === 1 ? 'y' : 'ies'}</div>`
+      : ''
+    const isThreadReply = m.thread_id && m.thread_id !== m.id
+    const threadBar = isThreadReply ? 'border-left:2px solid var(--accent);margin-left:16px;padding-left:8px;' : ''
+
+    html += `<div class="msg ${groupStart ? 'group-start' : ''} ${isSelf ? 'msg-self' : ''} ${isSystem ? 'msg-system' : ''}" data-msg-id="${m.id || ''}" style="${threadBar}" onclick="if(event.detail===2 && '${m.id || ''}')msgActions('${m.id || ''}')">
       <div class="msg-avatar" style="background:${agentColor(m.from)}">${agentInitials(m.from)}</div>
       <div class="msg-content">
         <div class="msg-header">
@@ -1000,9 +1151,11 @@ function renderChat() {
           <span class="msg-type ${typeCls}">${h(m.type || 'Message')}</span>
           ${m.to && m.to !== 'All' ? '<span style="font-size:0.65rem;color:var(--text3)">&#8594; '+h(m.to)+'</span>' : ''}
           <span class="msg-time">${msgTime}</span>
+          ${m.pinned ? '<span style="font-size:0.7rem" title="Pinned">📌</span>' : ''}
         </div>
         <div class="msg-body">${formatMessage(m.message)}</div>
         ${filesHtml}
+        ${threadIndicator}
       </div>
     </div>`
 
@@ -1156,6 +1309,72 @@ async function sendChat() {
       return
     }
 
+    // /debate @agent1 @agent2 topic
+    if (skillName === 'debate') {
+      const debateMatch = parsed.args.match(/^((?:@[\w-]+\s*)+)\s+(.+)$/s)
+      if (!debateMatch) { addLocalMsg('System', 'Usage: /debate @agent1 @agent2 <topic>', 'Alert'); return }
+      const agents = debateMatch[1].match(/@([\w-]+)/g).map(a => a.slice(1))
+      const topic = debateMatch[2].trim()
+      addLocalMsg('command-center', `/debate ${agents.join(' vs ')} — ${topic}`, 'Command')
+      try {
+        await api('/chat/debate', { method: 'POST', body: JSON.stringify({ agents, topic, rounds: 2 }) })
+      } catch (err) { addLocalMsg('System', 'Debate failed: ' + err.message, 'Alert') }
+      return
+    }
+
+    // /summarize [target]
+    if (skillName === 'summarize' || skillName === 'summary') {
+      addLocalMsg('command-center', `/summarize ${parsed.args || chatTarget}`, 'Command')
+      try {
+        const res = await api('/chat/summarize', { method: 'POST', body: JSON.stringify({ target: parsed.args || chatTarget, limit: 50 }) })
+        addLocalMsg('System', res.data?.summary || 'No summary generated', 'Message')
+      } catch (err) { addLocalMsg('System', 'Summary failed: ' + err.message, 'Alert') }
+      return
+    }
+
+    // /search <query>
+    if (skillName === 'search') {
+      if (!parsed.args) { addLocalMsg('System', 'Usage: /search <query>', 'Alert'); return }
+      addLocalMsg('command-center', `/search ${parsed.args}`, 'Command')
+      await searchChat(parsed.args)
+      return
+    }
+
+    // /template <name> [topic]
+    if (skillName === 'template') {
+      const tParts = parsed.args.split(/\s+/)
+      const tName = tParts[0]
+      const tTopic = tParts.slice(1).join(' ') || 'general'
+      if (!tName) {
+        const list = chatTemplates.map(t => `  **${t.id}** — ${t.description}`).join('\n')
+        addLocalMsg('System', 'Available templates:\n' + (list || '(none loaded)') + '\n\nUsage: /template <name> [topic]', 'Message')
+        return
+      }
+      addLocalMsg('command-center', `/template ${tName} ${tTopic}`, 'Command')
+      await runTemplate(tName, tTopic)
+      return
+    }
+
+    // /capture [tags]
+    if (skillName === 'capture') {
+      const tags = parsed.args ? parsed.args.split(/\s+/) : ['manual-capture']
+      const recentIds = chatMessages.slice(-10).filter(m => m.id).map(m => m.id)
+      addLocalMsg('command-center', `/capture ${tags.join(', ')}`, 'Command')
+      try {
+        await api('/chat/capture', { method: 'POST', body: JSON.stringify({ message_ids: recentIds, tags }) })
+        addLocalMsg('System', `📚 Captured ${recentIds.length} recent messages to SRAG`, 'Message')
+      } catch (err) { addLocalMsg('System', 'Capture failed: ' + err.message, 'Alert') }
+      return
+    }
+
+    // /pin — pin last message
+    if (skillName === 'pin') {
+      const lastMsg = chatMessages.filter(m => m.id).slice(-1)[0]
+      if (lastMsg?.id) await pinMessage(lastMsg.id)
+      else addLocalMsg('System', 'No message to pin', 'Alert')
+      return
+    }
+
     // Cognitive shortcuts
     const cogActions = ['reason','analyze','plan','learn','fold','enrich']
     if (cogActions.includes(skillName)) {
@@ -1199,7 +1418,8 @@ async function sendChat() {
     source: 'human',
     type: chatType,
     message: message,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    ...(activeThread ? { thread_id: activeThread, parent_id: activeThread } : {}),
   }
 
   try {
@@ -1210,6 +1430,8 @@ async function sendChat() {
       renderChat()
     }
     input.value = ''
+    input.placeholder = '@agent /command or type a message...'
+    activeThread = null
     pendingFiles = []
     renderPendingFiles()
   } catch (err) {
@@ -1286,8 +1508,18 @@ chatInput.addEventListener('input', () => {
     const cogCmds = ['reason','analyze','plan','learn','fold','enrich'].map(c => ({
       label: '/' + c, hint: 'cognitive', insert: '/' + c
     }))
+    const chatCmds = [
+      { label: '/debate', hint: 'Multi-agent debate', insert: '/debate' },
+      { label: '/summarize', hint: 'AI summary', insert: '/summarize' },
+      { label: '/search', hint: 'Search messages', insert: '/search' },
+      { label: '/capture', hint: 'Save to SRAG', insert: '/capture' },
+      { label: '/template', hint: 'Run workflow', insert: '/template' },
+      { label: '/pin', hint: 'Pin last message', insert: '/pin' },
+      { label: '/chain', hint: 'Execute chain', insert: '/chain' },
+    ]
+    const templateCmds = chatTemplates.map(t => ({ label: '/template ' + t.id, hint: t.description, insert: '/template ' + t.id }))
     const tools = availableTools.map(t => ({ label: '/' + t, hint: 'MCP tool', insert: '/' + t }))
-    const all = [...askCmds, ...cogCmds, ...tools].filter(t => !q || t.label.toLowerCase().includes(q)).slice(0, 15)
+    const all = [...chatCmds, ...askCmds, ...cogCmds, ...templateCmds, ...tools].filter(t => !q || t.label.toLowerCase().includes(q)).slice(0, 15)
     showAC(all)
   } else {
     closeAC()
@@ -1653,6 +1885,8 @@ function boot() {
   connectSSE()
   refreshDashboard()
   loadTools()
+  loadChatHistory()
+  loadTemplates()
   addChainStep() // Start with one empty step
   if (refreshTimer) clearInterval(refreshTimer)
   refreshTimer = setInterval(refreshDashboard, 10000)

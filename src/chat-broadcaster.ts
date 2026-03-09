@@ -14,6 +14,7 @@ import type { AgentMessage } from '@widgetdc/contracts/orchestrator'
 import { logger } from './logger.js'
 import { config } from './config.js'
 import { broadcastSSE } from './sse.js'
+import { storeMessage, msgId } from './chat-store.js'
 
 interface ConnectedAgent {
   ws: WebSocket
@@ -122,10 +123,26 @@ function handleIncomingMessage(fromAgentId: string, msg: AgentMessage): void {
 }
 
 export function broadcastMessage(msg: AgentMessage): void {
-  // Push to SSE clients for dashboard real-time updates
-  broadcastSSE('message', msg)
+  // Persist message to Redis/memory store
+  const storedMsg = {
+    id: (msg as any).id || msgId(),
+    from: msg.from,
+    to: msg.to,
+    source: msg.source,
+    type: msg.type,
+    message: msg.message,
+    timestamp: msg.timestamp || new Date().toISOString(),
+    thread_id: (msg as any).thread_id,
+    parent_id: (msg as any).parent_id,
+    files: (msg as any).files,
+    metadata: (msg as any).metadata,
+  }
+  storeMessage(storedMsg).catch(() => {})
 
-  const payload = JSON.stringify({ type: 'message', data: msg })
+  // Push to SSE clients for dashboard real-time updates
+  broadcastSSE('message', { ...msg, id: storedMsg.id })
+
+  const payload = JSON.stringify({ type: 'message', data: { ...msg, id: storedMsg.id } })
   let sent = 0
 
   for (const [, conn] of connections.entries()) {
