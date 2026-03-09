@@ -97,8 +97,8 @@ await test('5. GET / serves HTML with correct title', async () => {
 })
 
 // ── 6. Version tag present ──
-await test('6. Frontend: version tag v2.5', async () => {
-  assert(cachedHtml.includes('v2.5'), 'missing v2.5')
+await test('6. Frontend: version tag v2.6', async () => {
+  assert(cachedHtml.includes('v2.6'), 'missing v2.6')
 })
 
 // ── 7. CSS design system tokens ──
