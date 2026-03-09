@@ -411,12 +411,17 @@ function connectWS() {
     document.getElementById('ws-indicator').className = 'ws-dot connected'
     document.getElementById('ws-label').textContent = 'Connected'
   }
-  ws.onclose = () => {
+  ws.onclose = (e) => {
     document.getElementById('ws-indicator').className = 'ws-dot disconnected'
-    document.getElementById('ws-label').textContent = 'Disconnected'
+    if (e.code === 4401) {
+      document.getElementById('ws-label').textContent = 'Auth Failed'
+      API_KEY = ''; localStorage.removeItem('cc_api_key'); checkAuth()
+      return // Don't reconnect on auth failure
+    }
+    document.getElementById('ws-label').textContent = `Reconnecting... (${e.code})`
     setTimeout(connectWS, 3000)
   }
-  ws.onerror = () => ws.close()
+  ws.onerror = () => { /* onclose will fire */ }
   ws.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data)
