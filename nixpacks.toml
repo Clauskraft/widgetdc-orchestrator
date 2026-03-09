@@ -1,14 +1,12 @@
 # WidgeTDC Orchestrator — nixpacks build config
-# Railway builds from source on every deploy (never rely on committed dist/)
+# dist/ is pre-built locally and committed to git (contracts bundled by esbuild)
+# Railway only needs runtime deps — devDeps include file: refs that don't exist here
 
 [phases.setup]
 nixPkgs = ["nodejs_20"]
 
 [phases.install]
-cmds = ["npm ci"]
-
-[phases.build]
-cmds = ["npm run build"]
+cmds = ["npm ci --omit=dev"]
 
 [start]
 cmd = "node dist/index.js"
