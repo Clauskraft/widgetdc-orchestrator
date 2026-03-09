@@ -451,7 +451,9 @@ function connectWS() {
   ws.onerror = () => { /* onclose will fire */ }
   ws.onmessage = (e) => {
     try {
-      const msg = JSON.parse(e.data)
+      const raw = JSON.parse(e.data)
+      // WS sends {type:'message', data:{from,to,message,...}} — unwrap
+      const msg = raw.data || raw
       chatMessages.push(msg)
       if (chatMessages.length > 500) chatMessages = chatMessages.slice(-400)
       renderChat()
@@ -1197,9 +1199,14 @@ function connectSSE() {
     evtSource.addEventListener('message', (e) => {
       try {
         const msg = JSON.parse(e.data)
-        chatMessages.push(msg)
-        if (chatMessages.length > 500) chatMessages = chatMessages.slice(-400)
-        renderChat()
+        // SSE sends raw AgentMessage — dedup with WS (check last 10 msgs by timestamp+from)
+        const key = (msg.timestamp || '') + (msg.from || '')
+        const isDup = chatMessages.slice(-10).some(m => (m.timestamp || '') + (m.from || '') === key)
+        if (!isDup) {
+          chatMessages.push(msg)
+          if (chatMessages.length > 500) chatMessages = chatMessages.slice(-400)
+          renderChat()
+        }
       } catch {}
     })
     evtSource.addEventListener('connected', () => {
