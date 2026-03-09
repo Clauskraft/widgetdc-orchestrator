@@ -57,6 +57,31 @@ agentsRouter.get('/', (_req: Request, res: Response) => {
   res.json({ success: true, data: { agents, total: agents.length } })
 })
 
+agentsRouter.patch('/:id', (req: Request, res: Response) => {
+  const { id } = req.params
+  const updated = AgentRegistry.update(id, req.body)
+  if (!updated) {
+    res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: `Agent '${id}' not registered`, status_code: 404 } })
+    return
+  }
+  res.json({ success: true, data: { agent_id: id, updated: true } })
+})
+
+agentsRouter.delete('/:id', (req: Request, res: Response) => {
+  const { id } = req.params
+  const removed = AgentRegistry.remove(id)
+  if (!removed) {
+    res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: `Agent '${id}' not registered`, status_code: 404 } })
+    return
+  }
+  res.json({ success: true, data: { agent_id: id, removed: true } })
+})
+
+agentsRouter.delete('/', async (_req: Request, res: Response) => {
+  const count = await AgentRegistry.purgeAll()
+  res.json({ success: true, data: { purged: count } })
+})
+
 agentsRouter.post('/:id/heartbeat', (req: Request, res: Response) => {
   const { id } = req.params
   const entry = AgentRegistry.get(id)

@@ -42,6 +42,7 @@ import { isSlackEnabled } from './slack.js'
 import { isRlmAvailable } from './cognitive-proxy.js'
 import { hydrateCronJobs, registerDefaultLoops, listCronJobs } from './cron-scheduler.js'
 import { listExecutions } from './chain-engine.js'
+import { seedAgents } from './agent-seeds.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -140,6 +141,7 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 async function boot() {
   await initRedis()
   await AgentRegistry.hydrate()
+  seedAgents()
   await hydrateCronJobs()
   registerDefaultLoops()
   initWebSocket(server)

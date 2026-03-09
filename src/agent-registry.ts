@@ -152,6 +152,30 @@ export const AgentRegistry = {
     return { allowed: false, reason: `Agent '${agentId}' not authorized for '${namespace}'. Allowed: [${namespaces.join(', ')}]` }
   },
 
+  remove(agentId: string): boolean {
+    const existed = registry.delete(agentId)
+    if (existed) removeFromRedis(agentId)
+    return existed
+  },
+
+  update(agentId: string, fields: Partial<AgentHandshakeData>): boolean {
+    const entry = registry.get(agentId)
+    if (!entry) return false
+    Object.assign(entry.handshake, fields)
+    entry.lastSeenAt = new Date()
+    persistToRedis(agentId, entry)
+    return true
+  },
+
+  /** Remove all agents from registry and Redis */
+  async purgeAll(): Promise<number> {
+    const count = registry.size
+    registry.clear()
+    const redis = getRedis()
+    if (redis) await redis.del(REDIS_KEY).catch(() => {})
+    return count
+  },
+
   incrementActive(agentId: string): void {
     const e = registry.get(agentId)
     if (e) e.activeCalls++
