@@ -20,7 +20,10 @@
       "WebFetch(domain:composio.dev)",
       "Bash(head:*)",
       "Bash(git:*)",
-      "Bash(railway variables:*)"
+      "Bash(railway variables:*)",
+      "WebFetch(domain:gist.github.com)",
+      "WebFetch(domain:flowbite.com)",
+      "WebFetch(domain:ishadeed.com)"
     ]
   }
 }

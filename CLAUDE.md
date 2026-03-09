@@ -1,24 +1,49 @@
 # WidgeTDC Orchestrator — Multi-Agent Coordination Layer
 
-TypeScript orchestration service bridging AI agents to Railway MCP backend.
+TypeScript orchestration service: unified gateway for agent orchestration, MCP bridge, chains, cognitive proxy, and Command Center dashboard.
 
 ## Repo Map
 
 ```
 src/
-  agents/            Agent definitions and routing
-  coordination/      Multi-agent task coordination
-  bridges/           MCP backend bridge adapters
-  types/             TypeScript type definitions
+  index.ts              Entry point — Express server, routes, boot
+  config.ts             Environment config (all env vars)
+  agent-registry.ts     Agent registry with Redis persistence
+  agent-seeds.ts        19 canonical agent definitions, ghost cleanup
+  chain-engine.ts       Chain execution (sequential, parallel, loop, debate)
+  cognitive-proxy.ts    HTTP proxy to RLM Engine (reason, analyze, plan, fold)
+  cron-scheduler.ts     node-cron scheduled loops
+  chat-broadcaster.ts   WebSocket + SSE message broadcast
+  llm-proxy.ts          Multi-provider LLM proxy (DeepSeek, OpenAI, Groq, Gemini, Claude)
+  redis.ts              Optional Redis connection
+  auth.ts               API key auth middleware
+  audit.ts              Audit trail middleware
+  sse.ts                Server-sent events
+  validation.ts         TypeBox compiled validators
+  routes/
+    agents.ts           CRUD + heartbeat
+    tools.ts            MCP tool proxy with ACL
+    chains.ts           Chain execution + status
+    cognitive.ts        RLM cognitive endpoints
+    cron.ts             Cron CRUD + trigger
+    chat.ts             REST chat + WS stats
+    llm.ts              LLM chat + providers
+    dashboard.ts        Dashboard data API
+    audit.ts            Audit log query
+    openclaw.ts         OpenClaw gateway proxy
+frontend/
+  index.html            Command Center SPA (single file, vanilla JS)
+dist/                   Pre-built bundle (committed, Railway runs directly)
+test-e2e.mjs            50 comprehensive e2e tests
+build.mjs               esbuild bundler
 ```
 
 ## Essential Commands
 
 ```bash
-npm run dev                # Dev server
-npm run build              # Production build
-npm run test               # Run tests
-npm run lint               # ESLint
+npm run build              # esbuild bundle → dist/
+node test-e2e.mjs          # 50 e2e tests against production
+railway up -s orchestrator # Deploy to Railway
 ```
 
 ## Rules (Ufravigelige)
@@ -26,12 +51,14 @@ npm run lint               # ESLint
 1. ESM only — import/export, never require()
 2. TypeScript strict mode
 3. Auth: Authorization Bearer on all backend/RLM calls
-4. A2A protocol for agent delegation to RLM Engine
-5. Neo4j writes: MERGE only, AuraDB only, parameterized Cypher
-6. Conventional commits (feat:, fix:, docs:, refactor:)
+4. dist/ is committed — Railway runs `node dist/index.js` directly
+5. Frontend is vanilla JS in a single HTML file — NO TypeScript syntax (as/interface)
+6. Always `node --check` extracted JS before deploy
+7. Conventional commits (feat:, fix:, docs:, refactor:)
 
 ## Danger Zones
 
+- Never use TypeScript syntax (`as number`, `interface`) in frontend JS — crashes browsers
 - Never call backend without Authorization header
 - Never bypass rate limiting on MCP tool calls
 - Agent coordination must handle timeouts gracefully
@@ -39,15 +66,11 @@ npm run lint               # ESLint
 ## Key Integrations
 
 - Backend MCP: https://backend-production-d3da.up.railway.app/api/mcp/route
-- RLM A2A: https://rlm-engine-production.up.railway.app/a2a/tasks/send
+- RLM Engine: https://rlm-engine-production.up.railway.app
+- Redis: Railway Redis in widgetdc-prod project
 
 ## Cross-Repo
 
-Part of WidgeTDC platform (Clauskraft/). Monorepo: WidgeTDC.
+Part of WidgeTDC platform (Clauskraft/).
 Contracts: widgetdc-contracts (snake_case JSON, $id required).
 Production: https://orchestrator-production-c27e.up.railway.app
-
-## More Context
-
-- Agent compliance: see monorepo docs/AGENT_COMPLIANCE.md
-- Architecture: see monorepo docs/ARCHITECTURE.md
