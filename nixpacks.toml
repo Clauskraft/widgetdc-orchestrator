@@ -8,5 +8,8 @@ nixPkgs = ["nodejs_20"]
 [phases.install]
 cmds = ["npm ci --omit=dev"]
 
+[phases.build]
+cmds = ["echo 'Skipping build — dist/ is pre-built'"]
+
 [start]
 cmd = "node dist/index.js"
