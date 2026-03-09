@@ -836,24 +836,29 @@ async function fetchDomainCoverage() {
   try {
     const result = await api('/tools/call', { method: 'POST', body: JSON.stringify({
       agent_id: 'command-center', tool_name: 'graph.read_cypher', call_id: uuid(),
-      arguments: { query: "MATCH (d:ConsultingDomain) OPTIONAL MATCH (d)<-[:BELONGS_TO_DOMAIN]-(n) RETURN d.domain_id AS domain, d.name AS name, count(n) AS assets ORDER BY assets DESC" }
+      arguments: { query: "MATCH (d:ConsultingDomain) RETURN d.domain_id AS domain, d.name AS name ORDER BY domain" }
     })})
     const data = result.result || result.data?.result || result
-    const records = data.records || data.rows || data
+    const records = data.results || data.records || data.rows || data
     if (!Array.isArray(records) || records.length === 0) {
       document.getElementById('knowledge-content').innerHTML = '<div class="empty-state">No ConsultingDomain nodes found in graph</div>'
       return
     }
-    let html = '<div class="section-box"><h2>Consulting Domain Coverage (17 Canonical Domains)</h2><table><thead><tr><th>Domain ID</th><th>Name</th><th>Assets</th><th>Coverage</th></tr></thead><tbody>'
-    const maxAssets = Math.max(...records.map(r => r.assets || r[2] || 0))
-    for (const r of records) {
-      const domain = r.domain || r[0] || '-'
-      const name = r.name || r[1] || domain
-      const assets = r.assets || r[2] || 0
-      const pct = maxAssets > 0 ? (assets / maxAssets * 100).toFixed(0) : 0
-      html += `<tr><td><code style="color:var(--purple)">${h(domain)}</code></td><td>${h(name)}</td><td>${Number(assets).toLocaleString()}</td><td><div style="background:var(--bg);border-radius:4px;overflow:hidden;height:8px;width:160px"><div style="background:${Number(pct) > 50 ? 'var(--green)' : Number(pct) > 20 ? 'var(--yellow)' : 'var(--red)'};height:100%;width:${pct}%"></div></div></td></tr>`
+    const canonical = records.filter(r => r.domain)
+    const legacy = records.filter(r => !r.domain)
+    let html = '<div class="card-grid"><div class="stat-card"><div class="value">' + canonical.length + '</div><div class="label">Canonical Domains</div></div><div class="stat-card"><div class="value">' + legacy.length + '</div><div class="label">Legacy (unmapped)</div></div><div class="stat-card"><div class="value">' + records.length + '</div><div class="label">Total Domain Nodes</div></div></div>'
+    html += '<div class="section-box" style="margin-top:16px"><h2>Canonical Consulting Domains</h2><table><thead><tr><th>Domain ID</th><th>Name</th><th>Status</th></tr></thead><tbody>'
+    for (const r of canonical) {
+      html += `<tr><td><code style="color:var(--purple);font-weight:700">${h(r.domain)}</code></td><td>${h(r.name)}</td><td><span class="badge badge-online">canonical</span></td></tr>`
     }
     html += '</tbody></table></div>'
+    if (legacy.length > 0) {
+      html += '<div class="section-box"><h2>Legacy Domains (pending consolidation)</h2><table><thead><tr><th>Name</th><th>Status</th></tr></thead><tbody>'
+      for (const r of legacy) {
+        html += `<tr><td>${h(r.name)}</td><td><span class="badge badge-standby">legacy</span></td></tr>`
+      }
+      html += '</tbody></table></div>'
+    }
     document.getElementById('knowledge-content').innerHTML = html
   } catch (err) {
     document.getElementById('knowledge-content').innerHTML = `<div class="empty-state" style="color:var(--red)">Failed: ${h(err.message)}</div>`
@@ -865,26 +870,25 @@ async function fetchKnowledgeGaps() {
   try {
     const result = await api('/tools/call', { method: 'POST', body: JSON.stringify({
       agent_id: 'command-center', tool_name: 'graph.read_cypher', call_id: uuid(),
-      arguments: { query: "MATCH (ia:IntelligenceAsset) WHERE ia.domain IS NOT NULL RETURN ia.domain AS domain, count(*) AS count, avg(ia.confidence) AS avg_confidence ORDER BY count DESC" }
+      arguments: { query: "MATCH (ia:IntelligenceAsset) WHERE ia.domain IS NOT NULL RETURN ia.domain AS domain, count(ia) AS count ORDER BY count DESC" }
     })})
     const data = result.result || result.data?.result || result
-    const records = data.records || data.rows || data
+    const records = data.results || data.records || data.rows || data
     if (!Array.isArray(records) || records.length === 0) {
       document.getElementById('knowledge-content').innerHTML = '<div class="empty-state">No IntelligenceAsset nodes with domain tags found</div>'
       return
     }
-    const total = records.reduce((s, r) => s + (r.count || r[1] || 0), 0)
+    const total = records.reduce((s, r) => s + (r.count || 0), 0)
     const ideal = 1 / 17
     let html = '<div class="section-box"><h2>Knowledge Gap Analysis (KL Divergence)</h2><div class="card-grid" style="margin-bottom:16px"><div class="stat-card"><div class="value">' + Number(total).toLocaleString() + '</div><div class="label">Intelligence Assets</div></div><div class="stat-card"><div class="value">' + records.length + '/17</div><div class="label">Domains Covered</div></div></div>'
-    html += '<table><thead><tr><th>Domain</th><th>Assets</th><th>Coverage</th><th>Ideal</th><th>Gap</th><th>Avg Confidence</th></tr></thead><tbody>'
+    html += '<table><thead><tr><th>Domain</th><th>Assets</th><th>Coverage</th><th>Ideal</th><th>Gap</th></tr></thead><tbody>'
     for (const r of records) {
-      const domain = r.domain || r[0] || '-'
-      const count = r.count || r[1] || 0
-      const conf = r.avg_confidence || r[2] || 0
+      const domain = r.domain || '-'
+      const count = r.count || 0
       const coverage = total > 0 ? count / total : 0
       const gap = ideal - coverage
       const gapColor = gap > 0.03 ? 'var(--red)' : gap > 0 ? 'var(--yellow)' : 'var(--green)'
-      html += `<tr><td><code style="color:var(--purple)">${h(domain)}</code></td><td>${Number(count).toLocaleString()}</td><td>${(coverage * 100).toFixed(1)}%</td><td>${(ideal * 100).toFixed(1)}%</td><td style="color:${gapColor}">${gap > 0 ? '+' : ''}${(gap * 100).toFixed(2)}%</td><td>${typeof conf === 'number' ? conf.toFixed(2) : '-'}</td></tr>`
+      html += `<tr><td><code style="color:var(--purple)">${h(domain)}</code></td><td>${Number(count).toLocaleString()}</td><td>${(coverage * 100).toFixed(1)}%</td><td>${(ideal * 100).toFixed(1)}%</td><td style="color:${gapColor}">${gap > 0 ? '+' : ''}${(gap * 100).toFixed(2)}%</td></tr>`
     }
     html += '</tbody></table></div>'
     document.getElementById('knowledge-content').innerHTML = html
@@ -898,19 +902,19 @@ async function fetchGraphTopology() {
   try {
     const result = await api('/tools/call', { method: 'POST', body: JSON.stringify({
       agent_id: 'command-center', tool_name: 'graph.read_cypher', call_id: uuid(),
-      arguments: { query: "CALL db.labels() YIELD label MATCH (n) WHERE label IN labels(n) WITH label, count(n) AS cnt ORDER BY cnt DESC LIMIT 40 RETURN label, cnt" }
+      arguments: { query: "MATCH (n) RETURN labels(n)[0] AS label, count(n) AS cnt ORDER BY cnt DESC LIMIT 40" }
     })})
     const data = result.result || result.data?.result || result
-    const records = data.records || data.rows || data
+    const records = data.results || data.records || data.rows || data
     if (!Array.isArray(records) || records.length === 0) {
       document.getElementById('knowledge-content').innerHTML = '<div class="empty-state">No topology data returned</div>'
       return
     }
     let html = '<div class="section-box"><h2>Graph Topology — Top 40 Node Types</h2><table><thead><tr><th>Label</th><th>Count</th><th>Distribution</th></tr></thead><tbody>'
-    const maxCnt = Math.max(...records.map(r => r.cnt || r[1] || 0))
+    const maxCnt = Math.max(...records.map(r => r.cnt || 0))
     for (const r of records) {
-      const label = r.label || r[0] || '-'
-      const cnt = r.cnt || r[1] || 0
+      const label = r.label || '-'
+      const cnt = r.cnt || 0
       const pct = maxCnt > 0 ? (cnt / maxCnt * 100).toFixed(0) : 0
       html += `<tr><td><strong>${h(label)}</strong></td><td>${Number(cnt).toLocaleString()}</td><td><div style="background:var(--bg);border-radius:4px;overflow:hidden;height:10px;width:200px"><div style="background:var(--accent);height:100%;width:${pct}%"></div></div></td></tr>`
     }
