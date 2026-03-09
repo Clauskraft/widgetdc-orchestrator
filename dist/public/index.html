@@ -147,6 +147,10 @@
     <div class="sidebar-status">
       <span class="ws-dot disconnected" id="ws-indicator"></span>
       <span id="ws-label">Disconnected</span>
+      <div style="margin-top:8px;display:flex;justify-content:space-between;align-items:center">
+        <span style="color:var(--text3);font-size:0.6rem">v2.1</span>
+        <button onclick="logout()" style="background:none;border:1px solid var(--border);color:var(--text3);border-radius:4px;padding:2px 8px;font-size:0.65rem;cursor:pointer">Logout</button>
+      </div>
     </div>
   </div>
 
@@ -393,6 +397,14 @@ function doAuth() {
 
 document.getElementById('auth-key').addEventListener('keydown', e => { if (e.key === 'Enter') doAuth() })
 
+function logout() {
+  API_KEY = ''
+  localStorage.removeItem('cc_api_key')
+  if (ws) ws.close()
+  if (refreshTimer) clearInterval(refreshTimer)
+  checkAuth()
+}
+
 // ─── API Client ─────────────────────────────────────────────────────────────
 async function api(path, opts = {}) {
   const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${API_KEY}` }
@@ -450,6 +462,7 @@ async function refreshDashboard() {
     renderDashboard()
   } catch (err) {
     console.warn('Dashboard refresh failed:', err)
+    document.getElementById('stat-cards').innerHTML = `<div class="stat-card" style="grid-column:1/-1"><div class="value" style="font-size:1rem;color:var(--red)">Dashboard load failed</div><div class="label">${h(String(err))}</div></div>`
   }
 }
 

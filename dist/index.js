@@ -9490,7 +9490,13 @@ app.use((req, _res, next) => {
   logger.debug({ method: req.method, path: req.path }, "Request");
   next();
 });
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static(path.join(__dirname, "public"), {
+  etag: false,
+  maxAge: 0,
+  setHeaders: (res) => {
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  }
+}));
 app.use(auditMiddleware);
 app.use("/agents", requireApiKey, agentsRouter);
 app.use("/tools", requireApiKey, toolsRouter);
