@@ -59,19 +59,32 @@ export async function callCognitive(
   try {
     logger.debug({ action, url, agent: params.agent_id }, 'Cognitive proxy call')
 
+    // Build action-specific body (RLM endpoints have different schemas)
+    let body: Record<string, unknown>
+    if (action === 'analyze') {
+      body = {
+        task: (params as any).task || params.prompt,
+        context: (params as any).context || params.prompt,
+        analysis_dimensions: (params as any).analysis_dimensions || ['general'],
+        agent_id: params.agent_id,
+      }
+    } else {
+      body = {
+        prompt: params.prompt,
+        context: params.context,
+        agent_id: params.agent_id,
+        depth: params.depth ?? 0,
+        mode: params.mode ?? 'standard',
+      }
+    }
+
     const res = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(config.backendApiKey ? { 'Authorization': `Bearer ${config.backendApiKey}` } : {}),
       },
-      body: JSON.stringify({
-        prompt: params.prompt,
-        context: params.context,
-        agent_id: params.agent_id,
-        depth: params.depth ?? 0,
-        mode: params.mode ?? 'standard',
-      }),
+      body: JSON.stringify(body),
       signal: controller.signal,
     })
 

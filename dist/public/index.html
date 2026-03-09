@@ -86,9 +86,18 @@
     .msg .msg-body pre { background: var(--bg); padding: 8px; border-radius: 6px; overflow-x: auto; margin: 4px 0; }
     .msg.msg-self { align-self: flex-end; border-color: var(--accent); }
     .msg.msg-system { border-color: #713f12; }
-    .chat-input-bar { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); background: var(--bg2); }
+    .chat-input-bar { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); background: var(--bg2); position: relative; }
     .chat-input-bar input { flex: 1; }
     .chat-input-bar select { width: 140px; }
+    /* ─── Autocomplete ─── */
+    .ac-popup { position: absolute; bottom: 100%; left: 16px; right: 160px; max-height: 240px; overflow-y: auto; background: var(--bg2); border: 1px solid var(--accent); border-radius: 8px; display: none; z-index: 100; box-shadow: 0 -4px 16px rgba(0,0,0,0.4); }
+    .ac-popup.show { display: block; }
+    .ac-item { padding: 8px 14px; cursor: pointer; font-size: 0.82rem; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid rgba(45,55,72,0.3); }
+    .ac-item:hover, .ac-item.selected { background: var(--accent); color: #fff; }
+    .ac-item .ac-label { font-weight: 600; }
+    .ac-item .ac-hint { font-size: 0.7rem; color: var(--text3); margin-left: auto; }
+    .ac-item:hover .ac-hint { color: rgba(255,255,255,0.7); }
+    .ac-header { padding: 6px 14px; font-size: 0.65rem; color: var(--text3); text-transform: uppercase; letter-spacing: 0.1em; background: var(--bg); }
     /* ─── Chain Builder ─── */
     .chain-step { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 8px; display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 8px; align-items: center; }
     .chain-step input, .chain-step select { width: 100%; }
@@ -206,11 +215,12 @@
         <div class="chat-messages">
           <div class="chat-feed" id="chat-feed"></div>
           <div class="chat-input-bar">
-            <input type="text" id="chat-input" placeholder="Type a message... (@agent for mention)" autocomplete="off">
+            <div class="ac-popup" id="ac-popup"></div>
+            <input type="text" id="chat-input" placeholder="@agent /skill or message..." autocomplete="off">
             <select id="chat-type">
               <option value="Message">Message</option>
               <option value="TaskAssignment">TaskAssignment</option>
-              <option value="TaskComplete">TaskComplete</option>
+              <option value="Command">Command</option>
             </select>
             <button onclick="sendChat()">Send</button>
           </div>
@@ -613,21 +623,88 @@ function formatMessage(text) {
   s = s.replace(/`([^`]+)`/g, '<code>$1</code>')
   // bold
   s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+  // @mentions
+  s = s.replace(/@([\w-]+)/g, '<span style="color:var(--accent2);font-weight:600;cursor:pointer" onclick="chatInput.value=\'@$1 \';chatInput.focus()">@$1</span>')
+  // /commands
+  s = s.replace(/\/([\w.]+)/g, '<span style="color:var(--green);font-weight:600;cursor:pointer" onclick="chatInput.value=\'/$1 \';chatInput.focus()">/$1</span>')
   return s
+}
+
+// Available tools cache
+let availableTools = []
+async function loadTools() {
+  try {
+    const res = await api('/tools/namespaces')
+    availableTools = res?.data?.data?.tools || res?.data?.tools || []
+  } catch {}
+}
+
+// Parse @agent and /skill from input
+function parseInput(text) {
+  // /skill [args] — execute tool
+  const skillMatch = text.match(/^\/(\S+)\s*(.*)$/)
+  if (skillMatch) return { type: 'skill', skill: skillMatch[1], args: skillMatch[2].trim() }
+  // @agent message — direct message
+  const mentionMatch = text.match(/^@(\S+)\s*(.*)$/)
+  if (mentionMatch) return { type: 'mention', agent: mentionMatch[1], message: mentionMatch[2].trim() }
+  // plain message
+  return { type: 'message', message: text }
 }
 
 async function sendChat() {
   const input = document.getElementById('chat-input')
   const text = input.value.trim()
   if (!text) return
+  closeAC()
 
-  const type = document.getElementById('chat-type').value
+  const parsed = parseInput(text)
+  const chatType = document.getElementById('chat-type').value
+
+  if (parsed.type === 'skill') {
+    // Execute /skill as tool call
+    input.value = ''
+    const skillName = parsed.skill
+    // Cognitive shortcuts
+    const cogActions = ['reason','analyze','plan','learn','fold','enrich']
+    if (cogActions.includes(skillName)) {
+      addLocalMsg('command-center', `/${skillName} ${parsed.args}`, 'Command')
+      try {
+        const body = { action: skillName }
+        if (skillName === 'analyze') {
+          body.task = parsed.args || 'analyze'; body.context = 'Command Center'; body.analysis_dimensions = ['general']
+        } else {
+          body.prompt = parsed.args || skillName
+        }
+        const res = await api('/cognitive/' + skillName, { method: 'POST', body: JSON.stringify(body) })
+        addLocalMsg('RLM-Engine', JSON.stringify(res.data || res, null, 2), 'Answer')
+      } catch (err) { addLocalMsg('System', 'Cognitive error: ' + err.message, 'Alert') }
+      return
+    }
+    // MCP tool call
+    addLocalMsg('command-center', `/${skillName} ${parsed.args}`, 'Command')
+    try {
+      let args = {}
+      if (parsed.args) {
+        try { args = JSON.parse(parsed.args) } catch { args = { query: parsed.args, prompt: parsed.args } }
+      }
+      const res = await api('/tools/call', { method: 'POST', body: JSON.stringify({
+        agent_id: 'command-center', tool_name: skillName, arguments: args, call_id: uuid()
+      })})
+      const result = res.result || res.data?.result || res
+      addLocalMsg('MCP', typeof result === 'string' ? result : JSON.stringify(result, null, 2), 'ToolResult')
+    } catch (err) { addLocalMsg('System', 'Tool error: ' + err.message, 'Alert') }
+    return
+  }
+
+  // @agent or plain message
+  const target = parsed.type === 'mention' ? parsed.agent : chatTarget
+  const message = parsed.type === 'mention' ? (parsed.message || `@${parsed.agent}`) : parsed.message || text
   const msg = {
     from: 'command-center',
-    to: chatTarget,
+    to: target,
     source: 'human',
-    type,
-    message: text,
+    type: chatType,
+    message: message,
     timestamp: new Date().toISOString()
   }
 
@@ -635,11 +712,88 @@ async function sendChat() {
     await api('/chat/message', { method: 'POST', body: JSON.stringify(msg) })
     input.value = ''
   } catch (err) {
-    console.error('Send failed:', err)
+    addLocalMsg('System', 'Send failed: ' + err.message, 'Alert')
   }
 }
 
-document.getElementById('chat-input').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat() } })
+function addLocalMsg(from, message, type) {
+  chatMessages.push({ from, to: 'All', source: from === 'command-center' ? 'human' : 'system', type, message, timestamp: new Date().toISOString() })
+  if (chatMessages.length > 500) chatMessages = chatMessages.slice(-400)
+  renderChat()
+}
+
+// ─── Autocomplete ─────────────────────────────────────────────────────────
+let acIndex = -1
+let acItems = []
+
+function showAC(items) {
+  const popup = document.getElementById('ac-popup')
+  if (!items.length) { closeAC(); return }
+  acItems = items
+  acIndex = -1
+  popup.innerHTML = items.map((it, i) =>
+    `<div class="ac-item" data-idx="${i}" onmousedown="selectAC(${i})"><span class="ac-label">${h(it.label)}</span><span class="ac-hint">${h(it.hint || '')}</span></div>`
+  ).join('')
+  popup.classList.add('show')
+}
+
+function closeAC() {
+  document.getElementById('ac-popup').classList.remove('show')
+  acItems = []
+  acIndex = -1
+}
+
+function selectAC(idx) {
+  const item = acItems[idx]
+  if (!item) return
+  const input = document.getElementById('chat-input')
+  input.value = item.insert + ' '
+  input.focus()
+  closeAC()
+}
+
+function navigateAC(dir) {
+  if (!acItems.length) return false
+  acIndex = Math.max(-1, Math.min(acItems.length - 1, acIndex + dir))
+  document.querySelectorAll('.ac-item').forEach((el, i) => el.classList.toggle('selected', i === acIndex))
+  return true
+}
+
+const chatInput = document.getElementById('chat-input')
+chatInput.addEventListener('input', () => {
+  const val = chatInput.value
+  if (val.startsWith('@')) {
+    const q = val.slice(1).toLowerCase()
+    const agents = (dashboardData?.agents || []).map(a => ({
+      label: '@' + a.agent_id,
+      hint: a.display_name || a.source,
+      insert: '@' + a.agent_id
+    })).filter(a => !q || a.label.toLowerCase().includes(q)).slice(0, 12)
+    showAC(agents)
+  } else if (val.startsWith('/')) {
+    const q = val.slice(1).toLowerCase()
+    const cogCmds = ['reason','analyze','plan','learn','fold','enrich'].map(c => ({
+      label: '/' + c, hint: 'cognitive', insert: '/' + c
+    }))
+    const tools = availableTools.map(t => ({ label: '/' + t, hint: 'MCP tool', insert: '/' + t }))
+    const all = [...cogCmds, ...tools].filter(t => !q || t.label.toLowerCase().includes(q)).slice(0, 15)
+    showAC(all)
+  } else {
+    closeAC()
+  }
+})
+
+chatInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault()
+    if (acIndex >= 0) { selectAC(acIndex) } else { closeAC(); sendChat() }
+    return
+  }
+  if (e.key === 'ArrowDown') { if (navigateAC(1)) e.preventDefault() }
+  if (e.key === 'ArrowUp') { if (navigateAC(-1)) e.preventDefault() }
+  if (e.key === 'Escape') closeAC()
+  if (e.key === 'Tab' && acItems.length) { e.preventDefault(); selectAC(Math.max(0, acIndex)) }
+})
 
 // ─── Chain Builder ──────────────────────────────────────────────────────────
 document.getElementById('chain-mode').addEventListener('change', e => {
@@ -821,6 +975,7 @@ function boot() {
   connectWS()
   connectSSE()
   refreshDashboard()
+  loadTools()
   addChainStep() // Start with one empty step
   if (refreshTimer) clearInterval(refreshTimer)
   refreshTimer = setInterval(refreshDashboard, 10000)
