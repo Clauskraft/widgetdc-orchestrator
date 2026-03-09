@@ -137,7 +137,11 @@
       <div class="nav-item" data-panel="cron"><span class="icon">&#8635;</span><span>Cron</span></div>
       <div class="nav-sep">Intel</div>
       <div class="nav-item" data-panel="omega"><span class="icon">&#937;</span><span>Omega SITREP</span></div>
+      <div class="nav-item" data-panel="knowledge"><span class="icon">&#9733;</span><span>Knowledge</span></div>
       <div class="nav-item" data-panel="cognitive"><span class="icon">&#9881;</span><span>Cognitive</span></div>
+      <div class="nav-sep">Enterprise</div>
+      <div class="nav-item" data-panel="audit"><span class="icon">&#9998;</span><span>Audit Log</span></div>
+      <div class="nav-item" data-panel="cost"><span class="icon">&#36;</span><span>Cost Intel</span></div>
       <div class="nav-item" data-panel="openclaw"><span class="icon">&#9783;</span><span>OpenClaw</span></div>
     </div>
     <div class="sidebar-status">
@@ -292,6 +296,51 @@
           <button onclick="runCognitive()">Execute</button>
         </div>
         <div id="cog-result" class="empty-state">Results will appear here</div>
+      </div>
+    </div>
+
+    <!-- Knowledge Intelligence Panel -->
+    <div class="panel" id="panel-knowledge">
+      <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
+        <button onclick="fetchGraphStats()">Graph Stats</button>
+        <button class="secondary" onclick="fetchDomainCoverage()">Domain Coverage</button>
+        <button class="secondary" onclick="fetchKnowledgeGaps()">Knowledge Gaps</button>
+        <button class="secondary" onclick="fetchGraphTopology()">Top Node Types</button>
+      </div>
+      <div id="knowledge-content">
+        <div class="empty-state">Click Graph Stats to load Neo4j intelligence</div>
+      </div>
+    </div>
+
+    <!-- Audit Log Panel -->
+    <div class="panel" id="panel-audit">
+      <div class="section-box">
+        <h2>Audit Trail</h2>
+        <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+          <button onclick="fetchAuditLog()">Refresh</button>
+          <select id="audit-filter-action" onchange="fetchAuditLog()">
+            <option value="">All Actions</option>
+            <option value="register">Register</option>
+            <option value="tool_call">Tool Call</option>
+            <option value="chain_execute">Chain Execute</option>
+            <option value="chat_message">Chat Message</option>
+            <option value="cron_trigger">Cron Trigger</option>
+          </select>
+        </div>
+        <table>
+          <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Entity</th><th>Status</th><th>Duration</th></tr></thead>
+          <tbody id="audit-table"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Cost Intelligence Panel -->
+    <div class="panel" id="panel-cost">
+      <div style="display:flex;gap:8px;margin-bottom:16px">
+        <button onclick="fetchCostReport()">Load Cost Report</button>
+      </div>
+      <div id="cost-content">
+        <div class="empty-state">Click Load Cost Report to fetch LLM cost intelligence</div>
       </div>
     </div>
 
@@ -746,9 +795,231 @@ async function fetchOpenClawHealth() {
 // ─── Boot ───────────────────────────────────────────────────────────────────
 function boot() {
   connectWS()
+  connectSSE()
   refreshDashboard()
   addChainStep() // Start with one empty step
   refreshTimer = setInterval(refreshDashboard, 10000)
+}
+
+// ─── Knowledge Intelligence ─────────────────────────────────────────────────
+async function fetchGraphStats() {
+  document.getElementById('knowledge-content').innerHTML = '<div class="empty-state">Loading graph stats...</div>'
+  try {
+    const result = await api('/tools/call', { method: 'POST', body: JSON.stringify({
+      agent_id: 'command-center', tool_name: 'graph.stats', arguments: {}, call_id: uuid()
+    })})
+    const data = result.result || result.data?.result || result
+    let html = '<div class="card-grid">'
+    if (data.nodes) html += `<div class="stat-card"><div class="value">${Number(data.nodes).toLocaleString()}</div><div class="label">Total Nodes</div></div>`
+    if (data.relationships) html += `<div class="stat-card"><div class="value">${Number(data.relationships).toLocaleString()}</div><div class="label">Relationships</div></div>`
+    if (data.system) html += `<div class="stat-card"><div class="value" style="font-size:1rem">${h(data.system.version || '')}</div><div class="label">Neo4j ${h(data.system.edition || '')}</div></div>`
+    if (data.mode) html += `<div class="stat-card"><div class="value" style="font-size:1.2rem">${h(data.mode)}</div><div class="label">Mode</div></div>`
+    html += '</div>'
+    if (data.labels) {
+      html += '<div class="section-box" style="margin-top:16px"><h2>Node Labels (top 30)</h2><table><thead><tr><th>Label</th><th>Count</th><th>Coverage</th></tr></thead><tbody>'
+      const totalNodes = data.nodes || 1
+      const entries = Object.entries(data.labels).sort((a, b) => (b[1] as number) - (a[1] as number)).slice(0, 30)
+      for (const [label, count] of entries) {
+        const pct = ((count as number) / totalNodes * 100).toFixed(1)
+        html += `<tr><td><strong>${h(label)}</strong></td><td>${Number(count).toLocaleString()}</td><td><div style="background:var(--bg);border-radius:4px;overflow:hidden;height:8px;width:120px"><div style="background:var(--accent);height:100%;width:${Math.min(100, parseFloat(pct) * 2)}%"></div></div> ${pct}%</td></tr>`
+      }
+      html += '</tbody></table></div>'
+    }
+    document.getElementById('knowledge-content').innerHTML = html
+  } catch (err) {
+    document.getElementById('knowledge-content').innerHTML = `<div class="empty-state" style="color:var(--red)">Failed: ${h(err.message)}</div>`
+  }
+}
+
+async function fetchDomainCoverage() {
+  document.getElementById('knowledge-content').innerHTML = '<div class="empty-state">Querying domain coverage...</div>'
+  try {
+    const result = await api('/tools/call', { method: 'POST', body: JSON.stringify({
+      agent_id: 'command-center', tool_name: 'graph.read_cypher', call_id: uuid(),
+      arguments: { query: "MATCH (d:ConsultingDomain) OPTIONAL MATCH (d)<-[:BELONGS_TO_DOMAIN]-(n) RETURN d.domain_id AS domain, d.name AS name, count(n) AS assets ORDER BY assets DESC" }
+    })})
+    const data = result.result || result.data?.result || result
+    const records = data.records || data.rows || data
+    if (!Array.isArray(records) || records.length === 0) {
+      document.getElementById('knowledge-content').innerHTML = '<div class="empty-state">No ConsultingDomain nodes found in graph</div>'
+      return
+    }
+    let html = '<div class="section-box"><h2>Consulting Domain Coverage (17 Canonical Domains)</h2><table><thead><tr><th>Domain ID</th><th>Name</th><th>Assets</th><th>Coverage</th></tr></thead><tbody>'
+    const maxAssets = Math.max(...records.map(r => r.assets || r[2] || 0))
+    for (const r of records) {
+      const domain = r.domain || r[0] || '-'
+      const name = r.name || r[1] || domain
+      const assets = r.assets || r[2] || 0
+      const pct = maxAssets > 0 ? (assets / maxAssets * 100).toFixed(0) : 0
+      html += `<tr><td><code style="color:var(--purple)">${h(domain)}</code></td><td>${h(name)}</td><td>${Number(assets).toLocaleString()}</td><td><div style="background:var(--bg);border-radius:4px;overflow:hidden;height:8px;width:160px"><div style="background:${Number(pct) > 50 ? 'var(--green)' : Number(pct) > 20 ? 'var(--yellow)' : 'var(--red)'};height:100%;width:${pct}%"></div></div></td></tr>`
+    }
+    html += '</tbody></table></div>'
+    document.getElementById('knowledge-content').innerHTML = html
+  } catch (err) {
+    document.getElementById('knowledge-content').innerHTML = `<div class="empty-state" style="color:var(--red)">Failed: ${h(err.message)}</div>`
+  }
+}
+
+async function fetchKnowledgeGaps() {
+  document.getElementById('knowledge-content').innerHTML = '<div class="empty-state">Analyzing knowledge gaps...</div>'
+  try {
+    const result = await api('/tools/call', { method: 'POST', body: JSON.stringify({
+      agent_id: 'command-center', tool_name: 'graph.read_cypher', call_id: uuid(),
+      arguments: { query: "MATCH (ia:IntelligenceAsset) WHERE ia.domain IS NOT NULL RETURN ia.domain AS domain, count(*) AS count, avg(ia.confidence) AS avg_confidence ORDER BY count DESC" }
+    })})
+    const data = result.result || result.data?.result || result
+    const records = data.records || data.rows || data
+    if (!Array.isArray(records) || records.length === 0) {
+      document.getElementById('knowledge-content').innerHTML = '<div class="empty-state">No IntelligenceAsset nodes with domain tags found</div>'
+      return
+    }
+    const total = records.reduce((s, r) => s + (r.count || r[1] || 0), 0)
+    const ideal = 1 / 17
+    let html = '<div class="section-box"><h2>Knowledge Gap Analysis (KL Divergence)</h2><div class="card-grid" style="margin-bottom:16px"><div class="stat-card"><div class="value">' + Number(total).toLocaleString() + '</div><div class="label">Intelligence Assets</div></div><div class="stat-card"><div class="value">' + records.length + '/17</div><div class="label">Domains Covered</div></div></div>'
+    html += '<table><thead><tr><th>Domain</th><th>Assets</th><th>Coverage</th><th>Ideal</th><th>Gap</th><th>Avg Confidence</th></tr></thead><tbody>'
+    for (const r of records) {
+      const domain = r.domain || r[0] || '-'
+      const count = r.count || r[1] || 0
+      const conf = r.avg_confidence || r[2] || 0
+      const coverage = total > 0 ? count / total : 0
+      const gap = ideal - coverage
+      const gapColor = gap > 0.03 ? 'var(--red)' : gap > 0 ? 'var(--yellow)' : 'var(--green)'
+      html += `<tr><td><code style="color:var(--purple)">${h(domain)}</code></td><td>${Number(count).toLocaleString()}</td><td>${(coverage * 100).toFixed(1)}%</td><td>${(ideal * 100).toFixed(1)}%</td><td style="color:${gapColor}">${gap > 0 ? '+' : ''}${(gap * 100).toFixed(2)}%</td><td>${typeof conf === 'number' ? conf.toFixed(2) : '-'}</td></tr>`
+    }
+    html += '</tbody></table></div>'
+    document.getElementById('knowledge-content').innerHTML = html
+  } catch (err) {
+    document.getElementById('knowledge-content').innerHTML = `<div class="empty-state" style="color:var(--red)">Failed: ${h(err.message)}</div>`
+  }
+}
+
+async function fetchGraphTopology() {
+  document.getElementById('knowledge-content').innerHTML = '<div class="empty-state">Loading topology...</div>'
+  try {
+    const result = await api('/tools/call', { method: 'POST', body: JSON.stringify({
+      agent_id: 'command-center', tool_name: 'graph.read_cypher', call_id: uuid(),
+      arguments: { query: "CALL db.labels() YIELD label MATCH (n) WHERE label IN labels(n) WITH label, count(n) AS cnt ORDER BY cnt DESC LIMIT 40 RETURN label, cnt" }
+    })})
+    const data = result.result || result.data?.result || result
+    const records = data.records || data.rows || data
+    if (!Array.isArray(records) || records.length === 0) {
+      document.getElementById('knowledge-content').innerHTML = '<div class="empty-state">No topology data returned</div>'
+      return
+    }
+    let html = '<div class="section-box"><h2>Graph Topology — Top 40 Node Types</h2><table><thead><tr><th>Label</th><th>Count</th><th>Distribution</th></tr></thead><tbody>'
+    const maxCnt = Math.max(...records.map(r => r.cnt || r[1] || 0))
+    for (const r of records) {
+      const label = r.label || r[0] || '-'
+      const cnt = r.cnt || r[1] || 0
+      const pct = maxCnt > 0 ? (cnt / maxCnt * 100).toFixed(0) : 0
+      html += `<tr><td><strong>${h(label)}</strong></td><td>${Number(cnt).toLocaleString()}</td><td><div style="background:var(--bg);border-radius:4px;overflow:hidden;height:10px;width:200px"><div style="background:var(--accent);height:100%;width:${pct}%"></div></div></td></tr>`
+    }
+    html += '</tbody></table></div>'
+    document.getElementById('knowledge-content').innerHTML = html
+  } catch (err) {
+    document.getElementById('knowledge-content').innerHTML = `<div class="empty-state" style="color:var(--red)">Failed: ${h(err.message)}</div>`
+  }
+}
+
+// ─── Audit Log ──────────────────────────────────────────────────────────────
+async function fetchAuditLog() {
+  try {
+    const actionFilter = document.getElementById('audit-filter-action').value
+    let url = '/api/audit/log?limit=100'
+    if (actionFilter) url += '&action=' + actionFilter
+    const result = await api(url)
+    const entries = result.data?.entries || []
+    document.getElementById('audit-table').innerHTML = entries.length === 0
+      ? '<tr><td colspan="6" class="empty-state">No audit entries yet</td></tr>'
+      : entries.map(e => `<tr>
+        <td style="font-size:0.75rem;white-space:nowrap">${e.timestamp ? h(e.timestamp.slice(11,19)) : ''}</td>
+        <td><strong>${h(e.actor)}</strong></td>
+        <td><span class="badge" style="background:var(--bg3);color:var(--text2)">${h(e.action)}</span></td>
+        <td><code>${h(e.entity_type)}/${h(e.entity_id)}</code></td>
+        <td><span class="badge badge-${e.status < 400 ? 'completed' : 'failed'}">${e.status}</span></td>
+        <td>${e.duration_ms}ms</td>
+      </tr>`).join('')
+  } catch (err) {
+    document.getElementById('audit-table').innerHTML = `<tr><td colspan="6" class="empty-state" style="color:var(--red)">Failed: ${h(err.message)}</td></tr>`
+  }
+}
+
+// ─── Cost Intelligence ──────────────────────────────────────────────────────
+async function fetchCostReport() {
+  document.getElementById('cost-content').innerHTML = '<div class="empty-state">Loading cost report...</div>'
+  try {
+    const result = await api('/tools/call', { method: 'POST', body: JSON.stringify({
+      agent_id: 'command-center', tool_name: 'llm.cost_report', arguments: {}, call_id: uuid()
+    })})
+    const data = result.result || result.data?.result || result
+    if (!data || typeof data === 'string') {
+      try { renderCostReport(JSON.parse(data)) } catch { renderCostRaw(data) }
+    } else {
+      renderCostReport(data)
+    }
+  } catch (err) {
+    document.getElementById('cost-content').innerHTML = `<div class="empty-state" style="color:var(--red)">Cost report failed: ${h(err.message)}</div>`
+  }
+}
+
+function renderCostReport(data) {
+  const el = document.getElementById('cost-content')
+  if (typeof data !== 'object' || data === null) { renderCostRaw(data); return }
+
+  let html = '<div class="card-grid">'
+  // Extract common cost report fields
+  if (data.total_cost !== undefined) html += `<div class="stat-card"><div class="value" style="color:var(--green)">$${Number(data.total_cost).toFixed(4)}</div><div class="label">Total Cost</div></div>`
+  if (data.total_tokens !== undefined) html += `<div class="stat-card"><div class="value">${Number(data.total_tokens).toLocaleString()}</div><div class="label">Total Tokens</div></div>`
+  if (data.total_requests !== undefined) html += `<div class="stat-card"><div class="value">${Number(data.total_requests).toLocaleString()}</div><div class="label">Requests</div></div>`
+  html += '</div>'
+
+  // Per-model breakdown
+  if (data.by_model || data.models || data.breakdown) {
+    const models = data.by_model || data.models || data.breakdown
+    html += '<div class="section-box" style="margin-top:16px"><h2>Per-Model Breakdown</h2><table><thead><tr><th>Model</th><th>Requests</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>'
+    if (Array.isArray(models)) {
+      for (const m of models) {
+        html += `<tr><td><strong>${h(m.model || m.name || '-')}</strong></td><td>${m.requests || m.count || '-'}</td><td>${m.tokens ? Number(m.tokens).toLocaleString() : '-'}</td><td>${m.cost !== undefined ? '$' + Number(m.cost).toFixed(4) : '-'}</td></tr>`
+      }
+    } else if (typeof models === 'object') {
+      for (const [name, info] of Object.entries(models)) {
+        const m = typeof info === 'object' ? info : { cost: info }
+        html += `<tr><td><strong>${h(name)}</strong></td><td>${m.requests || '-'}</td><td>${m.tokens ? Number(m.tokens).toLocaleString() : '-'}</td><td>${m.cost !== undefined ? '$' + Number(m.cost).toFixed(4) : '-'}</td></tr>`
+      }
+    }
+    html += '</tbody></table></div>'
+  }
+
+  // Fallback: show raw if we got nothing useful
+  if (html === '<div class="card-grid"></div>') { renderCostRaw(data); return }
+  el.innerHTML = html
+}
+
+function renderCostRaw(data) {
+  document.getElementById('cost-content').innerHTML = `<div class="section-box"><h2>Cost Report</h2><pre style="font-size:0.8rem;white-space:pre-wrap;word-break:break-word">${h(typeof data === 'string' ? data : JSON.stringify(data, null, 2))}</pre></div>`
+}
+
+// ─── SSE Event Stream ───────────────────────────────────────────────────────
+function connectSSE() {
+  if (!API_KEY) return
+  try {
+    const evtSource = new EventSource(`${BASE}/api/events?api_key=${encodeURIComponent(API_KEY)}`)
+    evtSource.addEventListener('message', (e) => {
+      try {
+        const msg = JSON.parse(e.data)
+        chatMessages.push(msg)
+        if (chatMessages.length > 500) chatMessages = chatMessages.slice(-400)
+        renderChat()
+      } catch {}
+    })
+    evtSource.addEventListener('connected', () => {
+      console.log('SSE connected')
+    })
+    evtSource.onerror = () => {
+      evtSource.close()
+      setTimeout(connectSSE, 10000)
+    }
+  } catch {}
 }
 
 if (checkAuth()) boot()

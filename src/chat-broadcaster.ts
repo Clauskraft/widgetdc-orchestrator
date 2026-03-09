@@ -13,6 +13,7 @@ import type { Server } from 'http'
 import type { AgentMessage } from '@widgetdc/contracts/orchestrator'
 import { logger } from './logger.js'
 import { config } from './config.js'
+import { broadcastSSE } from './sse.js'
 
 interface ConnectedAgent {
   ws: WebSocket
@@ -121,6 +122,9 @@ function handleIncomingMessage(fromAgentId: string, msg: AgentMessage): void {
 }
 
 export function broadcastMessage(msg: AgentMessage): void {
+  // Push to SSE clients for dashboard real-time updates
+  broadcastSSE('message', msg)
+
   const payload = JSON.stringify({ type: 'message', data: msg })
   let sent = 0
 

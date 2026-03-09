@@ -32,6 +32,9 @@ import { cognitiveRouter } from './routes/cognitive.js'
 import { cronRouter } from './routes/cron.js'
 import { dashboardRouter } from './routes/dashboard.js'
 import { openclawRouter } from './routes/openclaw.js'
+import { auditRouter } from './routes/audit.js'
+import { auditMiddleware } from './audit.js'
+import { handleSSE, getSSEClientCount } from './sse.js'
 import { AgentRegistry } from './agent-registry.js'
 import { getConnectionStats } from './chat-broadcaster.js'
 import { requireApiKey } from './auth.js'
@@ -70,6 +73,9 @@ app.use((req, _res, next) => {
 // ─── Static frontend (Command Center SPA) ───────────────────────────────────
 app.use(express.static(path.join(__dirname, 'public')))
 
+// ─── Audit middleware (logs all mutations) ───────────────────────────────────
+app.use(auditMiddleware)
+
 // ─── Routes ──────────────────────────────────────────────────────────────────
 // Auth required for mutating endpoints (if ORCHESTRATOR_API_KEY is set)
 app.use('/agents', requireApiKey, agentsRouter)
@@ -79,9 +85,11 @@ app.use('/chains', requireApiKey, chainsRouter)
 app.use('/cognitive', requireApiKey, cognitiveRouter)
 app.use('/cron', requireApiKey, cronRouter)
 
-// Dashboard data API + OpenClaw proxy (no auth — SPA handles auth per-request)
+// Dashboard data API + OpenClaw proxy + Audit log + SSE
 app.use('/api/dashboard', dashboardRouter)
 app.use('/api/openclaw', requireApiKey, openclawRouter)
+app.use('/api/audit', requireApiKey, auditRouter)
+app.get('/api/events', requireApiKey, handleSSE)
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
@@ -92,6 +100,7 @@ app.get('/health', (_req, res) => {
     uptime_seconds: Math.floor(process.uptime()),
     agents_registered: AgentRegistry.all().length,
     ws_connections: getConnectionStats().total,
+    sse_clients: getSSEClientCount(),
     redis_enabled: isRedisEnabled(),
     rlm_available: isRlmAvailable(),
     active_chains: listExecutions().filter(e => e.status === 'running').length,

@@ -17,10 +17,11 @@ export function requireApiKey(req: Request, res: Response, next: NextFunction): 
   const authHeader = req.headers['authorization'] ?? ''
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
 
-  // Also accept x-api-key header
+  // Also accept x-api-key header or query param (needed for SSE EventSource)
   const apiKeyHeader = (req.headers['x-api-key'] ?? '') as string
+  const queryKey = (req.query['api_key'] ?? '') as string
 
-  if (token === config.orchestratorApiKey || apiKeyHeader === config.orchestratorApiKey) {
+  if (token === config.orchestratorApiKey || apiKeyHeader === config.orchestratorApiKey || queryKey === config.orchestratorApiKey) {
     next()
     return
   }

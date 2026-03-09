@@ -71,6 +71,50 @@ function childLogger(correlationId) {
 
 // src/chat-broadcaster.ts
 import { WebSocketServer, WebSocket } from "ws";
+
+// src/sse.ts
+var clients = [];
+function handleSSE(req, res) {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+  const clientId = `sse-${Date.now().toString(36)}`;
+  const client = { id: clientId, res, connectedAt: /* @__PURE__ */ new Date() };
+  clients.push(client);
+  res.write(`event: connected
+data: ${JSON.stringify({ id: clientId })}
+
+`);
+  const keepAlive = setInterval(() => {
+    res.write(": keepalive\n\n");
+  }, 3e4);
+  req.on("close", () => {
+    clearInterval(keepAlive);
+    const idx = clients.indexOf(client);
+    if (idx >= 0) clients.splice(idx, 1);
+    logger.debug({ clientId }, "SSE client disconnected");
+  });
+}
+function broadcastSSE(event, data) {
+  const payload = `event: ${event}
+data: ${JSON.stringify(data)}
+
+`;
+  for (let i = clients.length - 1; i >= 0; i--) {
+    try {
+      clients[i].res.write(payload);
+    } catch {
+      clients.splice(i, 1);
+    }
+  }
+}
+function getSSEClientCount() {
+  return clients.length;
+}
+
+// src/chat-broadcaster.ts
 var connections = /* @__PURE__ */ new Map();
 var wss = null;
 function initWebSocket(server2) {
@@ -149,6 +193,7 @@ function handleIncomingMessage(fromAgentId, msg) {
   }
 }
 function broadcastMessage(msg) {
+  broadcastSSE("message", msg);
   const payload = JSON.stringify({ type: "message", data: msg });
   let sent = 0;
   for (const [, conn] of connections.entries()) {
@@ -6317,7 +6362,7 @@ function Literal2(value, options) {
 }
 
 // ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/boolean/boolean.mjs
-function Boolean(options) {
+function Boolean2(options) {
   return CreateType2({ [Kind2]: "Boolean", type: "boolean" }, options);
 }
 
@@ -6339,7 +6384,7 @@ function String3(options) {
 // ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/syntax.mjs
 function* FromUnion13(syntax) {
   const trim = syntax.trim().replace(/"|'/g, "");
-  return trim === "boolean" ? yield Boolean() : trim === "number" ? yield Number2() : trim === "bigint" ? yield BigInt2() : trim === "string" ? yield String3() : yield (() => {
+  return trim === "boolean" ? yield Boolean2() : trim === "number" ? yield Number2() : trim === "bigint" ? yield BigInt2() : trim === "string" ? yield String3() : yield (() => {
     const literals = trim.split("|").map((literal) => Literal2(literal.trim()));
     return literals.length === 0 ? Never2() : literals.length === 1 ? literals[0] : UnionEvaluated2(literals);
   })();
@@ -7927,7 +7972,7 @@ __export(type_exports3, {
   AsyncIterator: () => AsyncIterator,
   Awaited: () => Awaited,
   BigInt: () => BigInt2,
-  Boolean: () => Boolean,
+  Boolean: () => Boolean2,
   Capitalize: () => Capitalize,
   Composite: () => Composite,
   Const: () => Const,
@@ -9305,6 +9350,102 @@ openclawRouter.all("/proxy/*", async (req, res) => {
   }
 });
 
+// src/routes/audit.ts
+import { Router as Router9 } from "express";
+
+// src/audit.ts
+var REDIS_KEY2 = "orchestrator:audit";
+var MAX_ENTRIES = 1e3;
+var TTL_SECONDS = 30 * 24 * 3600;
+var memoryAudit = [];
+async function logAudit(entry) {
+  try {
+    if (isRedisEnabled()) {
+      const redis2 = getRedis();
+      if (redis2) {
+        await redis2.lpush(REDIS_KEY2, JSON.stringify(entry));
+        await redis2.ltrim(REDIS_KEY2, 0, MAX_ENTRIES - 1);
+        await redis2.expire(REDIS_KEY2, TTL_SECONDS);
+        return;
+      }
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Audit Redis write failed, using memory");
+  }
+  memoryAudit.unshift(entry);
+  if (memoryAudit.length > MAX_ENTRIES) memoryAudit = memoryAudit.slice(0, MAX_ENTRIES);
+}
+async function getAuditLog(limit = 100, offset = 0) {
+  try {
+    if (isRedisEnabled()) {
+      const redis2 = getRedis();
+      if (redis2) {
+        const raw = await redis2.lrange(REDIS_KEY2, offset, offset + limit - 1);
+        return raw.map((r) => JSON.parse(r));
+      }
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Audit Redis read failed, using memory");
+  }
+  return memoryAudit.slice(offset, offset + limit);
+}
+function auditMiddleware(req, res, next) {
+  if (req.method === "GET" || req.method === "OPTIONS" || req.method === "HEAD") {
+    next();
+    return;
+  }
+  const start = Date.now();
+  const originalEnd = res.end.bind(res);
+  res.end = function(...args) {
+    const duration = Date.now() - start;
+    const actor = req.body?.agent_id ?? req.body?.from ?? "human";
+    const pathParts = req.path.split("/").filter(Boolean);
+    const entityType = pathParts[0] ?? "unknown";
+    const entityId = pathParts[1] ?? req.body?.agent_id ?? "-";
+    let action = `${req.method.toLowerCase()}_${entityType}`;
+    if (req.path.includes("/register")) action = "register";
+    else if (req.path.includes("/call")) action = "tool_call";
+    else if (req.path.includes("/execute")) action = "chain_execute";
+    else if (req.path.includes("/message")) action = "chat_message";
+    else if (req.path.includes("/heartbeat")) action = "heartbeat";
+    else if (req.path.includes("/run")) action = "cron_trigger";
+    const entry = {
+      id: `aud-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      actor,
+      action,
+      entity_type: entityType,
+      entity_id: String(entityId),
+      method: req.method,
+      path: req.path,
+      status: res.statusCode,
+      duration_ms: duration
+    };
+    if (action !== "heartbeat") {
+      logAudit(entry).catch(() => {
+      });
+    }
+    return originalEnd(...args);
+  };
+  next();
+}
+
+// src/routes/audit.ts
+var auditRouter = Router9();
+auditRouter.get("/log", async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+  const offset = parseInt(req.query.offset) || 0;
+  const entries = await getAuditLog(limit, offset);
+  const actor = req.query.actor;
+  const action = req.query.action;
+  const entityType = req.query.entity_type;
+  let filtered = entries;
+  if (actor) filtered = filtered.filter((e) => e.actor === actor);
+  if (action) filtered = filtered.filter((e) => e.action === action);
+  if (entityType) filtered = filtered.filter((e) => e.entity_type === entityType);
+  res.json({ success: true, data: { entries: filtered, total: filtered.length, limit, offset } });
+});
+
 // src/auth.ts
 function requireApiKey(req, res, next) {
   if (!config.orchestratorApiKey) {
@@ -9314,7 +9455,8 @@ function requireApiKey(req, res, next) {
   const authHeader = req.headers["authorization"] ?? "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
   const apiKeyHeader = req.headers["x-api-key"] ?? "";
-  if (token === config.orchestratorApiKey || apiKeyHeader === config.orchestratorApiKey) {
+  const queryKey = req.query["api_key"] ?? "";
+  if (token === config.orchestratorApiKey || apiKeyHeader === config.orchestratorApiKey || queryKey === config.orchestratorApiKey) {
     next();
     return;
   }
@@ -9349,6 +9491,7 @@ app.use((req, _res, next) => {
   next();
 });
 app.use(express.static(path.join(__dirname, "public")));
+app.use(auditMiddleware);
 app.use("/agents", requireApiKey, agentsRouter);
 app.use("/tools", requireApiKey, toolsRouter);
 app.use("/chat", requireApiKey, chatRouter);
@@ -9357,6 +9500,8 @@ app.use("/cognitive", requireApiKey, cognitiveRouter);
 app.use("/cron", requireApiKey, cronRouter);
 app.use("/api/dashboard", dashboardRouter);
 app.use("/api/openclaw", requireApiKey, openclawRouter);
+app.use("/api/audit", requireApiKey, auditRouter);
+app.get("/api/events", requireApiKey, handleSSE);
 app.get("/health", (_req, res) => {
   res.json({
     status: "healthy",
@@ -9365,6 +9510,7 @@ app.get("/health", (_req, res) => {
     uptime_seconds: Math.floor(process.uptime()),
     agents_registered: AgentRegistry.all().length,
     ws_connections: getConnectionStats().total,
+    sse_clients: getSSEClientCount(),
     redis_enabled: isRedisEnabled(),
     rlm_available: isRlmAvailable(),
     active_chains: listExecutions().filter((e) => e.status === "running").length,
