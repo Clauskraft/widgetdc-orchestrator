@@ -8847,409 +8847,6 @@ toolsRouter.get("/namespaces", async (_req, res) => {
 
 // src/routes/chat.ts
 import { Router as Router3 } from "express";
-var chatRouter = Router3();
-chatRouter.post("/message", (req, res) => {
-  const result = validate(validateMessage, req.body);
-  if (!result.ok) {
-    res.status(400).json({
-      success: false,
-      error: {
-        code: "VALIDATION_ERROR",
-        message: "Invalid AgentMessage payload",
-        details: result.errors,
-        status_code: 400
-      }
-    });
-    return;
-  }
-  const msg = {
-    ...result.data,
-    id: msgId(),
-    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-    thread_id: req.body.thread_id,
-    parent_id: req.body.parent_id,
-    files: req.body.files
-  };
-  broadcastMessage(msg);
-  notifyChatMessage(msg.from, msg.to, msg.message);
-  logger.info({ from: msg.from, to: msg.to, type: msg.type }, "Chat message broadcast");
-  res.json({ success: true, data: { id: msg.id, timestamp: msg.timestamp } });
-});
-chatRouter.get("/history", async (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit) || 100, 500);
-  const offset = parseInt(req.query.offset) || 0;
-  const target = req.query.target;
-  const messages = await getHistory(limit, offset, target);
-  res.json({ success: true, data: { messages, total: messages.length, limit, offset } });
-});
-chatRouter.get("/threads/:id", async (req, res) => {
-  const messages = await getThread(req.params.id);
-  res.json({ success: true, data: { thread_id: req.params.id, messages, count: messages.length } });
-});
-chatRouter.post("/threads", (req, res) => {
-  const { parent_id, from, message, type } = req.body;
-  if (!parent_id || !from || !message) {
-    res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "parent_id, from, message required" } });
-    return;
-  }
-  const threadMsg = {
-    from,
-    to: "All",
-    source: "human",
-    type: type || "Message",
-    message,
-    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-    thread_id: parent_id,
-    // replies are linked to the parent
-    parent_id
-  };
-  broadcastMessage(threadMsg);
-  res.json({ success: true, data: { thread_id: parent_id, timestamp: threadMsg.timestamp } });
-});
-chatRouter.get("/search", async (req, res) => {
-  const query = req.query.q;
-  if (!query || query.length < 2) {
-    res.status(400).json({ success: false, error: { code: "QUERY_TOO_SHORT", message: "Search query must be at least 2 characters" } });
-    return;
-  }
-  const limit = Math.min(parseInt(req.query.limit) || 50, 200);
-  const results = await searchMessages(query, limit);
-  res.json({ success: true, data: { query, results, count: results.length } });
-});
-chatRouter.post("/pin", async (req, res) => {
-  const { message_id, pin } = req.body;
-  if (!message_id) {
-    res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "message_id required" } });
-    return;
-  }
-  await togglePin(message_id, pin !== false);
-  res.json({ success: true, data: { message_id, pinned: pin !== false } });
-});
-chatRouter.get("/pinned", async (_req, res) => {
-  const pinned = await getPinnedMessages();
-  res.json({ success: true, data: { messages: pinned, count: pinned.length } });
-});
-chatRouter.get("/conversations", (_req, res) => {
-  const conversations = getConversationSummaries();
-  res.json({ success: true, data: { conversations } });
-});
-chatRouter.post("/capture", async (req, res) => {
-  const { message_ids, summary, tags } = req.body;
-  if (!message_ids?.length && !summary) {
-    res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "message_ids or summary required" } });
-    return;
-  }
-  try {
-    let context = summary || "";
-    if (message_ids?.length) {
-      const all = await getHistory(2e3, 0);
-      const selected = all.filter((m) => message_ids.includes(m.id));
-      context = selected.map((m) => `[${m.from}] ${m.message}`).join("\n");
-      if (summary) context = summary + "\n\n---\nSource messages:\n" + context;
-    }
-    const sragRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
-      },
-      body: JSON.stringify({
-        tool: "srag.ingest",
-        args: {
-          content: context,
-          source: "command-center-chat",
-          tags: tags || ["chat-capture"],
-          metadata: { captured_at: (/* @__PURE__ */ new Date()).toISOString(), message_count: message_ids?.length || 0 }
-        }
-      }),
-      signal: AbortSignal.timeout(3e4)
-    });
-    const sragData = await sragRes.json().catch(() => null);
-    broadcastMessage({
-      from: "System",
-      to: "All",
-      source: "system",
-      type: "Message",
-      message: `\u{1F4DA} Knowledge captured: ${message_ids?.length || 0} messages \u2192 SRAG (tags: ${(tags || ["chat-capture"]).join(", ")})`,
-      timestamp: (/* @__PURE__ */ new Date()).toISOString()
-    });
-    logger.info({ message_count: message_ids?.length, tags }, "Chat knowledge captured to SRAG");
-    res.json({ success: true, data: { captured: message_ids?.length || 1, srag_result: sragData } });
-  } catch (err) {
-    logger.error({ err: String(err) }, "Knowledge capture failed");
-    res.status(502).json({ success: false, error: { code: "CAPTURE_FAILED", message: String(err) } });
-  }
-});
-chatRouter.post("/summarize", async (req, res) => {
-  const { target, limit: msgLimit, thread_id } = req.body;
-  const limit = Math.min(msgLimit || 50, 200);
-  try {
-    let messages;
-    if (thread_id) {
-      messages = await getThread(thread_id);
-    } else {
-      messages = await getHistory(limit, 0, target);
-    }
-    if (messages.length === 0) {
-      res.json({ success: true, data: { summary: "No messages to summarize." } });
-      return;
-    }
-    const transcript = messages.sort((a, b) => (a.timestamp || "").localeCompare(b.timestamp || "")).map((m) => `[${(m.timestamp || "").slice(11, 19)}] ${m.from}: ${m.message}`).join("\n").slice(0, 8e3);
-    const llmRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
-      },
-      body: JSON.stringify({
-        tool: "llm.chat",
-        args: {
-          model: "deepseek-chat",
-          messages: [{
-            role: "user",
-            content: `Summarize this conversation concisely. Include key decisions, action items, and outcomes. Reply in the same language as the conversation.
-
-${transcript}`
-          }],
-          max_tokens: 500
-        }
-      }),
-      signal: AbortSignal.timeout(6e4)
-    });
-    const llmData = await llmRes.json().catch(() => null);
-    const summary = llmData?.result?.content || llmData?.result?.message || llmData?.result || "Summary generation failed";
-    broadcastMessage({
-      from: "System",
-      to: "All",
-      source: "system",
-      type: "Message",
-      message: `\u{1F4CB} **Conversation Summary**
-${typeof summary === "string" ? summary : JSON.stringify(summary)}`,
-      timestamp: (/* @__PURE__ */ new Date()).toISOString()
-    });
-    res.json({ success: true, data: { summary, message_count: messages.length } });
-  } catch (err) {
-    logger.error({ err: String(err) }, "Summarize failed");
-    res.status(502).json({ success: false, error: { code: "SUMMARIZE_FAILED", message: String(err) } });
-  }
-});
-chatRouter.post("/debate", async (req, res) => {
-  const { agents, topic, rounds } = req.body;
-  if (!agents?.length || agents.length < 2 || !topic) {
-    res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "agents (2+) and topic required" } });
-    return;
-  }
-  const debateId = `debate-${Date.now().toString(36)}`;
-  const maxRounds = Math.min(rounds || 2, 5);
-  broadcastMessage({
-    from: "System",
-    to: "All",
-    source: "system",
-    type: "Message",
-    message: `\u{1F3AF} **Debate Started**: "${topic}"
-Participants: ${agents.join(", ")} | Rounds: ${maxRounds}`,
-    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-    thread_id: debateId
-  });
-  runDebate(debateId, agents, topic, maxRounds).catch((err) => {
-    logger.error({ err: String(err), debateId }, "Debate failed");
-    broadcastMessage({
-      from: "System",
-      to: "All",
-      source: "system",
-      type: "Message",
-      message: `\u274C Debate "${topic}" failed: ${err.message}`,
-      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-      thread_id: debateId
-    });
-  });
-  res.json({ success: true, data: { debate_id: debateId, agents, topic, rounds: maxRounds } });
-});
-async function runDebate(debateId, agents, topic, rounds) {
-  const responses = [];
-  for (let round = 1; round <= rounds; round++) {
-    for (const agent of agents) {
-      const prevContext = responses.length > 0 ? "\n\nPrevious arguments:\n" + responses.map((r) => `[${r.agent} R${r.round}]: ${r.response}`).join("\n") : "";
-      const prompt = round === 1 ? `You are agent "${agent}" in a structured debate. Topic: "${topic}". Present your argument concisely (max 200 words).` : `You are agent "${agent}" in round ${round} of a debate on "${topic}". Review the previous arguments and provide your rebuttal or refined position (max 200 words).${prevContext}`;
-      try {
-        const llmRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
-          },
-          body: JSON.stringify({
-            tool: "llm.chat",
-            args: {
-              model: "deepseek-chat",
-              messages: [{ role: "user", content: prompt }],
-              max_tokens: 300
-            }
-          }),
-          signal: AbortSignal.timeout(6e4)
-        });
-        const data = await llmRes.json().catch(() => null);
-        const response = data?.result?.content || data?.result?.message || data?.result || "(no response)";
-        const responseStr = typeof response === "string" ? response : JSON.stringify(response);
-        responses.push({ agent, round, response: responseStr });
-        broadcastMessage({
-          from: agent,
-          to: "All",
-          source: "system",
-          type: "Message",
-          message: `**[Round ${round}]** ${responseStr}`,
-          timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-          thread_id: debateId
-        });
-      } catch {
-        responses.push({ agent, round, response: "(timeout)" });
-      }
-    }
-  }
-  const allArgs = responses.map((r) => `[${r.agent} R${r.round}]: ${r.response}`).join("\n");
-  try {
-    const synthRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
-      },
-      body: JSON.stringify({
-        tool: "llm.chat",
-        args: {
-          model: "deepseek-chat",
-          messages: [{ role: "user", content: `Synthesize the following debate on "${topic}" into a final summary. Identify areas of agreement, disagreement, and recommended action. Be concise (max 300 words).
-
-${allArgs}` }],
-          max_tokens: 400
-        }
-      }),
-      signal: AbortSignal.timeout(6e4)
-    });
-    const synthData = await synthRes.json().catch(() => null);
-    const synthesis = synthData?.result?.content || synthData?.result?.message || synthData?.result || "(synthesis failed)";
-    broadcastMessage({
-      from: "System",
-      to: "All",
-      source: "system",
-      type: "Message",
-      message: `\u{1F4CA} **Debate Synthesis**: "${topic}"
-
-${typeof synthesis === "string" ? synthesis : JSON.stringify(synthesis)}`,
-      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-      thread_id: debateId
-    });
-  } catch {
-  }
-}
-var CHAT_TEMPLATES = [
-  {
-    id: "incident-response",
-    name: "Incident Response",
-    description: "Alert agents, gather status, coordinate fix",
-    steps: [
-      { action: "message", to: "All", message: "\u{1F6A8} INCIDENT: {topic} \u2014 all agents report status" },
-      { action: "command", command: "/chain health-check omega:graph.health command-center:graph.stats" },
-      { action: "message", to: "omega", message: "@omega run SITREP for {topic}" }
-    ]
-  },
-  {
-    id: "knowledge-harvest",
-    name: "Knowledge Harvest",
-    description: "Query SRAG + graph, capture insights",
-    steps: [
-      { action: "command", command: "/rag {topic}" },
-      { action: "command", command: "/reason Analyze knowledge gaps for: {topic}" },
-      { action: "capture", tags: ["harvest", "knowledge"] }
-    ]
-  },
-  {
-    id: "agent-debrief",
-    name: "Agent Debrief",
-    description: "Collect status from all agents, summarize",
-    steps: [
-      { action: "message", to: "All", message: "\u{1F4CB} Debrief request: all agents report current status and findings" },
-      { action: "command", command: "/chain debrief omega:graph.stats" },
-      { action: "summarize" }
-    ]
-  },
-  {
-    id: "competitive-analysis",
-    name: "Competitive Analysis",
-    description: "Cross-domain intelligence via debate + RAG",
-    steps: [
-      { action: "command", command: "/rag {topic} competitive landscape" },
-      { action: "debate", agents: ["omega", "master"], topic: "{topic}" },
-      { action: "capture", tags: ["competitive", "analysis"] }
-    ]
-  },
-  {
-    id: "daily-standup",
-    name: "Daily Standup",
-    description: "Quick health check + summary of yesterday",
-    steps: [
-      { action: "command", command: "/chain standup command-center:graph.stats" },
-      { action: "summarize", limit: 100 },
-      { action: "message", to: "All", message: "\u2705 Standup complete. Next actions logged." }
-    ]
-  }
-];
-chatRouter.get("/templates", (_req, res) => {
-  res.json({ success: true, data: { templates: CHAT_TEMPLATES } });
-});
-chatRouter.post("/templates/:id/run", async (req, res) => {
-  const template = CHAT_TEMPLATES.find((t) => t.id === req.params.id);
-  if (!template) {
-    res.status(404).json({ success: false, error: { code: "NOT_FOUND", message: `Template ${req.params.id} not found` } });
-    return;
-  }
-  const topic = req.body.topic || "general";
-  broadcastMessage({
-    from: "System",
-    to: "All",
-    source: "system",
-    type: "Message",
-    message: `\u{1F680} Running template: **${template.name}** \u2014 ${template.description} (topic: ${topic})`,
-    timestamp: (/* @__PURE__ */ new Date()).toISOString()
-  });
-  let stepsRun = 0;
-  for (const step of template.steps) {
-    if (step.action === "message") {
-      const msg = (step.message || "").replace(/\{topic\}/g, topic);
-      broadcastMessage({
-        from: "command-center",
-        to: step.to || "All",
-        source: "system",
-        type: "Message",
-        message: msg,
-        timestamp: (/* @__PURE__ */ new Date()).toISOString()
-      });
-      stepsRun++;
-    }
-  }
-  res.json({
-    success: true,
-    data: {
-      template_id: template.id,
-      name: template.name,
-      topic,
-      steps_total: template.steps.length,
-      steps_executed: stepsRun,
-      steps: template.steps.map((s) => ({
-        ...s,
-        message: s.message?.replace(/\{topic\}/g, topic),
-        command: s.command?.replace(/\{topic\}/g, topic),
-        topic: s.topic?.replace(/\{topic\}/g, topic)
-      }))
-    }
-  });
-});
-chatRouter.get("/ws-stats", (_req, res) => {
-  res.json({ success: true, data: getConnectionStats() });
-});
-
-// src/routes/chains.ts
-import { Router as Router4 } from "express";
 
 // src/chain-engine.ts
 import { v4 as uuid } from "uuid";
@@ -9456,7 +9053,7 @@ async function runLoop(steps, maxIterations, exitCondition) {
   }
   return allResults;
 }
-async function runDebate2(steps, judgeAgent) {
+async function runDebate(steps, judgeAgent) {
   const debateResults = await runParallel(steps);
   if (!judgeAgent) return debateResults;
   const positions = debateResults.map((r) => ({
@@ -9510,7 +9107,7 @@ async function executeChain(def) {
         results = await runLoop(def.steps, def.max_iterations ?? 5, def.exit_condition);
         break;
       case "debate":
-        results = await runDebate2(def.steps, def.judge_agent);
+        results = await runDebate(def.steps, def.judge_agent);
         break;
       default:
         throw new Error(`Unknown chain mode: ${def.mode}`);
@@ -9546,7 +9143,922 @@ async function executeChain(def) {
   return execution;
 }
 
+// src/llm-proxy.ts
+function getProviders() {
+  const providers = {};
+  if (config.deepseekApiKey) {
+    providers.deepseek = {
+      name: "DeepSeek",
+      baseUrl: "https://api.deepseek.com/v1",
+      apiKey: config.deepseekApiKey,
+      defaultModel: "deepseek-chat",
+      type: "openai-compat"
+    };
+  }
+  if (config.dashscopeApiKey) {
+    providers.qwen = {
+      name: "Qwen",
+      baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      apiKey: config.dashscopeApiKey,
+      defaultModel: "qwen-plus",
+      type: "openai-compat"
+    };
+  }
+  if (config.openaiApiKey) {
+    providers.openai = {
+      name: "OpenAI",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: config.openaiApiKey,
+      defaultModel: "gpt-4o-mini",
+      type: "openai-compat"
+    };
+    providers.chatgpt = providers.openai;
+  }
+  if (config.groqApiKey) {
+    providers.groq = {
+      name: "Groq",
+      baseUrl: "https://api.groq.com/openai/v1",
+      apiKey: config.groqApiKey,
+      defaultModel: "llama-3.3-70b-versatile",
+      type: "openai-compat"
+    };
+  }
+  if (config.geminiApiKey) {
+    providers.gemini = {
+      name: "Gemini",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+      apiKey: config.geminiApiKey,
+      defaultModel: "gemini-2.0-flash",
+      type: "gemini"
+    };
+  }
+  if (config.anthropicApiKey) {
+    providers.claude = {
+      name: "Claude",
+      baseUrl: "https://api.anthropic.com/v1",
+      apiKey: config.anthropicApiKey,
+      defaultModel: "claude-sonnet-4-20250514",
+      type: "anthropic"
+    };
+    providers.anthropic = providers.claude;
+  }
+  return providers;
+}
+async function callOpenAICompat(provider, req) {
+  const start = Date.now();
+  const model = req.model || provider.defaultModel;
+  const res = await fetch(`${provider.baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${provider.apiKey}`
+    },
+    body: JSON.stringify({
+      model,
+      messages: req.messages,
+      temperature: req.temperature ?? 0.7,
+      max_tokens: req.max_tokens ?? 2048
+    }),
+    signal: AbortSignal.timeout(6e4)
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => `HTTP ${res.status}`);
+    throw new Error(`${provider.name} error: ${err}`);
+  }
+  const data = await res.json();
+  return {
+    provider: req.provider,
+    model: data.model || model,
+    content: data.choices?.[0]?.message?.content || "",
+    usage: data.usage,
+    duration_ms: Date.now() - start
+  };
+}
+async function callGemini(provider, req) {
+  const start = Date.now();
+  const model = req.model || provider.defaultModel;
+  const contents = req.messages.filter((m) => m.role !== "system").map((m) => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: m.content }]
+  }));
+  const systemInstruction = req.messages.find((m) => m.role === "system");
+  const res = await fetch(
+    `${provider.baseUrl}/models/${model}:generateContent?key=${provider.apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents,
+        ...systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction.content }] } } : {},
+        generationConfig: {
+          temperature: req.temperature ?? 0.7,
+          maxOutputTokens: req.max_tokens ?? 2048
+        }
+      }),
+      signal: AbortSignal.timeout(6e4)
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text().catch(() => `HTTP ${res.status}`);
+    throw new Error(`Gemini error: ${err}`);
+  }
+  const data = await res.json();
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  return {
+    provider: "gemini",
+    model,
+    content: text,
+    usage: data.usageMetadata ? {
+      prompt_tokens: data.usageMetadata.promptTokenCount || 0,
+      completion_tokens: data.usageMetadata.candidatesTokenCount || 0,
+      total_tokens: data.usageMetadata.totalTokenCount || 0
+    } : void 0,
+    duration_ms: Date.now() - start
+  };
+}
+async function callAnthropic(provider, req) {
+  const start = Date.now();
+  const model = req.model || provider.defaultModel;
+  const systemMsg = req.messages.find((m) => m.role === "system");
+  const nonSystem = req.messages.filter((m) => m.role !== "system");
+  const res = await fetch(`${provider.baseUrl}/messages`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": provider.apiKey,
+      "anthropic-version": "2023-06-01"
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: req.max_tokens ?? 2048,
+      ...systemMsg ? { system: systemMsg.content } : {},
+      messages: nonSystem.map((m) => ({ role: m.role, content: m.content }))
+    }),
+    signal: AbortSignal.timeout(6e4)
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => `HTTP ${res.status}`);
+    throw new Error(`Claude error: ${err}`);
+  }
+  const data = await res.json();
+  return {
+    provider: "claude",
+    model: data.model || model,
+    content: data.content?.[0]?.text || "",
+    usage: data.usage ? {
+      prompt_tokens: data.usage.input_tokens || 0,
+      completion_tokens: data.usage.output_tokens || 0,
+      total_tokens: (data.usage.input_tokens || 0) + (data.usage.output_tokens || 0)
+    } : void 0,
+    duration_ms: Date.now() - start
+  };
+}
+async function chatLLM(req) {
+  const providers = getProviders();
+  const provider = providers[req.provider.toLowerCase()];
+  if (!provider) {
+    const available = Object.keys(providers);
+    throw new Error(`Unknown provider '${req.provider}'. Available: ${available.join(", ")}`);
+  }
+  logger.info({ provider: req.provider, model: req.model, messages: req.messages.length }, "LLM proxy call");
+  switch (provider.type) {
+    case "openai-compat":
+      return callOpenAICompat(provider, req);
+    case "gemini":
+      return callGemini(provider, req);
+    case "anthropic":
+      return callAnthropic(provider, req);
+    default:
+      throw new Error(`Unsupported provider type: ${provider.type}`);
+  }
+}
+function listProviders() {
+  const providers = getProviders();
+  const all = [
+    { id: "deepseek", name: "DeepSeek", model: "deepseek-chat" },
+    { id: "qwen", name: "Qwen", model: "qwen-plus" },
+    { id: "gemini", name: "Gemini", model: "gemini-2.0-flash" },
+    { id: "openai", name: "OpenAI/ChatGPT", model: "gpt-4o-mini" },
+    { id: "groq", name: "Groq", model: "llama-3.3-70b-versatile" },
+    { id: "claude", name: "Claude", model: "claude-sonnet-4-20250514" }
+  ];
+  return all.map((p) => ({ ...p, available: !!providers[p.id] }));
+}
+
+// src/routes/chat.ts
+async function mcpCall(tool, args) {
+  const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+    },
+    body: JSON.stringify({ tool, args }),
+    signal: AbortSignal.timeout(3e4)
+  });
+  const data = await res.json().catch(() => null);
+  return data?.result ?? data;
+}
+async function storeEpisode(title, description, events, outcome, tags) {
+  try {
+    await mcpCall("memory_operation", {
+      action: "RECORD_EPISODE",
+      data: {
+        title,
+        description,
+        events,
+        outcome,
+        lessons: [outcome],
+        tags,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      }
+    });
+    logger.info({ title, tags }, "Episode stored to episodic memory");
+  } catch (err) {
+    logger.warn({ err: String(err), title }, "Episodic memory store failed (non-fatal)");
+  }
+}
+async function storeGraphMemory(agentId, type, content, tags) {
+  try {
+    const cypher = `CREATE (m:AgentMemory {
+      agent_id: $agent_id,
+      type: $type,
+      content: $content,
+      tags: $tags,
+      created_at: datetime(),
+      source: 'command-center-chat'
+    }) RETURN m`;
+    await mcpCall("graph.write_cypher", {
+      query: cypher,
+      parameters: { agent_id: agentId, type, content: content.slice(0, 4e3), tags }
+    });
+    logger.info({ agentId, type, tags }, "Memory stored to Neo4j graph");
+  } catch (err) {
+    logger.warn({ err: String(err), type }, "Graph memory store failed (non-fatal)");
+  }
+}
+async function storeSRAG(content, tags, source) {
+  try {
+    await mcpCall("srag.ingest", {
+      content,
+      source,
+      tags,
+      metadata: { captured_at: (/* @__PURE__ */ new Date()).toISOString() }
+    });
+    logger.info({ tags, source }, "Content stored to SRAG");
+  } catch (err) {
+    logger.warn({ err: String(err) }, "SRAG store failed (non-fatal)");
+  }
+}
+function persistToMemory(opts) {
+  const { title, content, tags, agentId = "command-center", type = "insight", events = [] } = opts;
+  Promise.allSettled([
+    storeEpisode(title, content, events.length ? events : [content.slice(0, 500)], title, tags),
+    storeGraphMemory(agentId, type, content, tags),
+    storeSRAG(content, [...tags, "auto-memory"], "command-center-chat")
+  ]).then((results) => {
+    const succeeded = results.filter((r) => r.status === "fulfilled").length;
+    logger.debug({ succeeded, total: 3, title }, "Memory persistence completed");
+  });
+}
+var AGENT_PERSONAS = {
+  omega: `Du er Omega Sentinel \u2014 omniscient architecture guardian for WidgeTDC. Du svarer kort og pr\xE6cist p\xE5 dansk. Du overv\xE5ger alle services, kontrakter og arkitektur. Du har adgang til Neo4j graph, SRAG, compliance matrix og alle agents. Svar altid med konkrete facts og handlinger.`,
+  trident: `Du er Trident Security \u2014 threat hunter og OSINT specialist. Du svarer p\xE5 dansk. Du analyserer trusler, angrebsflader, CVR-data, certstream og CTI. V\xE6r direkte og konkret.`,
+  prometheus: `Du er Prometheus Engine \u2014 code analysis og reinforcement learning specialist. Du svarer p\xE5 dansk. Du analyserer kode, embeddings, og governance patterns.`,
+  master: `Du er Master Orchestrator \u2014 central koordinator for hele WidgeTDC agent-swarm. Du svarer p\xE5 dansk. Du delegerer, koordinerer, og holder overblik over alle aktive opgaver.`,
+  graph: `Du er Neo4j Graph Agent. Du svarer p\xE5 dansk. Du kender grafstrukturen, Cypher queries, og kan analysere relationer mellem entiteter i knowledge graph.`,
+  consulting: `Du er Consulting Intelligence \u2014 specialist i indsigter, m\xF8nstre og forretningsm\xE6ssig analyse. Du svarer p\xE5 dansk med konkrete anbefalinger.`,
+  legal: `Du er Legal & Compliance \u2014 specialist i retsinformation, EU-funding, GDPR, og blast radius analyser. Du svarer p\xE5 dansk.`,
+  rlm: `Du er RLM Reasoning Engine \u2014 deep reasoning, planl\xE6gning og context folding specialist. Du svarer p\xE5 dansk med strukturerede analyser.`,
+  harvest: `Du er Harvest Collector \u2014 web crawling, data ingestion, M365, SharePoint specialist. Du svarer p\xE5 dansk.`,
+  nexus: `Du er Nexus Analyzer \u2014 dekomponering, gap-analyse og id\xE9generering specialist. Du svarer p\xE5 dansk med strukturerede nedbrydninger og muligheder.`,
+  autonomous: `Du er Autonomous Swarm \u2014 GraphRAG, state graphs og evolution specialist. Du svarer p\xE5 dansk.`,
+  cma: `Du er Context Memory Agent \u2014 memory management, kontekst-retrieval og vidensstyring. Du svarer p\xE5 dansk.`,
+  docgen: `Du er DocGen Factory \u2014 PowerPoint, Word, Excel og diagram specialist. Du svarer p\xE5 dansk.`,
+  custodian: `Du er Custodian Guardian \u2014 chaos testing, patrol og governance specialist. Du svarer p\xE5 dansk.`,
+  roma: `Du er Roma Self-Healer \u2014 self-healing, incident response specialist. Du svarer p\xE5 dansk.`,
+  vidensarkiv: `Du er Vidensarkiv \u2014 knowledge search og file management specialist. Du svarer p\xE5 dansk.`,
+  "the-snout": `Du er The Snout OSINT \u2014 domain intel, email intel og extraction specialist. Du svarer p\xE5 dansk.`,
+  "llm-router": `Du er LLM Cost Router \u2014 multi-model routing, cost tracking og budget optimering. Du svarer p\xE5 dansk.`
+};
+async function agentAutoReply(agentId, userMessage, from, threadId, provider) {
+  const agentEntry = AgentRegistry.get(agentId);
+  const displayName = agentEntry?.handshake.display_name || agentId;
+  const capabilities = agentEntry?.handshake.capabilities || [];
+  const persona = AGENT_PERSONAS[agentId] || `Du er ${displayName} med capabilities: ${capabilities.join(", ")}. Du svarer kort og pr\xE6cist p\xE5 dansk.`;
+  try {
+    const recentMsgs = await getHistory(10, 0);
+    const context = recentMsgs.reverse().map((m) => `[${m.from}\u2192${m.to}] ${(m.message || "").slice(0, 200)}`).join("\n");
+    const messages = [
+      { role: "system", content: `${persona}
+
+Dine capabilities: ${capabilities.join(", ")}
+
+Seneste samtale-kontekst:
+${context}` },
+      { role: "user", content: `${from} siger: ${userMessage}` }
+    ];
+    const result = await chatLLM({
+      provider: provider || "deepseek",
+      messages,
+      max_tokens: 800,
+      temperature: 0.7
+    });
+    broadcastMessage({
+      from: agentId,
+      to: from,
+      source: "agent",
+      type: "Message",
+      message: result.content,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      ...threadId ? { thread_id: threadId } : {},
+      metadata: { provider: result.provider, model: result.model, duration_ms: result.duration_ms }
+    });
+    logger.info({ agent: agentId, from, model: result.model, ms: result.duration_ms }, "Agent auto-reply sent");
+  } catch (err) {
+    logger.error({ err: String(err), agent: agentId }, "Agent auto-reply failed");
+    broadcastMessage({
+      from: agentId,
+      to: from,
+      source: "system",
+      type: "Message",
+      message: `\u26A0\uFE0F ${displayName} kunne ikke svare: ${err instanceof Error ? err.message : String(err)}`,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    });
+  }
+}
+var chatRouter = Router3();
+chatRouter.post("/message", (req, res) => {
+  const result = validate(validateMessage, req.body);
+  if (!result.ok) {
+    res.status(400).json({
+      success: false,
+      error: {
+        code: "VALIDATION_ERROR",
+        message: "Invalid AgentMessage payload",
+        details: result.errors,
+        status_code: 400
+      }
+    });
+    return;
+  }
+  const msg = {
+    ...result.data,
+    id: msgId(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    thread_id: req.body.thread_id,
+    parent_id: req.body.parent_id,
+    files: req.body.files
+  };
+  broadcastMessage(msg);
+  notifyChatMessage(msg.from, msg.to, msg.message);
+  logger.info({ from: msg.from, to: msg.to, type: msg.type }, "Chat message broadcast");
+  const noReply = req.body.no_reply === true;
+  if (!noReply && msg.to && msg.to !== "All" && msg.source !== "system" && msg.source !== "agent") {
+    const targetAgent = AgentRegistry.get(msg.to);
+    if (targetAgent) {
+      agentAutoReply(msg.to, msg.message, msg.from, req.body.thread_id, req.body.provider).catch(() => {
+      });
+    }
+  }
+  res.json({ success: true, data: { id: msg.id, timestamp: msg.timestamp } });
+});
+chatRouter.get("/history", async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+  const offset = parseInt(req.query.offset) || 0;
+  const target = req.query.target;
+  const messages = await getHistory(limit, offset, target);
+  res.json({ success: true, data: { messages, total: messages.length, limit, offset } });
+});
+chatRouter.get("/threads/:id", async (req, res) => {
+  const messages = await getThread(req.params.id);
+  res.json({ success: true, data: { thread_id: req.params.id, messages, count: messages.length } });
+});
+chatRouter.post("/threads", (req, res) => {
+  const { parent_id, from, message, type } = req.body;
+  if (!parent_id || !from || !message) {
+    res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "parent_id, from, message required" } });
+    return;
+  }
+  const threadMsg = {
+    from,
+    to: "All",
+    source: "human",
+    type: type || "Message",
+    message,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    thread_id: parent_id,
+    // replies are linked to the parent
+    parent_id
+  };
+  broadcastMessage(threadMsg);
+  res.json({ success: true, data: { thread_id: parent_id, timestamp: threadMsg.timestamp } });
+});
+chatRouter.get("/search", async (req, res) => {
+  const query = req.query.q;
+  if (!query || query.length < 2) {
+    res.status(400).json({ success: false, error: { code: "QUERY_TOO_SHORT", message: "Search query must be at least 2 characters" } });
+    return;
+  }
+  const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+  const results = await searchMessages(query, limit);
+  res.json({ success: true, data: { query, results, count: results.length } });
+});
+chatRouter.post("/pin", async (req, res) => {
+  const { message_id, pin } = req.body;
+  if (!message_id) {
+    res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "message_id required" } });
+    return;
+  }
+  await togglePin(message_id, pin !== false);
+  res.json({ success: true, data: { message_id, pinned: pin !== false } });
+});
+chatRouter.get("/pinned", async (_req, res) => {
+  const pinned = await getPinnedMessages();
+  res.json({ success: true, data: { messages: pinned, count: pinned.length } });
+});
+chatRouter.get("/conversations", (_req, res) => {
+  const conversations = getConversationSummaries();
+  res.json({ success: true, data: { conversations } });
+});
+chatRouter.post("/capture", async (req, res) => {
+  const { message_ids, summary, tags } = req.body;
+  if (!message_ids?.length && !summary) {
+    res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "message_ids or summary required" } });
+    return;
+  }
+  try {
+    let context = summary || "";
+    if (message_ids?.length) {
+      const all = await getHistory(2e3, 0);
+      const selected = all.filter((m) => message_ids.includes(m.id));
+      context = selected.map((m) => `[${m.from}] ${m.message}`).join("\n");
+      if (summary) context = summary + "\n\n---\nSource messages:\n" + context;
+    }
+    const sragRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+      },
+      body: JSON.stringify({
+        tool: "srag.ingest",
+        args: {
+          content: context,
+          source: "command-center-chat",
+          tags: tags || ["chat-capture"],
+          metadata: { captured_at: (/* @__PURE__ */ new Date()).toISOString(), message_count: message_ids?.length || 0 }
+        }
+      }),
+      signal: AbortSignal.timeout(3e4)
+    });
+    const sragData = await sragRes.json().catch(() => null);
+    broadcastMessage({
+      from: "System",
+      to: "All",
+      source: "system",
+      type: "Message",
+      message: `\u{1F4DA} Knowledge captured: ${message_ids?.length || 0} messages \u2192 SRAG (tags: ${(tags || ["chat-capture"]).join(", ")})`,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    logger.info({ message_count: message_ids?.length, tags }, "Chat knowledge captured to SRAG");
+    res.json({ success: true, data: { captured: message_ids?.length || 1, srag_result: sragData } });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Knowledge capture failed");
+    res.status(502).json({ success: false, error: { code: "CAPTURE_FAILED", message: String(err) } });
+  }
+});
+chatRouter.post("/summarize", async (req, res) => {
+  const { target, limit: msgLimit, thread_id } = req.body;
+  const limit = Math.min(msgLimit || 50, 200);
+  try {
+    let messages;
+    if (thread_id) {
+      messages = await getThread(thread_id);
+    } else {
+      messages = await getHistory(limit, 0, target);
+    }
+    if (messages.length === 0) {
+      res.json({ success: true, data: { summary: "No messages to summarize." } });
+      return;
+    }
+    const transcript = messages.sort((a, b) => (a.timestamp || "").localeCompare(b.timestamp || "")).map((m) => `[${(m.timestamp || "").slice(11, 19)}] ${m.from}: ${m.message}`).join("\n").slice(0, 8e3);
+    const llmRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+      },
+      body: JSON.stringify({
+        tool: "llm.chat",
+        args: {
+          model: "deepseek-chat",
+          messages: [{
+            role: "user",
+            content: `Summarize this conversation concisely. Include key decisions, action items, and outcomes. Reply in the same language as the conversation.
+
+${transcript}`
+          }],
+          max_tokens: 500
+        }
+      }),
+      signal: AbortSignal.timeout(6e4)
+    });
+    const llmData = await llmRes.json().catch(() => null);
+    const summary = llmData?.result?.content || llmData?.result?.message || llmData?.result || "Summary generation failed";
+    broadcastMessage({
+      from: "System",
+      to: "All",
+      source: "system",
+      type: "Message",
+      message: `\u{1F4CB} **Conversation Summary**
+${typeof summary === "string" ? summary : JSON.stringify(summary)}`,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    const summaryStr = typeof summary === "string" ? summary : JSON.stringify(summary);
+    persistToMemory({
+      title: `Chat Summary: ${target || thread_id || "general"}`,
+      content: summaryStr,
+      tags: ["chat-summary", "auto-summary", ...target ? [`conversation:${target}`] : []],
+      type: "summary",
+      events: messages.slice(0, 10).map((m) => `[${m.from}] ${(m.message || "").slice(0, 100)}`)
+    });
+    res.json({ success: true, data: { summary, message_count: messages.length, persisted: true } });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Summarize failed");
+    res.status(502).json({ success: false, error: { code: "SUMMARIZE_FAILED", message: String(err) } });
+  }
+});
+chatRouter.post("/debate", async (req, res) => {
+  const { agents, topic, rounds } = req.body;
+  if (!agents?.length || agents.length < 2 || !topic) {
+    res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "agents (2+) and topic required" } });
+    return;
+  }
+  const debateId = `debate-${Date.now().toString(36)}`;
+  const maxRounds = Math.min(rounds || 2, 5);
+  broadcastMessage({
+    from: "System",
+    to: "All",
+    source: "system",
+    type: "Message",
+    message: `\u{1F3AF} **Debate Started**: "${topic}"
+Participants: ${agents.join(", ")} | Rounds: ${maxRounds}`,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    thread_id: debateId
+  });
+  runDebate2(debateId, agents, topic, maxRounds).catch((err) => {
+    logger.error({ err: String(err), debateId }, "Debate failed");
+    broadcastMessage({
+      from: "System",
+      to: "All",
+      source: "system",
+      type: "Message",
+      message: `\u274C Debate "${topic}" failed: ${err.message}`,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      thread_id: debateId
+    });
+  });
+  res.json({ success: true, data: { debate_id: debateId, agents, topic, rounds: maxRounds } });
+});
+async function runDebate2(debateId, agents, topic, rounds) {
+  const responses = [];
+  for (let round = 1; round <= rounds; round++) {
+    for (const agent of agents) {
+      const prevContext = responses.length > 0 ? "\n\nPrevious arguments:\n" + responses.map((r) => `[${r.agent} R${r.round}]: ${r.response}`).join("\n") : "";
+      const prompt = round === 1 ? `You are agent "${agent}" in a structured debate. Topic: "${topic}". Present your argument concisely (max 200 words).` : `You are agent "${agent}" in round ${round} of a debate on "${topic}". Review the previous arguments and provide your rebuttal or refined position (max 200 words).${prevContext}`;
+      try {
+        const llmRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+          },
+          body: JSON.stringify({
+            tool: "llm.chat",
+            args: {
+              model: "deepseek-chat",
+              messages: [{ role: "user", content: prompt }],
+              max_tokens: 300
+            }
+          }),
+          signal: AbortSignal.timeout(6e4)
+        });
+        const data = await llmRes.json().catch(() => null);
+        const response = data?.result?.content || data?.result?.message || data?.result || "(no response)";
+        const responseStr = typeof response === "string" ? response : JSON.stringify(response);
+        responses.push({ agent, round, response: responseStr });
+        broadcastMessage({
+          from: agent,
+          to: "All",
+          source: "system",
+          type: "Message",
+          message: `**[Round ${round}]** ${responseStr}`,
+          timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+          thread_id: debateId
+        });
+      } catch {
+        responses.push({ agent, round, response: "(timeout)" });
+      }
+    }
+  }
+  const allArgs = responses.map((r) => `[${r.agent} R${r.round}]: ${r.response}`).join("\n");
+  try {
+    const synthRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+      },
+      body: JSON.stringify({
+        tool: "llm.chat",
+        args: {
+          model: "deepseek-chat",
+          messages: [{ role: "user", content: `Synthesize the following debate on "${topic}" into a final summary. Identify areas of agreement, disagreement, and recommended action. Be concise (max 300 words).
+
+${allArgs}` }],
+          max_tokens: 400
+        }
+      }),
+      signal: AbortSignal.timeout(6e4)
+    });
+    const synthData = await synthRes.json().catch(() => null);
+    const synthesis = synthData?.result?.content || synthData?.result?.message || synthData?.result || "(synthesis failed)";
+    const synthStr = typeof synthesis === "string" ? synthesis : JSON.stringify(synthesis);
+    broadcastMessage({
+      from: "System",
+      to: "All",
+      source: "system",
+      type: "Message",
+      message: `\u{1F4CA} **Debate Synthesis**: "${topic}"
+
+${synthStr}`,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      thread_id: debateId
+    });
+    const debateContent = `Debate: "${topic}"
+Participants: ${agents.join(", ")}
+Rounds: ${rounds}
+
+Arguments:
+${allArgs}
+
+Synthesis:
+${synthStr}`;
+    persistToMemory({
+      title: `Debate: ${topic}`,
+      content: debateContent,
+      tags: ["debate", "consensus", ...agents.map((a) => `agent:${a}`)],
+      type: "debate",
+      events: responses.map((r) => `[${r.agent} R${r.round}] ${r.response.slice(0, 100)}`)
+    });
+  } catch {
+  }
+}
+chatRouter.post("/think", async (req, res) => {
+  const { question, depth, steps: customSteps } = req.body;
+  if (!question) {
+    res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "question required" } });
+    return;
+  }
+  const thinkId = `think-${Date.now().toString(36)}`;
+  const thinkDepth = Math.min(depth || 3, 5);
+  broadcastMessage({
+    from: "System",
+    to: "All",
+    source: "system",
+    type: "Message",
+    message: `\u{1F9E0} **Sequential Thinking** started: "${question}" (depth: ${thinkDepth})`,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    thread_id: thinkId
+  });
+  const defaultSteps = [
+    { agent_id: "rlm", cognitive_action: "reason", prompt: `Deep reason about: ${question}`, timeout_ms: 6e4 },
+    { agent_id: "rlm", cognitive_action: "plan", prompt: `Based on reasoning: {{prev}}
+
+Create actionable plan for: ${question}`, timeout_ms: 6e4 },
+    { agent_id: "rlm", cognitive_action: "analyze", prompt: `Analyze this plan for gaps and improvements: {{prev}}
+
+Original question: ${question}`, timeout_ms: 6e4 }
+  ];
+  if (thinkDepth >= 4) {
+    defaultSteps.push({ agent_id: "rlm", cognitive_action: "fold", prompt: `Synthesize all findings into a concise conclusion: {{prev}}
+
+Original question: ${question}`, timeout_ms: 6e4 });
+  }
+  if (thinkDepth >= 5) {
+    defaultSteps.push({ agent_id: "rlm", cognitive_action: "enrich", prompt: `Enrich with additional context and recommendations: {{prev}}
+
+Original question: ${question}`, timeout_ms: 6e4 });
+  }
+  const steps = customSteps || defaultSteps;
+  runThink(thinkId, question, steps).catch((err) => {
+    logger.error({ err: String(err), thinkId }, "Think failed");
+    broadcastMessage({
+      from: "System",
+      to: "All",
+      source: "system",
+      type: "Message",
+      message: `\u274C Thinking failed: ${err.message}`,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      thread_id: thinkId
+    });
+  });
+  res.json({ success: true, data: { think_id: thinkId, question, depth: thinkDepth, steps: steps.length } });
+});
+async function runThink(thinkId, question, steps) {
+  const chainDef = {
+    name: `think: ${question.slice(0, 50)}`,
+    mode: "sequential",
+    steps
+  };
+  const execution = await executeChain(chainDef);
+  for (const result of execution.results) {
+    const output = typeof result.output === "string" ? result.output : JSON.stringify(result.output, null, 2);
+    broadcastMessage({
+      from: "RLM-Engine",
+      to: "All",
+      source: "system",
+      type: "Message",
+      message: `**[${result.action}]** ${output.slice(0, 3e3)}`,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      thread_id: thinkId
+    });
+  }
+  const finalOutput = typeof execution.final_output === "string" ? execution.final_output : JSON.stringify(execution.final_output, null, 2);
+  broadcastMessage({
+    from: "System",
+    to: "All",
+    source: "system",
+    type: "Message",
+    message: `\u{1F9E0} **Thinking Complete**: "${question}"
+
+${(finalOutput || "(no result)").slice(0, 3e3)}
+
+_${execution.steps_completed}/${execution.steps_total} steps in ${execution.duration_ms}ms_`,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    thread_id: thinkId
+  });
+  const allOutputs = execution.results.map((r) => {
+    const o = typeof r.output === "string" ? r.output : JSON.stringify(r.output);
+    return `[${r.action}]: ${o}`;
+  }).join("\n\n");
+  persistToMemory({
+    title: `Sequential Thinking: ${question.slice(0, 100)}`,
+    content: `Question: ${question}
+
+Thinking Steps:
+${allOutputs}
+
+Conclusion:
+${finalOutput || "(no result)"}`,
+    tags: ["thinking", "sequential", "cognitive"],
+    type: "thinking",
+    events: execution.results.map((r) => `${r.action}: ${r.status} (${r.duration_ms}ms)`)
+  });
+}
+chatRouter.post("/remember", async (req, res) => {
+  const { content, title, tags, message_ids } = req.body;
+  if (!content && !message_ids?.length) {
+    res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "content or message_ids required" } });
+    return;
+  }
+  let memContent = content || "";
+  if (message_ids?.length) {
+    const all = await getHistory(2e3, 0);
+    const selected = all.filter((m) => message_ids.includes(m.id));
+    const transcript = selected.map((m) => `[${m.from}] ${m.message}`).join("\n");
+    memContent = content ? `${content}
+
+---
+${transcript}` : transcript;
+  }
+  const memTitle = title || `Chat Memory: ${memContent.slice(0, 60)}`;
+  const memTags = tags || ["manual-remember"];
+  persistToMemory({
+    title: memTitle,
+    content: memContent,
+    tags: memTags,
+    type: "memory"
+  });
+  broadcastMessage({
+    from: "System",
+    to: "All",
+    source: "system",
+    type: "Message",
+    message: `\u{1F9E0} Remembered: "${memTitle}" \u2192 Episodic + Graph + SRAG (tags: ${memTags.join(", ")})`,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  });
+  res.json({ success: true, data: { title: memTitle, tags: memTags, layers: ["episodic", "graph", "srag"] } });
+});
+var CHAT_TEMPLATES = [
+  {
+    id: "incident-response",
+    name: "Incident Response",
+    description: "Alert agents, gather status, coordinate fix",
+    steps: [
+      { action: "message", to: "All", message: "\u{1F6A8} INCIDENT: {topic} \u2014 all agents report status" },
+      { action: "command", command: "/chain health-check omega:graph.health command-center:graph.stats" },
+      { action: "message", to: "omega", message: "@omega run SITREP for {topic}" }
+    ]
+  },
+  {
+    id: "knowledge-harvest",
+    name: "Knowledge Harvest",
+    description: "Query SRAG + graph, capture insights",
+    steps: [
+      { action: "command", command: "/rag {topic}" },
+      { action: "command", command: "/reason Analyze knowledge gaps for: {topic}" },
+      { action: "capture", tags: ["harvest", "knowledge"] }
+    ]
+  },
+  {
+    id: "agent-debrief",
+    name: "Agent Debrief",
+    description: "Collect status from all agents, summarize",
+    steps: [
+      { action: "message", to: "All", message: "\u{1F4CB} Debrief request: all agents report current status and findings" },
+      { action: "command", command: "/chain debrief omega:graph.stats" },
+      { action: "summarize" }
+    ]
+  },
+  {
+    id: "competitive-analysis",
+    name: "Competitive Analysis",
+    description: "Cross-domain intelligence via debate + RAG",
+    steps: [
+      { action: "command", command: "/rag {topic} competitive landscape" },
+      { action: "debate", agents: ["omega", "master"], topic: "{topic}" },
+      { action: "capture", tags: ["competitive", "analysis"] }
+    ]
+  },
+  {
+    id: "daily-standup",
+    name: "Daily Standup",
+    description: "Quick health check + summary of yesterday",
+    steps: [
+      { action: "command", command: "/chain standup command-center:graph.stats" },
+      { action: "summarize", limit: 100 },
+      { action: "message", to: "All", message: "\u2705 Standup complete. Next actions logged." }
+    ]
+  }
+];
+chatRouter.get("/templates", (_req, res) => {
+  res.json({ success: true, data: { templates: CHAT_TEMPLATES } });
+});
+chatRouter.post("/templates/:id/run", async (req, res) => {
+  const template = CHAT_TEMPLATES.find((t) => t.id === req.params.id);
+  if (!template) {
+    res.status(404).json({ success: false, error: { code: "NOT_FOUND", message: `Template ${req.params.id} not found` } });
+    return;
+  }
+  const topic = req.body.topic || "general";
+  broadcastMessage({
+    from: "System",
+    to: "All",
+    source: "system",
+    type: "Message",
+    message: `\u{1F680} Running template: **${template.name}** \u2014 ${template.description} (topic: ${topic})`,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  });
+  let stepsRun = 0;
+  for (const step of template.steps) {
+    if (step.action === "message") {
+      const msg = (step.message || "").replace(/\{topic\}/g, topic);
+      broadcastMessage({
+        from: "command-center",
+        to: step.to || "All",
+        source: "system",
+        type: "Message",
+        message: msg,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      });
+      stepsRun++;
+    }
+  }
+  res.json({
+    success: true,
+    data: {
+      template_id: template.id,
+      name: template.name,
+      topic,
+      steps_total: template.steps.length,
+      steps_executed: stepsRun,
+      steps: template.steps.map((s) => ({
+        ...s,
+        message: s.message?.replace(/\{topic\}/g, topic),
+        command: s.command?.replace(/\{topic\}/g, topic),
+        topic: s.topic?.replace(/\{topic\}/g, topic)
+      }))
+    }
+  });
+});
+chatRouter.get("/ws-stats", (_req, res) => {
+  res.json({ success: true, data: getConnectionStats() });
+});
+
 // src/routes/chains.ts
+import { Router as Router4 } from "express";
 var chainsRouter = Router4();
 chainsRouter.post("/execute", async (req, res) => {
   const body = req.body;
@@ -9964,210 +10476,6 @@ openclawRouter.all("/proxy/*", async (req, res) => {
 
 // src/routes/llm.ts
 import { Router as Router9 } from "express";
-
-// src/llm-proxy.ts
-function getProviders() {
-  const providers = {};
-  if (config.deepseekApiKey) {
-    providers.deepseek = {
-      name: "DeepSeek",
-      baseUrl: "https://api.deepseek.com/v1",
-      apiKey: config.deepseekApiKey,
-      defaultModel: "deepseek-chat",
-      type: "openai-compat"
-    };
-  }
-  if (config.dashscopeApiKey) {
-    providers.qwen = {
-      name: "Qwen",
-      baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-      apiKey: config.dashscopeApiKey,
-      defaultModel: "qwen-plus",
-      type: "openai-compat"
-    };
-  }
-  if (config.openaiApiKey) {
-    providers.openai = {
-      name: "OpenAI",
-      baseUrl: "https://api.openai.com/v1",
-      apiKey: config.openaiApiKey,
-      defaultModel: "gpt-4o-mini",
-      type: "openai-compat"
-    };
-    providers.chatgpt = providers.openai;
-  }
-  if (config.groqApiKey) {
-    providers.groq = {
-      name: "Groq",
-      baseUrl: "https://api.groq.com/openai/v1",
-      apiKey: config.groqApiKey,
-      defaultModel: "llama-3.3-70b-versatile",
-      type: "openai-compat"
-    };
-  }
-  if (config.geminiApiKey) {
-    providers.gemini = {
-      name: "Gemini",
-      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
-      apiKey: config.geminiApiKey,
-      defaultModel: "gemini-2.0-flash",
-      type: "gemini"
-    };
-  }
-  if (config.anthropicApiKey) {
-    providers.claude = {
-      name: "Claude",
-      baseUrl: "https://api.anthropic.com/v1",
-      apiKey: config.anthropicApiKey,
-      defaultModel: "claude-sonnet-4-20250514",
-      type: "anthropic"
-    };
-    providers.anthropic = providers.claude;
-  }
-  return providers;
-}
-async function callOpenAICompat(provider, req) {
-  const start = Date.now();
-  const model = req.model || provider.defaultModel;
-  const res = await fetch(`${provider.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${provider.apiKey}`
-    },
-    body: JSON.stringify({
-      model,
-      messages: req.messages,
-      temperature: req.temperature ?? 0.7,
-      max_tokens: req.max_tokens ?? 2048
-    }),
-    signal: AbortSignal.timeout(6e4)
-  });
-  if (!res.ok) {
-    const err = await res.text().catch(() => `HTTP ${res.status}`);
-    throw new Error(`${provider.name} error: ${err}`);
-  }
-  const data = await res.json();
-  return {
-    provider: req.provider,
-    model: data.model || model,
-    content: data.choices?.[0]?.message?.content || "",
-    usage: data.usage,
-    duration_ms: Date.now() - start
-  };
-}
-async function callGemini(provider, req) {
-  const start = Date.now();
-  const model = req.model || provider.defaultModel;
-  const contents = req.messages.filter((m) => m.role !== "system").map((m) => ({
-    role: m.role === "assistant" ? "model" : "user",
-    parts: [{ text: m.content }]
-  }));
-  const systemInstruction = req.messages.find((m) => m.role === "system");
-  const res = await fetch(
-    `${provider.baseUrl}/models/${model}:generateContent?key=${provider.apiKey}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents,
-        ...systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction.content }] } } : {},
-        generationConfig: {
-          temperature: req.temperature ?? 0.7,
-          maxOutputTokens: req.max_tokens ?? 2048
-        }
-      }),
-      signal: AbortSignal.timeout(6e4)
-    }
-  );
-  if (!res.ok) {
-    const err = await res.text().catch(() => `HTTP ${res.status}`);
-    throw new Error(`Gemini error: ${err}`);
-  }
-  const data = await res.json();
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-  return {
-    provider: "gemini",
-    model,
-    content: text,
-    usage: data.usageMetadata ? {
-      prompt_tokens: data.usageMetadata.promptTokenCount || 0,
-      completion_tokens: data.usageMetadata.candidatesTokenCount || 0,
-      total_tokens: data.usageMetadata.totalTokenCount || 0
-    } : void 0,
-    duration_ms: Date.now() - start
-  };
-}
-async function callAnthropic(provider, req) {
-  const start = Date.now();
-  const model = req.model || provider.defaultModel;
-  const systemMsg = req.messages.find((m) => m.role === "system");
-  const nonSystem = req.messages.filter((m) => m.role !== "system");
-  const res = await fetch(`${provider.baseUrl}/messages`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": provider.apiKey,
-      "anthropic-version": "2023-06-01"
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: req.max_tokens ?? 2048,
-      ...systemMsg ? { system: systemMsg.content } : {},
-      messages: nonSystem.map((m) => ({ role: m.role, content: m.content }))
-    }),
-    signal: AbortSignal.timeout(6e4)
-  });
-  if (!res.ok) {
-    const err = await res.text().catch(() => `HTTP ${res.status}`);
-    throw new Error(`Claude error: ${err}`);
-  }
-  const data = await res.json();
-  return {
-    provider: "claude",
-    model: data.model || model,
-    content: data.content?.[0]?.text || "",
-    usage: data.usage ? {
-      prompt_tokens: data.usage.input_tokens || 0,
-      completion_tokens: data.usage.output_tokens || 0,
-      total_tokens: (data.usage.input_tokens || 0) + (data.usage.output_tokens || 0)
-    } : void 0,
-    duration_ms: Date.now() - start
-  };
-}
-async function chatLLM(req) {
-  const providers = getProviders();
-  const provider = providers[req.provider.toLowerCase()];
-  if (!provider) {
-    const available = Object.keys(providers);
-    throw new Error(`Unknown provider '${req.provider}'. Available: ${available.join(", ")}`);
-  }
-  logger.info({ provider: req.provider, model: req.model, messages: req.messages.length }, "LLM proxy call");
-  switch (provider.type) {
-    case "openai-compat":
-      return callOpenAICompat(provider, req);
-    case "gemini":
-      return callGemini(provider, req);
-    case "anthropic":
-      return callAnthropic(provider, req);
-    default:
-      throw new Error(`Unsupported provider type: ${provider.type}`);
-  }
-}
-function listProviders() {
-  const providers = getProviders();
-  const all = [
-    { id: "deepseek", name: "DeepSeek", model: "deepseek-chat" },
-    { id: "qwen", name: "Qwen", model: "qwen-plus" },
-    { id: "gemini", name: "Gemini", model: "gemini-2.0-flash" },
-    { id: "openai", name: "OpenAI/ChatGPT", model: "gpt-4o-mini" },
-    { id: "groq", name: "Groq", model: "llama-3.3-70b-versatile" },
-    { id: "claude", name: "Claude", model: "claude-sonnet-4-20250514" }
-  ];
-  return all.map((p) => ({ ...p, available: !!providers[p.id] }));
-}
-
-// src/routes/llm.ts
 var llmRouter = Router9();
 llmRouter.get("/providers", (_req, res) => {
   res.json({ success: true, data: { providers: listProviders() } });

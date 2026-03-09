@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WidgeTDC Command Center v2.7</title>
+  <title>WidgeTDC Command Center v2.8</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..800&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -409,6 +409,11 @@
           </div>
         </div>
         <div class="chat-messages" style="position:relative">
+          <div id="chat-header-bar" style="padding:10px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;font-size:0.85rem;font-weight:600;background:var(--bg2);flex-shrink:0">
+            <span id="chat-header-icon" style="font-size:1.1rem"></span>
+            <span id="chat-header-name">Broadcast</span>
+            <span id="chat-header-model" style="font-size:0.7rem;color:var(--text3);font-weight:400;margin-left:auto"></span>
+          </div>
           <div class="chat-drop-overlay" id="chat-drop-overlay"><span>Drop files to attach</span></div>
           <div class="chat-feed" id="chat-feed"></div>
           <div id="chat-attachments" class="chat-attachments" style="display:none"></div>
@@ -792,6 +797,28 @@ let pendingFiles = []
 
 function setChatTarget(target) {
   chatTarget = target
+
+  // Update header bar
+  const provider = llmProviders.find(p => p.id === target)
+  const agent = (dashboardData?.agents || []).find(a => a.agent_id === target)
+  if (target === 'All') {
+    document.getElementById('chat-header-icon').textContent = '📡'
+    document.getElementById('chat-header-name').textContent = 'Broadcast'
+    document.getElementById('chat-header-model').textContent = 'All agents'
+  } else if (provider) {
+    document.getElementById('chat-header-icon').textContent = PROVIDER_ICONS[target] || '🧠'
+    document.getElementById('chat-header-name').textContent = provider.name
+    document.getElementById('chat-header-model').textContent = provider.model
+  } else {
+    document.getElementById('chat-header-icon').textContent = agent ? '🤖' : '👤'
+    document.getElementById('chat-header-name').textContent = agent?.display_name || target
+    document.getElementById('chat-header-model').textContent = agent ? `${agent.source} · ${agent.status}` : ''
+  }
+
+  document.getElementById('chat-input').placeholder = provider
+    ? `Chat with ${provider.name}...`
+    : target === 'All' ? '@agent /command or type a message...' : `Message @${target}...`
+
   renderChatSidebar()
   renderChat()
   document.getElementById('chat-input').focus()
@@ -808,11 +835,34 @@ function renderChatSidebar() {
   const searchQ = (document.getElementById('chat-search')?.value || '').toLowerCase()
 
   if (chatSidebarTab === 'contacts') {
-    // Contacts view — all agents as contact cards
+    // Contacts view — agents + LLM providers
     const agents = (dashboardData?.agents || []).filter(a =>
       !searchQ || a.agent_id.toLowerCase().includes(searchQ) || (a.display_name || '').toLowerCase().includes(searchQ)
     )
-    list.innerHTML = agents.map(a => `
+    const providers = llmProviders.filter(p =>
+      !searchQ || p.id.toLowerCase().includes(searchQ) || p.name.toLowerCase().includes(searchQ)
+    )
+
+    let html = ''
+
+    // LLM Providers section
+    if (providers.length > 0) {
+      html += `<div style="padding:8px 14px;font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--text3);border-bottom:1px solid var(--border)">LLM Providers</div>`
+      html += providers.map(p => `
+        <div class="contact-item" onclick="setChatTarget('${h(p.id)}')">
+          <div class="contact-avatar" style="background:${PROVIDER_COLORS[p.id] || 'var(--accent)'}">${PROVIDER_ICONS[p.id] || '🧠'}</div>
+          <span class="contact-status" style="background:var(--green)"></span>
+          <div class="contact-info">
+            <div class="contact-name">${h(p.name)}</div>
+            <div class="contact-role">${h(p.model)} · online</div>
+          </div>
+        </div>
+      `).join('')
+    }
+
+    // Agents section
+    html += `<div style="padding:8px 14px;font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--text3);border-bottom:1px solid var(--border)">Agents</div>`
+    html += agents.map(a => `
       <div class="contact-item" onclick="setChatTarget('${h(a.agent_id)}')">
         <div class="contact-avatar" style="background:${agentColor(a.agent_id)}">${agentInitials(a.agent_id)}</div>
         <span class="contact-status" style="background:${a.status === 'online' ? 'var(--green)' : a.status === 'standby' ? 'var(--yellow)' : 'var(--red)'}"></span>
@@ -822,6 +872,8 @@ function renderChatSidebar() {
         </div>
       </div>
     `).join('') || '<div class="empty-state" style="padding:24px">No agents found</div>'
+
+    list.innerHTML = html
     return
   }
 
@@ -841,13 +893,15 @@ function renderChatSidebar() {
     }
     if (!convMap.has(partner)) {
       const agent = (dashboardData?.agents || []).find(a => a.agent_id === partner)
+      const provider = llmProviders.find(p => p.id === partner)
       convMap.set(partner, {
         target: partner,
-        name: agent?.display_name || partner,
+        name: provider?.name || agent?.display_name || partner,
         lastMsg: '',
         lastTime: '',
         unread: 0,
-        status: agent?.status || null
+        status: provider ? 'online' : (agent?.status || null),
+        isProvider: !!provider,
       })
     }
     const conv = convMap.get(partner)
@@ -874,7 +928,7 @@ function renderChatSidebar() {
     const statusColor = c.status === 'online' ? 'var(--green)' : c.status === 'standby' ? 'var(--yellow)' : c.status ? 'var(--red)' : ''
     return `
       <div class="conv-item ${isActive ? 'active' : ''}" data-target="${h(c.target)}" onclick="setChatTarget('${h(c.target)}')">
-        <div class="conv-avatar" style="background:${c.target === 'All' ? 'var(--accent)' : agentColor(c.target)}">${c.target === 'All' ? 'BC' : agentInitials(c.target)}</div>
+        <div class="conv-avatar" style="background:${c.target === 'All' ? 'var(--accent)' : (c.isProvider ? (PROVIDER_COLORS[c.target] || 'var(--accent)') : agentColor(c.target))}">${c.target === 'All' ? 'BC' : (c.isProvider ? (PROVIDER_ICONS[c.target] || '🧠') : agentInitials(c.target))}</div>
         ${statusColor ? `<span class="conv-status" style="background:${statusColor}"></span>` : ''}
         <div class="conv-info">
           <div class="conv-name">${h(c.name)}</div>
@@ -1192,6 +1246,28 @@ async function loadTools() {
   } catch {}
 }
 
+// LLM providers cache
+let llmProviders = []
+async function loadProviders() {
+  try {
+    const res = await api('/api/llm/providers')
+    llmProviders = (res.data?.providers || []).filter(p => p.available)
+  } catch {}
+}
+
+const PROVIDER_ICONS = {
+  deepseek: '🐋', qwen: '🌙', gemini: '💎', openai: '🤖', chatgpt: '🤖',
+  groq: '⚡', claude: '🟠', anthropic: '🟠',
+}
+const PROVIDER_COLORS = {
+  deepseek: '#4a90d9', qwen: '#7c3aed', gemini: '#1a73e8', openai: '#10a37f',
+  groq: '#f97316', claude: '#d97706', anthropic: '#d97706',
+}
+
+function isLLMProvider(id) {
+  return llmProviders.some(p => p.id === id) || ['deepseek','qwen','gemini','openai','chatgpt','groq','claude','anthropic'].includes(id)
+}
+
 // Parse @agent and /skill from input
 function parseInput(text) {
   // /skill [args] — execute tool
@@ -1229,6 +1305,158 @@ async function sendChat() {
         addLocalMsg(`${d.provider}/${d.model}`, d.content, 'Answer')
         addLocalMsg('System', `${d.duration_ms}ms | ${d.usage?.total_tokens || '?'} tokens`, 'Message')
       } catch (err) { addLocalMsg('System', 'LLM error: ' + err.message, 'Alert') }
+      return
+    }
+
+    // /omega [subcommand] — Omega Sentinel SITREP, boot, sweep, memory
+    if (skillName === 'omega') {
+      const sub = (parsed.args || 'sitrep').trim().toLowerCase()
+      addLocalMsg('Omega Sentinel', `/omega ${sub}`, 'Command')
+
+      if (sub === 'sitrep' || sub === 'status') {
+        // Full SITREP: health sweep + sentinel status + graph stats
+        addLocalMsg('Omega Sentinel', '🛡️ Running SITREP...', 'Message')
+        try {
+          const [health, sentinel, graphStats, episodes] = await Promise.allSettled([
+            api('/health'),
+            api('/tools/call', { method: 'POST', body: JSON.stringify({ agent_id: 'omega', tool_name: 'get_sentinel_status', arguments: {}, call_id: uuid() }) }),
+            api('/tools/call', { method: 'POST', body: JSON.stringify({ agent_id: 'omega', tool_name: 'graph.stats', arguments: {}, call_id: uuid() }) }),
+            api('/tools/call', { method: 'POST', body: JSON.stringify({ agent_id: 'omega', tool_name: 'memory_operation', arguments: { action: 'SEARCH_EPISODES', query: { keywords: ['omega','sitrep'], tags: ['omega'], limit: 3 } }, call_id: uuid() }) }),
+          ])
+          const hData = health.status === 'fulfilled' ? health.value.body : {}
+          const sData = sentinel.status === 'fulfilled' ? (sentinel.value.body?.result || sentinel.value.body?.data?.result || '(unavailable)') : '(unavailable)'
+          const gData = graphStats.status === 'fulfilled' ? (graphStats.value.body?.result || graphStats.value.body?.data?.result || '(unavailable)') : '(unavailable)'
+          const eData = episodes.status === 'fulfilled' ? (episodes.value.body?.result || episodes.value.body?.data?.result || '(none)') : '(none)'
+
+          addLocalMsg('Omega Sentinel', `🛡️ **SITREP**\n\n**Health**: ${hData.status || '?'} | Agents: ${hData.agents_registered || '?'} | WS: ${hData.ws_connections || 0} | Redis: ${hData.redis_enabled ? 'ON' : 'OFF'} | Chains: ${hData.active_chains || 0} | Cron: ${hData.cron_jobs || 0}\n\n**Sentinel Status**: ${typeof sData === 'string' ? sData : JSON.stringify(sData, null, 2)}\n\n**Graph**: ${typeof gData === 'string' ? gData : JSON.stringify(gData, null, 2)}\n\n**Recent Episodes**: ${typeof eData === 'string' ? eData : JSON.stringify(eData, null, 2)}`, 'Answer')
+        } catch (err) { addLocalMsg('System', 'SITREP failed: ' + err.message, 'Alert') }
+        return
+      }
+
+      if (sub === 'sweep') {
+        // Service health sweep
+        addLocalMsg('Omega Sentinel', '🔍 Running service health sweep...', 'Message')
+        try {
+          const services = [
+            { name: 'Backend', url: 'https://backend-production-d3da.up.railway.app/health' },
+            { name: 'RLM Engine', url: 'https://rlm-engine-production.up.railway.app/' },
+            { name: 'Consulting', url: 'https://consulting-production-b5d8.up.railway.app/' },
+          ]
+          const checks = await Promise.allSettled(
+            services.map(async s => {
+              const r = await fetch(s.url, { signal: AbortSignal.timeout(10000) })
+              return { name: s.name, status: r.status, ok: r.ok }
+            })
+          )
+          const report = checks.map((c, i) => {
+            if (c.status === 'fulfilled') return `${c.value.ok ? '✅' : '❌'} ${c.value.name}: HTTP ${c.value.status}`
+            return `❌ ${services[i].name}: ${c.reason?.message || 'unreachable'}`
+          }).join('\n')
+          addLocalMsg('Omega Sentinel', `🔍 **Service Health Sweep**\n${report}`, 'Answer')
+        } catch (err) { addLocalMsg('System', 'Sweep failed: ' + err.message, 'Alert') }
+        return
+      }
+
+      if (sub === 'memory' || sub === 'recall') {
+        // Recall agent memories from Neo4j
+        addLocalMsg('Omega Sentinel', '🧠 Querying agent memories...', 'Message')
+        try {
+          const res = await api('/tools/call', { method: 'POST', body: JSON.stringify({
+            agent_id: 'omega', tool_name: 'graph.read_cypher',
+            arguments: { query: "MATCH (m:AgentMemory) WHERE m.type IN ['teaching','learning','insight','intelligence'] RETURN m.agentId, m.key, m.value, m.type, m.updatedAt ORDER BY m.updatedAt DESC LIMIT 20" },
+            call_id: uuid()
+          })})
+          const data = res.body?.result || res.body?.data?.result || '(no memories)'
+          addLocalMsg('Omega Sentinel', `🧠 **Agent Memories (Neo4j)**\n${typeof data === 'string' ? data : JSON.stringify(data, null, 2)}`, 'Answer')
+        } catch (err) { addLocalMsg('System', 'Memory recall failed: ' + err.message, 'Alert') }
+        return
+      }
+
+      if (sub === 'compliance') {
+        // Architecture compliance check
+        addLocalMsg('Omega Sentinel', '📋 Checking architecture compliance...', 'Message')
+        try {
+          const [compliance, analysis] = await Promise.allSettled([
+            fetch('https://arch-mcp-server-production.up.railway.app/api/compliance-matrix', { signal: AbortSignal.timeout(10000) }).then(r => r.json()),
+            fetch('https://arch-mcp-server-production.up.railway.app/api/analysis', { signal: AbortSignal.timeout(10000) }).then(r => r.json()),
+          ])
+          const cData = compliance.status === 'fulfilled' ? compliance.value : '(unavailable)'
+          const aData = analysis.status === 'fulfilled' ? analysis.value : '(unavailable)'
+          addLocalMsg('Omega Sentinel', `📋 **Compliance Matrix**\n${JSON.stringify(cData, null, 2).slice(0, 3000)}\n\n**Analysis**\n${JSON.stringify(aData, null, 2).slice(0, 2000)}`, 'Answer')
+        } catch (err) { addLocalMsg('System', 'Compliance check failed: ' + err.message, 'Alert') }
+        return
+      }
+
+      addLocalMsg('System', 'Usage: /omega [sitrep|sweep|memory|compliance]\n\n- **sitrep** — Full status report (health + sentinel + graph + episodes)\n- **sweep** — Service health check across all Railway services\n- **memory** — Recall agent memories from Neo4j graph\n- **compliance** — Architecture compliance matrix', 'Message')
+      return
+    }
+
+    // /cortex <concept> — Associative memory activation (Holographic Layer 8)
+    if (skillName === 'cortex') {
+      if (!parsed.args) { addLocalMsg('System', 'Usage: /cortex <concept> [depth:1-5]', 'Alert'); return }
+      let depth = 3, concept = parsed.args
+      const dm = concept.match(/^depth:(\d)\s+(.+)$/s)
+      if (dm) { depth = parseInt(dm[1]); concept = dm[2] }
+      addLocalMsg('command-center', `/cortex ${concept} (depth:${depth})`, 'Command')
+      try {
+        const res = await api('/tools/call', { method: 'POST', body: JSON.stringify({
+          agent_id: 'omega', tool_name: 'activate_associative_memory',
+          arguments: { concept, depth }, call_id: uuid()
+        })})
+        const data = res.body?.result || res.body?.data?.result || '(no associations)'
+        addLocalMsg('Cortex', `🧠 **Associative Memory Flash**: "${concept}"\n\n${typeof data === 'string' ? data : JSON.stringify(data, null, 2)}`, 'Answer')
+      } catch (err) { addLocalMsg('System', 'Cortex failed: ' + err.message, 'Alert') }
+      return
+    }
+
+    // /mission <objective> — RLM multi-step mission
+    if (skillName === 'mission') {
+      if (!parsed.args) { addLocalMsg('System', 'Usage: /mission <objective> [steps:1-10]', 'Alert'); return }
+      let maxSteps = 5, objective = parsed.args
+      const sm = objective.match(/^steps:(\d+)\s+(.+)$/s)
+      if (sm) { maxSteps = Math.min(parseInt(sm[1]), 10); objective = sm[2] }
+      addLocalMsg('command-center', `/mission ${objective} (max ${maxSteps} steps)`, 'Command')
+      try {
+        const startRes = await api('/tools/call', { method: 'POST', body: JSON.stringify({
+          agent_id: 'rlm', tool_name: 'rlm.start_mission',
+          arguments: { name: objective.slice(0, 50), objective, maxSteps, maxDepth: 3 }, call_id: uuid()
+        })})
+        const missionData = startRes.body?.result || startRes.body?.data?.result || startRes.body
+        const missionId = missionData?.missionId || missionData?.mission_id || missionData?.id
+        if (missionId) {
+          addLocalMsg('RLM-Engine', `🎯 Mission started: ${missionId}\nObjective: ${objective}\nExecuting up to ${maxSteps} steps...`, 'Message')
+          // Execute steps sequentially
+          for (let i = 0; i < maxSteps; i++) {
+            try {
+              const stepRes = await api('/tools/call', { method: 'POST', body: JSON.stringify({
+                agent_id: 'rlm', tool_name: 'rlm.execute_step',
+                arguments: { missionId }, call_id: uuid()
+              })})
+              const stepData = stepRes.body?.result || stepRes.body?.data?.result || '(no output)'
+              const stepStr = typeof stepData === 'string' ? stepData : JSON.stringify(stepData, null, 2)
+              addLocalMsg('RLM-Engine', `**[Step ${i+1}]** ${stepStr.slice(0, 2000)}`, 'Answer')
+              if (stepStr.includes('COMPLETE') || stepStr.includes('complete') || stepStr.includes('done')) break
+            } catch (err) { addLocalMsg('System', `Step ${i+1} failed: ${err.message}`, 'Alert'); break }
+          }
+        } else {
+          addLocalMsg('RLM-Engine', `🎯 Mission response:\n${JSON.stringify(missionData, null, 2)}`, 'Answer')
+        }
+      } catch (err) { addLocalMsg('System', 'Mission failed: ' + err.message, 'Alert') }
+      return
+    }
+
+    // /episodes [keywords] — Search episodic memory
+    if (skillName === 'episodes') {
+      const keywords = parsed.args ? parsed.args.split(/\s+/) : ['omega', 'sentinel']
+      addLocalMsg('command-center', `/episodes ${keywords.join(', ')}`, 'Command')
+      try {
+        const res = await api('/tools/call', { method: 'POST', body: JSON.stringify({
+          agent_id: 'omega', tool_name: 'memory_operation',
+          arguments: { action: 'SEARCH_EPISODES', query: { keywords, limit: 10 } }, call_id: uuid()
+        })})
+        const data = res.body?.result || res.body?.data?.result || '(no episodes)'
+        addLocalMsg('Episodic Memory', `📖 **Episodes** (${keywords.join(', ')})\n\n${typeof data === 'string' ? data : JSON.stringify(data, null, 2)}`, 'Answer')
+      } catch (err) { addLocalMsg('System', 'Episodes search failed: ' + err.message, 'Alert') }
       return
     }
 
@@ -1367,6 +1595,34 @@ async function sendChat() {
       return
     }
 
+    // /think <question> — sequential thinking via RLM chain
+    if (skillName === 'think') {
+      if (!parsed.args) { addLocalMsg('System', 'Usage: /think <question> [depth:1-5]', 'Alert'); return }
+      // Parse optional depth: /think depth:4 my question
+      let depth = 3
+      let question = parsed.args
+      const depthMatch = question.match(/^depth:(\d)\s+(.+)$/s)
+      if (depthMatch) { depth = parseInt(depthMatch[1]); question = depthMatch[2] }
+      addLocalMsg('command-center', `/think ${question} (depth:${depth})`, 'Command')
+      try {
+        const res = await api('/chat/think', { method: 'POST', body: JSON.stringify({ question, depth }) })
+        addLocalMsg('System', `🧠 Sequential thinking started: ${res.data?.think_id || 'unknown'} (${res.data?.steps || '?'} steps)`, 'Message')
+      } catch (err) { addLocalMsg('System', 'Think failed: ' + err.message, 'Alert') }
+      return
+    }
+
+    // /remember [tags] — store recent messages to all memory layers
+    if (skillName === 'remember') {
+      const tags = parsed.args ? parsed.args.split(/\s+/) : ['manual-remember']
+      const recentIds = chatMessages.slice(-10).filter(m => m.id).map(m => m.id)
+      addLocalMsg('command-center', `/remember ${tags.join(', ')}`, 'Command')
+      try {
+        await api('/chat/remember', { method: 'POST', body: JSON.stringify({ message_ids: recentIds, tags }) })
+        addLocalMsg('System', `🧠 Stored ${recentIds.length} messages → Episodic + Graph + SRAG`, 'Message')
+      } catch (err) { addLocalMsg('System', 'Remember failed: ' + err.message, 'Alert') }
+      return
+    }
+
     // /pin — pin last message
     if (skillName === 'pin') {
       const lastMsg = chatMessages.filter(m => m.id).slice(-1)[0]
@@ -1411,6 +1667,26 @@ async function sendChat() {
 
   // Build file attachment metadata (data stays client-side)
   const files = pendingFiles.map(f => ({ name: f.name, size: f.size, type: f.type, dataUrl: f.dataUrl }))
+
+  // Direct LLM provider chat — route to /api/llm/chat instead of /chat/message
+  if (isLLMProvider(target)) {
+    addLocalMsg('command-center', message, chatType)
+    input.value = ''
+    pendingFiles = []
+    renderPendingFiles()
+    try {
+      const provider = target === 'chatgpt' ? 'openai' : target
+      const res = await api('/api/llm/chat', { method: 'POST', body: JSON.stringify({
+        provider, prompt: message, broadcast: false, max_tokens: 2048
+      })})
+      const d = res.data
+      addLocalMsg(`${d.provider}/${d.model}`, d.content, 'Answer')
+      addLocalMsg('System', `${d.duration_ms}ms | ${d.usage?.total_tokens || '?'} tokens`, 'Message')
+    } catch (err) {
+      addLocalMsg('System', `${target} error: ${err.message}`, 'Alert')
+    }
+    return
+  }
 
   const msg = {
     from: 'command-center',
@@ -1516,6 +1792,16 @@ chatInput.addEventListener('input', () => {
       { label: '/template', hint: 'Run workflow', insert: '/template' },
       { label: '/pin', hint: 'Pin last message', insert: '/pin' },
       { label: '/chain', hint: 'Execute chain', insert: '/chain' },
+      { label: '/think', hint: 'Sequential thinking', insert: '/think' },
+      { label: '/remember', hint: 'Store to all memory', insert: '/remember' },
+      { label: '/omega', hint: 'Omega Sentinel', insert: '/omega' },
+      { label: '/omega sitrep', hint: 'Full SITREP', insert: '/omega sitrep' },
+      { label: '/omega sweep', hint: 'Service health sweep', insert: '/omega sweep' },
+      { label: '/omega memory', hint: 'Agent memories', insert: '/omega memory' },
+      { label: '/omega compliance', hint: 'Architecture compliance', insert: '/omega compliance' },
+      { label: '/cortex', hint: 'Associative memory', insert: '/cortex' },
+      { label: '/mission', hint: 'RLM multi-step mission', insert: '/mission' },
+      { label: '/episodes', hint: 'Episodic memory search', insert: '/episodes' },
     ]
     const templateCmds = chatTemplates.map(t => ({ label: '/template ' + t.id, hint: t.description, insert: '/template ' + t.id }))
     const tools = availableTools.map(t => ({ label: '/' + t, hint: 'MCP tool', insert: '/' + t }))
@@ -1885,6 +2171,7 @@ function boot() {
   connectSSE()
   refreshDashboard()
   loadTools()
+  loadProviders()
   loadChatHistory()
   loadTemplates()
   addChainStep() // Start with one empty step
