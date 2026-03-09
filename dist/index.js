@@ -9053,21 +9053,93 @@ async function runLoop(steps, maxIterations, exitCondition) {
   }
   return allResults;
 }
-async function runDebate(steps, judgeAgent) {
+async function classifyComplexity(query) {
+  try {
+    const result = await callCognitive("reason", {
+      prompt: `Classify this query's complexity for a multi-agent system. Reply with ONLY one word: simple, medium, or complex.
+
+Query: "${query}"
+
+Rules:
+- simple: direct lookup, single-hop, factual (\u2192 sequential chain)
+- medium: multi-step, requires 2-3 sources, some reasoning (\u2192 parallel chain)
+- complex: multi-hop reasoning, debate-worthy, ambiguous, strategic (\u2192 debate+parallel)`,
+      context: {},
+      agent_id: "orchestrator"
+    }, 15e3);
+    const text = String(result ?? "").toLowerCase().trim();
+    if (text.includes("complex")) return "complex";
+    if (text.includes("medium")) return "medium";
+    return "simple";
+  } catch {
+    return "medium";
+  }
+}
+async function runAdaptive(steps, query, judgeAgent, confidenceThreshold = 0.6) {
+  const complexity = query ? await classifyComplexity(query) : "medium";
+  logger.info({ complexity, query: query?.slice(0, 80) }, "AGoT: classified complexity");
+  let results;
+  let topology;
+  switch (complexity) {
+    case "simple":
+      topology = "sequential";
+      results = await runSequential(steps);
+      break;
+    case "medium":
+      topology = "parallel";
+      results = await runParallel(steps);
+      break;
+    case "complex":
+      topology = "debate+verify";
+      results = await runDebateGVU(steps, judgeAgent, confidenceThreshold);
+      break;
+    default:
+      topology = "sequential";
+      results = await runSequential(steps);
+  }
+  results.forEach((r) => {
+    r.topology = topology;
+  });
+  return { results, chosen_topology: topology };
+}
+async function runDebateGVU(steps, judgeAgent, confidenceThreshold = 0.6) {
   const debateResults = await runParallel(steps);
   if (!judgeAgent) return debateResults;
   const positions = debateResults.map((r) => ({
     agent: r.agent_id,
-    position: r.output
+    position: typeof r.output === "string" ? r.output.slice(0, 500) : JSON.stringify(r.output).slice(0, 500),
+    status: r.status
   }));
-  const judgeResult = await executeStep({
+  const verifyResult = await executeStep({
     agent_id: judgeAgent,
     cognitive_action: "analyze",
-    prompt: `You are the judge. Evaluate these positions and synthesize the best answer:
+    prompt: `You are the VERIFIER in a GVU (Generator-Verifier-Updater) loop.
 
-${JSON.stringify(positions, null, 2)}`
+Score each position on a 0-1 confidence scale and synthesize the best answer.
+Only accept positions with confidence >= ${confidenceThreshold}.
+
+Positions:
+${JSON.stringify(positions, null, 2)}
+
+Reply as JSON: {"synthesis": "best answer", "scores": [{"agent": "id", "confidence": 0.0-1.0, "accepted": true/false}], "overall_confidence": 0.0-1.0}`
   }, positions);
-  return [...debateResults, judgeResult];
+  let verification = {};
+  try {
+    const raw = String(verifyResult.output ?? "");
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (match) verification = JSON.parse(match[0]);
+  } catch {
+    verification = { synthesis: verifyResult.output, overall_confidence: 0.5, scores: [] };
+  }
+  for (const r of debateResults) {
+    const score = verification.scores?.find((s) => s.agent === r.agent_id);
+    r.confidence = score?.confidence ?? 0.5;
+    r.verified = score?.accepted ?? r.confidence >= confidenceThreshold;
+  }
+  verifyResult.confidence = verification.overall_confidence ?? 0.5;
+  verifyResult.verified = true;
+  verifyResult.output = verification.synthesis ?? verifyResult.output;
+  return [...debateResults, verifyResult];
 }
 async function executeChain(def) {
   const executionId = uuid();
@@ -9107,8 +9179,14 @@ async function executeChain(def) {
         results = await runLoop(def.steps, def.max_iterations ?? 5, def.exit_condition);
         break;
       case "debate":
-        results = await runDebate(def.steps, def.judge_agent);
+        results = await runDebateGVU(def.steps, def.judge_agent, def.confidence_threshold);
         break;
+      case "adaptive": {
+        const adaptive = await runAdaptive(def.steps, def.query, def.judge_agent, def.confidence_threshold);
+        results = adaptive.results;
+        execution.chosen_topology = adaptive.chosen_topology;
+        break;
+      }
       default:
         throw new Error(`Unknown chain mode: ${def.mode}`);
     }
@@ -9345,6 +9423,96 @@ function listProviders() {
   return all.map((p) => ({ ...p, available: !!providers[p.id] }));
 }
 
+// src/dual-rag.ts
+import { v4 as uuid2 } from "uuid";
+async function dualChannelRAG(query, options) {
+  const t0 = Date.now();
+  const maxResults = options?.maxResults ?? 10;
+  const depth = options?.cypherDepth ?? 2;
+  const [sragResult, cypherResult] = await Promise.allSettled([
+    callMcpTool({
+      toolName: "srag.query",
+      args: { query },
+      callId: uuid2(),
+      timeoutMs: 3e4
+    }),
+    callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: buildCypherQuery(query, depth)
+      },
+      callId: uuid2(),
+      timeoutMs: 15e3
+    })
+  ]);
+  const results = [];
+  if (sragResult.status === "fulfilled" && sragResult.value.status === "success") {
+    const sragData = sragResult.value.result;
+    const items = Array.isArray(sragData) ? sragData : sragData?.results ? sragData.results : sragData?.chunks ? sragData.chunks : [];
+    for (const item of items.slice(0, maxResults)) {
+      results.push({
+        source: "srag",
+        content: item.content || item.text || item.chunk || JSON.stringify(item).slice(0, 500),
+        score: item.score || item.similarity || 0.5,
+        metadata: { title: item.title, tags: item.tags }
+      });
+    }
+  }
+  if (cypherResult.status === "fulfilled" && cypherResult.value.status === "success") {
+    const cypherData = cypherResult.value.result;
+    const rows = cypherData?.results || cypherData || [];
+    if (Array.isArray(rows)) {
+      for (const row of rows.slice(0, maxResults)) {
+        const content = Object.values(row).map(
+          (v) => typeof v === "string" ? v : JSON.stringify(v)
+        ).join(" | ");
+        results.push({
+          source: "cypher",
+          content: content.slice(0, 500),
+          score: 0.7,
+          // graph results are structurally relevant
+          metadata: row
+        });
+      }
+    }
+  }
+  results.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  const merged = results.slice(0, maxResults).map(
+    (r, i) => `[${r.source.toUpperCase()} #${i + 1}] ${r.content}`
+  ).join("\n\n");
+  const sragCount = results.filter((r) => r.source === "srag").length;
+  const cypherCount = results.filter((r) => r.source === "cypher").length;
+  logger.debug({ query: query.slice(0, 60), sragCount, cypherCount, ms: Date.now() - t0 }, "Dual-channel RAG");
+  return {
+    query,
+    results: results.slice(0, maxResults),
+    srag_count: sragCount,
+    cypher_count: cypherCount,
+    merged_context: merged,
+    duration_ms: Date.now() - t0
+  };
+}
+function buildCypherQuery(query, depth) {
+  const stopWords = /* @__PURE__ */ new Set(["the", "and", "for", "with", "that", "this", "from", "are", "was", "how", "what", "which", "where", "when", "why", "can", "does", "will", "not", "all", "has", "have", "been", "our", "their", "its"]);
+  const keywords = query.toLowerCase().replace(/[^a-zA-Z0-9æøåÆØÅ\s]/g, "").split(/\s+/).filter((w) => w.length >= 3 && !stopWords.has(w)).slice(0, 5);
+  if (keywords.length === 0) {
+    return "MATCH (n:StrategicInsight) RETURN n.title AS title, n.domain AS domain LIMIT 5";
+  }
+  const kwConditions = keywords.map(
+    (kw) => `toLower(coalesce(n.title, n.name, n.description, '')) CONTAINS '${kw}'`
+  ).join(" OR ");
+  return `MATCH (n) WHERE (n:StrategicInsight OR n:Pattern OR n:Lesson OR n:Knowledge OR n:Memory OR n:TDCDocument)
+AND (${kwConditions})
+WITH n, labels(n)[0] AS label
+OPTIONAL MATCH (n)-[r]-(m)
+RETURN label,
+       coalesce(n.title, n.name, n.filename) AS title,
+       substring(coalesce(n.description, n.content, n.value, ''), 0, 300) AS content,
+       type(r) AS rel,
+       labels(m)[0] AS connected_to
+LIMIT 15`;
+}
+
 // src/routes/chat.ts
 async function mcpCall(tool, args) {
   const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
@@ -9530,6 +9698,20 @@ chatRouter.get("/history", async (req, res) => {
   const messages = await getHistory(limit, offset, target);
   res.json({ success: true, data: { messages, total: messages.length, limit, offset } });
 });
+chatRouter.post("/rag", async (req, res) => {
+  const { query, max_results, cypher_depth } = req.body;
+  if (!query || typeof query !== "string" || query.length < 3) {
+    res.status(400).json({ success: false, error: { code: "INVALID_QUERY", message: "query (min 3 chars) required", status_code: 400 } });
+    return;
+  }
+  try {
+    const result = await dualChannelRAG(query, { maxResults: max_results, cypherDepth: cypher_depth });
+    res.json({ success: true, data: result });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Dual-RAG error");
+    res.status(500).json({ success: false, error: { code: "RAG_ERROR", message: String(err), status_code: 500 } });
+  }
+});
 chatRouter.get("/threads/:id", async (req, res) => {
   const messages = await getThread(req.params.id);
   res.json({ success: true, data: { thread_id: req.params.id, messages, count: messages.length } });
@@ -9707,7 +9889,7 @@ Participants: ${agents.join(", ")} | Rounds: ${maxRounds}`,
     timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     thread_id: debateId
   });
-  runDebate2(debateId, agents, topic, maxRounds).catch((err) => {
+  runDebate(debateId, agents, topic, maxRounds).catch((err) => {
     logger.error({ err: String(err), debateId }, "Debate failed");
     broadcastMessage({
       from: "System",
@@ -9721,7 +9903,7 @@ Participants: ${agents.join(", ")} | Rounds: ${maxRounds}`,
   });
   res.json({ success: true, data: { debate_id: debateId, agents, topic, rounds: maxRounds } });
 });
-async function runDebate2(debateId, agents, topic, rounds) {
+async function runDebate(debateId, agents, topic, rounds) {
   const responses = [];
   for (let round = 1; round <= rounds; round++) {
     for (const agent of agents) {
@@ -10186,6 +10368,233 @@ import { Router as Router6 } from "express";
 
 // src/cron-scheduler.ts
 import cron from "node-cron";
+
+// src/graph-self-correct.ts
+import { v4 as uuid3 } from "uuid";
+async function graphRead(cypher) {
+  const result = await callMcpTool({
+    toolName: "graph.read_cypher",
+    args: { query: cypher },
+    callId: uuid3(),
+    timeoutMs: 15e3
+  });
+  if (result.status !== "success") return [];
+  const data = result.result;
+  return data?.results || data || [];
+}
+async function graphWrite(cypher, params) {
+  const result = await callMcpTool({
+    toolName: "graph.write_cypher",
+    args: { query: cypher, ...params ? { parameters: params } : {} },
+    callId: uuid3(),
+    timeoutMs: 15e3
+  });
+  return result.status === "success";
+}
+async function fixOrphanedNodes() {
+  const orphans = await graphRead(`
+    MATCH (n)
+    WHERE NOT (n)-[]-()
+    AND NOT n:TDCDocument
+    RETURN labels(n)[0] AS label, count(*) AS count
+    ORDER BY count DESC LIMIT 20
+  `);
+  let fixed = 0;
+  const totalFound = orphans.reduce((sum, r) => sum + (r.count?.low ?? r.count ?? 0), 0);
+  const hubWiring = {
+    SystemArchitecture: 'MERGE (hub:CodeHub {name: "system"}) MERGE (n)-[:PART_OF]->(hub)',
+    AgentMemory: "MATCH (a:Agent {name: n.agent_id}) MERGE (n)-[:BELONGS_TO]->(a)",
+    EvolutionEvent: 'MERGE (hub:EvolutionHub {name: "evolution"}) MERGE (n)-[:TRACKED_BY]->(hub)',
+    Lesson: 'MERGE (hub:LessonHub {name: "lessons"}) MERGE (n)-[:CATALOGED_IN]->(hub)',
+    FailureMemory: 'MERGE (hub:FailureHub {name: "failures"}) MERGE (n)-[:TRACKED_BY]->(hub)'
+  };
+  for (const [label, wireCypher] of Object.entries(hubWiring)) {
+    const count = orphans.find((r) => r.label === label);
+    if (count) {
+      const ok = await graphWrite(`
+        MATCH (n:${label}) WHERE NOT (n)-[]-()
+        WITH n LIMIT 50
+        ${wireCypher}
+      `);
+      if (ok) fixed += Math.min(count.count?.low ?? count.count ?? 0, 50);
+    }
+  }
+  return {
+    check: "orphaned_nodes",
+    found: totalFound,
+    fixed,
+    details: orphans.map((r) => `${r.label}: ${r.count?.low ?? r.count}`).join(", ")
+  };
+}
+async function addBiTemporalMetadata() {
+  const missing = await graphRead(`
+    MATCH (n)
+    WHERE n.created_at IS NOT NULL AND n.valid_from IS NULL
+    AND (n:StrategicInsight OR n:Pattern OR n:Lesson OR n:Knowledge OR n:AgentMemory)
+    RETURN labels(n)[0] AS label, count(*) AS count
+  `);
+  const totalFound = missing.reduce((sum, r) => sum + (r.count?.low ?? r.count ?? 0), 0);
+  let fixed = 0;
+  for (const row of missing) {
+    const label = row.label;
+    const ok = await graphWrite(`
+      MATCH (n:${label})
+      WHERE n.created_at IS NOT NULL AND n.valid_from IS NULL
+      WITH n LIMIT 100
+      SET n.valid_from = n.created_at,
+          n.valid_to = datetime('9999-12-31T23:59:59Z'),
+          n.temporal_version = 1
+    `);
+    if (ok) fixed += Math.min(row.count?.low ?? row.count ?? 0, 100);
+  }
+  return {
+    check: "bi_temporal_metadata",
+    found: totalFound,
+    fixed,
+    details: `Added valid_from/valid_to to ${fixed} nodes`
+  };
+}
+async function resolveStaleFailures() {
+  const stale = await graphRead(`
+    MATCH (f:FailureMemory)
+    WHERE f.created_at < datetime() - duration('P30D')
+    AND f.resolved IS NULL
+    RETURN count(f) AS count
+  `);
+  const totalFound = stale[0]?.count?.low ?? stale[0]?.count ?? 0;
+  if (totalFound === 0) {
+    return { check: "stale_failures", found: 0, fixed: 0, details: "No stale failures" };
+  }
+  const ok = await graphWrite(`
+    MATCH (f:FailureMemory)
+    WHERE f.created_at < datetime() - duration('P30D')
+    AND f.resolved IS NULL
+    WITH f LIMIT 50
+    SET f.resolved = 'auto-stale',
+        f.resolved_at = datetime(),
+        f.valid_to = datetime()
+  `);
+  return {
+    check: "stale_failures",
+    found: totalFound,
+    fixed: ok ? Math.min(totalFound, 50) : 0,
+    details: `${totalFound} failures older than 30 days`
+  };
+}
+async function detectDuplicates() {
+  const dupes = await graphRead(`
+    MATCH (n)
+    WHERE n.title IS NOT NULL
+    AND (n:StrategicInsight OR n:Pattern OR n:Lesson OR n:Knowledge)
+    WITH n.title AS title, labels(n)[0] AS label, collect(n) AS nodes
+    WHERE size(nodes) > 1
+    RETURN label, title, size(nodes) AS count
+    LIMIT 20
+  `);
+  const totalFound = dupes.reduce((sum, r) => sum + (r.count?.low ?? r.count ?? 0), 0);
+  return {
+    check: "duplicates",
+    found: totalFound,
+    fixed: 0,
+    details: dupes.map((r) => `${r.label}:"${r.title}" (${r.count?.low ?? r.count}x)`).join(", ") || "None"
+  };
+}
+async function fixEvolutionEvents() {
+  const broken = await graphRead(`
+    MATCH (e:EvolutionEvent)
+    WHERE e.pass_rate IS NULL AND e.passed IS NOT NULL AND e.total IS NOT NULL
+    RETURN count(e) AS count
+  `);
+  const totalFound = broken[0]?.count?.low ?? broken[0]?.count ?? 0;
+  if (totalFound === 0) {
+    return { check: "evolution_events", found: 0, fixed: 0, details: "All events have pass_rate" };
+  }
+  const ok = await graphWrite(`
+    MATCH (e:EvolutionEvent)
+    WHERE e.pass_rate IS NULL AND e.passed IS NOT NULL AND e.total IS NOT NULL
+    WITH e LIMIT 100
+    SET e.pass_rate = toFloat(e.passed) / toFloat(e.total),
+        e.type = coalesce(e.type, 'evolution')
+  `);
+  return {
+    check: "evolution_events",
+    found: totalFound,
+    fixed: ok ? Math.min(totalFound, 100) : 0,
+    details: `Fixed pass_rate on ${Math.min(totalFound, 100)} events`
+  };
+}
+async function runSelfCorrect() {
+  const t0 = Date.now();
+  const startedAt = (/* @__PURE__ */ new Date()).toISOString();
+  logger.info("Self-correcting graph agent starting");
+  const corrections = await Promise.all([
+    fixOrphanedNodes().catch((err) => ({
+      check: "orphaned_nodes",
+      found: 0,
+      fixed: 0,
+      details: `Error: ${err}`
+    })),
+    addBiTemporalMetadata().catch((err) => ({
+      check: "bi_temporal_metadata",
+      found: 0,
+      fixed: 0,
+      details: `Error: ${err}`
+    })),
+    resolveStaleFailures().catch((err) => ({
+      check: "stale_failures",
+      found: 0,
+      fixed: 0,
+      details: `Error: ${err}`
+    })),
+    detectDuplicates().catch((err) => ({
+      check: "duplicates",
+      found: 0,
+      fixed: 0,
+      details: `Error: ${err}`
+    })),
+    fixEvolutionEvents().catch((err) => ({
+      check: "evolution_events",
+      found: 0,
+      fixed: 0,
+      details: `Error: ${err}`
+    }))
+  ]);
+  const report = {
+    started_at: startedAt,
+    completed_at: (/* @__PURE__ */ new Date()).toISOString(),
+    duration_ms: Date.now() - t0,
+    corrections,
+    total_found: corrections.reduce((s, c) => s + c.found, 0),
+    total_fixed: corrections.reduce((s, c) => s + c.fixed, 0)
+  };
+  try {
+    await graphWrite(`
+      CREATE (e:SelfCorrectionEvent {
+        timestamp: datetime(),
+        total_found: $found,
+        total_fixed: $fixed,
+        duration_ms: $ms,
+        checks: $checks,
+        valid_from: datetime(),
+        valid_to: datetime('9999-12-31T23:59:59Z')
+      })
+    `, {
+      found: report.total_found,
+      fixed: report.total_fixed,
+      ms: report.duration_ms,
+      checks: JSON.stringify(corrections)
+    });
+  } catch {
+  }
+  logger.info({
+    found: report.total_found,
+    fixed: report.total_fixed,
+    ms: report.duration_ms
+  }, "Self-correcting graph agent complete");
+  return report;
+}
+
+// src/cron-scheduler.ts
 var jobs = /* @__PURE__ */ new Map();
 var cronTasks = /* @__PURE__ */ new Map();
 var REDIS_CRON_KEY = "orchestrator:cron-jobs";
@@ -10222,6 +10631,22 @@ async function runCronJob(jobId) {
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   });
   try {
+    if (job.id === "graph-self-correct") {
+      const report = await runSelfCorrect();
+      job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+      job.last_status = report.total_fixed > 0 ? "corrected" : "clean";
+      job.run_count++;
+      persistCronJobs();
+      broadcastMessage({
+        from: "Orchestrator",
+        to: "All",
+        source: "orchestrator",
+        type: "Message",
+        message: `Self-correct: found ${report.total_found} issues, fixed ${report.total_fixed} (${report.duration_ms}ms)`,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      });
+      return;
+    }
     const result = await executeChain(job.chain);
     job.last_run = (/* @__PURE__ */ new Date()).toISOString();
     job.last_status = result.status;
@@ -10341,6 +10766,25 @@ function registerDefaultLoops() {
           tool_name: "graph.read_cypher",
           arguments: {
             query: "MATCH (f:FailureMemory) WHERE f.last_seen > datetime() - duration('PT6H') OR f.created_at > datetime() - duration('PT6H') RETURN f.category AS category, f.pattern AS pattern, f.hit_count AS hits, f.resolution AS resolution ORDER BY f.hit_count DESC LIMIT 10"
+          }
+        }
+      ]
+    }
+  });
+  registerCronJob({
+    id: "graph-self-correct",
+    name: "Self-Correcting Graph Agent",
+    schedule: "0 */2 * * *",
+    enabled: true,
+    chain: {
+      name: "Graph Self-Correct",
+      mode: "sequential",
+      steps: [
+        {
+          agent_id: "orchestrator",
+          tool_name: "graph.read_cypher",
+          arguments: {
+            query: "MATCH (n) WHERE NOT (n)-[]-() AND NOT n:TDCDocument RETURN labels(n)[0] AS label, count(*) AS count ORDER BY count DESC LIMIT 10"
           }
         }
       ]
@@ -10654,6 +11098,345 @@ auditRouter.get("/log", async (req, res) => {
   res.json({ success: true, data: { entries: filtered, total: filtered.length, limit, offset } });
 });
 
+// src/routes/monitor.ts
+import { Router as Router11 } from "express";
+
+// src/context-compress.ts
+var DEFAULT_MAX_TOKENS = 2e3;
+var AVG_CHARS_PER_TOKEN = 4;
+async function compressContext(content, options) {
+  const t0 = Date.now();
+  const strategy = options?.strategy ?? "hybrid";
+  const maxChars = (options?.maxTokens ?? DEFAULT_MAX_TOKENS) * AVG_CHARS_PER_TOKEN;
+  if (content.length <= maxChars) {
+    return {
+      original_length: content.length,
+      compressed_length: content.length,
+      compression_ratio: 1,
+      strategy,
+      content,
+      duration_ms: Date.now() - t0
+    };
+  }
+  let compressed;
+  switch (strategy) {
+    case "fold":
+      compressed = await foldCompress(content, maxChars);
+      break;
+    case "truncate":
+      compressed = smartTruncate(content, maxChars);
+      break;
+    case "dedupe":
+      compressed = deduplicateBlocks(content, maxChars);
+      break;
+    case "hybrid":
+      compressed = deduplicateBlocks(content, maxChars * 2);
+      if (compressed.length > maxChars) {
+        compressed = await foldCompress(compressed, maxChars);
+      }
+      break;
+    default:
+      compressed = smartTruncate(content, maxChars);
+  }
+  const result = {
+    original_length: content.length,
+    compressed_length: compressed.length,
+    compression_ratio: compressed.length / content.length,
+    strategy,
+    content: compressed,
+    duration_ms: Date.now() - t0
+  };
+  logger.debug({
+    strategy,
+    original: content.length,
+    compressed: compressed.length,
+    ratio: result.compression_ratio.toFixed(2)
+  }, "Context compressed");
+  return result;
+}
+async function foldCompress(content, maxChars) {
+  if (!isRlmAvailable()) {
+    return smartTruncate(content, maxChars);
+  }
+  try {
+    const result = await callCognitive("fold", {
+      prompt: `Compress the following context to approximately ${Math.round(maxChars / AVG_CHARS_PER_TOKEN)} tokens while preserving all key facts, entities, relationships, and actionable information. Remove redundancy but keep semantic density high. Output ONLY the compressed text, no preamble.`,
+      context: { content: content.slice(0, 16e3) },
+      // RLM input limit
+      agent_id: "context-compressor"
+    }, 3e4);
+    const compressed = String(result ?? "");
+    if (compressed.length > 0 && compressed.length < content.length) {
+      return compressed.slice(0, maxChars);
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, "RLM fold failed, falling back to truncation");
+  }
+  return smartTruncate(content, maxChars);
+}
+function smartTruncate(content, maxChars) {
+  if (content.length <= maxChars) return content;
+  const headSize = Math.floor(maxChars * 0.6);
+  const tailSize = Math.floor(maxChars * 0.3);
+  const separator = "\n\n[...compressed...]\n\n";
+  const head = content.slice(0, headSize);
+  const tail = content.slice(-tailSize);
+  return head + separator + tail;
+}
+function deduplicateBlocks(content, maxChars) {
+  const blocks = content.split(/\n{2,}/);
+  const seen = /* @__PURE__ */ new Set();
+  const unique = [];
+  for (const block of blocks) {
+    const normalized = block.toLowerCase().replace(/\s+/g, " ").trim();
+    if (normalized.length < 10) continue;
+    const key = normalized.slice(0, 100);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(block.trim());
+  }
+  const result = unique.join("\n\n");
+  return result.length > maxChars ? smartTruncate(result, maxChars) : result;
+}
+async function expandContext(compressed, targetFormat) {
+  if (!isRlmAvailable()) return compressed;
+  const formatInstructions = {
+    graph_mutations: "Expand into specific Neo4j Cypher mutations (CREATE/MERGE/SET statements) that would persist these insights into a knowledge graph.",
+    detailed_response: "Expand into a detailed, well-structured response with sections, examples, and actionable recommendations.",
+    action_plan: "Expand into a concrete action plan with numbered steps, responsible agents, and expected outcomes."
+  };
+  try {
+    const result = await callCognitive("reason", {
+      prompt: `${formatInstructions[targetFormat]}
+
+Compressed context:
+${compressed}`,
+      agent_id: "context-expander"
+    }, 3e4);
+    return String(result ?? compressed);
+  } catch {
+    return compressed;
+  }
+}
+
+// src/routes/monitor.ts
+import { v4 as uuid4 } from "uuid";
+var monitorRouter = Router11();
+async function graphRead2(cypher) {
+  const result = await callMcpTool({
+    toolName: "graph.read_cypher",
+    args: { query: cypher },
+    callId: uuid4(),
+    timeoutMs: 1e4
+  });
+  if (result.status !== "success") return [];
+  const data = result.result;
+  return data?.results || data || [];
+}
+function neo4jInt(val) {
+  if (val == null) return 0;
+  if (typeof val === "number") return val;
+  if (typeof val === "object" && "low" in val) return val.low;
+  return Number(val) || 0;
+}
+monitorRouter.get("/status", async (_req, res) => {
+  try {
+    const [
+      evolutionEvents,
+      failureMemory,
+      selfCorrections,
+      biTemporalNodes,
+      graphStats
+    ] = await Promise.all([
+      graphRead2(`
+        MATCH (e:EvolutionEvent)
+        WHERE e.timestamp > datetime() - duration('P7D')
+        RETURN count(e) AS events_7d,
+               avg(toFloat(coalesce(e.pass_rate, 0))) AS avg_pass_rate,
+               max(e.timestamp) AS latest
+      `),
+      graphRead2(`
+        MATCH (f:FailureMemory)
+        RETURN count(f) AS total,
+               sum(CASE WHEN f.resolved IS NOT NULL THEN 1 ELSE 0 END) AS resolved
+      `),
+      graphRead2(`
+        MATCH (s:SelfCorrectionEvent)
+        RETURN count(s) AS runs,
+               sum(s.total_fixed) AS total_fixed,
+               max(s.timestamp) AS latest
+        LIMIT 1
+      `),
+      graphRead2(`
+        MATCH (n)
+        WHERE n.valid_from IS NOT NULL
+        RETURN count(n) AS temporal_nodes
+      `),
+      graphRead2(`
+        MATCH (n) RETURN labels(n)[0] AS label, count(*) AS count
+        ORDER BY count DESC LIMIT 15
+      `)
+    ]);
+    const ev = evolutionEvents[0] || {};
+    const fm = failureMemory[0] || {};
+    const sc = selfCorrections[0] || {};
+    const bt = biTemporalNodes[0] || {};
+    const cronJobs = listCronJobs();
+    const recentChains = listExecutions().slice(0, 5);
+    res.json({
+      success: true,
+      data: {
+        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        evolution: {
+          events_last_7d: neo4jInt(ev.events_7d),
+          avg_pass_rate: ev.avg_pass_rate ?? null,
+          latest_event: ev.latest
+        },
+        failure_memory: {
+          total: neo4jInt(fm.total),
+          resolved: neo4jInt(fm.resolved),
+          unresolved: neo4jInt(fm.total) - neo4jInt(fm.resolved)
+        },
+        self_corrections: {
+          total_runs: neo4jInt(sc.runs),
+          total_fixed: neo4jInt(sc.total_fixed),
+          latest_run: sc.latest
+        },
+        bi_temporal: {
+          nodes_with_temporal_metadata: neo4jInt(bt.temporal_nodes)
+        },
+        features: {
+          "1_bi_temporal_edges": neo4jInt(bt.temporal_nodes) > 0 ? "active" : "pending",
+          "2_self_correcting_graph": neo4jInt(sc.runs) > 0 ? "active" : "registered",
+          "3_context_compression": isRlmAvailable() ? "available" : "no_rlm",
+          "4_adaptive_graph_of_thoughts": "active",
+          "5_gvu_debate": "active",
+          "6_dual_channel_rag": "active"
+        },
+        cron_jobs: cronJobs.map((j) => ({
+          id: j.id,
+          name: j.name,
+          schedule: j.schedule,
+          enabled: j.enabled,
+          last_run: j.last_run,
+          last_status: j.last_status,
+          run_count: j.run_count
+        })),
+        recent_chains: recentChains.map((c) => ({
+          name: c.name,
+          mode: c.mode,
+          status: c.status,
+          steps: `${c.steps_completed}/${c.steps_total}`,
+          duration_ms: c.duration_ms,
+          started_at: c.started_at
+        })),
+        graph_stats: graphStats.map((r) => ({
+          label: r.label,
+          count: neo4jInt(r.count)
+        }))
+      }
+    });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Monitor status error");
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
+monitorRouter.get("/features", async (_req, res) => {
+  const features = [
+    {
+      id: 1,
+      name: "Bi-Temporal Edges",
+      source: "Graphiti/Zep (2024)",
+      status: "active",
+      description: "Nodes get valid_from/valid_to + temporal_version. Self-correcting agent adds temporal metadata to nodes missing it.",
+      endpoint: null,
+      cron: "graph-self-correct (adds bi-temporal metadata)"
+    },
+    {
+      id: 2,
+      name: "Self-Correcting Graph Agent",
+      source: "Globant (2025)",
+      status: "active",
+      description: "Detects orphaned nodes, stale failures, missing metadata, duplicates. Runs every 2 hours via cron.",
+      endpoint: "POST /monitor/self-correct",
+      cron: "graph-self-correct (every 2h)"
+    },
+    {
+      id: 3,
+      name: "Active Context Compression",
+      source: "arXiv 2601.07190",
+      status: isRlmAvailable() ? "active" : "degraded",
+      description: "Context Folding IN/OUT via RLM Engine. Strategies: fold, truncate, dedupe, hybrid.",
+      endpoint: "POST /monitor/compress",
+      cron: null
+    },
+    {
+      id: 4,
+      name: "Adaptive Graph of Thoughts (AGoT)",
+      source: "arXiv 2502.05078",
+      status: "active",
+      description: "Chain engine auto-selects topology (sequential/parallel/debate) based on query complexity classification.",
+      endpoint: "POST /chains/execute (mode: adaptive)",
+      cron: null
+    },
+    {
+      id: 5,
+      name: "GVU Self-Improvement Loop",
+      source: "Chojecki (2025)",
+      status: "active",
+      description: "Generator-Verifier-Updater pattern in debate chains. Judge scores positions 0-1, enforces confidence threshold.",
+      endpoint: "POST /chains/execute (mode: debate)",
+      cron: null
+    },
+    {
+      id: 6,
+      name: "Dual-Channel RAG",
+      source: "Nature (2025)",
+      status: "active",
+      description: "Parallel SRAG vector search + Neo4j Cypher path traversal, merged by relevance score.",
+      endpoint: "POST /chat/rag",
+      cron: null
+    }
+  ];
+  res.json({ success: true, data: { features, count: features.length } });
+});
+monitorRouter.post("/self-correct", async (_req, res) => {
+  try {
+    const report = await runSelfCorrect();
+    res.json({ success: true, data: report });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Self-correct trigger error");
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
+monitorRouter.post("/compress", async (req, res) => {
+  const { content, strategy, max_tokens, expand_format } = req.body;
+  if (!content || typeof content !== "string") {
+    res.status(400).json({ success: false, error: "content (string) required" });
+    return;
+  }
+  try {
+    const result = await compressContext(content, {
+      strategy: strategy ?? "hybrid",
+      maxTokens: max_tokens
+    });
+    let expanded;
+    if (expand_format) {
+      expanded = await expandContext(result.content, expand_format);
+    }
+    res.json({
+      success: true,
+      data: {
+        ...result,
+        ...expanded ? { expanded } : {}
+      }
+    });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Compress error");
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
+
 // src/auth.ts
 function requireApiKey(req, res, next) {
   if (!config.orchestratorApiKey) {
@@ -10910,6 +11693,7 @@ app.use("/api/dashboard", dashboardRouter);
 app.use("/api/openclaw", requireApiKey, openclawRouter);
 app.use("/api/audit", requireApiKey, auditRouter);
 app.use("/api/llm", requireApiKey, llmRouter);
+app.use("/monitor", requireApiKey, monitorRouter);
 app.get("/api/events", requireApiKey, handleSSE);
 app.get("/health", (_req, res) => {
   res.json({

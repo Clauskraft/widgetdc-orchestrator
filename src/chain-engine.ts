@@ -34,7 +34,7 @@ export interface ChainDefinition {
   chain_id?: string
   name: string
   description?: string
-  mode: 'sequential' | 'parallel' | 'debate' | 'loop'
+  mode: 'sequential' | 'parallel' | 'debate' | 'loop' | 'adaptive'
   steps: ChainStep[]
   /** For loops: max iterations before forced exit */
   max_iterations?: number
@@ -42,6 +42,10 @@ export interface ChainDefinition {
   exit_condition?: string
   /** For debate: agent_id of the judge */
   judge_agent?: string
+  /** For adaptive: the query to classify complexity for */
+  query?: string
+  /** For debate/GVU: minimum confidence threshold (0-1) */
+  confidence_threshold?: number
 }
 
 export interface ChainExecution {
@@ -67,6 +71,10 @@ interface StepResult {
   status: 'success' | 'error' | 'timeout'
   output: unknown
   duration_ms: number
+  /** GVU verification score (0-1) — set by verifier in debate/adaptive */
+  confidence?: number
+  /** Whether this result was verified (GVU pattern) */
+  verified?: boolean
 }
 
 // ─── Execution Store ────────────────────────────────────────────────────────
@@ -228,6 +236,124 @@ async function runDebate(
   return [...debateResults, judgeResult]
 }
 
+// ─── Adaptive Graph of Thoughts (AGoT) ──────────────────────────────────────
+
+async function classifyComplexity(query: string): Promise<'simple' | 'medium' | 'complex'> {
+  try {
+    const result = await callCognitive('reason', {
+      prompt: `Classify this query's complexity for a multi-agent system. Reply with ONLY one word: simple, medium, or complex.
+
+Query: "${query}"
+
+Rules:
+- simple: direct lookup, single-hop, factual (→ sequential chain)
+- medium: multi-step, requires 2-3 sources, some reasoning (→ parallel chain)
+- complex: multi-hop reasoning, debate-worthy, ambiguous, strategic (→ debate+parallel)`,
+      context: {},
+      agent_id: 'orchestrator',
+    }, 15000)
+    const text = String(result ?? '').toLowerCase().trim()
+    if (text.includes('complex')) return 'complex'
+    if (text.includes('medium')) return 'medium'
+    return 'simple'
+  } catch {
+    return 'medium' // default
+  }
+}
+
+async function runAdaptive(
+  steps: ChainStep[],
+  query?: string,
+  judgeAgent?: string,
+  confidenceThreshold = 0.6,
+): Promise<{ results: StepResult[]; chosen_topology: string }> {
+  const complexity = query ? await classifyComplexity(query) : 'medium'
+  logger.info({ complexity, query: query?.slice(0, 80) }, 'AGoT: classified complexity')
+
+  let results: StepResult[]
+  let topology: string
+
+  switch (complexity) {
+    case 'simple':
+      topology = 'sequential'
+      results = await runSequential(steps)
+      break
+    case 'medium':
+      topology = 'parallel'
+      results = await runParallel(steps)
+      break
+    case 'complex':
+      topology = 'debate+verify'
+      results = await runDebateGVU(steps, judgeAgent, confidenceThreshold)
+      break
+    default:
+      topology = 'sequential'
+      results = await runSequential(steps)
+  }
+
+  // Tag all results with topology
+  results.forEach(r => { (r as any).topology = topology })
+  return { results, chosen_topology: topology }
+}
+
+// ─── GVU (Generator-Verifier-Updater) Debate ────────────────────────────────
+
+async function runDebateGVU(
+  steps: ChainStep[],
+  judgeAgent?: string,
+  confidenceThreshold = 0.6,
+): Promise<StepResult[]> {
+  // Phase 1: GENERATE — all debaters run in parallel
+  const debateResults = await runParallel(steps)
+
+  if (!judgeAgent) return debateResults
+
+  // Phase 2: VERIFY — judge scores each position
+  const positions = debateResults.map(r => ({
+    agent: r.agent_id,
+    position: typeof r.output === 'string' ? r.output.slice(0, 500) : JSON.stringify(r.output).slice(0, 500),
+    status: r.status,
+  }))
+
+  const verifyResult = await executeStep({
+    agent_id: judgeAgent,
+    cognitive_action: 'analyze',
+    prompt: `You are the VERIFIER in a GVU (Generator-Verifier-Updater) loop.
+
+Score each position on a 0-1 confidence scale and synthesize the best answer.
+Only accept positions with confidence >= ${confidenceThreshold}.
+
+Positions:
+${JSON.stringify(positions, null, 2)}
+
+Reply as JSON: {"synthesis": "best answer", "scores": [{"agent": "id", "confidence": 0.0-1.0, "accepted": true/false}], "overall_confidence": 0.0-1.0}`,
+  }, positions)
+
+  // Parse verification scores
+  let verification: any = {}
+  try {
+    const raw = String(verifyResult.output ?? '')
+    const match = raw.match(/\{[\s\S]*\}/)
+    if (match) verification = JSON.parse(match[0])
+  } catch {
+    verification = { synthesis: verifyResult.output, overall_confidence: 0.5, scores: [] }
+  }
+
+  // Phase 3: UPDATE — mark results with verification
+  for (const r of debateResults) {
+    const score = verification.scores?.find((s: any) => s.agent === r.agent_id)
+    r.confidence = score?.confidence ?? 0.5
+    r.verified = score?.accepted ?? (r.confidence >= confidenceThreshold)
+  }
+
+  // Add verifier result
+  verifyResult.confidence = verification.overall_confidence ?? 0.5
+  verifyResult.verified = true
+  verifyResult.output = verification.synthesis ?? verifyResult.output
+
+  return [...debateResults, verifyResult]
+}
+
 // ─── Main Executor ──────────────────────────────────────────────────────────
 
 export async function executeChain(def: ChainDefinition): Promise<ChainExecution> {
@@ -274,8 +400,14 @@ export async function executeChain(def: ChainDefinition): Promise<ChainExecution
         results = await runLoop(def.steps, def.max_iterations ?? 5, def.exit_condition)
         break
       case 'debate':
-        results = await runDebate(def.steps, def.judge_agent)
+        results = await runDebateGVU(def.steps, def.judge_agent, def.confidence_threshold)
         break
+      case 'adaptive': {
+        const adaptive = await runAdaptive(def.steps, def.query, def.judge_agent, def.confidence_threshold)
+        results = adaptive.results
+        ;(execution as any).chosen_topology = adaptive.chosen_topology
+        break
+      }
       default:
         throw new Error(`Unknown chain mode: ${def.mode}`)
     }

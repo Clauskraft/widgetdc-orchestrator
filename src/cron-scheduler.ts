@@ -9,6 +9,7 @@ import { executeChain, type ChainDefinition } from './chain-engine.js'
 import { logger } from './logger.js'
 import { getRedis } from './redis.js'
 import { broadcastMessage } from './chat-broadcaster.js'
+import { runSelfCorrect } from './graph-self-correct.js'
 
 interface CronJob {
   id: string
@@ -74,6 +75,25 @@ export async function runCronJob(jobId: string): Promise<void> {
   })
 
   try {
+    // Special handler for self-correcting graph agent
+    if (job.id === 'graph-self-correct') {
+      const report = await runSelfCorrect()
+      job.last_run = new Date().toISOString()
+      job.last_status = report.total_fixed > 0 ? 'corrected' : 'clean'
+      job.run_count++
+      persistCronJobs()
+
+      broadcastMessage({
+        from: 'Orchestrator',
+        to: 'All',
+        source: 'orchestrator',
+        type: 'Message',
+        message: `Self-correct: found ${report.total_found} issues, fixed ${report.total_fixed} (${report.duration_ms}ms)`,
+        timestamp: new Date().toISOString(),
+      })
+      return
+    }
+
     const result = await executeChain(job.chain)
     job.last_run = new Date().toISOString()
     job.last_status = result.status
@@ -226,6 +246,27 @@ export function registerDefaultLoops(): void {
           tool_name: 'graph.read_cypher',
           arguments: {
             query: "MATCH (f:FailureMemory) WHERE f.last_seen > datetime() - duration('PT6H') OR f.created_at > datetime() - duration('PT6H') RETURN f.category AS category, f.pattern AS pattern, f.hit_count AS hits, f.resolution AS resolution ORDER BY f.hit_count DESC LIMIT 10",
+          },
+        },
+      ],
+    },
+  })
+
+  // Self-correcting graph agent — detects and fixes inconsistencies every 2 hours
+  registerCronJob({
+    id: 'graph-self-correct',
+    name: 'Self-Correcting Graph Agent',
+    schedule: '0 */2 * * *',
+    enabled: true,
+    chain: {
+      name: 'Graph Self-Correct',
+      mode: 'sequential',
+      steps: [
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'graph.read_cypher',
+          arguments: {
+            query: "MATCH (n) WHERE NOT (n)-[]-() AND NOT n:TDCDocument RETURN labels(n)[0] AS label, count(*) AS count ORDER BY count DESC LIMIT 10",
           },
         },
       ],

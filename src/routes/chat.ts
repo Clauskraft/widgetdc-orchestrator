@@ -14,6 +14,7 @@ import { config } from '../config.js'
 import { callCognitive, isRlmAvailable } from '../cognitive-proxy.js'
 import { executeChain } from '../chain-engine.js'
 import { chatLLM } from '../llm-proxy.js'
+import { dualChannelRAG } from '../dual-rag.js'
 import { AgentRegistry } from '../agent-registry.js'
 import type { AgentMessage } from '@widgetdc/contracts/orchestrator'
 
@@ -245,6 +246,22 @@ chatRouter.get('/history', async (req: Request, res: Response) => {
 
   const messages = await getHistory(limit, offset, target)
   res.json({ success: true, data: { messages, total: messages.length, limit, offset } })
+})
+
+// ─── POST /rag — Dual-channel RAG (SRAG + Neo4j Cypher) ─────────────────────
+chatRouter.post('/rag', async (req: Request, res: Response) => {
+  const { query, max_results, cypher_depth } = req.body
+  if (!query || typeof query !== 'string' || query.length < 3) {
+    res.status(400).json({ success: false, error: { code: 'INVALID_QUERY', message: 'query (min 3 chars) required', status_code: 400 } })
+    return
+  }
+  try {
+    const result = await dualChannelRAG(query, { maxResults: max_results, cypherDepth: cypher_depth })
+    res.json({ success: true, data: result })
+  } catch (err) {
+    logger.error({ err: String(err) }, 'Dual-RAG error')
+    res.status(500).json({ success: false, error: { code: 'RAG_ERROR', message: String(err), status_code: 500 } })
+  }
 })
 
 // ─── GET /threads/:id — Thread replies ───────────────────────────────────────
