@@ -30,9 +30,14 @@ var config = {
   // WidgeTDC Backend (Railway monolith)
   backendUrl: optional("BACKEND_URL", "https://backend-production-d3da.up.railway.app"),
   backendApiKey: required("BACKEND_API_KEY"),
-  // AI providers (optional — only used for health checks)
+  // LLM providers (for direct LLM chat proxy)
+  deepseekApiKey: optional("DEEPSEEK_API_KEY", ""),
+  dashscopeApiKey: optional("DASHSCOPE_API_KEY", ""),
+  // Qwen
   geminiApiKey: optional("GEMINI_API_KEY", ""),
+  openaiApiKey: optional("OPENAI_API_KEY", ""),
   anthropicApiKey: optional("ANTHROPIC_API_KEY", ""),
+  groqApiKey: optional("GROQ_API_KEY", ""),
   // RLM Engine (optional — cognitive reasoning proxy)
   rlmUrl: optional("RLM_URL", "https://rlm-engine-production.up.railway.app"),
   // Redis (optional — for agent registry persistence across restarts)
@@ -8750,18 +8755,40 @@ async function callCognitive(action, params, timeoutMs) {
   const timer = setTimeout(() => controller.abort(), timeoutMs ?? 6e4);
   try {
     logger.debug({ action, url, agent: params.agent_id }, "Cognitive proxy call");
+    const p = params;
     let body;
     if (action === "analyze") {
       body = {
-        task: params.task || params.prompt,
-        context: params.context || params.prompt,
-        analysis_dimensions: params.analysis_dimensions || ["general"],
+        task: p.task || params.prompt,
+        context: p.context || params.prompt,
+        analysis_dimensions: p.analysis_dimensions || ["general"],
+        agent_id: params.agent_id
+      };
+    } else if (action === "reason") {
+      body = {
+        task: p.task || params.prompt,
+        context: p.context || params.prompt,
+        agent_id: params.agent_id,
+        depth: params.depth ?? 0
+      };
+    } else if (action === "plan") {
+      body = {
+        task: p.task || params.prompt,
+        context: p.context || params.prompt,
+        constraints: p.constraints || [],
+        agent_id: params.agent_id
+      };
+    } else if (action === "fold") {
+      body = {
+        task: p.task || params.prompt,
+        context: p.context || params.prompt,
         agent_id: params.agent_id
       };
     } else {
       body = {
         prompt: params.prompt,
-        context: params.context,
+        task: p.task || params.prompt,
+        context: p.context || params.prompt,
         agent_id: params.agent_id,
         depth: params.depth ?? 0,
         mode: params.mode ?? "standard"
@@ -9411,8 +9438,251 @@ openclawRouter.all("/proxy/*", async (req, res) => {
   }
 });
 
-// src/routes/audit.ts
+// src/routes/llm.ts
 import { Router as Router9 } from "express";
+
+// src/llm-proxy.ts
+function getProviders() {
+  const providers = {};
+  if (config.deepseekApiKey) {
+    providers.deepseek = {
+      name: "DeepSeek",
+      baseUrl: "https://api.deepseek.com/v1",
+      apiKey: config.deepseekApiKey,
+      defaultModel: "deepseek-chat",
+      type: "openai-compat"
+    };
+  }
+  if (config.dashscopeApiKey) {
+    providers.qwen = {
+      name: "Qwen",
+      baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      apiKey: config.dashscopeApiKey,
+      defaultModel: "qwen-plus",
+      type: "openai-compat"
+    };
+  }
+  if (config.openaiApiKey) {
+    providers.openai = {
+      name: "OpenAI",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: config.openaiApiKey,
+      defaultModel: "gpt-4o-mini",
+      type: "openai-compat"
+    };
+    providers.chatgpt = providers.openai;
+  }
+  if (config.groqApiKey) {
+    providers.groq = {
+      name: "Groq",
+      baseUrl: "https://api.groq.com/openai/v1",
+      apiKey: config.groqApiKey,
+      defaultModel: "llama-3.3-70b-versatile",
+      type: "openai-compat"
+    };
+  }
+  if (config.geminiApiKey) {
+    providers.gemini = {
+      name: "Gemini",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+      apiKey: config.geminiApiKey,
+      defaultModel: "gemini-2.0-flash",
+      type: "gemini"
+    };
+  }
+  if (config.anthropicApiKey) {
+    providers.claude = {
+      name: "Claude",
+      baseUrl: "https://api.anthropic.com/v1",
+      apiKey: config.anthropicApiKey,
+      defaultModel: "claude-sonnet-4-20250514",
+      type: "anthropic"
+    };
+    providers.anthropic = providers.claude;
+  }
+  return providers;
+}
+async function callOpenAICompat(provider, req) {
+  const start = Date.now();
+  const model = req.model || provider.defaultModel;
+  const res = await fetch(`${provider.baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${provider.apiKey}`
+    },
+    body: JSON.stringify({
+      model,
+      messages: req.messages,
+      temperature: req.temperature ?? 0.7,
+      max_tokens: req.max_tokens ?? 2048
+    }),
+    signal: AbortSignal.timeout(6e4)
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => `HTTP ${res.status}`);
+    throw new Error(`${provider.name} error: ${err}`);
+  }
+  const data = await res.json();
+  return {
+    provider: req.provider,
+    model: data.model || model,
+    content: data.choices?.[0]?.message?.content || "",
+    usage: data.usage,
+    duration_ms: Date.now() - start
+  };
+}
+async function callGemini(provider, req) {
+  const start = Date.now();
+  const model = req.model || provider.defaultModel;
+  const contents = req.messages.filter((m) => m.role !== "system").map((m) => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: m.content }]
+  }));
+  const systemInstruction = req.messages.find((m) => m.role === "system");
+  const res = await fetch(
+    `${provider.baseUrl}/models/${model}:generateContent?key=${provider.apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents,
+        ...systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction.content }] } } : {},
+        generationConfig: {
+          temperature: req.temperature ?? 0.7,
+          maxOutputTokens: req.max_tokens ?? 2048
+        }
+      }),
+      signal: AbortSignal.timeout(6e4)
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text().catch(() => `HTTP ${res.status}`);
+    throw new Error(`Gemini error: ${err}`);
+  }
+  const data = await res.json();
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  return {
+    provider: "gemini",
+    model,
+    content: text,
+    usage: data.usageMetadata ? {
+      prompt_tokens: data.usageMetadata.promptTokenCount || 0,
+      completion_tokens: data.usageMetadata.candidatesTokenCount || 0,
+      total_tokens: data.usageMetadata.totalTokenCount || 0
+    } : void 0,
+    duration_ms: Date.now() - start
+  };
+}
+async function callAnthropic(provider, req) {
+  const start = Date.now();
+  const model = req.model || provider.defaultModel;
+  const systemMsg = req.messages.find((m) => m.role === "system");
+  const nonSystem = req.messages.filter((m) => m.role !== "system");
+  const res = await fetch(`${provider.baseUrl}/messages`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": provider.apiKey,
+      "anthropic-version": "2023-06-01"
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: req.max_tokens ?? 2048,
+      ...systemMsg ? { system: systemMsg.content } : {},
+      messages: nonSystem.map((m) => ({ role: m.role, content: m.content }))
+    }),
+    signal: AbortSignal.timeout(6e4)
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => `HTTP ${res.status}`);
+    throw new Error(`Claude error: ${err}`);
+  }
+  const data = await res.json();
+  return {
+    provider: "claude",
+    model: data.model || model,
+    content: data.content?.[0]?.text || "",
+    usage: data.usage ? {
+      prompt_tokens: data.usage.input_tokens || 0,
+      completion_tokens: data.usage.output_tokens || 0,
+      total_tokens: (data.usage.input_tokens || 0) + (data.usage.output_tokens || 0)
+    } : void 0,
+    duration_ms: Date.now() - start
+  };
+}
+async function chatLLM(req) {
+  const providers = getProviders();
+  const provider = providers[req.provider.toLowerCase()];
+  if (!provider) {
+    const available = Object.keys(providers);
+    throw new Error(`Unknown provider '${req.provider}'. Available: ${available.join(", ")}`);
+  }
+  logger.info({ provider: req.provider, model: req.model, messages: req.messages.length }, "LLM proxy call");
+  switch (provider.type) {
+    case "openai-compat":
+      return callOpenAICompat(provider, req);
+    case "gemini":
+      return callGemini(provider, req);
+    case "anthropic":
+      return callAnthropic(provider, req);
+    default:
+      throw new Error(`Unsupported provider type: ${provider.type}`);
+  }
+}
+function listProviders() {
+  const providers = getProviders();
+  const all = [
+    { id: "deepseek", name: "DeepSeek", model: "deepseek-chat" },
+    { id: "qwen", name: "Qwen", model: "qwen-plus" },
+    { id: "gemini", name: "Gemini", model: "gemini-2.0-flash" },
+    { id: "openai", name: "OpenAI/ChatGPT", model: "gpt-4o-mini" },
+    { id: "groq", name: "Groq", model: "llama-3.3-70b-versatile" },
+    { id: "claude", name: "Claude", model: "claude-sonnet-4-20250514" }
+  ];
+  return all.map((p) => ({ ...p, available: !!providers[p.id] }));
+}
+
+// src/routes/llm.ts
+var llmRouter = Router9();
+llmRouter.get("/providers", (_req, res) => {
+  res.json({ success: true, data: { providers: listProviders() } });
+});
+llmRouter.post("/chat", async (req, res) => {
+  const { provider, prompt, messages, model, temperature, max_tokens, broadcast } = req.body;
+  if (!provider) {
+    res.status(400).json({ success: false, error: { code: "MISSING_PROVIDER", message: "provider is required", status_code: 400 } });
+    return;
+  }
+  if (!prompt && (!messages || !messages.length)) {
+    res.status(400).json({ success: false, error: { code: "MISSING_PROMPT", message: "prompt or messages required", status_code: 400 } });
+    return;
+  }
+  const llmMessages = messages || [{ role: "user", content: prompt }];
+  try {
+    const result = await chatLLM({ provider, messages: llmMessages, model, temperature, max_tokens });
+    if (broadcast !== false) {
+      broadcastMessage({
+        from: `${result.provider}/${result.model}`,
+        to: "All",
+        source: "llm",
+        type: "Answer",
+        message: result.content,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    }
+    res.json({ success: true, data: result });
+  } catch (err) {
+    logger.error({ err: String(err), provider }, "LLM chat error");
+    res.status(502).json({
+      success: false,
+      error: { code: "LLM_ERROR", message: String(err instanceof Error ? err.message : err), status_code: 502 }
+    });
+  }
+});
+
+// src/routes/audit.ts
+import { Router as Router10 } from "express";
 
 // src/audit.ts
 var REDIS_KEY2 = "orchestrator:audit";
@@ -9492,7 +9762,7 @@ function auditMiddleware(req, res, next) {
 }
 
 // src/routes/audit.ts
-var auditRouter = Router9();
+var auditRouter = Router10();
 auditRouter.get("/log", async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 100, 500);
   const offset = parseInt(req.query.offset) || 0;
@@ -9762,6 +10032,7 @@ app.use("/cron", requireApiKey, cronRouter);
 app.use("/api/dashboard", dashboardRouter);
 app.use("/api/openclaw", requireApiKey, openclawRouter);
 app.use("/api/audit", requireApiKey, auditRouter);
+app.use("/api/llm", requireApiKey, llmRouter);
 app.get("/api/events", requireApiKey, handleSSE);
 app.get("/health", (_req, res) => {
   res.json({

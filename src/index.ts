@@ -32,6 +32,7 @@ import { cognitiveRouter } from './routes/cognitive.js'
 import { cronRouter } from './routes/cron.js'
 import { dashboardRouter } from './routes/dashboard.js'
 import { openclawRouter } from './routes/openclaw.js'
+import { llmRouter } from './routes/llm.js'
 import { auditRouter } from './routes/audit.js'
 import { auditMiddleware } from './audit.js'
 import { handleSSE, getSSEClientCount } from './sse.js'
@@ -90,10 +91,11 @@ app.use('/chains', requireApiKey, chainsRouter)
 app.use('/cognitive', requireApiKey, cognitiveRouter)
 app.use('/cron', requireApiKey, cronRouter)
 
-// Dashboard data API + OpenClaw proxy + Audit log + SSE
+// Dashboard data API + OpenClaw proxy + Audit log + LLM + SSE
 app.use('/api/dashboard', dashboardRouter)
 app.use('/api/openclaw', requireApiKey, openclawRouter)
 app.use('/api/audit', requireApiKey, auditRouter)
+app.use('/api/llm', requireApiKey, llmRouter)
 app.get('/api/events', requireApiKey, handleSSE)
 
 // ─── Health ───────────────────────────────────────────────────────────────────

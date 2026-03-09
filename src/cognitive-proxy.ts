@@ -60,18 +60,42 @@ export async function callCognitive(
     logger.debug({ action, url, agent: params.agent_id }, 'Cognitive proxy call')
 
     // Build action-specific body (RLM endpoints have different schemas)
+    const p = params as any
     let body: Record<string, unknown>
+
     if (action === 'analyze') {
       body = {
-        task: (params as any).task || params.prompt,
-        context: (params as any).context || params.prompt,
-        analysis_dimensions: (params as any).analysis_dimensions || ['general'],
+        task: p.task || params.prompt,
+        context: p.context || params.prompt,
+        analysis_dimensions: p.analysis_dimensions || ['general'],
+        agent_id: params.agent_id,
+      }
+    } else if (action === 'reason') {
+      body = {
+        task: p.task || params.prompt,
+        context: p.context || params.prompt,
+        agent_id: params.agent_id,
+        depth: params.depth ?? 0,
+      }
+    } else if (action === 'plan') {
+      body = {
+        task: p.task || params.prompt,
+        context: p.context || params.prompt,
+        constraints: p.constraints || [],
+        agent_id: params.agent_id,
+      }
+    } else if (action === 'fold') {
+      body = {
+        task: p.task || params.prompt,
+        context: p.context || params.prompt,
         agent_id: params.agent_id,
       }
     } else {
+      // learn, enrich — try both formats
       body = {
         prompt: params.prompt,
-        context: params.context,
+        task: p.task || params.prompt,
+        context: p.context || params.prompt,
         agent_id: params.agent_id,
         depth: params.depth ?? 0,
         mode: params.mode ?? 'standard',

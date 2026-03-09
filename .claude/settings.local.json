@@ -10,7 +10,17 @@
       "Bash(railway:*)",
       "WebFetch(domain:orchestrator-production-c27e.up.railway.app)",
       "Bash(curl:*)",
-      "Read(//c/Users/claus/Projetcs/widgetdc-consulting-frontend/src/**)"
+      "Read(//c/Users/claus/Projetcs/widgetdc-consulting-frontend/src/**)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.datadoghq.com)",
+      "WebFetch(domain:www.cio.com)",
+      "WebFetch(domain:grafana.com)",
+      "WebFetch(domain:blogs.infosys.com)",
+      "WebFetch(domain:composio.dev)",
+      "Bash(head:*)",
+      "Bash(git:*)",
+      "Bash(railway variables:*)"
     ]
   }
 }

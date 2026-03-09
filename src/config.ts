@@ -22,9 +22,13 @@ export const config = {
   backendUrl: optional('BACKEND_URL', 'https://backend-production-d3da.up.railway.app'),
   backendApiKey: required('BACKEND_API_KEY'),
 
-  // AI providers (optional — only used for health checks)
+  // LLM providers (for direct LLM chat proxy)
+  deepseekApiKey: optional('DEEPSEEK_API_KEY', ''),
+  dashscopeApiKey: optional('DASHSCOPE_API_KEY', ''),  // Qwen
   geminiApiKey: optional('GEMINI_API_KEY', ''),
+  openaiApiKey: optional('OPENAI_API_KEY', ''),
   anthropicApiKey: optional('ANTHROPIC_API_KEY', ''),
+  groqApiKey: optional('GROQ_API_KEY', ''),
 
   // RLM Engine (optional — cognitive reasoning proxy)
   rlmUrl: optional('RLM_URL', 'https://rlm-engine-production.up.railway.app'),

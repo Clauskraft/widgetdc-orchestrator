@@ -666,19 +666,57 @@ async function sendChat() {
     // Execute /skill as tool call
     input.value = ''
     const skillName = parsed.skill
+    // /ask <provider> <prompt> — LLM direct chat
+    if (skillName === 'ask') {
+      const parts = parsed.args.match(/^(\S+)\s+(.+)$/s)
+      if (!parts) { addLocalMsg('System', 'Usage: /ask <provider> <prompt>\nProviders: deepseek, qwen, gemini, openai, groq, claude', 'Alert'); return }
+      const provider = parts[1], prompt = parts[2]
+      addLocalMsg('command-center', `/ask ${provider} ${prompt}`, 'Command')
+      try {
+        const res = await api('/api/llm/chat', { method: 'POST', body: JSON.stringify({ provider, prompt }) })
+        const d = res.data
+        addLocalMsg(`${d.provider}/${d.model}`, d.content, 'Answer')
+        addLocalMsg('System', `${d.duration_ms}ms | ${d.usage?.total_tokens || '?'} tokens`, 'Message')
+      } catch (err) { addLocalMsg('System', 'LLM error: ' + err.message, 'Alert') }
+      return
+    }
+
+    // /rag <question> — SRAG knowledge query
+    if (skillName === 'rag') {
+      addLocalMsg('command-center', `/rag ${parsed.args}`, 'Command')
+      try {
+        const res = await api('/tools/call', { method: 'POST', body: JSON.stringify({
+          agent_id: 'command-center', tool_name: 'srag.query', arguments: { question: parsed.args }, call_id: uuid()
+        })})
+        const data = res.result || res.data?.result || res
+        addLocalMsg('SRAG', data.response || data.answer || JSON.stringify(data, null, 2), 'Answer')
+      } catch (err) { addLocalMsg('System', 'RAG error: ' + err.message, 'Alert') }
+      return
+    }
+
+    // /knowledge <query> — RLM knowledge search
+    if (skillName === 'knowledge') {
+      addLocalMsg('command-center', `/knowledge ${parsed.args}`, 'Command')
+      try {
+        const res = await api('/api/llm/chat', { method: 'POST', body: JSON.stringify({
+          provider: 'deepseek', prompt: parsed.args, broadcast: false
+        })})
+        addLocalMsg('Knowledge', res.data?.content || JSON.stringify(res.data, null, 2), 'Answer')
+      } catch (err) { addLocalMsg('System', 'Knowledge error: ' + err.message, 'Alert') }
+      return
+    }
+
     // Cognitive shortcuts
     const cogActions = ['reason','analyze','plan','learn','fold','enrich']
     if (cogActions.includes(skillName)) {
       addLocalMsg('command-center', `/${skillName} ${parsed.args}`, 'Command')
       try {
-        const body = { action: skillName }
+        const body = { action: skillName, prompt: parsed.args || skillName }
         if (skillName === 'analyze') {
           body.task = parsed.args || 'analyze'; body.context = 'Command Center'; body.analysis_dimensions = ['general']
-        } else {
-          body.prompt = parsed.args || skillName
         }
         const res = await api('/cognitive/' + skillName, { method: 'POST', body: JSON.stringify(body) })
-        addLocalMsg('RLM-Engine', JSON.stringify(res.data || res, null, 2), 'Answer')
+        addLocalMsg('RLM-Engine', typeof (res.data) === 'string' ? res.data : JSON.stringify(res.data || res, null, 2), 'Answer')
       } catch (err) { addLocalMsg('System', 'Cognitive error: ' + err.message, 'Alert') }
       return
     }
@@ -774,11 +812,21 @@ chatInput.addEventListener('input', () => {
     showAC(agents)
   } else if (val.startsWith('/')) {
     const q = val.slice(1).toLowerCase()
+    const askCmds = [
+      { label: '/ask deepseek', hint: 'LLM chat', insert: '/ask deepseek' },
+      { label: '/ask qwen', hint: 'LLM chat', insert: '/ask qwen' },
+      { label: '/ask gemini', hint: 'LLM chat', insert: '/ask gemini' },
+      { label: '/ask openai', hint: 'LLM chat', insert: '/ask openai' },
+      { label: '/ask groq', hint: 'LLM chat', insert: '/ask groq' },
+      { label: '/ask claude', hint: 'LLM chat', insert: '/ask claude' },
+      { label: '/rag', hint: 'Knowledge RAG', insert: '/rag' },
+      { label: '/knowledge', hint: 'Knowledge search', insert: '/knowledge' },
+    ]
     const cogCmds = ['reason','analyze','plan','learn','fold','enrich'].map(c => ({
       label: '/' + c, hint: 'cognitive', insert: '/' + c
     }))
     const tools = availableTools.map(t => ({ label: '/' + t, hint: 'MCP tool', insert: '/' + t }))
-    const all = [...cogCmds, ...tools].filter(t => !q || t.label.toLowerCase().includes(q)).slice(0, 15)
+    const all = [...askCmds, ...cogCmds, ...tools].filter(t => !q || t.label.toLowerCase().includes(q)).slice(0, 15)
     showAC(all)
   } else {
     closeAC()
