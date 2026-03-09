@@ -1232,6 +1232,158 @@ async function sendChat() {
       return
     }
 
+    // /omega [subcommand] — Omega Sentinel SITREP, boot, sweep, memory
+    if (skillName === 'omega') {
+      const sub = (parsed.args || 'sitrep').trim().toLowerCase()
+      addLocalMsg('Omega Sentinel', `/omega ${sub}`, 'Command')
+
+      if (sub === 'sitrep' || sub === 'status') {
+        // Full SITREP: health sweep + sentinel status + graph stats
+        addLocalMsg('Omega Sentinel', '🛡️ Running SITREP...', 'Message')
+        try {
+          const [health, sentinel, graphStats, episodes] = await Promise.allSettled([
+            api('/health'),
+            api('/tools/call', { method: 'POST', body: JSON.stringify({ agent_id: 'omega', tool_name: 'get_sentinel_status', arguments: {}, call_id: uuid() }) }),
+            api('/tools/call', { method: 'POST', body: JSON.stringify({ agent_id: 'omega', tool_name: 'graph.stats', arguments: {}, call_id: uuid() }) }),
+            api('/tools/call', { method: 'POST', body: JSON.stringify({ agent_id: 'omega', tool_name: 'memory_operation', arguments: { action: 'SEARCH_EPISODES', query: { keywords: ['omega','sitrep'], tags: ['omega'], limit: 3 } }, call_id: uuid() }) }),
+          ])
+          const hData = health.status === 'fulfilled' ? health.value.body : {}
+          const sData = sentinel.status === 'fulfilled' ? (sentinel.value.body?.result || sentinel.value.body?.data?.result || '(unavailable)') : '(unavailable)'
+          const gData = graphStats.status === 'fulfilled' ? (graphStats.value.body?.result || graphStats.value.body?.data?.result || '(unavailable)') : '(unavailable)'
+          const eData = episodes.status === 'fulfilled' ? (episodes.value.body?.result || episodes.value.body?.data?.result || '(none)') : '(none)'
+
+          addLocalMsg('Omega Sentinel', `🛡️ **SITREP**\n\n**Health**: ${hData.status || '?'} | Agents: ${hData.agents_registered || '?'} | WS: ${hData.ws_connections || 0} | Redis: ${hData.redis_enabled ? 'ON' : 'OFF'} | Chains: ${hData.active_chains || 0} | Cron: ${hData.cron_jobs || 0}\n\n**Sentinel Status**: ${typeof sData === 'string' ? sData : JSON.stringify(sData, null, 2)}\n\n**Graph**: ${typeof gData === 'string' ? gData : JSON.stringify(gData, null, 2)}\n\n**Recent Episodes**: ${typeof eData === 'string' ? eData : JSON.stringify(eData, null, 2)}`, 'Answer')
+        } catch (err) { addLocalMsg('System', 'SITREP failed: ' + err.message, 'Alert') }
+        return
+      }
+
+      if (sub === 'sweep') {
+        // Service health sweep
+        addLocalMsg('Omega Sentinel', '🔍 Running service health sweep...', 'Message')
+        try {
+          const services = [
+            { name: 'Backend', url: 'https://backend-production-d3da.up.railway.app/health' },
+            { name: 'RLM Engine', url: 'https://rlm-engine-production.up.railway.app/' },
+            { name: 'Consulting', url: 'https://consulting-production-b5d8.up.railway.app/' },
+          ]
+          const checks = await Promise.allSettled(
+            services.map(async s => {
+              const r = await fetch(s.url, { signal: AbortSignal.timeout(10000) })
+              return { name: s.name, status: r.status, ok: r.ok }
+            })
+          )
+          const report = checks.map((c, i) => {
+            if (c.status === 'fulfilled') return `${c.value.ok ? '✅' : '❌'} ${c.value.name}: HTTP ${c.value.status}`
+            return `❌ ${services[i].name}: ${c.reason?.message || 'unreachable'}`
+          }).join('\n')
+          addLocalMsg('Omega Sentinel', `🔍 **Service Health Sweep**\n${report}`, 'Answer')
+        } catch (err) { addLocalMsg('System', 'Sweep failed: ' + err.message, 'Alert') }
+        return
+      }
+
+      if (sub === 'memory' || sub === 'recall') {
+        // Recall agent memories from Neo4j
+        addLocalMsg('Omega Sentinel', '🧠 Querying agent memories...', 'Message')
+        try {
+          const res = await api('/tools/call', { method: 'POST', body: JSON.stringify({
+            agent_id: 'omega', tool_name: 'graph.read_cypher',
+            arguments: { query: "MATCH (m:AgentMemory) WHERE m.type IN ['teaching','learning','insight','intelligence'] RETURN m.agentId, m.key, m.value, m.type, m.updatedAt ORDER BY m.updatedAt DESC LIMIT 20" },
+            call_id: uuid()
+          })})
+          const data = res.body?.result || res.body?.data?.result || '(no memories)'
+          addLocalMsg('Omega Sentinel', `🧠 **Agent Memories (Neo4j)**\n${typeof data === 'string' ? data : JSON.stringify(data, null, 2)}`, 'Answer')
+        } catch (err) { addLocalMsg('System', 'Memory recall failed: ' + err.message, 'Alert') }
+        return
+      }
+
+      if (sub === 'compliance') {
+        // Architecture compliance check
+        addLocalMsg('Omega Sentinel', '📋 Checking architecture compliance...', 'Message')
+        try {
+          const [compliance, analysis] = await Promise.allSettled([
+            fetch('https://arch-mcp-server-production.up.railway.app/api/compliance-matrix', { signal: AbortSignal.timeout(10000) }).then(r => r.json()),
+            fetch('https://arch-mcp-server-production.up.railway.app/api/analysis', { signal: AbortSignal.timeout(10000) }).then(r => r.json()),
+          ])
+          const cData = compliance.status === 'fulfilled' ? compliance.value : '(unavailable)'
+          const aData = analysis.status === 'fulfilled' ? analysis.value : '(unavailable)'
+          addLocalMsg('Omega Sentinel', `📋 **Compliance Matrix**\n${JSON.stringify(cData, null, 2).slice(0, 3000)}\n\n**Analysis**\n${JSON.stringify(aData, null, 2).slice(0, 2000)}`, 'Answer')
+        } catch (err) { addLocalMsg('System', 'Compliance check failed: ' + err.message, 'Alert') }
+        return
+      }
+
+      addLocalMsg('System', 'Usage: /omega [sitrep|sweep|memory|compliance]\n\n- **sitrep** — Full status report (health + sentinel + graph + episodes)\n- **sweep** — Service health check across all Railway services\n- **memory** — Recall agent memories from Neo4j graph\n- **compliance** — Architecture compliance matrix', 'Message')
+      return
+    }
+
+    // /cortex <concept> — Associative memory activation (Holographic Layer 8)
+    if (skillName === 'cortex') {
+      if (!parsed.args) { addLocalMsg('System', 'Usage: /cortex <concept> [depth:1-5]', 'Alert'); return }
+      let depth = 3, concept = parsed.args
+      const dm = concept.match(/^depth:(\d)\s+(.+)$/s)
+      if (dm) { depth = parseInt(dm[1]); concept = dm[2] }
+      addLocalMsg('command-center', `/cortex ${concept} (depth:${depth})`, 'Command')
+      try {
+        const res = await api('/tools/call', { method: 'POST', body: JSON.stringify({
+          agent_id: 'omega', tool_name: 'activate_associative_memory',
+          arguments: { concept, depth }, call_id: uuid()
+        })})
+        const data = res.body?.result || res.body?.data?.result || '(no associations)'
+        addLocalMsg('Cortex', `🧠 **Associative Memory Flash**: "${concept}"\n\n${typeof data === 'string' ? data : JSON.stringify(data, null, 2)}`, 'Answer')
+      } catch (err) { addLocalMsg('System', 'Cortex failed: ' + err.message, 'Alert') }
+      return
+    }
+
+    // /mission <objective> — RLM multi-step mission
+    if (skillName === 'mission') {
+      if (!parsed.args) { addLocalMsg('System', 'Usage: /mission <objective> [steps:1-10]', 'Alert'); return }
+      let maxSteps = 5, objective = parsed.args
+      const sm = objective.match(/^steps:(\d+)\s+(.+)$/s)
+      if (sm) { maxSteps = Math.min(parseInt(sm[1]), 10); objective = sm[2] }
+      addLocalMsg('command-center', `/mission ${objective} (max ${maxSteps} steps)`, 'Command')
+      try {
+        const startRes = await api('/tools/call', { method: 'POST', body: JSON.stringify({
+          agent_id: 'rlm', tool_name: 'rlm.start_mission',
+          arguments: { name: objective.slice(0, 50), objective, maxSteps, maxDepth: 3 }, call_id: uuid()
+        })})
+        const missionData = startRes.body?.result || startRes.body?.data?.result || startRes.body
+        const missionId = missionData?.missionId || missionData?.mission_id || missionData?.id
+        if (missionId) {
+          addLocalMsg('RLM-Engine', `🎯 Mission started: ${missionId}\nObjective: ${objective}\nExecuting up to ${maxSteps} steps...`, 'Message')
+          // Execute steps sequentially
+          for (let i = 0; i < maxSteps; i++) {
+            try {
+              const stepRes = await api('/tools/call', { method: 'POST', body: JSON.stringify({
+                agent_id: 'rlm', tool_name: 'rlm.execute_step',
+                arguments: { missionId }, call_id: uuid()
+              })})
+              const stepData = stepRes.body?.result || stepRes.body?.data?.result || '(no output)'
+              const stepStr = typeof stepData === 'string' ? stepData : JSON.stringify(stepData, null, 2)
+              addLocalMsg('RLM-Engine', `**[Step ${i+1}]** ${stepStr.slice(0, 2000)}`, 'Answer')
+              if (stepStr.includes('COMPLETE') || stepStr.includes('complete') || stepStr.includes('done')) break
+            } catch (err) { addLocalMsg('System', `Step ${i+1} failed: ${err.message}`, 'Alert'); break }
+          }
+        } else {
+          addLocalMsg('RLM-Engine', `🎯 Mission response:\n${JSON.stringify(missionData, null, 2)}`, 'Answer')
+        }
+      } catch (err) { addLocalMsg('System', 'Mission failed: ' + err.message, 'Alert') }
+      return
+    }
+
+    // /episodes [keywords] — Search episodic memory
+    if (skillName === 'episodes') {
+      const keywords = parsed.args ? parsed.args.split(/\s+/) : ['omega', 'sentinel']
+      addLocalMsg('command-center', `/episodes ${keywords.join(', ')}`, 'Command')
+      try {
+        const res = await api('/tools/call', { method: 'POST', body: JSON.stringify({
+          agent_id: 'omega', tool_name: 'memory_operation',
+          arguments: { action: 'SEARCH_EPISODES', query: { keywords, limit: 10 } }, call_id: uuid()
+        })})
+        const data = res.body?.result || res.body?.data?.result || '(no episodes)'
+        addLocalMsg('Episodic Memory', `📖 **Episodes** (${keywords.join(', ')})\n\n${typeof data === 'string' ? data : JSON.stringify(data, null, 2)}`, 'Answer')
+      } catch (err) { addLocalMsg('System', 'Episodes search failed: ' + err.message, 'Alert') }
+      return
+    }
+
     // /rag <question> — SRAG knowledge query
     if (skillName === 'rag') {
       addLocalMsg('command-center', `/rag ${parsed.args}`, 'Command')
@@ -1546,6 +1698,14 @@ chatInput.addEventListener('input', () => {
       { label: '/chain', hint: 'Execute chain', insert: '/chain' },
       { label: '/think', hint: 'Sequential thinking', insert: '/think' },
       { label: '/remember', hint: 'Store to all memory', insert: '/remember' },
+      { label: '/omega', hint: 'Omega Sentinel', insert: '/omega' },
+      { label: '/omega sitrep', hint: 'Full SITREP', insert: '/omega sitrep' },
+      { label: '/omega sweep', hint: 'Service health sweep', insert: '/omega sweep' },
+      { label: '/omega memory', hint: 'Agent memories', insert: '/omega memory' },
+      { label: '/omega compliance', hint: 'Architecture compliance', insert: '/omega compliance' },
+      { label: '/cortex', hint: 'Associative memory', insert: '/cortex' },
+      { label: '/mission', hint: 'RLM multi-step mission', insert: '/mission' },
+      { label: '/episodes', hint: 'Episodic memory search', insert: '/episodes' },
     ]
     const templateCmds = chatTemplates.map(t => ({ label: '/template ' + t.id, hint: t.description, insert: '/template ' + t.id }))
     const tools = availableTools.map(t => ({ label: '/' + t, hint: 'MCP tool', insert: '/' + t }))

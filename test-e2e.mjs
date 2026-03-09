@@ -572,6 +572,47 @@ await test('60. Frontend: /remember command present', async () => {
   assert(cachedHtml.includes("label: '/remember'"), 'missing /remember in autocomplete')
 })
 
+console.log('\n' + '=' .repeat(60))
+console.log('  SECTION 11: Omega Sentinel & Memory Commands (v2.8)')
+console.log('=' .repeat(60))
+
+// ── 61. Frontend: /omega command ──
+await test('61. Frontend: /omega command with subcommands', async () => {
+  assert(cachedHtml.includes("skillName === 'omega'"), 'missing /omega handler')
+  assert(cachedHtml.includes('get_sentinel_status'), 'missing sentinel status call')
+  assert(cachedHtml.includes("sub === 'sitrep'"), 'missing sitrep subcommand')
+  assert(cachedHtml.includes("sub === 'sweep'"), 'missing sweep subcommand')
+  assert(cachedHtml.includes("sub === 'memory'"), 'missing memory subcommand')
+  assert(cachedHtml.includes("sub === 'compliance'"), 'missing compliance subcommand')
+})
+
+// ── 62. Frontend: /cortex command ──
+await test('62. Frontend: /cortex associative memory command', async () => {
+  assert(cachedHtml.includes("skillName === 'cortex'"), 'missing /cortex handler')
+  assert(cachedHtml.includes('activate_associative_memory'), 'missing associative memory call')
+})
+
+// ── 63. Frontend: /mission command ──
+await test('63. Frontend: /mission RLM multi-step command', async () => {
+  assert(cachedHtml.includes("skillName === 'mission'"), 'missing /mission handler')
+  assert(cachedHtml.includes('rlm.start_mission'), 'missing start_mission call')
+  assert(cachedHtml.includes('rlm.execute_step'), 'missing execute_step call')
+})
+
+// ── 64. Frontend: /episodes command ──
+await test('64. Frontend: /episodes episodic memory command', async () => {
+  assert(cachedHtml.includes("skillName === 'episodes'"), 'missing /episodes handler')
+  assert(cachedHtml.includes('SEARCH_EPISODES'), 'missing SEARCH_EPISODES call')
+})
+
+// ── 65. Frontend: all new commands in autocomplete ──
+await test('65. Frontend: new commands in autocomplete', async () => {
+  const cmds = ['/omega', '/cortex', '/mission', '/episodes', '/think', '/remember']
+  for (const cmd of cmds) {
+    assert(cachedHtml.includes(`label: '${cmd}'`), `missing ${cmd} in autocomplete`)
+  }
+})
+
 // ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped
