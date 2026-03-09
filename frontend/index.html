@@ -320,6 +320,7 @@ let refreshTimer = null
 
 const BASE = location.origin
 const h = (s) => s ? String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') : ''
+const uuid = () => crypto.randomUUID()
 
 // ─── Auth ───────────────────────────────────────────────────────────────────
 function checkAuth() {
@@ -651,7 +652,7 @@ async function fetchOmegaSitrep() {
   document.getElementById('omega-content').innerHTML = '<div class="empty-state">Loading SITREP...</div>'
   try {
     const result = await api('/tools/call', { method: 'POST', body: JSON.stringify({
-      agent_id: 'command-center', tool_name: 'omega.sitrep', arguments: {}, call_id: 'cc-sitrep-' + Date.now()
+      agent_id: 'command-center', tool_name: 'omega.sitrep', arguments: {}, call_id: uuid()
     })})
     renderOmega(result.result || result.data?.result || result)
   } catch (err) {
@@ -663,7 +664,7 @@ async function fetchOmegaSubAgents() {
   document.getElementById('omega-content').innerHTML = '<div class="empty-state">Loading sub-agents...</div>'
   try {
     const result = await api('/tools/call', { method: 'POST', body: JSON.stringify({
-      agent_id: 'command-center', tool_name: 'omega.sub_agents', arguments: {}, call_id: 'cc-subagents-' + Date.now()
+      agent_id: 'command-center', tool_name: 'omega.sub_agents', arguments: {}, call_id: uuid()
     })})
     renderOmegaRaw('Sub-Agent Status', result.result || result.data?.result || result)
   } catch (err) {
@@ -675,7 +676,7 @@ async function fetchOmegaPheromones() {
   document.getElementById('omega-content').innerHTML = '<div class="empty-state">Loading pheromones...</div>'
   try {
     const result = await api('/tools/call', { method: 'POST', body: JSON.stringify({
-      agent_id: 'command-center', tool_name: 'omega.pheromone.sense', arguments: {}, call_id: 'cc-phero-' + Date.now()
+      agent_id: 'command-center', tool_name: 'omega.pheromone.sense', arguments: {}, call_id: uuid()
     })})
     renderOmegaRaw('Active Pheromones', result.result || result.data?.result || result)
   } catch (err) {
