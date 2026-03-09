@@ -66,28 +66,28 @@ export async function callCognitive(
     if (action === 'analyze') {
       body = {
         task: p.task || params.prompt,
-        context: p.context || params.prompt,
+        context: typeof p.context === 'string' ? p.context : (p.context || params.prompt),
         analysis_dimensions: p.analysis_dimensions || ['general'],
         agent_id: params.agent_id,
       }
     } else if (action === 'reason') {
       body = {
         task: p.task || params.prompt,
-        context: p.context || params.prompt,
+        context: typeof p.context === 'object' ? p.context : { prompt: params.prompt },
         agent_id: params.agent_id,
         depth: params.depth ?? 0,
       }
     } else if (action === 'plan') {
       body = {
         task: p.task || params.prompt,
-        context: p.context || params.prompt,
+        context: typeof p.context === 'object' ? p.context : { prompt: params.prompt },
         constraints: p.constraints || [],
         agent_id: params.agent_id,
       }
     } else if (action === 'fold') {
       body = {
         task: p.task || params.prompt,
-        context: p.context || params.prompt,
+        context: typeof p.context === 'object' ? p.context : { prompt: params.prompt },
         agent_id: params.agent_id,
       }
     } else {
