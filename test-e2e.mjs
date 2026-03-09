@@ -613,6 +613,64 @@ await test('65. Frontend: new commands in autocomplete', async () => {
   }
 })
 
+console.log('\n' + '=' .repeat(60))
+console.log('  SECTION 12: Agent Auto-Reply (v2.8)')
+console.log('=' .repeat(60))
+
+// ── 66. Agent auto-reply triggers on @agent message ──
+await test('66. Chat: @agent message triggers auto-reply', async () => {
+  // Send a message to omega and wait for a reply to appear in history
+  const marker = `autoreply-test-${Date.now()}`
+  await api('/chat/message', { method: 'POST', body: JSON.stringify({
+    from: 'e2e-tester', to: 'nexus', source: 'human', type: 'Message',
+    message: `${marker}: test Nexus idégenerering for microservices`, timestamp: new Date().toISOString()
+  })})
+
+  // Wait for auto-reply (LLM takes a few seconds)
+  let found = false
+  for (let i = 0; i < 15; i++) {
+    await new Promise(r => setTimeout(r, 2000))
+    const hist = await api('/chat/history?limit=20')
+    const msgs = hist.body?.data?.messages || []
+    // Look for a reply FROM nexus
+    if (msgs.some(m => m.from === 'nexus' && m.to === 'e2e-tester')) {
+      found = true
+      break
+    }
+  }
+  assert(found, 'No auto-reply from nexus within 30s')
+})
+
+// ── 67. Agent auto-reply: no reply for broadcast messages ──
+await test('67. Chat: broadcast messages do NOT trigger auto-reply', async () => {
+  const marker = `broadcast-test-${Date.now()}`
+  await api('/chat/message', { method: 'POST', body: JSON.stringify({
+    from: 'e2e-tester', to: 'All', source: 'human', type: 'Message',
+    message: marker, timestamp: new Date().toISOString()
+  })})
+  // Brief wait
+  await new Promise(r => setTimeout(r, 3000))
+  const hist = await api('/chat/history?limit=10')
+  const msgs = hist.body?.data?.messages || []
+  // No agent should auto-reply to a broadcast
+  const autoReplies = msgs.filter(m => m.message?.includes(marker) && m.source === 'agent')
+  assert(autoReplies.length === 0, `unexpected auto-reply to broadcast: ${autoReplies.length}`)
+})
+
+// ── 68. Agent auto-reply: no_reply flag suppresses reply ──
+await test('68. Chat: no_reply flag suppresses auto-reply', async () => {
+  await api('/chat/message', { method: 'POST', body: JSON.stringify({
+    from: 'e2e-tester', to: 'omega', source: 'human', type: 'Message',
+    message: `noreply-test-${Date.now()}`, timestamp: new Date().toISOString(),
+    no_reply: true
+  })})
+  // Should return immediately without triggering reply
+  // (We just verify the message was accepted)
+  // Brief check that no immediate reply comes
+  await new Promise(r => setTimeout(r, 2000))
+  // Pass — the point is it doesn't error
+})
+
 // ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped

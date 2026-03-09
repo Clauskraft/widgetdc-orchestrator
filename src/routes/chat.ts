@@ -13,6 +13,8 @@ import { getHistory, getThread, searchMessages, togglePin, getPinnedMessages, ge
 import { config } from '../config.js'
 import { callCognitive, isRlmAvailable } from '../cognitive-proxy.js'
 import { executeChain } from '../chain-engine.js'
+import { chatLLM } from '../llm-proxy.js'
+import { AgentRegistry } from '../agent-registry.js'
 import type { AgentMessage } from '@widgetdc/contracts/orchestrator'
 
 // ─── Memory helpers — persist to multiple memory layers ──────────────────────
@@ -110,6 +112,86 @@ function persistToMemory(opts: {
   })
 }
 
+// ─── Agent Auto-Reply — AI-powered agent responses ──────────────────────────
+
+/** Agent persona system prompts based on capabilities */
+const AGENT_PERSONAS: Record<string, string> = {
+  omega: `Du er Omega Sentinel — omniscient architecture guardian for WidgeTDC. Du svarer kort og præcist på dansk. Du overvåger alle services, kontrakter og arkitektur. Du har adgang til Neo4j graph, SRAG, compliance matrix og alle agents. Svar altid med konkrete facts og handlinger.`,
+  trident: `Du er Trident Security — threat hunter og OSINT specialist. Du svarer på dansk. Du analyserer trusler, angrebsflader, CVR-data, certstream og CTI. Vær direkte og konkret.`,
+  prometheus: `Du er Prometheus Engine — code analysis og reinforcement learning specialist. Du svarer på dansk. Du analyserer kode, embeddings, og governance patterns.`,
+  master: `Du er Master Orchestrator — central koordinator for hele WidgeTDC agent-swarm. Du svarer på dansk. Du delegerer, koordinerer, og holder overblik over alle aktive opgaver.`,
+  graph: `Du er Neo4j Graph Agent. Du svarer på dansk. Du kender grafstrukturen, Cypher queries, og kan analysere relationer mellem entiteter i knowledge graph.`,
+  consulting: `Du er Consulting Intelligence — specialist i indsigter, mønstre og forretningsmæssig analyse. Du svarer på dansk med konkrete anbefalinger.`,
+  legal: `Du er Legal & Compliance — specialist i retsinformation, EU-funding, GDPR, og blast radius analyser. Du svarer på dansk.`,
+  rlm: `Du er RLM Reasoning Engine — deep reasoning, planlægning og context folding specialist. Du svarer på dansk med strukturerede analyser.`,
+  harvest: `Du er Harvest Collector — web crawling, data ingestion, M365, SharePoint specialist. Du svarer på dansk.`,
+  nexus: `Du er Nexus Analyzer — dekomponering, gap-analyse og idégenerering specialist. Du svarer på dansk med strukturerede nedbrydninger og muligheder.`,
+  autonomous: `Du er Autonomous Swarm — GraphRAG, state graphs og evolution specialist. Du svarer på dansk.`,
+  cma: `Du er Context Memory Agent — memory management, kontekst-retrieval og vidensstyring. Du svarer på dansk.`,
+  docgen: `Du er DocGen Factory — PowerPoint, Word, Excel og diagram specialist. Du svarer på dansk.`,
+  custodian: `Du er Custodian Guardian — chaos testing, patrol og governance specialist. Du svarer på dansk.`,
+  roma: `Du er Roma Self-Healer — self-healing, incident response specialist. Du svarer på dansk.`,
+  vidensarkiv: `Du er Vidensarkiv — knowledge search og file management specialist. Du svarer på dansk.`,
+  'the-snout': `Du er The Snout OSINT — domain intel, email intel og extraction specialist. Du svarer på dansk.`,
+  'llm-router': `Du er LLM Cost Router — multi-model routing, cost tracking og budget optimering. Du svarer på dansk.`,
+}
+
+/** Generate AI reply on behalf of an agent */
+async function agentAutoReply(agentId: string, userMessage: string, from: string, threadId?: string): Promise<void> {
+  const agentEntry = AgentRegistry.get(agentId)
+  const displayName = agentEntry?.handshake.display_name || agentId
+  const capabilities = agentEntry?.handshake.capabilities || []
+
+  // Build system prompt from persona or generate generic
+  const persona = AGENT_PERSONAS[agentId] ||
+    `Du er ${displayName} med capabilities: ${capabilities.join(', ')}. Du svarer kort og præcist på dansk.`
+
+  // Get recent conversation context (last 10 messages)
+  try {
+    const recentMsgs = await getHistory(10, 0)
+    const context = recentMsgs
+      .reverse()
+      .map(m => `[${m.from}→${m.to}] ${(m.message || '').slice(0, 200)}`)
+      .join('\n')
+
+    const messages = [
+      { role: 'system' as const, content: `${persona}\n\nDine capabilities: ${capabilities.join(', ')}\n\nSeneste samtale-kontekst:\n${context}` },
+      { role: 'user' as const, content: `${from} siger: ${userMessage}` },
+    ]
+
+    const result = await chatLLM({
+      provider: 'deepseek',
+      messages,
+      max_tokens: 800,
+      temperature: 0.7,
+    })
+
+    // Broadcast agent's reply
+    broadcastMessage({
+      from: agentId,
+      to: from as any,
+      source: 'agent' as any,
+      type: 'Message',
+      message: result.content,
+      timestamp: new Date().toISOString(),
+      ...(threadId ? { thread_id: threadId } : {}),
+      metadata: { provider: result.provider, model: result.model, duration_ms: result.duration_ms },
+    } as any)
+
+    logger.info({ agent: agentId, from, model: result.model, ms: result.duration_ms }, 'Agent auto-reply sent')
+  } catch (err) {
+    logger.error({ err: String(err), agent: agentId }, 'Agent auto-reply failed')
+    broadcastMessage({
+      from: agentId,
+      to: from as any,
+      source: 'system' as any,
+      type: 'Message',
+      message: `⚠️ ${displayName} kunne ikke svare: ${err instanceof Error ? err.message : String(err)}`,
+      timestamp: new Date().toISOString(),
+    } as any)
+  }
+}
+
 export const chatRouter = Router()
 
 // ─── POST /message — Broadcast + persist ─────────────────────────────────────
@@ -141,6 +223,17 @@ chatRouter.post('/message', (req: Request, res: Response) => {
   broadcastMessage(msg as any)
   notifyChatMessage(msg.from, msg.to, msg.message)
   logger.info({ from: msg.from, to: msg.to, type: msg.type }, 'Chat message broadcast')
+
+  // Trigger agent auto-reply if message targets a specific registered agent
+  const noReply = req.body.no_reply === true
+  if (!noReply && msg.to && msg.to !== 'All' && msg.source !== 'system' && msg.source !== 'agent') {
+    const targetAgent = AgentRegistry.get(msg.to)
+    if (targetAgent) {
+      // Fire-and-forget — don't block the response
+      agentAutoReply(msg.to, msg.message, msg.from, req.body.thread_id).catch(() => {})
+    }
+  }
+
   res.json({ success: true, data: { id: msg.id, timestamp: msg.timestamp } })
 })
 
