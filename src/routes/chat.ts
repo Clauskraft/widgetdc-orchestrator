@@ -137,7 +137,7 @@ const AGENT_PERSONAS: Record<string, string> = {
 }
 
 /** Generate AI reply on behalf of an agent */
-async function agentAutoReply(agentId: string, userMessage: string, from: string, threadId?: string): Promise<void> {
+async function agentAutoReply(agentId: string, userMessage: string, from: string, threadId?: string, provider?: string): Promise<void> {
   const agentEntry = AgentRegistry.get(agentId)
   const displayName = agentEntry?.handshake.display_name || agentId
   const capabilities = agentEntry?.handshake.capabilities || []
@@ -160,7 +160,7 @@ async function agentAutoReply(agentId: string, userMessage: string, from: string
     ]
 
     const result = await chatLLM({
-      provider: 'deepseek',
+      provider: provider || 'deepseek',
       messages,
       max_tokens: 800,
       temperature: 0.7,
@@ -230,7 +230,7 @@ chatRouter.post('/message', (req: Request, res: Response) => {
     const targetAgent = AgentRegistry.get(msg.to)
     if (targetAgent) {
       // Fire-and-forget — don't block the response
-      agentAutoReply(msg.to, msg.message, msg.from, req.body.thread_id).catch(() => {})
+      agentAutoReply(msg.to, msg.message, msg.from, req.body.thread_id, req.body.provider).catch(() => {})
     }
   }
 

@@ -409,6 +409,11 @@
           </div>
         </div>
         <div class="chat-messages" style="position:relative">
+          <div id="chat-header-bar" style="padding:10px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;font-size:0.85rem;font-weight:600;background:var(--bg2);flex-shrink:0">
+            <span id="chat-header-icon" style="font-size:1.1rem"></span>
+            <span id="chat-header-name">Broadcast</span>
+            <span id="chat-header-model" style="font-size:0.7rem;color:var(--text3);font-weight:400;margin-left:auto"></span>
+          </div>
           <div class="chat-drop-overlay" id="chat-drop-overlay"><span>Drop files to attach</span></div>
           <div class="chat-feed" id="chat-feed"></div>
           <div id="chat-attachments" class="chat-attachments" style="display:none"></div>
@@ -792,6 +797,28 @@ let pendingFiles = []
 
 function setChatTarget(target) {
   chatTarget = target
+
+  // Update header bar
+  const provider = llmProviders.find(p => p.id === target)
+  const agent = (dashboardData?.agents || []).find(a => a.agent_id === target)
+  if (target === 'All') {
+    document.getElementById('chat-header-icon').textContent = '📡'
+    document.getElementById('chat-header-name').textContent = 'Broadcast'
+    document.getElementById('chat-header-model').textContent = 'All agents'
+  } else if (provider) {
+    document.getElementById('chat-header-icon').textContent = PROVIDER_ICONS[target] || '🧠'
+    document.getElementById('chat-header-name').textContent = provider.name
+    document.getElementById('chat-header-model').textContent = provider.model
+  } else {
+    document.getElementById('chat-header-icon').textContent = agent ? '🤖' : '👤'
+    document.getElementById('chat-header-name').textContent = agent?.display_name || target
+    document.getElementById('chat-header-model').textContent = agent ? `${agent.source} · ${agent.status}` : ''
+  }
+
+  document.getElementById('chat-input').placeholder = provider
+    ? `Chat with ${provider.name}...`
+    : target === 'All' ? '@agent /command or type a message...' : `Message @${target}...`
+
   renderChatSidebar()
   renderChat()
   document.getElementById('chat-input').focus()
@@ -808,11 +835,34 @@ function renderChatSidebar() {
   const searchQ = (document.getElementById('chat-search')?.value || '').toLowerCase()
 
   if (chatSidebarTab === 'contacts') {
-    // Contacts view — all agents as contact cards
+    // Contacts view — agents + LLM providers
     const agents = (dashboardData?.agents || []).filter(a =>
       !searchQ || a.agent_id.toLowerCase().includes(searchQ) || (a.display_name || '').toLowerCase().includes(searchQ)
     )
-    list.innerHTML = agents.map(a => `
+    const providers = llmProviders.filter(p =>
+      !searchQ || p.id.toLowerCase().includes(searchQ) || p.name.toLowerCase().includes(searchQ)
+    )
+
+    let html = ''
+
+    // LLM Providers section
+    if (providers.length > 0) {
+      html += `<div style="padding:8px 14px;font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--text3);border-bottom:1px solid var(--border)">LLM Providers</div>`
+      html += providers.map(p => `
+        <div class="contact-item" onclick="setChatTarget('${h(p.id)}')">
+          <div class="contact-avatar" style="background:${PROVIDER_COLORS[p.id] || 'var(--accent)'}">${PROVIDER_ICONS[p.id] || '🧠'}</div>
+          <span class="contact-status" style="background:var(--green)"></span>
+          <div class="contact-info">
+            <div class="contact-name">${h(p.name)}</div>
+            <div class="contact-role">${h(p.model)} · online</div>
+          </div>
+        </div>
+      `).join('')
+    }
+
+    // Agents section
+    html += `<div style="padding:8px 14px;font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--text3);border-bottom:1px solid var(--border)">Agents</div>`
+    html += agents.map(a => `
       <div class="contact-item" onclick="setChatTarget('${h(a.agent_id)}')">
         <div class="contact-avatar" style="background:${agentColor(a.agent_id)}">${agentInitials(a.agent_id)}</div>
         <span class="contact-status" style="background:${a.status === 'online' ? 'var(--green)' : a.status === 'standby' ? 'var(--yellow)' : 'var(--red)'}"></span>
@@ -822,6 +872,8 @@ function renderChatSidebar() {
         </div>
       </div>
     `).join('') || '<div class="empty-state" style="padding:24px">No agents found</div>'
+
+    list.innerHTML = html
     return
   }
 
@@ -841,13 +893,15 @@ function renderChatSidebar() {
     }
     if (!convMap.has(partner)) {
       const agent = (dashboardData?.agents || []).find(a => a.agent_id === partner)
+      const provider = llmProviders.find(p => p.id === partner)
       convMap.set(partner, {
         target: partner,
-        name: agent?.display_name || partner,
+        name: provider?.name || agent?.display_name || partner,
         lastMsg: '',
         lastTime: '',
         unread: 0,
-        status: agent?.status || null
+        status: provider ? 'online' : (agent?.status || null),
+        isProvider: !!provider,
       })
     }
     const conv = convMap.get(partner)
@@ -874,7 +928,7 @@ function renderChatSidebar() {
     const statusColor = c.status === 'online' ? 'var(--green)' : c.status === 'standby' ? 'var(--yellow)' : c.status ? 'var(--red)' : ''
     return `
       <div class="conv-item ${isActive ? 'active' : ''}" data-target="${h(c.target)}" onclick="setChatTarget('${h(c.target)}')">
-        <div class="conv-avatar" style="background:${c.target === 'All' ? 'var(--accent)' : agentColor(c.target)}">${c.target === 'All' ? 'BC' : agentInitials(c.target)}</div>
+        <div class="conv-avatar" style="background:${c.target === 'All' ? 'var(--accent)' : (c.isProvider ? (PROVIDER_COLORS[c.target] || 'var(--accent)') : agentColor(c.target))}">${c.target === 'All' ? 'BC' : (c.isProvider ? (PROVIDER_ICONS[c.target] || '🧠') : agentInitials(c.target))}</div>
         ${statusColor ? `<span class="conv-status" style="background:${statusColor}"></span>` : ''}
         <div class="conv-info">
           <div class="conv-name">${h(c.name)}</div>
@@ -1190,6 +1244,28 @@ async function loadTools() {
     const res = await api('/tools/namespaces')
     availableTools = res?.data?.data?.tools || res?.data?.tools || []
   } catch {}
+}
+
+// LLM providers cache
+let llmProviders = []
+async function loadProviders() {
+  try {
+    const res = await api('/api/llm/providers')
+    llmProviders = (res.data?.providers || []).filter(p => p.available)
+  } catch {}
+}
+
+const PROVIDER_ICONS = {
+  deepseek: '🐋', qwen: '🌙', gemini: '💎', openai: '🤖', chatgpt: '🤖',
+  groq: '⚡', claude: '🟠', anthropic: '🟠',
+}
+const PROVIDER_COLORS = {
+  deepseek: '#4a90d9', qwen: '#7c3aed', gemini: '#1a73e8', openai: '#10a37f',
+  groq: '#f97316', claude: '#d97706', anthropic: '#d97706',
+}
+
+function isLLMProvider(id) {
+  return llmProviders.some(p => p.id === id) || ['deepseek','qwen','gemini','openai','chatgpt','groq','claude','anthropic'].includes(id)
 }
 
 // Parse @agent and /skill from input
@@ -1591,6 +1667,26 @@ async function sendChat() {
 
   // Build file attachment metadata (data stays client-side)
   const files = pendingFiles.map(f => ({ name: f.name, size: f.size, type: f.type, dataUrl: f.dataUrl }))
+
+  // Direct LLM provider chat — route to /api/llm/chat instead of /chat/message
+  if (isLLMProvider(target)) {
+    addLocalMsg('command-center', message, chatType)
+    input.value = ''
+    pendingFiles = []
+    renderPendingFiles()
+    try {
+      const provider = target === 'chatgpt' ? 'openai' : target
+      const res = await api('/api/llm/chat', { method: 'POST', body: JSON.stringify({
+        provider, prompt: message, broadcast: false, max_tokens: 2048
+      })})
+      const d = res.data
+      addLocalMsg(`${d.provider}/${d.model}`, d.content, 'Answer')
+      addLocalMsg('System', `${d.duration_ms}ms | ${d.usage?.total_tokens || '?'} tokens`, 'Message')
+    } catch (err) {
+      addLocalMsg('System', `${target} error: ${err.message}`, 'Alert')
+    }
+    return
+  }
 
   const msg = {
     from: 'command-center',
@@ -2075,6 +2171,7 @@ function boot() {
   connectSSE()
   refreshDashboard()
   loadTools()
+  loadProviders()
   loadChatHistory()
   loadTemplates()
   addChainStep() // Start with one empty step

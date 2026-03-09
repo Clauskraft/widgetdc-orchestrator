@@ -671,6 +671,46 @@ await test('68. Chat: no_reply flag suppresses auto-reply', async () => {
   // Pass — the point is it doesn't error
 })
 
+console.log('\n' + '=' .repeat(60))
+console.log('  SECTION 13: LLM Provider Contacts (v2.8)')
+console.log('=' .repeat(60))
+
+// ── 69. Frontend: LLM providers in contacts ──
+await test('69. Frontend: LLM providers section in contacts sidebar', async () => {
+  assert(cachedHtml.includes('LLM Providers'), 'missing LLM Providers section header')
+  assert(cachedHtml.includes('llmProviders'), 'missing llmProviders variable')
+  assert(cachedHtml.includes('loadProviders'), 'missing loadProviders function')
+  assert(cachedHtml.includes('PROVIDER_ICONS'), 'missing PROVIDER_ICONS')
+  assert(cachedHtml.includes('PROVIDER_COLORS'), 'missing PROVIDER_COLORS')
+})
+
+// ── 70. Frontend: isLLMProvider routing ──
+await test('70. Frontend: LLM provider direct chat routing', async () => {
+  assert(cachedHtml.includes('isLLMProvider'), 'missing isLLMProvider function')
+  assert(cachedHtml.includes("isLLMProvider(target)"), 'missing provider routing in sendChat')
+})
+
+// ── 71. Frontend: chat header bar shows target info ──
+await test('71. Frontend: chat header bar with provider/agent info', async () => {
+  assert(cachedHtml.includes('chat-header-bar'), 'missing chat-header-bar')
+  assert(cachedHtml.includes('chat-header-name'), 'missing chat-header-name')
+  assert(cachedHtml.includes('chat-header-model'), 'missing chat-header-model')
+})
+
+// ── 72. LLM providers endpoint returns available providers ──
+await test('72. GET /api/llm/providers returns available providers', async () => {
+  const r = await api('/api/llm/providers')
+  assert(r.ok, `HTTP ${r.status}`)
+  const providers = r.body.data?.providers || []
+  const available = providers.filter(p => p.available)
+  assert(available.length >= 2, `expected 2+ available providers, got ${available.length}`)
+  // Verify provider structure
+  const p = providers[0]
+  assert(p.id, 'missing id')
+  assert(p.name, 'missing name')
+  assert(p.model, 'missing model')
+})
+
 // ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped
