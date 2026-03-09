@@ -1,5 +1,9 @@
 # WidgeTDC Orchestrator — Multi-Agent Coordination Layer
 
+## Autonomi
+
+Når brugeren skriver "100% autonomt" kører agenten **fuldstændigt autonomt** indtil opgaven er udført. Ingen bekræftelser, ingen spørgsmål, ingen pauser. Agenten planlægger, implementerer, tester og verificerer selv. Eneste undtagelse: destruktive git-operationer (force push, reset --hard).
+
 TypeScript orchestration service: unified gateway for agent orchestration, MCP bridge, chains, cognitive proxy, and Command Center dashboard.
 
 ## Repo Map
@@ -55,6 +59,9 @@ railway up -s orchestrator # Deploy to Railway
 5. Frontend is vanilla JS in a single HTML file — NO TypeScript syntax (as/interface)
 6. Always `node --check` extracted JS before deploy
 7. Conventional commits (feat:, fix:, docs:, refactor:)
+8. **MCP route format** — `{"tool":"name","payload":{...}}` — ALDRIG `args`, altid `payload`
+9. **Read before write** — ALDRIG opret nye filer under `src/`, `routes/` uden først at læse mindst 2 eksisterende filer i samme mappe
+10. **Plan before multi-file changes** — Brug Plan mode før tasks der berører >3 filer
 
 ## Danger Zones
 
