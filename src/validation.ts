@@ -5,12 +5,21 @@
  * incoming requests at the route level.
  */
 import { TypeCompiler } from '@sinclair/typebox/compiler'
+import { FormatRegistry } from '@sinclair/typebox'
 import { Value } from '@sinclair/typebox/value'
 import {
   AgentHandshake,
   AgentMessage,
   OrchestratorToolCall,
 } from '@widgetdc/contracts/orchestrator'
+
+// Register TypeBox formats used by contract schemas
+if (!FormatRegistry.Has('date-time')) {
+  FormatRegistry.Set('date-time', (v) => !isNaN(Date.parse(v)))
+}
+if (!FormatRegistry.Has('uuid')) {
+  FormatRegistry.Set('uuid', (v) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v))
+}
 
 // Pre-compiled validators (fast repeated checks)
 export const validateHandshake = TypeCompiler.Compile(AgentHandshake)

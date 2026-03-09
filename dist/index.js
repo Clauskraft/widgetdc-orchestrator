@@ -8247,6 +8247,12 @@ var AgentHandshake = Type.Object({
 });
 
 // src/validation.ts
+if (!format_exports.Has("date-time")) {
+  format_exports.Set("date-time", (v) => !isNaN(Date.parse(v)));
+}
+if (!format_exports.Has("uuid")) {
+  format_exports.Set("uuid", (v) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v));
+}
 var validateHandshake = TypeCompiler.Compile(AgentHandshake);
 var validateMessage = TypeCompiler.Compile(AgentMessage);
 var validateToolCall = TypeCompiler.Compile(OrchestratorToolCall);
