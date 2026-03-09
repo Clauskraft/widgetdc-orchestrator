@@ -849,9 +849,9 @@ async function fetchGraphStats() {
     if (data.labels) {
       html += '<div class="section-box" style="margin-top:16px"><h2>Node Labels (top 30)</h2><table><thead><tr><th>Label</th><th>Count</th><th>Coverage</th></tr></thead><tbody>'
       const totalNodes = data.nodes || 1
-      const entries = Object.entries(data.labels).sort((a, b) => (b[1] as number) - (a[1] as number)).slice(0, 30)
+      const entries = Object.entries(data.labels).sort((a, b) => Number(b[1]) - Number(a[1])).slice(0, 30)
       for (const [label, count] of entries) {
-        const pct = ((count as number) / totalNodes * 100).toFixed(1)
+        const pct = (Number(count) / totalNodes * 100).toFixed(1)
         html += `<tr><td><strong>${h(label)}</strong></td><td>${Number(count).toLocaleString()}</td><td><div style="background:var(--bg);border-radius:4px;overflow:hidden;height:8px;width:120px"><div style="background:var(--accent);height:100%;width:${Math.min(100, parseFloat(pct) * 2)}%"></div></div> ${pct}%</td></tr>`
       }
       html += '</tbody></table></div>'
