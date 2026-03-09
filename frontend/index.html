@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WidgeTDC Command Center</title>
+  <title>WidgeTDC Command Center v2.2</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
@@ -148,8 +148,8 @@
       <span class="ws-dot disconnected" id="ws-indicator"></span>
       <span id="ws-label">Disconnected</span>
       <div style="margin-top:8px;display:flex;justify-content:space-between;align-items:center">
-        <span style="color:var(--text3);font-size:0.6rem">v2.1</span>
-        <button onclick="logout()" style="background:none;border:1px solid var(--border);color:var(--text3);border-radius:4px;padding:2px 8px;font-size:0.65rem;cursor:pointer">Logout</button>
+        <span style="color:var(--text3);font-size:0.6rem" id="version-tag">v2.2</span>
+        <button onclick="doLogout()" style="background:var(--red);border:none;color:#fff;border-radius:4px;padding:4px 12px;font-size:0.7rem;cursor:pointer;font-weight:600">Logout</button>
       </div>
     </div>
   </div>
@@ -379,7 +379,7 @@ const uuid = () => crypto.randomUUID()
 function checkAuth() {
   if (!API_KEY) {
     document.getElementById('auth-overlay').style.display = 'flex'
-    document.getElementById('auth-key').focus()
+    try { document.getElementById('auth-key').focus() } catch {}
     return false
   }
   document.getElementById('auth-overlay').style.display = 'none'
@@ -397,12 +397,17 @@ function doAuth() {
 
 document.getElementById('auth-key').addEventListener('keydown', e => { if (e.key === 'Enter') doAuth() })
 
-function logout() {
+function doLogout() {
   API_KEY = ''
   localStorage.removeItem('cc_api_key')
-  if (ws) ws.close()
-  if (refreshTimer) clearInterval(refreshTimer)
-  checkAuth()
+  try { if (ws) { ws.onclose = null; ws.close() } } catch {}
+  ws = null
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null }
+  document.getElementById('ws-indicator').className = 'ws-dot disconnected'
+  document.getElementById('ws-label').textContent = 'Disconnected'
+  document.getElementById('stat-cards').innerHTML = ''
+  document.getElementById('auth-overlay').style.display = 'flex'
+  try { document.getElementById('auth-key').value = ''; document.getElementById('auth-key').focus() } catch {}
 }
 
 // ─── API Client ─────────────────────────────────────────────────────────────
@@ -812,11 +817,19 @@ async function fetchOpenClawHealth() {
 
 // ─── Boot ───────────────────────────────────────────────────────────────────
 function boot() {
+  console.log('[CC] boot() called, API_KEY length:', API_KEY.length)
   connectWS()
   connectSSE()
   refreshDashboard()
   addChainStep() // Start with one empty step
+  if (refreshTimer) clearInterval(refreshTimer)
   refreshTimer = setInterval(refreshDashboard, 10000)
+}
+
+// Global error handler — show JS errors on screen
+window.onerror = (msg, src, line) => {
+  const el = document.getElementById('stat-cards')
+  if (el) el.innerHTML = `<div class="stat-card" style="grid-column:1/-1"><div class="value" style="font-size:0.9rem;color:var(--red)">JS Error</div><div class="label">${msg} (${src}:${line})</div></div>`
 }
 
 // ─── Knowledge Intelligence ─────────────────────────────────────────────────
@@ -1044,7 +1057,7 @@ function connectSSE() {
   } catch {}
 }
 
-if (checkAuth()) boot()
+try { if (checkAuth()) boot() } catch(e) { document.title = 'ERROR: ' + e.message; alert('Boot error: ' + e.message) }
 </script>
 </body>
 </html>
