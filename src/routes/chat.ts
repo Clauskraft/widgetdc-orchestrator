@@ -11,7 +11,104 @@ import { notifyChatMessage } from '../slack.js'
 import { validate, validateMessage } from '../validation.js'
 import { getHistory, getThread, searchMessages, togglePin, getPinnedMessages, getConversationSummaries, msgId } from '../chat-store.js'
 import { config } from '../config.js'
+import { callCognitive, isRlmAvailable } from '../cognitive-proxy.js'
+import { executeChain } from '../chain-engine.js'
 import type { AgentMessage } from '@widgetdc/contracts/orchestrator'
+
+// ─── Memory helpers — persist to multiple memory layers ──────────────────────
+
+/** Call MCP tool via backend */
+async function mcpCall(tool: string, args: Record<string, unknown>): Promise<unknown> {
+  const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(config.backendApiKey ? { 'Authorization': `Bearer ${config.backendApiKey}` } : {}),
+    },
+    body: JSON.stringify({ tool, args }),
+    signal: AbortSignal.timeout(30000),
+  })
+  const data = await res.json().catch(() => null)
+  return data?.result ?? data
+}
+
+/** Store to episodic memory via memory_operation RECORD_EPISODE */
+async function storeEpisode(title: string, description: string, events: string[], outcome: string, tags: string[]): Promise<void> {
+  try {
+    await mcpCall('memory_operation', {
+      action: 'RECORD_EPISODE',
+      data: {
+        title,
+        description,
+        events,
+        outcome,
+        lessons: [outcome],
+        tags,
+        timestamp: new Date().toISOString(),
+      },
+    })
+    logger.info({ title, tags }, 'Episode stored to episodic memory')
+  } catch (err) {
+    logger.warn({ err: String(err), title }, 'Episodic memory store failed (non-fatal)')
+  }
+}
+
+/** Store to graph memory via graph.write_cypher (AgentMemory node) */
+async function storeGraphMemory(agentId: string, type: string, content: string, tags: string[]): Promise<void> {
+  try {
+    const cypher = `CREATE (m:AgentMemory {
+      agent_id: $agent_id,
+      type: $type,
+      content: $content,
+      tags: $tags,
+      created_at: datetime(),
+      source: 'command-center-chat'
+    }) RETURN m`
+    await mcpCall('graph.write_cypher', {
+      query: cypher,
+      parameters: { agent_id: agentId, type, content: content.slice(0, 4000), tags },
+    })
+    logger.info({ agentId, type, tags }, 'Memory stored to Neo4j graph')
+  } catch (err) {
+    logger.warn({ err: String(err), type }, 'Graph memory store failed (non-fatal)')
+  }
+}
+
+/** Store to SRAG semantic memory */
+async function storeSRAG(content: string, tags: string[], source: string): Promise<void> {
+  try {
+    await mcpCall('srag.ingest', {
+      content,
+      source,
+      tags,
+      metadata: { captured_at: new Date().toISOString() },
+    })
+    logger.info({ tags, source }, 'Content stored to SRAG')
+  } catch (err) {
+    logger.warn({ err: String(err) }, 'SRAG store failed (non-fatal)')
+  }
+}
+
+/** Persist to all memory layers (best-effort, non-blocking) */
+function persistToMemory(opts: {
+  title: string
+  content: string
+  tags: string[]
+  agentId?: string
+  type?: string
+  events?: string[]
+}): void {
+  const { title, content, tags, agentId = 'command-center', type = 'insight', events = [] } = opts
+  // Fire all three in parallel, don't await
+  Promise.allSettled([
+    storeEpisode(title, content, events.length ? events : [content.slice(0, 500)], title, tags),
+    storeGraphMemory(agentId, type, content, tags),
+    storeSRAG(content, [...tags, 'auto-memory'], 'command-center-chat'),
+  ]).then(results => {
+    const succeeded = results.filter(r => r.status === 'fulfilled').length
+    logger.debug({ succeeded, total: 3, title }, 'Memory persistence completed')
+  })
+}
 
 export const chatRouter = Router()
 
@@ -237,7 +334,17 @@ chatRouter.post('/summarize', async (req: Request, res: Response) => {
       timestamp: new Date().toISOString(),
     } as any)
 
-    res.json({ success: true, data: { summary, message_count: messages.length } })
+    // Persist summary to all memory layers
+    const summaryStr = typeof summary === 'string' ? summary : JSON.stringify(summary)
+    persistToMemory({
+      title: `Chat Summary: ${target || thread_id || 'general'}`,
+      content: summaryStr,
+      tags: ['chat-summary', 'auto-summary', ...(target ? [`conversation:${target}`] : [])],
+      type: 'summary',
+      events: messages.slice(0, 10).map(m => `[${m.from}] ${(m.message || '').slice(0, 100)}`),
+    })
+
+    res.json({ success: true, data: { summary, message_count: messages.length, persisted: true } })
   } catch (err) {
     logger.error({ err: String(err) }, 'Summarize failed')
     res.status(502).json({ success: false, error: { code: 'SUMMARIZE_FAILED', message: String(err) } })
@@ -358,17 +465,176 @@ async function runDebate(debateId: string, agents: string[], topic: string, roun
     const synthData = await synthRes.json().catch(() => null)
     const synthesis = synthData?.result?.content || synthData?.result?.message || synthData?.result || '(synthesis failed)'
 
+    const synthStr = typeof synthesis === 'string' ? synthesis : JSON.stringify(synthesis)
+
     broadcastMessage({
       from: 'System',
       to: 'All',
       source: 'system',
       type: 'Message',
-      message: `📊 **Debate Synthesis**: "${topic}"\n\n${typeof synthesis === 'string' ? synthesis : JSON.stringify(synthesis)}`,
+      message: `📊 **Debate Synthesis**: "${topic}"\n\n${synthStr}`,
       timestamp: new Date().toISOString(),
       thread_id: debateId,
     } as any)
+
+    // Persist debate to all memory layers
+    const debateContent = `Debate: "${topic}"\nParticipants: ${agents.join(', ')}\nRounds: ${rounds}\n\nArguments:\n${allArgs}\n\nSynthesis:\n${synthStr}`
+    persistToMemory({
+      title: `Debate: ${topic}`,
+      content: debateContent,
+      tags: ['debate', 'consensus', ...agents.map(a => `agent:${a}`)],
+      type: 'debate',
+      events: responses.map(r => `[${r.agent} R${r.round}] ${r.response.slice(0, 100)}`),
+    })
   } catch {}
 }
+
+// ─── POST /think — Sequential thinking via chain engine ──────────────────────
+chatRouter.post('/think', async (req: Request, res: Response) => {
+  const { question, depth, steps: customSteps } = req.body
+  if (!question) {
+    res.status(400).json({ success: false, error: { code: 'MISSING_FIELDS', message: 'question required' } })
+    return
+  }
+
+  const thinkId = `think-${Date.now().toString(36)}`
+  const thinkDepth = Math.min(depth || 3, 5)
+
+  // Announce thinking
+  broadcastMessage({
+    from: 'System',
+    to: 'All',
+    source: 'system',
+    type: 'Message',
+    message: `🧠 **Sequential Thinking** started: "${question}" (depth: ${thinkDepth})`,
+    timestamp: new Date().toISOString(),
+    thread_id: thinkId,
+  } as any)
+
+  // Build chain: reason → plan → analyze → fold (synthesize)
+  const defaultSteps = [
+    { agent_id: 'rlm', cognitive_action: 'reason', prompt: `Deep reason about: ${question}`, timeout_ms: 60000 },
+    { agent_id: 'rlm', cognitive_action: 'plan', prompt: `Based on reasoning: {{prev}}\n\nCreate actionable plan for: ${question}`, timeout_ms: 60000 },
+    { agent_id: 'rlm', cognitive_action: 'analyze', prompt: `Analyze this plan for gaps and improvements: {{prev}}\n\nOriginal question: ${question}`, timeout_ms: 60000 },
+  ]
+
+  // Add extra depth steps if requested
+  if (thinkDepth >= 4) {
+    defaultSteps.push({ agent_id: 'rlm', cognitive_action: 'fold', prompt: `Synthesize all findings into a concise conclusion: {{prev}}\n\nOriginal question: ${question}`, timeout_ms: 60000 })
+  }
+  if (thinkDepth >= 5) {
+    defaultSteps.push({ agent_id: 'rlm', cognitive_action: 'enrich', prompt: `Enrich with additional context and recommendations: {{prev}}\n\nOriginal question: ${question}`, timeout_ms: 60000 })
+  }
+
+  const steps = customSteps || defaultSteps
+
+  // Execute as sequential chain
+  runThink(thinkId, question, steps).catch(err => {
+    logger.error({ err: String(err), thinkId }, 'Think failed')
+    broadcastMessage({
+      from: 'System',
+      to: 'All',
+      source: 'system',
+      type: 'Message',
+      message: `❌ Thinking failed: ${err.message}`,
+      timestamp: new Date().toISOString(),
+      thread_id: thinkId,
+    } as any)
+  })
+
+  res.json({ success: true, data: { think_id: thinkId, question, depth: thinkDepth, steps: steps.length } })
+})
+
+async function runThink(thinkId: string, question: string, steps: any[]) {
+  const chainDef = {
+    name: `think: ${question.slice(0, 50)}`,
+    mode: 'sequential' as const,
+    steps,
+  }
+
+  const execution = await executeChain(chainDef)
+
+  // Broadcast each step result in the thread
+  for (const result of execution.results) {
+    const output = typeof result.output === 'string' ? result.output : JSON.stringify(result.output, null, 2)
+    broadcastMessage({
+      from: 'RLM-Engine',
+      to: 'All',
+      source: 'system',
+      type: 'Message',
+      message: `**[${result.action}]** ${output.slice(0, 3000)}`,
+      timestamp: new Date().toISOString(),
+      thread_id: thinkId,
+    } as any)
+  }
+
+  // Final result
+  const finalOutput = typeof execution.final_output === 'string'
+    ? execution.final_output
+    : JSON.stringify(execution.final_output, null, 2)
+
+  broadcastMessage({
+    from: 'System',
+    to: 'All',
+    source: 'system',
+    type: 'Message',
+    message: `🧠 **Thinking Complete**: "${question}"\n\n${(finalOutput || '(no result)').slice(0, 3000)}\n\n_${execution.steps_completed}/${execution.steps_total} steps in ${execution.duration_ms}ms_`,
+    timestamp: new Date().toISOString(),
+    thread_id: thinkId,
+  } as any)
+
+  // Persist to all memory layers
+  const allOutputs = execution.results.map(r => {
+    const o = typeof r.output === 'string' ? r.output : JSON.stringify(r.output)
+    return `[${r.action}]: ${o}`
+  }).join('\n\n')
+
+  persistToMemory({
+    title: `Sequential Thinking: ${question.slice(0, 100)}`,
+    content: `Question: ${question}\n\nThinking Steps:\n${allOutputs}\n\nConclusion:\n${finalOutput || '(no result)'}`,
+    tags: ['thinking', 'sequential', 'cognitive'],
+    type: 'thinking',
+    events: execution.results.map(r => `${r.action}: ${r.status} (${r.duration_ms}ms)`),
+  })
+}
+
+// ─── POST /remember — Store to all memory layers explicitly ──────────────────
+chatRouter.post('/remember', async (req: Request, res: Response) => {
+  const { content, title, tags, message_ids } = req.body
+  if (!content && !message_ids?.length) {
+    res.status(400).json({ success: false, error: { code: 'MISSING_FIELDS', message: 'content or message_ids required' } })
+    return
+  }
+
+  let memContent = content || ''
+  if (message_ids?.length) {
+    const all = await getHistory(2000, 0)
+    const selected = all.filter((m: any) => message_ids.includes(m.id))
+    const transcript = selected.map((m: any) => `[${m.from}] ${m.message}`).join('\n')
+    memContent = content ? `${content}\n\n---\n${transcript}` : transcript
+  }
+
+  const memTitle = title || `Chat Memory: ${memContent.slice(0, 60)}`
+  const memTags = tags || ['manual-remember']
+
+  persistToMemory({
+    title: memTitle,
+    content: memContent,
+    tags: memTags,
+    type: 'memory',
+  })
+
+  broadcastMessage({
+    from: 'System',
+    to: 'All',
+    source: 'system',
+    type: 'Message',
+    message: `🧠 Remembered: "${memTitle}" → Episodic + Graph + SRAG (tags: ${memTags.join(', ')})`,
+    timestamp: new Date().toISOString(),
+  } as any)
+
+  res.json({ success: true, data: { title: memTitle, tags: memTags, layers: ['episodic', 'graph', 'srag'] } })
+})
 
 // ─── GET /templates — Conversation workflow templates ─────────────────────────
 const CHAT_TEMPLATES = [

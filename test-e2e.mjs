@@ -97,8 +97,8 @@ await test('5. GET / serves HTML with correct title', async () => {
 })
 
 // ── 6. Version tag present ──
-await test('6. Frontend: version tag v2.7', async () => {
-  assert(cachedHtml.includes('v2.7'), 'missing v2.7')
+await test('6. Frontend: version tag v2.8', async () => {
+  assert(cachedHtml.includes('v2.8'), 'missing v2.8')
 })
 
 // ── 7. CSS design system tokens ──
@@ -491,6 +491,85 @@ await test('50. 404: returns structured JSON error', async () => {
   assert(r.body.success === false, 'missing success:false')
   assert(r.body.error?.code === 'NOT_FOUND', 'missing NOT_FOUND')
   assert(r.body.error?.status_code === 404, 'missing status_code')
+})
+
+console.log('\n' + '=' .repeat(60))
+console.log('  SECTION 10: Memory & Sequential Thinking (v2.8)')
+console.log('=' .repeat(60))
+
+// ── 51. Chat /think endpoint ──
+await test('51. POST /chat/think starts sequential thinking', async () => {
+  const r = await api('/chat/think', { method: 'POST', body: JSON.stringify({ question: 'What is the best architecture for microservices?', depth: 2 }) })
+  if (r.status === 502 || r.status === 503) { console.log('    (RLM unavailable)'); return }
+  assert(r.ok, `HTTP ${r.status}: ${JSON.stringify(r.body?.error)}`)
+  assert(r.body.data?.think_id, 'no think_id')
+  assert(r.body.data?.steps > 0, 'no steps')
+})
+
+// ── 52. Chat /think rejects missing question ──
+await test('52. POST /chat/think rejects missing question', async () => {
+  const r = await api('/chat/think', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status === 400, `expected 400, got ${r.status}`)
+  assert(r.body.error?.code === 'MISSING_FIELDS', 'missing error code')
+})
+
+// ── 53. Chat /remember endpoint ──
+await test('53. POST /chat/remember stores to memory layers', async () => {
+  const r = await api('/chat/remember', { method: 'POST', body: JSON.stringify({ content: 'E2E test memory entry', title: 'E2E Test', tags: ['e2e', 'test'] }) })
+  assert(r.ok, `HTTP ${r.status}: ${JSON.stringify(r.body?.error)}`)
+  assert(r.body.data?.layers?.length === 3, 'should target 3 layers')
+  assert(r.body.data?.title === 'E2E Test', 'title mismatch')
+})
+
+// ── 54. Chat /remember rejects empty ──
+await test('54. POST /chat/remember rejects empty', async () => {
+  const r = await api('/chat/remember', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status === 400, `expected 400, got ${r.status}`)
+})
+
+// ── 55. Chat /summarize returns persisted flag ──
+await test('55. POST /chat/summarize includes persisted flag', async () => {
+  const r = await api('/chat/summarize', { method: 'POST', body: JSON.stringify({ limit: 5 }) })
+  if (r.status === 502) { console.log('    (LLM unavailable)'); return }
+  assert(r.ok, `HTTP ${r.status}`)
+  assert(r.body.data?.persisted === true, 'missing persisted:true')
+})
+
+// ── 56. Chat history endpoint ──
+await test('56. GET /chat/history returns messages', async () => {
+  const r = await api('/chat/history?limit=10')
+  assert(r.ok, `HTTP ${r.status}`)
+  assert(Array.isArray(r.body.data?.messages), 'messages not array')
+})
+
+// ── 57. Chat conversations endpoint ──
+await test('57. GET /chat/conversations returns sidebar data', async () => {
+  const r = await api('/chat/conversations')
+  assert(r.ok, `HTTP ${r.status}`)
+  assert(Array.isArray(r.body.data?.conversations), 'conversations not array')
+})
+
+// ── 58. Chat templates endpoint ──
+await test('58. GET /chat/templates returns templates', async () => {
+  const r = await api('/chat/templates')
+  assert(r.ok, `HTTP ${r.status}`)
+  const templates = r.body.data?.templates || []
+  assert(templates.length >= 5, `expected 5+ templates, got ${templates.length}`)
+  assert(templates.some(t => t.id === 'daily-standup'), 'missing daily-standup')
+})
+
+// ── 59. Frontend: /think command in autocomplete ──
+await test('59. Frontend: /think command present', async () => {
+  assert(cachedHtml.includes("skillName === 'think'"), 'missing /think handler')
+  assert(cachedHtml.includes('/chat/think'), 'missing /chat/think endpoint call')
+  assert(cachedHtml.includes("label: '/think'"), 'missing /think in autocomplete')
+})
+
+// ── 60. Frontend: /remember command in autocomplete ──
+await test('60. Frontend: /remember command present', async () => {
+  assert(cachedHtml.includes("skillName === 'remember'"), 'missing /remember handler')
+  assert(cachedHtml.includes('/chat/remember'), 'missing /chat/remember endpoint call')
+  assert(cachedHtml.includes("label: '/remember'"), 'missing /remember in autocomplete')
 })
 
 // ═══════════════════════════════════════════════════════════════

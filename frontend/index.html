@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WidgeTDC Command Center v2.7</title>
+  <title>WidgeTDC Command Center v2.8</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..800&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1367,6 +1367,34 @@ async function sendChat() {
       return
     }
 
+    // /think <question> — sequential thinking via RLM chain
+    if (skillName === 'think') {
+      if (!parsed.args) { addLocalMsg('System', 'Usage: /think <question> [depth:1-5]', 'Alert'); return }
+      // Parse optional depth: /think depth:4 my question
+      let depth = 3
+      let question = parsed.args
+      const depthMatch = question.match(/^depth:(\d)\s+(.+)$/s)
+      if (depthMatch) { depth = parseInt(depthMatch[1]); question = depthMatch[2] }
+      addLocalMsg('command-center', `/think ${question} (depth:${depth})`, 'Command')
+      try {
+        const res = await api('/chat/think', { method: 'POST', body: JSON.stringify({ question, depth }) })
+        addLocalMsg('System', `🧠 Sequential thinking started: ${res.data?.think_id || 'unknown'} (${res.data?.steps || '?'} steps)`, 'Message')
+      } catch (err) { addLocalMsg('System', 'Think failed: ' + err.message, 'Alert') }
+      return
+    }
+
+    // /remember [tags] — store recent messages to all memory layers
+    if (skillName === 'remember') {
+      const tags = parsed.args ? parsed.args.split(/\s+/) : ['manual-remember']
+      const recentIds = chatMessages.slice(-10).filter(m => m.id).map(m => m.id)
+      addLocalMsg('command-center', `/remember ${tags.join(', ')}`, 'Command')
+      try {
+        await api('/chat/remember', { method: 'POST', body: JSON.stringify({ message_ids: recentIds, tags }) })
+        addLocalMsg('System', `🧠 Stored ${recentIds.length} messages → Episodic + Graph + SRAG`, 'Message')
+      } catch (err) { addLocalMsg('System', 'Remember failed: ' + err.message, 'Alert') }
+      return
+    }
+
     // /pin — pin last message
     if (skillName === 'pin') {
       const lastMsg = chatMessages.filter(m => m.id).slice(-1)[0]
@@ -1516,6 +1544,8 @@ chatInput.addEventListener('input', () => {
       { label: '/template', hint: 'Run workflow', insert: '/template' },
       { label: '/pin', hint: 'Pin last message', insert: '/pin' },
       { label: '/chain', hint: 'Execute chain', insert: '/chain' },
+      { label: '/think', hint: 'Sequential thinking', insert: '/think' },
+      { label: '/remember', hint: 'Store to all memory', insert: '/remember' },
     ]
     const templateCmds = chatTemplates.map(t => ({ label: '/template ' + t.id, hint: t.description, insert: '/template ' + t.id }))
     const tools = availableTools.map(t => ({ label: '/' + t, hint: 'MCP tool', insert: '/' + t }))
