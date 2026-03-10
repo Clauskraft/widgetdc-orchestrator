@@ -47,6 +47,8 @@ var config = {
   // OpenClaw gateway (optional — for terminal/agent spawning)
   openclawUrl: optional("OPENCLAW_URL", ""),
   openclawToken: optional("OPENCLAW_GATEWAY_TOKEN", ""),
+  // LibreChat (optional — for agent visibility + health)
+  libreChatUrl: optional("LIBRECHAT_URL", ""),
   // Orchestrator identity
   orchestratorId: optional("ORCHESTRATOR_ID", "widgetdc-orchestrator-v1"),
   // WebSocket heartbeat interval (ms)
@@ -355,10 +357,48 @@ function handleIncomingMessage(fromAgentId, msg) {
     broadcastMessage(msg);
   } else {
     const target = connections.get(msg.to);
+    const storedMsg = {
+      id: msg.id || msgId(),
+      from: msg.from,
+      to: msg.to,
+      source: msg.source,
+      type: msg.type,
+      message: msg.message,
+      timestamp: msg.timestamp || (/* @__PURE__ */ new Date()).toISOString(),
+      thread_id: msg.thread_id,
+      parent_id: msg.parent_id,
+      metadata: msg.metadata
+    };
+    const payload = JSON.stringify({ type: "message", data: storedMsg });
     if (target?.ws.readyState === WebSocket.OPEN) {
-      target.ws.send(JSON.stringify(msg));
+      target.ws.send(payload);
+      const sender = connections.get(fromAgentId);
+      if (sender?.ws.readyState === WebSocket.OPEN && fromAgentId !== msg.to) {
+        sender.ws.send(payload);
+      }
+      storeMessage(storedMsg).catch(() => {
+      });
+      broadcastSSE("message", storedMsg);
     } else {
-      broadcastMessage(msg);
+      storeMessage(storedMsg).catch(() => {
+      });
+      const sender = connections.get(fromAgentId);
+      if (sender?.ws.readyState === WebSocket.OPEN) {
+        sender.ws.send(payload);
+        sender.ws.send(JSON.stringify({
+          type: "message",
+          data: {
+            id: msgId(),
+            from: "System",
+            to: fromAgentId,
+            source: "system",
+            type: "Alert",
+            message: `${msg.to} is offline. Message saved.`,
+            timestamp: (/* @__PURE__ */ new Date()).toISOString()
+          }
+        }));
+      }
+      logger.info({ from: msg.from, to: msg.to }, "DM stored for offline agent (not broadcast)");
     }
   }
 }
@@ -633,7 +673,7 @@ ${message.slice(0, 500)}`
   ], `${from} \u2192 ${to}: ${message.slice(0, 100)}`);
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/guard/guard.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/guard/guard.mjs
 function IsAsyncIterator(value) {
   return IsObject(value) && globalThis.Symbol.asyncIterator in value;
 }
@@ -701,7 +741,7 @@ function IsValueType(value) {
   return IsBigInt(value) || IsBoolean(value) || IsNull(value) || IsNumber(value) || IsString(value) || IsSymbol(value) || IsUndefined(value);
 }
 
-// node_modules/@sinclair/typebox/build/esm/system/policy.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/system/policy.mjs
 var TypeSystemPolicy;
 (function(TypeSystemPolicy3) {
   TypeSystemPolicy3.InstanceMode = "default";
@@ -733,7 +773,7 @@ var TypeSystemPolicy;
   TypeSystemPolicy3.IsVoidLike = IsVoidLike;
 })(TypeSystemPolicy || (TypeSystemPolicy = {}));
 
-// node_modules/@sinclair/typebox/build/esm/type/registry/format.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/registry/format.mjs
 var format_exports = {};
 __export(format_exports, {
   Clear: () => Clear,
@@ -763,7 +803,7 @@ function Get(format) {
   return map.get(format);
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/registry/type.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/registry/type.mjs
 var type_exports = {};
 __export(type_exports, {
   Clear: () => Clear2,
@@ -793,7 +833,7 @@ function Get2(kind) {
   return map2.get(kind);
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/guard/value.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/guard/value.mjs
 function IsArray2(value) {
   return Array.isArray(value);
 }
@@ -825,7 +865,7 @@ function IsUndefined2(value) {
   return value === void 0;
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/create/immutable.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/create/immutable.mjs
 function ImmutableArray(value) {
   return globalThis.Object.freeze(value).map((value2) => Immutable(value2));
 }
@@ -852,7 +892,7 @@ function Immutable(value) {
   return IsArray2(value) ? ImmutableArray(value) : IsDate2(value) ? ImmutableDate(value) : IsUint8Array2(value) ? ImmutableUint8Array(value) : IsRegExp(value) ? ImmutableRegExp(value) : IsObject2(value) ? ImmutableObject(value) : value;
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/clone/value.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/clone/value.mjs
 function ArrayType(value) {
   return value.map((value2) => Visit(value2));
 }
@@ -882,7 +922,7 @@ function Clone(value) {
   return Visit(value);
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/create/type.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/create/type.mjs
 function CreateType(schema, options) {
   const result = options !== void 0 ? { ...options, ...schema } : schema;
   switch (TypeSystemPolicy.InstanceMode) {
@@ -895,21 +935,21 @@ function CreateType(schema, options) {
   }
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/symbols/symbols.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/symbols/symbols.mjs
 var TransformKind = Symbol.for("TypeBox.Transform");
 var ReadonlyKind = Symbol.for("TypeBox.Readonly");
 var OptionalKind = Symbol.for("TypeBox.Optional");
 var Hint = Symbol.for("TypeBox.Hint");
 var Kind = Symbol.for("TypeBox.Kind");
 
-// node_modules/@sinclair/typebox/build/esm/type/error/error.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/error/error.mjs
 var TypeBoxError = class extends Error {
   constructor(message) {
     super(message);
   }
 };
 
-// node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-result.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-result.mjs
 function MappedResult(properties) {
   return CreateType({
     [Kind]: "MappedResult",
@@ -917,7 +957,7 @@ function MappedResult(properties) {
   });
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/discard/discard.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/discard/discard.mjs
 function DiscardKey(value, key) {
   const { [key]: _, ...rest } = value;
   return rest;
@@ -926,12 +966,12 @@ function Discard(value, keys) {
   return keys.reduce((acc, key) => DiscardKey(acc, key), value);
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/never/never.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/never/never.mjs
 function Never(options) {
   return CreateType({ [Kind]: "Never", not: {} }, options);
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/guard/kind.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/guard/kind.mjs
 function IsOptional(value) {
   return IsObject2(value) && value[OptionalKind] === "Optional";
 }
@@ -1056,7 +1096,7 @@ function IsSchema(value) {
   return IsAny(value) || IsArgument(value) || IsArray3(value) || IsBoolean3(value) || IsBigInt3(value) || IsAsyncIterator2(value) || IsComputed(value) || IsConstructor(value) || IsDate3(value) || IsFunction2(value) || IsInteger2(value) || IsIntersect(value) || IsIterator2(value) || IsLiteral(value) || IsMappedKey(value) || IsMappedResult(value) || IsNever(value) || IsNot(value) || IsNull2(value) || IsNumber3(value) || IsObject3(value) || IsPromise2(value) || IsRecord(value) || IsRef(value) || IsRegExp2(value) || IsString3(value) || IsSymbol2(value) || IsTemplateLiteral(value) || IsThis(value) || IsTuple(value) || IsUndefined3(value) || IsUnion(value) || IsUint8Array3(value) || IsUnknown(value) || IsUnsafe(value) || IsVoid(value) || IsKind(value);
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/optional/optional.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/optional/optional.mjs
 function RemoveOptional(schema) {
   return CreateType(Discard(schema, [OptionalKind]));
 }
@@ -1071,7 +1111,7 @@ function Optional(schema, enable) {
   return IsMappedResult(schema) ? OptionalFromMappedResult(schema, F) : OptionalWithFlag(schema, F);
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/optional/optional-from-mapped-result.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/optional/optional-from-mapped-result.mjs
 function FromProperties(P, F) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(P))
@@ -1086,14 +1126,14 @@ function OptionalFromMappedResult(R, F) {
   return MappedResult(P);
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-create.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-create.mjs
 function IntersectCreate(T, options = {}) {
   const allObjects = T.every((schema) => IsObject3(schema));
   const clonedUnevaluatedProperties = IsSchema(options.unevaluatedProperties) ? { unevaluatedProperties: options.unevaluatedProperties } : {};
   return CreateType(options.unevaluatedProperties === false || IsSchema(options.unevaluatedProperties) || allObjects ? { ...clonedUnevaluatedProperties, [Kind]: "Intersect", type: "object", allOf: T } : { ...clonedUnevaluatedProperties, [Kind]: "Intersect", allOf: T }, options);
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-evaluated.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-evaluated.mjs
 function IsIntersectOptional(types) {
   return types.every((left) => IsOptional(left));
 }
@@ -1116,12 +1156,12 @@ function IntersectEvaluated(types, options = {}) {
   return ResolveIntersect(types, options);
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/union/union-create.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/union/union-create.mjs
 function UnionCreate(T, options) {
   return CreateType({ [Kind]: "Union", anyOf: T }, options);
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/union/union-evaluated.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/union/union-evaluated.mjs
 function IsUnionOptional(types) {
   return types.some((type) => IsOptional(type));
 }
@@ -1139,12 +1179,12 @@ function UnionEvaluated(T, options) {
   return T.length === 1 ? CreateType(T[0], options) : T.length === 0 ? Never(options) : ResolveUnion(T, options);
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/union/union.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/union/union.mjs
 function Union(types, options) {
   return types.length === 0 ? Never(options) : types.length === 1 ? CreateType(types[0], options) : UnionCreate(types, options);
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/template-literal/parse.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/template-literal/parse.mjs
 var TemplateLiteralParserError = class extends TypeBoxError {
 };
 function Unescape(pattern) {
@@ -1268,7 +1308,7 @@ function TemplateLiteralParseExact(pattern) {
   return TemplateLiteralParse(pattern.slice(1, pattern.length - 1));
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/template-literal/finite.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/template-literal/finite.mjs
 var TemplateLiteralFiniteError = class extends TypeBoxError {
 };
 function IsNumberExpression(expression) {
@@ -1290,7 +1330,7 @@ function IsTemplateLiteralFinite(schema) {
   return IsTemplateLiteralExpressionFinite(expression);
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/template-literal/generate.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/template-literal/generate.mjs
 var TemplateLiteralGenerateError = class extends TypeBoxError {
 };
 function* GenerateReduce(buffer) {
@@ -1322,7 +1362,7 @@ function TemplateLiteralGenerate(schema) {
   return IsTemplateLiteralExpressionFinite(expression) ? [...TemplateLiteralExpressionGenerate(expression)] : [];
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/literal/literal.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/literal/literal.mjs
 function Literal(value, options) {
   return CreateType({
     [Kind]: "Literal",
@@ -1331,12 +1371,12 @@ function Literal(value, options) {
   }, options);
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/string/string.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/string/string.mjs
 function String2(options) {
   return CreateType({ [Kind]: "String", type: "string" }, options);
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/indexed/indexed.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/indexed/indexed.mjs
 function FromRest(types, key) {
   return types.map((type) => IndexFromPropertyKey(type, key));
 }
@@ -1368,7 +1408,7 @@ function IndexFromPropertyKeys(type, propertyKeys) {
   return propertyKeys.map((propertyKey) => IndexFromPropertyKey(type, propertyKey));
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/object/object.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/object/object.mjs
 function RequiredArray(properties) {
   return globalThis.Object.keys(properties).filter((key) => !IsOptional(properties[key]));
 }
@@ -1379,7 +1419,7 @@ function _Object(properties, options) {
 }
 var Object2 = _Object;
 
-// node_modules/@sinclair/typebox/build/esm/type/sets/set.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/sets/set.mjs
 function SetIntersect(T, S) {
   return T.filter((L) => S.includes(L));
 }
@@ -1398,7 +1438,7 @@ function SetUnionMany(T) {
   return Acc;
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/ref/ref.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/ref/ref.mjs
 function Ref(...args) {
   const [$ref, options] = typeof args[0] === "string" ? [args[0], args[1]] : [args[0].$id, args[1]];
   if (typeof $ref !== "string")
@@ -1406,7 +1446,7 @@ function Ref(...args) {
   return CreateType({ [Kind]: "Ref", $ref }, options);
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-keys.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-keys.mjs
 function FromRest2(types) {
   const result = [];
   for (const L of types)
@@ -1452,14 +1492,14 @@ function KeyOfPattern(schema) {
   return `^(${pattern.join("|")})$`;
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-entries.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-entries.mjs
 function KeyOfPropertyEntries(schema) {
   const keys = KeyOfPropertyKeys(schema);
   const schemas = IndexFromPropertyKeys(schema, keys);
   return keys.map((_, index) => [keys[index], schemas[index]]);
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/extends/extends-undefined.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/extends/extends-undefined.mjs
 function Intersect(schema) {
   return schema.allOf.every((schema2) => ExtendsUndefinedCheck(schema2));
 }
@@ -1473,7 +1513,7 @@ function ExtendsUndefinedCheck(schema) {
   return schema[Kind] === "Intersect" ? Intersect(schema) : schema[Kind] === "Union" ? Union2(schema) : schema[Kind] === "Not" ? Not(schema) : schema[Kind] === "Undefined" ? true : false;
 }
 
-// node_modules/@sinclair/typebox/build/esm/errors/function.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/errors/function.mjs
 function DefaultErrorFunction(error) {
   switch (error.errorType) {
     case ValueErrorType.ArrayContains:
@@ -1613,7 +1653,7 @@ function GetErrorFunction() {
   return errorFunction;
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/deref/deref.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/deref/deref.mjs
 var TypeDereferenceError = class extends TypeBoxError {
   constructor(schema) {
     super(`Unable to dereference schema with $id '${schema.$ref}'`);
@@ -1636,7 +1676,7 @@ function Deref(schema, references) {
   return schema[Kind] === "This" || schema[Kind] === "Ref" ? Resolve(schema, references) : schema;
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/hash/hash.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/hash/hash.mjs
 var ValueHashError = class extends TypeBoxError {
   constructor(value) {
     super(`Unable to hash value`);
@@ -1766,12 +1806,12 @@ function Hash(value) {
   return Accumulator;
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/unknown/unknown.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/unknown/unknown.mjs
 function Unknown(options) {
   return CreateType({ [Kind]: "Unknown" }, options);
 }
 
-// node_modules/@sinclair/typebox/build/esm/type/guard/type.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/type/guard/type.mjs
 var KnownTypes = [
   "Argument",
   "Any",
@@ -1983,7 +2023,7 @@ function IsSchema2(value) {
   return IsObject2(value) && (IsAny2(value) || IsArgument2(value) || IsArray4(value) || IsBoolean4(value) || IsBigInt4(value) || IsAsyncIterator3(value) || IsComputed2(value) || IsConstructor2(value) || IsDate4(value) || IsFunction3(value) || IsInteger3(value) || IsIntersect2(value) || IsIterator3(value) || IsLiteral2(value) || IsMappedKey2(value) || IsMappedResult2(value) || IsNever2(value) || IsNot2(value) || IsNull3(value) || IsNumber4(value) || IsObject4(value) || IsPromise3(value) || IsRecord2(value) || IsRef2(value) || IsRegExp3(value) || IsString4(value) || IsSymbol3(value) || IsTemplateLiteral2(value) || IsThis2(value) || IsTuple2(value) || IsUndefined4(value) || IsUnion2(value) || IsUint8Array4(value) || IsUnknown2(value) || IsUnsafe2(value) || IsVoid2(value) || IsKind2(value));
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/check/check.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/check/check.mjs
 var ValueCheckUnknownTypeError = class extends TypeBoxError {
   constructor(schema) {
     super(`Unknown type`);
@@ -2415,7 +2455,7 @@ function Check(...args) {
   return args.length === 3 ? Visit3(args[0], args[1], args[2]) : Visit3(args[0], [], args[1]);
 }
 
-// node_modules/@sinclair/typebox/build/esm/errors/errors.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/errors/errors.mjs
 var ValueErrorType;
 (function(ValueErrorType2) {
   ValueErrorType2[ValueErrorType2["ArrayContains"] = 0] = "ArrayContains";
@@ -2973,7 +3013,7 @@ function Errors(...args) {
   return new ValueErrorIterator(iterator);
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/transform/decode.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/transform/decode.mjs
 var TransformDecodeCheckError = class extends TypeBoxError {
   constructor(schema, value, error) {
     super(`Unable to decode value as it does not match the expected schema`);
@@ -3132,7 +3172,7 @@ function TransformDecode(schema, references, value) {
   return Visit5(schema, references, "", value);
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/transform/encode.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/transform/encode.mjs
 var TransformEncodeCheckError = class extends TypeBoxError {
   constructor(schema, value, error) {
     super(`The encoded value does not match the expected schema`);
@@ -3302,7 +3342,7 @@ function TransformEncode(schema, references, value) {
   return Visit6(schema, references, "", value);
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/transform/has.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/transform/has.mjs
 function FromArray7(schema, references) {
   return IsTransform(schema) || Visit7(schema.items, references);
 }
@@ -3404,7 +3444,7 @@ function HasTransform(schema, references) {
   return Visit7(schema, references);
 }
 
-// node_modules/@sinclair/typebox/build/esm/compiler/compiler.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/compiler/compiler.mjs
 var TypeCheck = class {
   constructor(schema, references, checkFunc, code) {
     this.schema = schema;
@@ -3988,7 +4028,7 @@ var TypeCompiler;
   TypeCompiler2.Compile = Compile;
 })(TypeCompiler || (TypeCompiler = {}));
 
-// node_modules/@sinclair/typebox/build/esm/value/assert/assert.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/assert/assert.mjs
 var __classPrivateFieldSet = function(receiver, state, value, kind, f) {
   if (kind === "m") throw new TypeError("Private method is not writable");
   if (kind === "a" && !f) throw new TypeError("Private accessor was defined without a setter");
@@ -4031,7 +4071,7 @@ function Assert(...args) {
   return args.length === 3 ? AssertValue(args[0], args[1], args[2]) : AssertValue(args[0], [], args[1]);
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/clone/clone.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/clone/clone.mjs
 function FromObject6(value) {
   const Acc = {};
   for (const key of Object.getOwnPropertyNames(value)) {
@@ -4078,7 +4118,7 @@ function Clone2(value) {
   throw new Error("ValueClone: Unable to clone value");
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/create/create.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/create/create.mjs
 var ValueCreateError = class extends TypeBoxError {
   constructor(schema, message) {
     super(message);
@@ -4474,7 +4514,7 @@ function Create2(...args) {
   return args.length === 2 ? Visit8(args[0], args[1]) : Visit8(args[0], []);
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/cast/cast.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/cast/cast.mjs
 var ValueCastError = class extends TypeBoxError {
   constructor(schema, message) {
     super(message);
@@ -4678,7 +4718,7 @@ function Cast(...args) {
   return args.length === 3 ? Visit9(args[0], args[1], args[2]) : Visit9(args[0], [], args[1]);
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/clean/clean.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/clean/clean.mjs
 function IsCheckable(schema) {
   return IsKind(schema) && schema[Kind] !== "Unsafe";
 }
@@ -4800,7 +4840,7 @@ function Clean(...args) {
   return args.length === 3 ? Visit10(args[0], args[1], args[2]) : Visit10(args[0], [], args[1]);
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/convert/convert.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/convert/convert.mjs
 function IsStringNumeric(value) {
   return IsString(value) && !isNaN(value) && !isNaN(parseFloat(value));
 }
@@ -5012,7 +5052,7 @@ function Convert(...args) {
   return args.length === 3 ? Visit11(args[0], args[1], args[2]) : Visit11(args[0], [], args[1]);
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/decode/decode.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/decode/decode.mjs
 function Decode(...args) {
   const [schema, references, value] = args.length === 3 ? [args[0], args[1], args[2]] : [args[0], [], args[1]];
   if (!Check(schema, references, value))
@@ -5020,7 +5060,7 @@ function Decode(...args) {
   return HasTransform(schema, references) ? TransformDecode(schema, references, value) : value;
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/default/default.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/default/default.mjs
 function ValueOrDefault(schema, value) {
   const defaultValue = HasPropertyKey(schema, "default") ? schema.default : void 0;
   const clone = IsFunction(defaultValue) ? defaultValue() : Clone2(defaultValue);
@@ -5159,7 +5199,7 @@ function Default5(...args) {
   return args.length === 3 ? Visit12(args[0], args[1], args[2]) : Visit12(args[0], [], args[1]);
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/pointer/pointer.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/pointer/pointer.mjs
 var pointer_exports = {};
 __export(pointer_exports, {
   Delete: () => Delete3,
@@ -5264,7 +5304,7 @@ function Get3(value, pointer) {
   return current;
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/equal/equal.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/equal/equal.mjs
 function ObjectType3(left, right) {
   if (!IsObject(right))
     return false;
@@ -5304,7 +5344,7 @@ function Equal(left, right) {
   throw new Error("ValueEquals: Unable to compare value");
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/delta/delta.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/delta/delta.mjs
 var Insert = Object2({
   type: Literal("insert"),
   path: String2(),
@@ -5440,7 +5480,7 @@ function Patch(current, edits) {
   return clone;
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/encode/encode.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/encode/encode.mjs
 function Encode(...args) {
   const [schema, references, value] = args.length === 3 ? [args[0], args[1], args[2]] : [args[0], [], args[1]];
   const encoded = HasTransform(schema, references) ? TransformEncode(schema, references, value) : value;
@@ -5449,7 +5489,7 @@ function Encode(...args) {
   return encoded;
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/mutate/mutate.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/mutate/mutate.mjs
 function IsStandardObject2(value) {
   return IsObject(value) && !IsArray(value);
 }
@@ -5527,7 +5567,7 @@ function Mutate(current, next) {
   Visit14(current, "", current, next);
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/parse/parse.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/parse/parse.mjs
 var ParseError = class extends TypeBoxError {
   constructor(message) {
     super(message);
@@ -5584,7 +5624,7 @@ function Parse(...args) {
   return ParseValue(operations, schema, references, value);
 }
 
-// node_modules/@sinclair/typebox/build/esm/value/value/value.mjs
+// ../../../node_modules/@sinclair/typebox/build/esm/value/value/value.mjs
 var value_exports2 = {};
 __export(value_exports2, {
   Assert: () => Assert,
@@ -5608,7 +5648,7 @@ __export(value_exports2, {
   ValueErrorIterator: () => ValueErrorIterator
 });
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/guard/value.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/guard/value.mjs
 var value_exports3 = {};
 __export(value_exports3, {
   HasPropertyKey: () => HasPropertyKey3,
@@ -5677,7 +5717,7 @@ function IsUndefined5(value) {
   return value === void 0;
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/clone/value.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/clone/value.mjs
 function ArrayType6(value) {
   return value.map((value2) => Visit15(value2));
 }
@@ -5707,12 +5747,12 @@ function Clone3(value) {
   return Visit15(value);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/clone/type.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/clone/type.mjs
 function CloneType(schema, options) {
   return options === void 0 ? Clone3(schema) : Clone3({ ...options, ...schema });
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/value/guard/guard.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/value/guard/guard.mjs
 function IsObject6(value) {
   return value !== null && typeof value === "object";
 }
@@ -5726,7 +5766,7 @@ function IsNumber6(value) {
   return typeof value === "number";
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/system/policy.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/system/policy.mjs
 var TypeSystemPolicy2;
 (function(TypeSystemPolicy3) {
   TypeSystemPolicy3.InstanceMode = "default";
@@ -5758,7 +5798,7 @@ var TypeSystemPolicy2;
   TypeSystemPolicy3.IsVoidLike = IsVoidLike;
 })(TypeSystemPolicy2 || (TypeSystemPolicy2 = {}));
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/create/immutable.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/create/immutable.mjs
 function ImmutableArray2(value) {
   return globalThis.Object.freeze(value).map((value2) => Immutable2(value2));
 }
@@ -5785,7 +5825,7 @@ function Immutable2(value) {
   return IsArray5(value) ? ImmutableArray2(value) : IsDate5(value) ? ImmutableDate2(value) : IsUint8Array5(value) ? ImmutableUint8Array2(value) : IsRegExp4(value) ? ImmutableRegExp2(value) : IsObject5(value) ? ImmutableObject2(value) : value;
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/create/type.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/create/type.mjs
 function CreateType2(schema, options) {
   const result = options !== void 0 ? { ...options, ...schema } : schema;
   switch (TypeSystemPolicy2.InstanceMode) {
@@ -5798,21 +5838,21 @@ function CreateType2(schema, options) {
   }
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/error/error.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/error/error.mjs
 var TypeBoxError2 = class extends Error {
   constructor(message) {
     super(message);
   }
 };
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/symbols/symbols.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/symbols/symbols.mjs
 var TransformKind2 = Symbol.for("TypeBox.Transform");
 var ReadonlyKind2 = Symbol.for("TypeBox.Readonly");
 var OptionalKind2 = Symbol.for("TypeBox.Optional");
 var Hint2 = Symbol.for("TypeBox.Hint");
 var Kind2 = Symbol.for("TypeBox.Kind");
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/guard/kind.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/guard/kind.mjs
 function IsReadonly(value) {
   return IsObject5(value) && value[ReadonlyKind2] === "Readonly";
 }
@@ -5943,7 +5983,7 @@ function IsSchema3(value) {
   return IsAny3(value) || IsArgument3(value) || IsArray7(value) || IsBoolean6(value) || IsBigInt6(value) || IsAsyncIterator5(value) || IsComputed3(value) || IsConstructor3(value) || IsDate6(value) || IsFunction5(value) || IsInteger4(value) || IsIntersect3(value) || IsIterator5(value) || IsLiteral3(value) || IsMappedKey3(value) || IsMappedResult3(value) || IsNever3(value) || IsNot3(value) || IsNull5(value) || IsNumber7(value) || IsObject7(value) || IsPromise4(value) || IsRecord3(value) || IsRef3(value) || IsRegExp5(value) || IsString6(value) || IsSymbol5(value) || IsTemplateLiteral3(value) || IsThis3(value) || IsTuple3(value) || IsUndefined7(value) || IsUnion3(value) || IsUint8Array6(value) || IsUnknown3(value) || IsUnsafe3(value) || IsVoid3(value) || IsKind3(value);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/guard/type.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/guard/type.mjs
 var type_exports2 = {};
 __export(type_exports2, {
   IsAny: () => IsAny4,
@@ -6235,7 +6275,7 @@ function IsSchema4(value) {
   return IsObject5(value) && (IsAny4(value) || IsArgument4(value) || IsArray8(value) || IsBoolean7(value) || IsBigInt7(value) || IsAsyncIterator6(value) || IsComputed4(value) || IsConstructor4(value) || IsDate7(value) || IsFunction6(value) || IsInteger5(value) || IsIntersect4(value) || IsIterator6(value) || IsLiteral4(value) || IsMappedKey4(value) || IsMappedResult4(value) || IsNever4(value) || IsNot4(value) || IsNull6(value) || IsNumber8(value) || IsObject8(value) || IsPromise5(value) || IsRecord4(value) || IsRef4(value) || IsRegExp6(value) || IsString7(value) || IsSymbol6(value) || IsTemplateLiteral4(value) || IsThis4(value) || IsTuple4(value) || IsUndefined8(value) || IsUnion4(value) || IsUint8Array7(value) || IsUnknown4(value) || IsUnsafe4(value) || IsVoid4(value) || IsKind4(value));
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/patterns/patterns.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/patterns/patterns.mjs
 var PatternBoolean = "(true|false)";
 var PatternNumber = "(0|[1-9][0-9]*)";
 var PatternString = "(.*)";
@@ -6245,7 +6285,7 @@ var PatternNumberExact = `^${PatternNumber}$`;
 var PatternStringExact = `^${PatternString}$`;
 var PatternNeverExact = `^${PatternNever}$`;
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/sets/set.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/sets/set.mjs
 function SetIncludes(T, S) {
   return T.includes(S);
 }
@@ -6270,32 +6310,32 @@ function SetUnionMany2(T) {
   return Acc;
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/any/any.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/any/any.mjs
 function Any(options) {
   return CreateType2({ [Kind2]: "Any" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/array/array.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/array/array.mjs
 function Array2(items, options) {
   return CreateType2({ [Kind2]: "Array", type: "array", items }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/argument/argument.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/argument/argument.mjs
 function Argument(index) {
   return CreateType2({ [Kind2]: "Argument", index });
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/async-iterator/async-iterator.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/async-iterator/async-iterator.mjs
 function AsyncIterator(items, options) {
   return CreateType2({ [Kind2]: "AsyncIterator", type: "AsyncIterator", items }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/computed/computed.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/computed/computed.mjs
 function Computed(target, parameters, options) {
   return CreateType2({ [Kind2]: "Computed", target, parameters }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/discard/discard.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/discard/discard.mjs
 function DiscardKey2(value, key) {
   const { [key]: _, ...rest } = value;
   return rest;
@@ -6304,12 +6344,12 @@ function Discard2(value, keys) {
   return keys.reduce((acc, key) => DiscardKey2(acc, key), value);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/never/never.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/never/never.mjs
 function Never2(options) {
   return CreateType2({ [Kind2]: "Never", not: {} }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-result.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-result.mjs
 function MappedResult2(properties) {
   return CreateType2({
     [Kind2]: "MappedResult",
@@ -6317,22 +6357,22 @@ function MappedResult2(properties) {
   });
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/constructor/constructor.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/constructor/constructor.mjs
 function Constructor(parameters, returns, options) {
   return CreateType2({ [Kind2]: "Constructor", type: "Constructor", parameters, returns }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/function/function.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/function/function.mjs
 function Function(parameters, returns, options) {
   return CreateType2({ [Kind2]: "Function", type: "Function", parameters, returns }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/union/union-create.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/union/union-create.mjs
 function UnionCreate2(T, options) {
   return CreateType2({ [Kind2]: "Union", anyOf: T }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/union/union-evaluated.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/union/union-evaluated.mjs
 function IsUnionOptional2(types) {
   return types.some((type) => IsOptional2(type));
 }
@@ -6350,12 +6390,12 @@ function UnionEvaluated2(T, options) {
   return T.length === 1 ? CreateType2(T[0], options) : T.length === 0 ? Never2(options) : ResolveUnion2(T, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/union/union.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/union/union.mjs
 function Union3(types, options) {
   return types.length === 0 ? Never2(options) : types.length === 1 ? CreateType2(types[0], options) : UnionCreate2(types, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/parse.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/parse.mjs
 var TemplateLiteralParserError2 = class extends TypeBoxError2 {
 };
 function Unescape2(pattern) {
@@ -6479,7 +6519,7 @@ function TemplateLiteralParseExact2(pattern) {
   return TemplateLiteralParse2(pattern.slice(1, pattern.length - 1));
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/finite.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/finite.mjs
 var TemplateLiteralFiniteError2 = class extends TypeBoxError2 {
 };
 function IsNumberExpression2(expression) {
@@ -6501,7 +6541,7 @@ function IsTemplateLiteralFinite2(schema) {
   return IsTemplateLiteralExpressionFinite2(expression);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/generate.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/generate.mjs
 var TemplateLiteralGenerateError2 = class extends TypeBoxError2 {
 };
 function* GenerateReduce2(buffer) {
@@ -6533,7 +6573,7 @@ function TemplateLiteralGenerate2(schema) {
   return IsTemplateLiteralExpressionFinite2(expression) ? [...TemplateLiteralExpressionGenerate2(expression)] : [];
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/literal/literal.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/literal/literal.mjs
 function Literal2(value, options) {
   return CreateType2({
     [Kind2]: "Literal",
@@ -6542,27 +6582,27 @@ function Literal2(value, options) {
   }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/boolean/boolean.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/boolean/boolean.mjs
 function Boolean2(options) {
   return CreateType2({ [Kind2]: "Boolean", type: "boolean" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/bigint/bigint.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/bigint/bigint.mjs
 function BigInt2(options) {
   return CreateType2({ [Kind2]: "BigInt", type: "bigint" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/number/number.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/number/number.mjs
 function Number2(options) {
   return CreateType2({ [Kind2]: "Number", type: "number" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/string/string.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/string/string.mjs
 function String3(options) {
   return CreateType2({ [Kind2]: "String", type: "string" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/syntax.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/syntax.mjs
 function* FromUnion13(syntax) {
   const trim = syntax.trim().replace(/"|'/g, "");
   return trim === "boolean" ? yield Boolean2() : trim === "number" ? yield Number2() : trim === "bigint" ? yield BigInt2() : trim === "string" ? yield String3() : yield (() => {
@@ -6599,7 +6639,7 @@ function TemplateLiteralSyntax(syntax) {
   return [...FromSyntax(syntax)];
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/pattern.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/pattern.mjs
 var TemplateLiteralPatternError = class extends TypeBoxError2 {
 };
 function Escape2(value) {
@@ -6614,20 +6654,20 @@ function TemplateLiteralPattern(kinds) {
   return `^${kinds.map((schema) => Visit16(schema, "")).join("")}$`;
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/union.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/union.mjs
 function TemplateLiteralToUnion(schema) {
   const R = TemplateLiteralGenerate2(schema);
   const L = R.map((S) => Literal2(S));
   return UnionEvaluated2(L);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/template-literal.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/template-literal.mjs
 function TemplateLiteral(unresolved, options) {
   const pattern = IsString5(unresolved) ? TemplateLiteralPattern(TemplateLiteralSyntax(unresolved)) : TemplateLiteralPattern(unresolved);
   return CreateType2({ [Kind2]: "TemplateLiteral", type: "string", pattern }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-property-keys.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-property-keys.mjs
 function FromTemplateLiteral4(templateLiteral) {
   const keys = TemplateLiteralGenerate2(templateLiteral);
   return keys.map((key) => key.toString());
@@ -6645,7 +6685,7 @@ function IndexPropertyKeys(type) {
   return [...new Set(IsTemplateLiteral3(type) ? FromTemplateLiteral4(type) : IsUnion3(type) ? FromUnion14(type.anyOf) : IsLiteral3(type) ? FromLiteral5(type.const) : IsNumber7(type) ? ["[number]"] : IsInteger4(type) ? ["[number]"] : [])];
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-result.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-result.mjs
 function FromProperties3(type, properties, options) {
   const result = {};
   for (const K2 of Object.getOwnPropertyNames(properties)) {
@@ -6661,7 +6701,7 @@ function IndexFromMappedResult(type, mappedResult, options) {
   return MappedResult2(properties);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed.mjs
 function FromRest3(types, key) {
   return types.map((type) => IndexFromPropertyKey2(type, key));
 }
@@ -6709,7 +6749,7 @@ function Index(type, key, options) {
   return CreateType2(IsSchema3(key) ? FromSchema(type, IndexPropertyKeys(key)) : FromSchema(type, key), options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-key.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-key.mjs
 function MappedIndexPropertyKey(type, key, options) {
   return { [key]: Index(type, [key], Clone3(options)) };
 }
@@ -6726,12 +6766,12 @@ function IndexFromMappedKey(type, mappedKey, options) {
   return MappedResult2(properties);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/iterator/iterator.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/iterator/iterator.mjs
 function Iterator(items, options) {
   return CreateType2({ [Kind2]: "Iterator", type: "Iterator", items }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/object/object.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/object/object.mjs
 function RequiredArray2(properties) {
   return globalThis.Object.keys(properties).filter((key) => !IsOptional2(properties[key]));
 }
@@ -6742,12 +6782,12 @@ function _Object2(properties, options) {
 }
 var Object3 = _Object2;
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/promise/promise.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/promise/promise.mjs
 function Promise2(item, options) {
   return CreateType2({ [Kind2]: "Promise", type: "Promise", item }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/readonly/readonly.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/readonly/readonly.mjs
 function RemoveReadonly(schema) {
   return CreateType2(Discard2(schema, [ReadonlyKind2]));
 }
@@ -6762,7 +6802,7 @@ function Readonly(schema, enable) {
   return IsMappedResult3(schema) ? ReadonlyFromMappedResult(schema, F) : ReadonlyWithFlag(schema, F);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/readonly/readonly-from-mapped-result.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/readonly/readonly-from-mapped-result.mjs
 function FromProperties4(K, F) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(K))
@@ -6777,12 +6817,12 @@ function ReadonlyFromMappedResult(R, F) {
   return MappedResult2(P);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/tuple/tuple.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/tuple/tuple.mjs
 function Tuple(types, options) {
   return CreateType2(types.length > 0 ? { [Kind2]: "Tuple", type: "array", items: types, additionalItems: false, minItems: types.length, maxItems: types.length } : { [Kind2]: "Tuple", type: "array", minItems: types.length, maxItems: types.length }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/mapped/mapped.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/mapped/mapped.mjs
 function FromMappedResult4(K, P) {
   return K in P ? FromSchemaType(K, P[K]) : MappedResult2(P);
 }
@@ -6837,7 +6877,7 @@ function Mapped(key, map3, options) {
   return Object3(R, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/optional/optional.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/optional/optional.mjs
 function RemoveOptional2(schema) {
   return CreateType2(Discard2(schema, [OptionalKind2]));
 }
@@ -6852,7 +6892,7 @@ function Optional2(schema, enable) {
   return IsMappedResult3(schema) ? OptionalFromMappedResult2(schema, F) : OptionalWithFlag2(schema, F);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/optional/optional-from-mapped-result.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/optional/optional-from-mapped-result.mjs
 function FromProperties6(P, F) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(P))
@@ -6867,14 +6907,14 @@ function OptionalFromMappedResult2(R, F) {
   return MappedResult2(P);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-create.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-create.mjs
 function IntersectCreate2(T, options = {}) {
   const allObjects = T.every((schema) => IsObject7(schema));
   const clonedUnevaluatedProperties = IsSchema3(options.unevaluatedProperties) ? { unevaluatedProperties: options.unevaluatedProperties } : {};
   return CreateType2(options.unevaluatedProperties === false || IsSchema3(options.unevaluatedProperties) || allObjects ? { ...clonedUnevaluatedProperties, [Kind2]: "Intersect", type: "object", allOf: T } : { ...clonedUnevaluatedProperties, [Kind2]: "Intersect", allOf: T }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-evaluated.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-evaluated.mjs
 function IsIntersectOptional2(types) {
   return types.every((left) => IsOptional2(left));
 }
@@ -6897,7 +6937,7 @@ function IntersectEvaluated2(types, options = {}) {
   return ResolveIntersect2(types, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intersect/intersect.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intersect/intersect.mjs
 function Intersect2(types, options) {
   if (types.length === 1)
     return CreateType2(types[0], options);
@@ -6908,7 +6948,7 @@ function Intersect2(types, options) {
   return IntersectCreate2(types, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/ref/ref.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/ref/ref.mjs
 function Ref2(...args) {
   const [$ref, options] = typeof args[0] === "string" ? [args[0], args[1]] : [args[0].$id, args[1]];
   if (typeof $ref !== "string")
@@ -6916,7 +6956,7 @@ function Ref2(...args) {
   return CreateType2({ [Kind2]: "Ref", $ref }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/awaited/awaited.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/awaited/awaited.mjs
 function FromComputed(target, parameters) {
   return Computed("Awaited", [Computed(target, parameters)]);
 }
@@ -6939,7 +6979,7 @@ function Awaited(type, options) {
   return CreateType2(IsComputed3(type) ? FromComputed(type.target, type.parameters) : IsIntersect3(type) ? FromIntersect14(type.allOf) : IsUnion3(type) ? FromUnion16(type.anyOf) : IsPromise4(type) ? FromPromise5(type.item) : IsRef3(type) ? FromRef11(type.$ref) : type, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-keys.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-keys.mjs
 function FromRest6(types) {
   const result = [];
   for (const L of types)
@@ -6978,7 +7018,7 @@ function KeyOfPropertyKeys2(type) {
 }
 var includePatternProperties2 = false;
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/keyof/keyof.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/keyof/keyof.mjs
 function FromComputed2(target, parameters) {
   return Computed("KeyOf", [Computed(target, parameters)]);
 }
@@ -6998,7 +7038,7 @@ function KeyOf(type, options) {
   return IsComputed3(type) ? FromComputed2(type.target, type.parameters) : IsRef3(type) ? FromRef12(type.$ref) : IsMappedResult3(type) ? KeyOfFromMappedResult(type, options) : KeyOfFromType(type, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-from-mapped-result.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-from-mapped-result.mjs
 function FromProperties8(properties, options) {
   const result = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(properties))
@@ -7013,7 +7053,7 @@ function KeyOfFromMappedResult(mappedResult, options) {
   return MappedResult2(properties);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/composite/composite.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/composite/composite.mjs
 function CompositeKeys(T) {
   const Acc = [];
   for (const L of T)
@@ -7043,37 +7083,37 @@ function Composite(T, options) {
   return R;
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/date/date.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/date/date.mjs
 function Date2(options) {
   return CreateType2({ [Kind2]: "Date", type: "Date" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/null/null.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/null/null.mjs
 function Null(options) {
   return CreateType2({ [Kind2]: "Null", type: "null" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/symbol/symbol.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/symbol/symbol.mjs
 function Symbol2(options) {
   return CreateType2({ [Kind2]: "Symbol", type: "symbol" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/undefined/undefined.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/undefined/undefined.mjs
 function Undefined(options) {
   return CreateType2({ [Kind2]: "Undefined", type: "undefined" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/uint8array/uint8array.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/uint8array/uint8array.mjs
 function Uint8Array2(options) {
   return CreateType2({ [Kind2]: "Uint8Array", type: "Uint8Array" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/unknown/unknown.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/unknown/unknown.mjs
 function Unknown2(options) {
   return CreateType2({ [Kind2]: "Unknown" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/const/const.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/const/const.mjs
 function FromArray16(T) {
   return T.map((L) => FromValue2(L, false));
 }
@@ -7093,12 +7133,12 @@ function Const(T, options) {
   return CreateType2(FromValue2(T, true), options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/constructor-parameters/constructor-parameters.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/constructor-parameters/constructor-parameters.mjs
 function ConstructorParameters(schema, options) {
   return IsConstructor3(schema) ? Tuple(schema.parameters, options) : Never2(options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/enum/enum.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/enum/enum.mjs
 function Enum(item, options) {
   if (IsUndefined5(item))
     throw new Error("Enum undefined or empty");
@@ -7108,7 +7148,7 @@ function Enum(item, options) {
   return Union3(anyOf, { ...options, [Hint2]: "Enum" });
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extends/extends-check.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extends/extends-check.mjs
 var ExtendsResolverError = class extends TypeBoxError2 {
 };
 var ExtendsResult;
@@ -7359,7 +7399,7 @@ function ExtendsCheck(left, right) {
   return Visit17(left, right);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-result.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-result.mjs
 function FromProperties10(P, Right, True, False, options) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(P))
@@ -7374,7 +7414,7 @@ function ExtendsFromMappedResult(Left, Right, True, False, options) {
   return MappedResult2(P);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extends/extends.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extends/extends.mjs
 function ExtendsResolve(left, right, trueType, falseType) {
   const R = ExtendsCheck(left, right);
   return R === ExtendsResult.Union ? Union3([trueType, falseType]) : R === ExtendsResult.True ? trueType : falseType;
@@ -7383,7 +7423,7 @@ function Extends(L, R, T, F, options) {
   return IsMappedResult3(L) ? ExtendsFromMappedResult(L, R, T, F, options) : IsMappedKey3(L) ? CreateType2(ExtendsFromMappedKey(L, R, T, F, options)) : CreateType2(ExtendsResolve(L, R, T, F), options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-key.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-key.mjs
 function FromPropertyKey(K, U, L, R, options) {
   return {
     [K]: Extends(Literal2(K), U, L, R, Clone3(options))
@@ -7402,12 +7442,12 @@ function ExtendsFromMappedKey(T, U, L, R, options) {
   return MappedResult2(P);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-template-literal.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-template-literal.mjs
 function ExcludeFromTemplateLiteral(L, R) {
   return Exclude(TemplateLiteralToUnion(L), R);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/exclude/exclude.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/exclude/exclude.mjs
 function ExcludeRest(L, R) {
   const excluded = L.filter((inner) => ExtendsCheck(inner, R) === ExtendsResult.False);
   return excluded.length === 1 ? excluded[0] : Union3(excluded);
@@ -7420,7 +7460,7 @@ function Exclude(L, R, options = {}) {
   return CreateType2(IsUnion3(L) ? ExcludeRest(L.anyOf, R) : ExtendsCheck(L, R) !== ExtendsResult.False ? Never2() : L, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-mapped-result.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-mapped-result.mjs
 function FromProperties11(P, U) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(P))
@@ -7435,12 +7475,12 @@ function ExcludeFromMappedResult(R, T) {
   return MappedResult2(P);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-template-literal.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-template-literal.mjs
 function ExtractFromTemplateLiteral(L, R) {
   return Extract(TemplateLiteralToUnion(L), R);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extract/extract.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extract/extract.mjs
 function ExtractRest(L, R) {
   const extracted = L.filter((inner) => ExtendsCheck(inner, R) !== ExtendsResult.False);
   return extracted.length === 1 ? extracted[0] : Union3(extracted);
@@ -7453,7 +7493,7 @@ function Extract(L, R, options) {
   return CreateType2(IsUnion3(L) ? ExtractRest(L.anyOf, R) : ExtendsCheck(L, R) !== ExtendsResult.False ? L : Never2(), options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-mapped-result.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-mapped-result.mjs
 function FromProperties12(P, T) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(P))
@@ -7468,17 +7508,17 @@ function ExtractFromMappedResult(R, T) {
   return MappedResult2(P);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/instance-type/instance-type.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/instance-type/instance-type.mjs
 function InstanceType(schema, options) {
   return IsConstructor3(schema) ? CreateType2(schema.returns, options) : Never2(options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/readonly-optional/readonly-optional.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/readonly-optional/readonly-optional.mjs
 function ReadonlyOptional(schema) {
   return Readonly(Optional2(schema));
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/record/record.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/record/record.mjs
 function RecordCreateFromPattern(pattern, T, options) {
   return CreateType2({ [Kind2]: "Record", type: "object", patternProperties: { [pattern]: T } }, options);
 }
@@ -7533,7 +7573,7 @@ function RecordValue2(type) {
   return type.patternProperties[RecordPattern(type)];
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/instantiate/instantiate.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/instantiate/instantiate.mjs
 function FromConstructor7(args, type) {
   type.parameters = FromTypes(args, type.parameters);
   type.returns = FromType(args, type.returns);
@@ -7608,12 +7648,12 @@ function Instantiate(type, args) {
   return FromType(args, CloneType(type));
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/integer/integer.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/integer/integer.mjs
 function Integer(options) {
   return CreateType2({ [Kind2]: "Integer", type: "integer" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic-from-mapped-key.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic-from-mapped-key.mjs
 function MappedIntrinsicPropertyKey(K, M, options) {
   return {
     [K]: Intrinsic(Literal2(K), M, Clone3(options))
@@ -7633,7 +7673,7 @@ function IntrinsicFromMappedKey(T, M, options) {
   return MappedResult2(P);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic.mjs
 function ApplyUncapitalize(value) {
   const [first, rest] = [value.slice(0, 1), value.slice(1)];
   return [first.toLowerCase(), rest].join("");
@@ -7678,27 +7718,27 @@ function Intrinsic(schema, mode, options = {}) {
   );
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/capitalize.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/capitalize.mjs
 function Capitalize(T, options = {}) {
   return Intrinsic(T, "Capitalize", options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/lowercase.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/lowercase.mjs
 function Lowercase(T, options = {}) {
   return Intrinsic(T, "Lowercase", options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/uncapitalize.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/uncapitalize.mjs
 function Uncapitalize(T, options = {}) {
   return Intrinsic(T, "Uncapitalize", options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/uppercase.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/uppercase.mjs
 function Uppercase(T, options = {}) {
   return Intrinsic(T, "Uppercase", options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-result.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-result.mjs
 function FromProperties14(properties, propertyKeys, options) {
   const result = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(properties))
@@ -7713,7 +7753,7 @@ function OmitFromMappedResult(mappedResult, propertyKeys, options) {
   return MappedResult2(properties);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/omit/omit.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/omit/omit.mjs
 function FromIntersect18(types, propertyKeys) {
   return types.map((type) => OmitResolve(type, propertyKeys));
 }
@@ -7747,7 +7787,7 @@ function Omit(type, key, options) {
   return IsMappedResult3(type) ? OmitFromMappedResult(type, propertyKeys, options) : IsMappedKey3(key) ? OmitFromMappedKey(type, key, options) : isTypeRef && isKeyRef ? Computed("Omit", [type, typeKey], options) : !isTypeRef && isKeyRef ? Computed("Omit", [type, typeKey], options) : isTypeRef && !isKeyRef ? Computed("Omit", [type, typeKey], options) : CreateType2({ ...OmitResolve(type, propertyKeys), ...options });
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-key.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-key.mjs
 function FromPropertyKey2(type, key, options) {
   return { [key]: Omit(type, [key], Clone3(options)) };
 }
@@ -7764,7 +7804,7 @@ function OmitFromMappedKey(type, mappedKey, options) {
   return MappedResult2(properties);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-result.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-result.mjs
 function FromProperties16(properties, propertyKeys, options) {
   const result = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(properties))
@@ -7779,7 +7819,7 @@ function PickFromMappedResult(mappedResult, propertyKeys, options) {
   return MappedResult2(properties);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/pick/pick.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/pick/pick.mjs
 function FromIntersect19(types, propertyKeys) {
   return types.map((type) => PickResolve(type, propertyKeys));
 }
@@ -7813,7 +7853,7 @@ function Pick(type, key, options) {
   return IsMappedResult3(type) ? PickFromMappedResult(type, propertyKeys, options) : IsMappedKey3(key) ? PickFromMappedKey(type, key, options) : isTypeRef && isKeyRef ? Computed("Pick", [type, typeKey], options) : !isTypeRef && isKeyRef ? Computed("Pick", [type, typeKey], options) : isTypeRef && !isKeyRef ? Computed("Pick", [type, typeKey], options) : CreateType2({ ...PickResolve(type, propertyKeys), ...options });
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-key.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-key.mjs
 function FromPropertyKey3(type, key, options) {
   return {
     [key]: Pick(type, [key], Clone3(options))
@@ -7832,7 +7872,7 @@ function PickFromMappedKey(type, mappedKey, options) {
   return MappedResult2(properties);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/partial/partial.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/partial/partial.mjs
 function FromComputed3(target, parameters) {
   return Computed("Partial", [Computed(target, parameters)]);
 }
@@ -7873,7 +7913,7 @@ function Partial(type, options) {
   }
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/partial/partial-from-mapped-result.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/partial/partial-from-mapped-result.mjs
 function FromProperties19(K, options) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(K))
@@ -7888,7 +7928,7 @@ function PartialFromMappedResult(R, options) {
   return MappedResult2(P);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/required/required.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/required/required.mjs
 function FromComputed4(target, parameters) {
   return Computed("Required", [Computed(target, parameters)]);
 }
@@ -7929,7 +7969,7 @@ function Required(type, options) {
   }
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/required/required-from-mapped-result.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/required/required-from-mapped-result.mjs
 function FromProperties21(P, options) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(P))
@@ -7944,7 +7984,7 @@ function RequiredFromMappedResult(R, options) {
   return MappedResult2(P);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/module/compute.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/module/compute.mjs
 function DereferenceParameters(moduleProperties, types) {
   return types.map((type) => {
     return IsRef3(type) ? Dereference(moduleProperties, type.$ref) : FromType2(moduleProperties, type);
@@ -8040,7 +8080,7 @@ function ComputeModuleProperties(moduleProperties) {
   }, {});
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/module/module.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/module/module.mjs
 var TModule = class {
   constructor($defs) {
     const computed = ComputeModuleProperties($defs);
@@ -8063,17 +8103,17 @@ function Module(properties) {
   return new TModule(properties);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/not/not.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/not/not.mjs
 function Not2(type, options) {
   return CreateType2({ [Kind2]: "Not", not: type }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/parameters/parameters.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/parameters/parameters.mjs
 function Parameters(schema, options) {
   return IsFunction5(schema) ? Tuple(schema.parameters, options) : Never2();
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/recursive/recursive.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/recursive/recursive.mjs
 var Ordinal = 0;
 function Recursive(callback, options = {}) {
   if (IsUndefined5(options.$id))
@@ -8083,13 +8123,13 @@ function Recursive(callback, options = {}) {
   return CreateType2({ [Hint2]: "Recursive", ...thisType }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/regexp/regexp.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/regexp/regexp.mjs
 function RegExp2(unresolved, options) {
   const expr = IsString5(unresolved) ? new globalThis.RegExp(unresolved) : unresolved;
   return CreateType2({ [Kind2]: "RegExp", type: "RegExp", source: expr.source, flags: expr.flags }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/rest/rest.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/rest/rest.mjs
 function RestResolve(T) {
   return IsIntersect3(T) ? T.allOf : IsUnion3(T) ? T.anyOf : IsTuple3(T) ? T.items ?? [] : [];
 }
@@ -8097,12 +8137,12 @@ function Rest(T) {
   return RestResolve(T);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/return-type/return-type.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/return-type/return-type.mjs
 function ReturnType(schema, options) {
   return IsFunction5(schema) ? CreateType2(schema.returns, options) : Never2(options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/transform/transform.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/transform/transform.mjs
 var TransformDecodeBuilder = class {
   constructor(schema) {
     this.schema = schema;
@@ -8134,17 +8174,17 @@ function Transform(schema) {
   return new TransformDecodeBuilder(schema);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/unsafe/unsafe.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/unsafe/unsafe.mjs
 function Unsafe(options = {}) {
   return CreateType2({ [Kind2]: options[Kind2] ?? "Unsafe" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/void/void.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/void/void.mjs
 function Void(options) {
   return CreateType2({ [Kind2]: "Void", type: "void" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/type/type.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/type/type.mjs
 var type_exports3 = {};
 __export(type_exports3, {
   Any: () => Any,
@@ -8211,10 +8251,10 @@ __export(type_exports3, {
   Void: () => Void
 });
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/type/index.mjs
+// ../../../../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/type/index.mjs
 var Type = type_exports3;
 
-// ../widgetdc-contracts/dist/orchestrator/tool-call.js
+// ../../../../widgetdc-contracts/dist/orchestrator/tool-call.js
 var OrchestratorToolCall = Type.Object({
   /** Unique call ID — used to correlate with OrchestratorToolResult */
   call_id: Type.String({
@@ -8252,7 +8292,7 @@ var OrchestratorToolCall = Type.Object({
   description: "Agent \u2192 Orchestrator: request to invoke an MCP tool on the WidgeTDC backend. Orchestrator injects auth and handles SSE."
 });
 
-// ../widgetdc-contracts/dist/orchestrator/tool-result.js
+// ../../../../widgetdc-contracts/dist/orchestrator/tool-result.js
 var OrchestratorToolStatus = Type.Union([
   Type.Literal("success"),
   Type.Literal("error"),
@@ -8299,7 +8339,7 @@ var OrchestratorToolResult = Type.Object({
   description: "Orchestrator \u2192 Agent: result of an MCP tool invocation. Includes raw output or structured error."
 });
 
-// ../widgetdc-contracts/dist/orchestrator/agent-message.js
+// ../../../../widgetdc-contracts/dist/orchestrator/agent-message.js
 var AgentId = Type.Union([
   Type.Literal("Claude"),
   Type.Literal("Gemini"),
@@ -8375,6 +8415,30 @@ var AgentMessage = Type.Object({
   call_id: Type.Optional(Type.String({
     description: "Links this message to a specific tool call (for ToolResult messages)"
   })),
+  /** Storage-layer assigned message ID */
+  id: Type.Optional(Type.String({
+    description: "Storage-layer assigned message ID (e.g. UUID or Redis-generated)"
+  })),
+  /** Thread grouping — groups related messages (alias for thread) */
+  thread_id: Type.Optional(Type.String({
+    description: "Thread ID for grouping related messages"
+  })),
+  /** Direct reply-to message ID */
+  parent_id: Type.Optional(Type.String({
+    description: "ID of the message this is a direct reply to"
+  })),
+  /** Attached files */
+  files: Type.Optional(Type.Array(Type.Object({
+    name: Type.String(),
+    size: Type.Number(),
+    type: Type.String()
+  }), {
+    description: "File attachments on this message"
+  })),
+  /** Arbitrary metadata (provider info, conversation_id, etc.) */
+  metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown(), {
+    description: "Extensible metadata (e.g. provider, model, duration_ms, conversation_id)"
+  })),
   /** ISO timestamp */
   timestamp: Type.Optional(Type.String({
     format: "date-time",
@@ -8385,7 +8449,7 @@ var AgentMessage = Type.Object({
   description: "Shared message format for agent\u2194agent and agent\u2194user communication. Matches Notion Global Chat schema."
 });
 
-// ../widgetdc-contracts/dist/orchestrator/agent-handshake.js
+// ../../../../widgetdc-contracts/dist/orchestrator/agent-handshake.js
 var AgentCapability = Type.Union([
   Type.Literal("graph_read"),
   // Can read Neo4j via graph.read_cypher
@@ -8405,10 +8469,8 @@ var AgentCapability = Type.Union([
   // Can trigger data ingestion
   Type.Literal("git_operations"),
   // Can use git.* tools
-  Type.Literal("audit"),
+  Type.Literal("audit")
   // Can use audit.* tools
-  Type.String()
-  // Extensible: custom capabilities allowed
 ], {
   $id: "AgentCapability",
   description: "Capability flags declaring what an agent is authorized to do"
@@ -8441,9 +8503,11 @@ var AgentHandshake = Type.Object({
   })),
   /** Current availability status */
   status: AgentHandshakeStatus,
-  /** Declared capabilities — Orchestrator enforces these as ACL */
-  capabilities: Type.Array(AgentCapability, {
-    description: "List of capabilities this agent is authorized to use",
+  /** Declared capabilities — Orchestrator enforces these as ACL.
+   *  Accepts both known AgentCapability literals and free-form strings
+   *  for domain-specific capabilities (e.g. 'sitrep', 'threat_hunting'). */
+  capabilities: Type.Array(Type.Union([AgentCapability, Type.String()]), {
+    description: "List of capabilities this agent is authorized to use (known + domain-specific)",
     minItems: 0
   }),
   /**
@@ -8470,6 +8534,26 @@ var AgentHandshake = Type.Object({
 }, {
   $id: "AgentHandshake",
   description: "Agent registration payload. Sent to Orchestrator on boot to declare identity, capabilities, and tool permissions."
+});
+
+// ../../../../widgetdc-contracts/dist/orchestrator/stored-message.js
+var StoredMessage = Type.Intersect([
+  AgentMessage,
+  Type.Object({
+    /** Storage-assigned unique ID (required for persistence) */
+    id: Type.String({
+      description: "Storage-assigned message ID"
+    }),
+    /** Emoji reactions: emoji → list of agent IDs */
+    reactions: Type.Optional(Type.Record(Type.String(), Type.Array(Type.String()), { description: "Emoji reactions: emoji key \u2192 agent IDs who reacted" })),
+    /** Whether this message is pinned */
+    pinned: Type.Optional(Type.Boolean({
+      description: "Whether this message is pinned in the chat"
+    }))
+  })
+], {
+  $id: "StoredMessage",
+  description: "Persisted agent message with storage-layer fields (id, reactions, pinned). Extends AgentMessage."
 });
 
 // src/validation.ts
@@ -9514,14 +9598,14 @@ LIMIT 15`;
 }
 
 // src/routes/chat.ts
-async function mcpCall(tool, args) {
+async function mcpCall(tool, payload) {
   const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
     },
-    body: JSON.stringify({ tool, args }),
+    body: JSON.stringify({ tool, payload }),
     signal: AbortSignal.timeout(3e4)
   });
   const data = await res.json().catch(() => null);
@@ -9785,7 +9869,7 @@ chatRouter.post("/capture", async (req, res) => {
       },
       body: JSON.stringify({
         tool: "srag.ingest",
-        args: {
+        payload: {
           content: context,
           source: "command-center-chat",
           tags: tags || ["chat-capture"],
@@ -9825,29 +9909,17 @@ chatRouter.post("/summarize", async (req, res) => {
       return;
     }
     const transcript = messages.sort((a, b) => (a.timestamp || "").localeCompare(b.timestamp || "")).map((m) => `[${(m.timestamp || "").slice(11, 19)}] ${m.from}: ${m.message}`).join("\n").slice(0, 8e3);
-    const llmRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
-      },
-      body: JSON.stringify({
-        tool: "llm.chat",
-        args: {
-          model: "deepseek-chat",
-          messages: [{
-            role: "user",
-            content: `Summarize this conversation concisely. Include key decisions, action items, and outcomes. Reply in the same language as the conversation.
+    const llmResult = await chatLLM({
+      provider: "deepseek",
+      messages: [{
+        role: "user",
+        content: `Summarize this conversation concisely. Include key decisions, action items, and outcomes. Reply in the same language as the conversation.
 
 ${transcript}`
-          }],
-          max_tokens: 500
-        }
-      }),
-      signal: AbortSignal.timeout(6e4)
+      }],
+      max_tokens: 500
     });
-    const llmData = await llmRes.json().catch(() => null);
-    const summary = llmData?.result?.content || llmData?.result?.message || llmData?.result || "Summary generation failed";
+    const summary = llmResult.content || "Summary generation failed";
     broadcastMessage({
       from: "System",
       to: "All",
@@ -9910,25 +9982,12 @@ async function runDebate(debateId, agents, topic, rounds) {
       const prevContext = responses.length > 0 ? "\n\nPrevious arguments:\n" + responses.map((r) => `[${r.agent} R${r.round}]: ${r.response}`).join("\n") : "";
       const prompt = round === 1 ? `You are agent "${agent}" in a structured debate. Topic: "${topic}". Present your argument concisely (max 200 words).` : `You are agent "${agent}" in round ${round} of a debate on "${topic}". Review the previous arguments and provide your rebuttal or refined position (max 200 words).${prevContext}`;
       try {
-        const llmRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
-          },
-          body: JSON.stringify({
-            tool: "llm.chat",
-            args: {
-              model: "deepseek-chat",
-              messages: [{ role: "user", content: prompt }],
-              max_tokens: 300
-            }
-          }),
-          signal: AbortSignal.timeout(6e4)
+        const llmResult = await chatLLM({
+          provider: "deepseek",
+          messages: [{ role: "user", content: prompt }],
+          max_tokens: 300
         });
-        const data = await llmRes.json().catch(() => null);
-        const response = data?.result?.content || data?.result?.message || data?.result || "(no response)";
-        const responseStr = typeof response === "string" ? response : JSON.stringify(response);
+        const responseStr = llmResult.content || "(no response)";
         responses.push({ agent, round, response: responseStr });
         broadcastMessage({
           from: agent,
@@ -9946,27 +10005,14 @@ async function runDebate(debateId, agents, topic, rounds) {
   }
   const allArgs = responses.map((r) => `[${r.agent} R${r.round}]: ${r.response}`).join("\n");
   try {
-    const synthRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
-      },
-      body: JSON.stringify({
-        tool: "llm.chat",
-        args: {
-          model: "deepseek-chat",
-          messages: [{ role: "user", content: `Synthesize the following debate on "${topic}" into a final summary. Identify areas of agreement, disagreement, and recommended action. Be concise (max 300 words).
+    const synthResult = await chatLLM({
+      provider: "deepseek",
+      messages: [{ role: "user", content: `Synthesize the following debate on "${topic}" into a final summary. Identify areas of agreement, disagreement, and recommended action. Be concise (max 300 words).
 
 ${allArgs}` }],
-          max_tokens: 400
-        }
-      }),
-      signal: AbortSignal.timeout(6e4)
+      max_tokens: 400
     });
-    const synthData = await synthRes.json().catch(() => null);
-    const synthesis = synthData?.result?.content || synthData?.result?.message || synthData?.result || "(synthesis failed)";
-    const synthStr = typeof synthesis === "string" ? synthesis : JSON.stringify(synthesis);
+    const synthStr = synthResult.content || "(synthesis failed)";
     broadcastMessage({
       from: "System",
       to: "All",
@@ -10791,6 +10837,45 @@ function registerDefaultLoops() {
     }
   });
   registerCronJob({
+    id: "cia-guardian",
+    name: "CIA Guardian (Autonomous Remediation)",
+    schedule: "*/10 * * * *",
+    enabled: true,
+    chain: {
+      name: "CIA Health Scan",
+      mode: "sequential",
+      steps: [
+        {
+          agent_id: "orchestrator",
+          tool_name: "llm.generate",
+          arguments: {
+            prompt: "Scan fleet health and identify CRITICAL domains for remediation. Use /api/intelligence/fleet-health."
+          }
+        }
+      ]
+    }
+  });
+  registerCronJob({
+    id: "dynamic-watchtower",
+    name: "Intelligence Watchtower (Multi-Domain)",
+    schedule: "0 */4 * * *",
+    // Every 4 hours
+    enabled: true,
+    chain: {
+      name: "Dynamic Intelligence Pipeline",
+      mode: "sequential",
+      steps: [
+        {
+          agent_id: "orchestrator",
+          tool_name: "llm.generate",
+          arguments: {
+            prompt: "1. Trigger FileSystemHarvester to index local data (D:/Intel, Downloads). 2. Query Neo4j for all :WatchDefinition nodes. 3. For each watch, use osint.search to find signals. 4. Cross-reference new signals with local IntelligenceAssets. 5. Format as IntelligenceObservation and score via /api/intelligence/observation/score."
+          }
+        }
+      ]
+    }
+  });
+  registerCronJob({
     id: "evolution-tracker",
     name: "Evolution Event Tracker",
     schedule: "0 * * * *",
@@ -10885,8 +10970,184 @@ cronRouter.delete("/:id", (req, res) => {
 });
 
 // src/routes/dashboard.ts
+import { Router as Router8 } from "express";
+
+// src/routes/openclaw.ts
 import { Router as Router7 } from "express";
-var dashboardRouter = Router7();
+var openclawRouter = Router7();
+var healthStatus = {
+  healthy: false,
+  checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
+  latencyMs: 0
+};
+var consecutiveFailures = 0;
+var CIRCUIT_THRESHOLD = 3;
+var CIRCUIT_RESET_MS = 3e4;
+var circuitOpenUntil = 0;
+function recordSuccess() {
+  consecutiveFailures = 0;
+  circuitOpenUntil = 0;
+}
+function recordFailure() {
+  consecutiveFailures++;
+  if (consecutiveFailures >= CIRCUIT_THRESHOLD) {
+    circuitOpenUntil = Date.now() + CIRCUIT_RESET_MS;
+    logger.warn({ failures: consecutiveFailures }, "OpenClaw circuit breaker OPEN");
+  }
+}
+function isCircuitOpen() {
+  if (circuitOpenUntil === 0) return false;
+  if (Date.now() > circuitOpenUntil) {
+    circuitOpenUntil = 0;
+    consecutiveFailures = 0;
+    logger.info("OpenClaw circuit breaker RESET (auto)");
+    return false;
+  }
+  return true;
+}
+var skillManifest = [];
+var skillsFetchedAt = "";
+async function fetchSkills() {
+  const openclawUrl = config.openclawUrl;
+  if (!openclawUrl) return;
+  try {
+    const token = config.openclawToken;
+    const headers = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const res = await fetch(`${openclawUrl}/setup/api/status`, {
+      headers,
+      signal: AbortSignal.timeout(1e4)
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const skills = data.skills ?? data.available_skills ?? [];
+      if (Array.isArray(skills)) {
+        skillManifest = skills;
+        skillsFetchedAt = (/* @__PURE__ */ new Date()).toISOString();
+        logger.info({ count: skills.length }, "OpenClaw skills discovered");
+      }
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, "OpenClaw skill discovery failed (non-fatal)");
+  }
+}
+async function pollHealth() {
+  const openclawUrl = config.openclawUrl;
+  if (!openclawUrl) {
+    healthStatus = { healthy: false, checkedAt: (/* @__PURE__ */ new Date()).toISOString(), latencyMs: 0, error: "OPENCLAW_URL not configured" };
+    return;
+  }
+  const start = Date.now();
+  try {
+    const token = config.openclawToken;
+    const headers = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const res = await fetch(`${openclawUrl}/healthz`, {
+      headers,
+      signal: AbortSignal.timeout(5e3)
+    });
+    const latencyMs = Date.now() - start;
+    healthStatus = {
+      healthy: res.ok,
+      checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      latencyMs,
+      ...res.ok ? {} : { error: `HTTP ${res.status}` }
+    };
+    if (res.ok) recordSuccess();
+    else recordFailure();
+  } catch (err) {
+    healthStatus = {
+      healthy: false,
+      checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      latencyMs: Date.now() - start,
+      error: String(err)
+    };
+    recordFailure();
+  }
+}
+function isOpenClawHealthy() {
+  return healthStatus.healthy && !isCircuitOpen();
+}
+function getOpenClawHealth() {
+  return { ...healthStatus, circuit_open: isCircuitOpen(), consecutive_failures: consecutiveFailures };
+}
+function getOpenClawSkills() {
+  return { skills: skillManifest, fetched_at: skillsFetchedAt };
+}
+function initOpenClaw() {
+  if (!config.openclawUrl) {
+    logger.info("OpenClaw not configured \u2014 skipping init");
+    return;
+  }
+  pollHealth();
+  fetchSkills();
+  setInterval(pollHealth, 6e4);
+  setInterval(fetchSkills, 5 * 6e4);
+}
+openclawRouter.get("/skills", (_req, res) => {
+  res.json({ success: true, data: getOpenClawSkills() });
+});
+openclawRouter.get("/health", (_req, res) => {
+  const health = getOpenClawHealth();
+  res.status(health.healthy ? 200 : 503).json({ success: health.healthy, data: health });
+});
+openclawRouter.all("/proxy/*", async (req, res) => {
+  const openclawUrl = config.openclawUrl;
+  if (!openclawUrl) {
+    res.status(503).json({ success: false, error: { code: "NOT_CONFIGURED", message: "OPENCLAW_URL not configured", status_code: 503 } });
+    return;
+  }
+  if (isCircuitOpen()) {
+    res.status(503).json({
+      success: false,
+      error: {
+        code: "CIRCUIT_OPEN",
+        message: `OpenClaw circuit breaker open (${consecutiveFailures} consecutive failures). Auto-reset in ${Math.ceil((circuitOpenUntil - Date.now()) / 1e3)}s.`,
+        status_code: 503
+      }
+    });
+    return;
+  }
+  const targetPath = req.params[0] ?? "";
+  const token = config.openclawToken;
+  try {
+    const headers = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const fetchOpts = {
+      method: req.method,
+      headers,
+      signal: AbortSignal.timeout(3e4)
+    };
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      fetchOpts.body = JSON.stringify(req.body);
+    }
+    const response = await fetch(`${openclawUrl}/${targetPath}`, fetchOpts);
+    const contentType = response.headers.get("content-type") ?? "";
+    recordSuccess();
+    if (contentType.includes("application/json")) {
+      const data = await response.json();
+      res.status(response.status).json(data);
+    } else {
+      const text = await response.text();
+      res.status(response.status).type(contentType).send(text);
+    }
+  } catch (err) {
+    recordFailure();
+    logger.warn({ err: String(err), path: targetPath, failures: consecutiveFailures }, "OpenClaw proxy error");
+    res.status(502).json({
+      success: false,
+      error: {
+        code: "GATEWAY_ERROR",
+        message: "OpenClaw gateway unreachable",
+        details: String(err),
+        status_code: 502
+      }
+    });
+  }
+});
+
+// src/routes/dashboard.ts
+var dashboardRouter = Router8();
 dashboardRouter.get("/data", async (_req, res) => {
   const agents = AgentRegistry.all().map((a) => ({
     agent_id: a.handshake.agent_id,
@@ -10918,6 +11179,10 @@ dashboardRouter.get("/data", async (_req, res) => {
     cronJobs,
     rlmAvailable,
     rlmHealth,
+    openclaw: {
+      health: getOpenClawHealth(),
+      skills: getOpenClawSkills()
+    },
     config: {
       backendUrl: config.backendUrl,
       orchestratorId: config.orchestratorId,
@@ -10925,42 +11190,6 @@ dashboardRouter.get("/data", async (_req, res) => {
     },
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   });
-});
-
-// src/routes/openclaw.ts
-import { Router as Router8 } from "express";
-var openclawRouter = Router8();
-openclawRouter.all("/proxy/*", async (req, res) => {
-  const openclawUrl = config.openclawUrl;
-  if (!openclawUrl) {
-    res.status(503).json({ success: false, error: "OPENCLAW_URL not configured" });
-    return;
-  }
-  const targetPath = req.params[0] ?? "";
-  const token = config.openclawToken;
-  try {
-    const headers = { "Content-Type": "application/json" };
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-    const fetchOpts = {
-      method: req.method,
-      headers
-    };
-    if (req.method !== "GET" && req.method !== "HEAD") {
-      fetchOpts.body = JSON.stringify(req.body);
-    }
-    const response = await fetch(`${openclawUrl}/${targetPath}`, fetchOpts);
-    const contentType = response.headers.get("content-type") ?? "";
-    if (contentType.includes("application/json")) {
-      const data = await response.json();
-      res.status(response.status).json(data);
-    } else {
-      const text = await response.text();
-      res.status(response.status).type(contentType).send(text);
-    }
-  } catch (err) {
-    logger.warn({ err: String(err), path: targetPath }, "OpenClaw proxy error");
-    res.status(502).json({ success: false, error: "OpenClaw gateway unreachable" });
-  }
 });
 
 // src/routes/llm.ts
@@ -10995,6 +11224,59 @@ llmRouter.post("/chat", async (req, res) => {
     res.json({ success: true, data: result });
   } catch (err) {
     logger.error({ err: String(err), provider }, "LLM chat error");
+    res.status(502).json({
+      success: false,
+      error: { code: "LLM_ERROR", message: String(err instanceof Error ? err.message : err), status_code: 502 }
+    });
+  }
+});
+llmRouter.post("/conversation", async (req, res) => {
+  const { provider, messages, prompt, model, temperature, max_tokens, conversation_id } = req.body;
+  if (!provider) {
+    res.status(400).json({ success: false, error: { code: "MISSING_PROVIDER", message: "provider is required", status_code: 400 } });
+    return;
+  }
+  if (!prompt && (!messages || !messages.length)) {
+    res.status(400).json({ success: false, error: { code: "MISSING_PROMPT", message: "prompt or messages required", status_code: 400 } });
+    return;
+  }
+  const convId = conversation_id || `llm-${provider}-${Date.now().toString(36)}`;
+  const llmMessages = messages || [{ role: "user", content: prompt }];
+  const lastUserMsg = [...llmMessages].reverse().find((m) => m.role === "user");
+  try {
+    if (lastUserMsg) {
+      await storeMessage({
+        id: msgId(),
+        from: "command-center",
+        to: provider,
+        source: "human",
+        type: "Message",
+        message: lastUserMsg.content,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        metadata: { conversation_id: convId, provider }
+      });
+    }
+    const result = await chatLLM({ provider, messages: llmMessages, model, temperature, max_tokens });
+    await storeMessage({
+      id: msgId(),
+      from: `${result.provider}/${result.model}`,
+      to: "command-center",
+      source: "llm",
+      type: "Answer",
+      message: result.content,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      metadata: {
+        conversation_id: convId,
+        provider: result.provider,
+        model: result.model,
+        duration_ms: result.duration_ms,
+        usage: result.usage
+      }
+    });
+    logger.info({ provider, model: result.model, convId, ms: result.duration_ms }, "LLM conversation persisted");
+    res.json({ success: true, data: { ...result, conversation_id: convId } });
+  } catch (err) {
+    logger.error({ err: String(err), provider, convId }, "LLM conversation error");
     res.status(502).json({
       success: false,
       error: { code: "LLM_ERROR", message: String(err instanceof Error ? err.message : err), status_code: 502 }
@@ -11437,6 +11719,72 @@ monitorRouter.post("/compress", async (req, res) => {
   }
 });
 
+// src/routes/s1-s4.ts
+import { Router as Router12 } from "express";
+var s1s4Router = Router12();
+s1s4Router.post("/trigger", async (req, res) => {
+  const { url, source_type, topic, weights } = req.body;
+  if (!url) {
+    return res.status(400).json({ success: false, error: "URL or path is required" });
+  }
+  logger.info({ url, topic }, "\u{1F6F0}\uFE0F Triggering S1-S4 Pipeline");
+  try {
+    const execution = await executeChain({
+      name: `S1-S4: ${topic || "General Intelligence"}`,
+      mode: "sequential",
+      steps: [
+        {
+          agent_id: "harvester",
+          tool_name: "osint.scrape",
+          // S1: Extract
+          arguments: { url, max_lines: 50 }
+        },
+        {
+          agent_id: "orchestrator",
+          cognitive_action: "analyze",
+          // S2: Map
+          prompt: `Transform this raw data into a valid IntelligenceObservation (snake_case).
+                   Context: Topic=${topic || "General"}, Weights=${JSON.stringify(weights || {})}.
+                   Data: {{prev}}`
+        },
+        {
+          agent_id: "orchestrator",
+          tool_name: "graph.write_cypher",
+          // S3: Sync/Inject
+          arguments: {
+            query: `
+              MERGE (o:IntelligenceObservation {id: apoc.create.uuid()})
+              SET o.title = $title,
+                  o.source_type = $source_type,
+                  o.content_summary = $summary,
+                  o.actor_name = $actor,
+                  o.url = $url,
+                  o.timestamp = datetime(),
+                  o.salience_score = $score
+              RETURN o.id
+            `,
+            parameters: {
+              url,
+              source_type: source_type || "MEDIA"
+              // Note: Parameters will be extracted from step 2 output in real flow
+            }
+          }
+        },
+        {
+          agent_id: "sentinel",
+          tool_name: "audit.run",
+          // S4: Sentinel/Verify
+          arguments: { target_id: "{{prev}}" }
+        }
+      ]
+    });
+    res.json({ success: true, execution_id: execution.execution_id });
+  } catch (error) {
+    logger.error({ error: String(error) }, "S1-S4 Trigger failed");
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
 // src/auth.ts
 function requireApiKey(req, res, next) {
   if (!config.orchestratorApiKey) {
@@ -11630,6 +11978,61 @@ var AGENT_SEEDS = [
     status: "online",
     capabilities: ["mcp_tools", "chat", "chain_execution"],
     allowed_tool_namespaces: ["*"]
+  },
+  // ─── LibreChat agents (visible in registry, not WS-connected) ────────────
+  {
+    agent_id: "lc-prometheus",
+    display_name: "Prometheus (LibreChat)",
+    source: "librechat",
+    version: "1.0",
+    status: "online",
+    capabilities: ["code_analysis", "embeddings", "governance", "reinforcement_learning"],
+    allowed_tool_namespaces: ["prometheus", "code", "*"]
+  },
+  {
+    agent_id: "lc-roma",
+    display_name: "Roma (LibreChat)",
+    source: "librechat",
+    version: "1.0",
+    status: "online",
+    capabilities: ["self_healing", "incident_response", "monitoring"],
+    allowed_tool_namespaces: ["roma", "incident", "*"]
+  },
+  {
+    agent_id: "lc-dot",
+    display_name: "DOT Navigator (LibreChat)",
+    source: "librechat",
+    version: "1.0",
+    status: "online",
+    capabilities: ["navigation", "task_routing", "context_switching"],
+    allowed_tool_namespaces: ["dot", "*"]
+  },
+  {
+    agent_id: "lc-harvester",
+    display_name: "Harvester (LibreChat)",
+    source: "librechat",
+    version: "1.0",
+    status: "online",
+    capabilities: ["web_crawl", "data_ingestion", "extraction"],
+    allowed_tool_namespaces: ["harvest", "ingestion", "*"]
+  },
+  {
+    agent_id: "lc-sentinel",
+    display_name: "Sentinel (LibreChat)",
+    source: "librechat",
+    version: "1.0",
+    status: "online",
+    capabilities: ["monitoring", "alerting", "threat_detection"],
+    allowed_tool_namespaces: ["sentinel", "alert", "*"]
+  },
+  {
+    agent_id: "lc-analyst",
+    display_name: "Analyst (LibreChat)",
+    source: "librechat",
+    version: "1.0",
+    status: "online",
+    capabilities: ["data_analysis", "reporting", "visualization"],
+    allowed_tool_namespaces: ["analyst", "report", "*"]
   }
 ];
 function seedAgents() {
@@ -11694,6 +12097,7 @@ app.use("/api/openclaw", requireApiKey, openclawRouter);
 app.use("/api/audit", requireApiKey, auditRouter);
 app.use("/api/llm", requireApiKey, llmRouter);
 app.use("/monitor", requireApiKey, monitorRouter);
+app.use("/api/s1-s4", requireApiKey, s1s4Router);
 app.get("/api/events", requireApiKey, handleSSE);
 app.get("/health", (_req, res) => {
   res.json({
@@ -11708,6 +12112,8 @@ app.get("/health", (_req, res) => {
     rlm_available: isRlmAvailable(),
     active_chains: listExecutions().filter((e) => e.status === "running").length,
     cron_jobs: listCronJobs().filter((j) => j.enabled).length,
+    openclaw_healthy: isOpenClawHealthy(),
+    librechat_url: config.libreChatUrl || null,
     slack_enabled: isSlackEnabled(),
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   });
@@ -11735,6 +12141,7 @@ async function boot() {
   await hydrateMessages();
   await hydrateCronJobs();
   registerDefaultLoops();
+  initOpenClaw();
   initWebSocket(server);
   server.listen(config.port, () => {
     logger.info(

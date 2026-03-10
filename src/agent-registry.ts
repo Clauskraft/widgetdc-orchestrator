@@ -7,20 +7,10 @@
  */
 import { logger } from './logger.js'
 import { getRedis } from './redis.js'
+import type { AgentHandshake } from '@widgetdc/contracts/orchestrator'
 
-export interface AgentHandshakeData {
-  agent_id: string
-  display_name: string
-  source: string
-  version?: string
-  status: 'online' | 'standby' | 'offline' | 'degraded'
-  capabilities: string[]
-  allowed_tool_namespaces: string[]
-  max_concurrent_calls?: number
-  default_thread?: string
-  registered_at?: string
-  last_seen_at?: string
-}
+/** Re-export contracts type under legacy name for compatibility */
+export type AgentHandshakeData = AgentHandshake
 
 interface RegistryEntry {
   handshake: AgentHandshakeData

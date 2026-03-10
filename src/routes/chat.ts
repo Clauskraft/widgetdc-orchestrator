@@ -21,14 +21,14 @@ import type { AgentMessage } from '@widgetdc/contracts/orchestrator'
 // ─── Memory helpers — persist to multiple memory layers ──────────────────────
 
 /** Call MCP tool via backend */
-async function mcpCall(tool: string, args: Record<string, unknown>): Promise<unknown> {
+async function mcpCall(tool: string, payload: Record<string, unknown>): Promise<unknown> {
   const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...(config.backendApiKey ? { 'Authorization': `Bearer ${config.backendApiKey}` } : {}),
     },
-    body: JSON.stringify({ tool, args }),
+    body: JSON.stringify({ tool, payload }),
     signal: AbortSignal.timeout(30000),
   })
   const data = await res.json().catch(() => null)
@@ -170,26 +170,26 @@ async function agentAutoReply(agentId: string, userMessage: string, from: string
     // Broadcast agent's reply
     broadcastMessage({
       from: agentId,
-      to: from as any,
-      source: 'agent' as any,
+      to: from,
+      source: 'agent',
       type: 'Message',
       message: result.content,
       timestamp: new Date().toISOString(),
       ...(threadId ? { thread_id: threadId } : {}),
       metadata: { provider: result.provider, model: result.model, duration_ms: result.duration_ms },
-    } as any)
+    })
 
     logger.info({ agent: agentId, from, model: result.model, ms: result.duration_ms }, 'Agent auto-reply sent')
   } catch (err) {
     logger.error({ err: String(err), agent: agentId }, 'Agent auto-reply failed')
     broadcastMessage({
       from: agentId,
-      to: from as any,
-      source: 'system' as any,
+      to: from,
+      source: 'system',
       type: 'Message',
       message: `⚠️ ${displayName} kunne ikke svare: ${err instanceof Error ? err.message : String(err)}`,
       timestamp: new Date().toISOString(),
-    } as any)
+    })
   }
 }
 
@@ -221,7 +221,7 @@ chatRouter.post('/message', (req: Request, res: Response) => {
     files: req.body.files,
   }
 
-  broadcastMessage(msg as any)
+  broadcastMessage(msg)
   notifyChatMessage(msg.from, msg.to, msg.message)
   logger.info({ from: msg.from, to: msg.to, type: msg.type }, 'Chat message broadcast')
 
@@ -289,7 +289,7 @@ chatRouter.post('/threads', (req: Request, res: Response) => {
     parent_id,
   }
 
-  broadcastMessage(threadMsg as any)
+  broadcastMessage(threadMsg)
   res.json({ success: true, data: { thread_id: parent_id, timestamp: threadMsg.timestamp } })
 })
 
@@ -355,7 +355,7 @@ chatRouter.post('/capture', async (req: Request, res: Response) => {
       },
       body: JSON.stringify({
         tool: 'srag.ingest',
-        args: {
+        payload: {
           content: context,
           source: 'command-center-chat',
           tags: tags || ['chat-capture'],
@@ -375,7 +375,7 @@ chatRouter.post('/capture', async (req: Request, res: Response) => {
       type: 'Message',
       message: `📚 Knowledge captured: ${message_ids?.length || 0} messages → SRAG (tags: ${(tags || ['chat-capture']).join(', ')})`,
       timestamp: new Date().toISOString(),
-    } as any)
+    })
 
     logger.info({ message_count: message_ids?.length, tags }, 'Chat knowledge captured to SRAG')
     res.json({ success: true, data: { captured: message_ids?.length || 1, srag_result: sragData } })
@@ -411,28 +411,15 @@ chatRouter.post('/summarize', async (req: Request, res: Response) => {
       .slice(0, 8000) // limit context size
 
     // Use LLM to summarize
-    const llmRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(config.backendApiKey ? { 'Authorization': `Bearer ${config.backendApiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        tool: 'llm.chat',
-        args: {
-          model: 'deepseek-chat',
-          messages: [{
-            role: 'user',
-            content: `Summarize this conversation concisely. Include key decisions, action items, and outcomes. Reply in the same language as the conversation.\n\n${transcript}`,
-          }],
-          max_tokens: 500,
-        },
-      }),
-      signal: AbortSignal.timeout(60000),
+    const llmResult = await chatLLM({
+      provider: 'deepseek',
+      messages: [{
+        role: 'user',
+        content: `Summarize this conversation concisely. Include key decisions, action items, and outcomes. Reply in the same language as the conversation.\n\n${transcript}`,
+      }],
+      max_tokens: 500,
     })
-
-    const llmData = await llmRes.json().catch(() => null)
-    const summary = llmData?.result?.content || llmData?.result?.message || llmData?.result || 'Summary generation failed'
+    const summary = llmResult.content || 'Summary generation failed'
 
     // Broadcast summary
     broadcastMessage({
@@ -442,7 +429,7 @@ chatRouter.post('/summarize', async (req: Request, res: Response) => {
       type: 'Message',
       message: `📋 **Conversation Summary**\n${typeof summary === 'string' ? summary : JSON.stringify(summary)}`,
       timestamp: new Date().toISOString(),
-    } as any)
+    })
 
     // Persist summary to all memory layers
     const summaryStr = typeof summary === 'string' ? summary : JSON.stringify(summary)
@@ -481,7 +468,7 @@ chatRouter.post('/debate', async (req: Request, res: Response) => {
     message: `🎯 **Debate Started**: "${topic}"\nParticipants: ${agents.join(', ')} | Rounds: ${maxRounds}`,
     timestamp: new Date().toISOString(),
     thread_id: debateId,
-  } as any)
+  })
 
   // Run debate asynchronously
   runDebate(debateId, agents, topic, maxRounds).catch(err => {
@@ -494,7 +481,7 @@ chatRouter.post('/debate', async (req: Request, res: Response) => {
       message: `❌ Debate "${topic}" failed: ${err.message}`,
       timestamp: new Date().toISOString(),
       thread_id: debateId,
-    } as any)
+    })
   })
 
   res.json({ success: true, data: { debate_id: debateId, agents, topic, rounds: maxRounds } })
@@ -515,26 +502,12 @@ async function runDebate(debateId: string, agents: string[], topic: string, roun
         : `You are agent "${agent}" in round ${round} of a debate on "${topic}". Review the previous arguments and provide your rebuttal or refined position (max 200 words).${prevContext}`
 
       try {
-        const llmRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(config.backendApiKey ? { 'Authorization': `Bearer ${config.backendApiKey}` } : {}),
-          },
-          body: JSON.stringify({
-            tool: 'llm.chat',
-            args: {
-              model: 'deepseek-chat',
-              messages: [{ role: 'user', content: prompt }],
-              max_tokens: 300,
-            },
-          }),
-          signal: AbortSignal.timeout(60000),
+        const llmResult = await chatLLM({
+          provider: 'deepseek',
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 300,
         })
-
-        const data = await llmRes.json().catch(() => null)
-        const response = data?.result?.content || data?.result?.message || data?.result || '(no response)'
-        const responseStr = typeof response === 'string' ? response : JSON.stringify(response)
+        const responseStr = llmResult.content || '(no response)'
         responses.push({ agent, round, response: responseStr })
 
         broadcastMessage({
@@ -545,7 +518,7 @@ async function runDebate(debateId: string, agents: string[], topic: string, roun
           message: `**[Round ${round}]** ${responseStr}`,
           timestamp: new Date().toISOString(),
           thread_id: debateId,
-        } as any)
+        })
       } catch {
         responses.push({ agent, round, response: '(timeout)' })
       }
@@ -555,27 +528,12 @@ async function runDebate(debateId: string, agents: string[], topic: string, roun
   // Final synthesis
   const allArgs = responses.map(r => `[${r.agent} R${r.round}]: ${r.response}`).join('\n')
   try {
-    const synthRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(config.backendApiKey ? { 'Authorization': `Bearer ${config.backendApiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        tool: 'llm.chat',
-        args: {
-          model: 'deepseek-chat',
-          messages: [{ role: 'user', content: `Synthesize the following debate on "${topic}" into a final summary. Identify areas of agreement, disagreement, and recommended action. Be concise (max 300 words).\n\n${allArgs}` }],
-          max_tokens: 400,
-        },
-      }),
-      signal: AbortSignal.timeout(60000),
+    const synthResult = await chatLLM({
+      provider: 'deepseek',
+      messages: [{ role: 'user', content: `Synthesize the following debate on "${topic}" into a final summary. Identify areas of agreement, disagreement, and recommended action. Be concise (max 300 words).\n\n${allArgs}` }],
+      max_tokens: 400,
     })
-
-    const synthData = await synthRes.json().catch(() => null)
-    const synthesis = synthData?.result?.content || synthData?.result?.message || synthData?.result || '(synthesis failed)'
-
-    const synthStr = typeof synthesis === 'string' ? synthesis : JSON.stringify(synthesis)
+    const synthStr = synthResult.content || '(synthesis failed)'
 
     broadcastMessage({
       from: 'System',
@@ -585,7 +543,7 @@ async function runDebate(debateId: string, agents: string[], topic: string, roun
       message: `📊 **Debate Synthesis**: "${topic}"\n\n${synthStr}`,
       timestamp: new Date().toISOString(),
       thread_id: debateId,
-    } as any)
+    })
 
     // Persist debate to all memory layers
     const debateContent = `Debate: "${topic}"\nParticipants: ${agents.join(', ')}\nRounds: ${rounds}\n\nArguments:\n${allArgs}\n\nSynthesis:\n${synthStr}`
@@ -619,7 +577,7 @@ chatRouter.post('/think', async (req: Request, res: Response) => {
     message: `🧠 **Sequential Thinking** started: "${question}" (depth: ${thinkDepth})`,
     timestamp: new Date().toISOString(),
     thread_id: thinkId,
-  } as any)
+  })
 
   // Build chain: reason → plan → analyze → fold (synthesize)
   const defaultSteps = [
@@ -649,7 +607,7 @@ chatRouter.post('/think', async (req: Request, res: Response) => {
       message: `❌ Thinking failed: ${err.message}`,
       timestamp: new Date().toISOString(),
       thread_id: thinkId,
-    } as any)
+    })
   })
 
   res.json({ success: true, data: { think_id: thinkId, question, depth: thinkDepth, steps: steps.length } })
@@ -675,7 +633,7 @@ async function runThink(thinkId: string, question: string, steps: any[]) {
       message: `**[${result.action}]** ${output.slice(0, 3000)}`,
       timestamp: new Date().toISOString(),
       thread_id: thinkId,
-    } as any)
+    })
   }
 
   // Final result
@@ -691,7 +649,7 @@ async function runThink(thinkId: string, question: string, steps: any[]) {
     message: `🧠 **Thinking Complete**: "${question}"\n\n${(finalOutput || '(no result)').slice(0, 3000)}\n\n_${execution.steps_completed}/${execution.steps_total} steps in ${execution.duration_ms}ms_`,
     timestamp: new Date().toISOString(),
     thread_id: thinkId,
-  } as any)
+  })
 
   // Persist to all memory layers
   const allOutputs = execution.results.map(r => {
@@ -719,8 +677,8 @@ chatRouter.post('/remember', async (req: Request, res: Response) => {
   let memContent = content || ''
   if (message_ids?.length) {
     const all = await getHistory(2000, 0)
-    const selected = all.filter((m: any) => message_ids.includes(m.id))
-    const transcript = selected.map((m: any) => `[${m.from}] ${m.message}`).join('\n')
+    const selected = all.filter(m => message_ids.includes(m.id))
+    const transcript = selected.map(m => `[${m.from}] ${m.message}`).join('\n')
     memContent = content ? `${content}\n\n---\n${transcript}` : transcript
   }
 
@@ -741,7 +699,7 @@ chatRouter.post('/remember', async (req: Request, res: Response) => {
     type: 'Message',
     message: `🧠 Remembered: "${memTitle}" → Episodic + Graph + SRAG (tags: ${memTags.join(', ')})`,
     timestamp: new Date().toISOString(),
-  } as any)
+  })
 
   res.json({ success: true, data: { title: memTitle, tags: memTags, layers: ['episodic', 'graph', 'srag'] } })
 })
@@ -821,7 +779,7 @@ chatRouter.post('/templates/:id/run', async (req: Request, res: Response) => {
     type: 'Message',
     message: `🚀 Running template: **${template.name}** — ${template.description} (topic: ${topic})`,
     timestamp: new Date().toISOString(),
-  } as any)
+  })
 
   // Execute steps sequentially (fire-and-forget for async ops)
   let stepsRun = 0
@@ -835,7 +793,7 @@ chatRouter.post('/templates/:id/run', async (req: Request, res: Response) => {
         type: 'Message',
         message: msg,
         timestamp: new Date().toISOString(),
-      } as any)
+      })
       stepsRun++
     }
     // Other step types are hints for the frontend to execute

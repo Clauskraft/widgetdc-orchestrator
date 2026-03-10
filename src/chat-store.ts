@@ -7,22 +7,8 @@
  */
 import { getRedis, isRedisEnabled } from './redis.js'
 import { logger } from './logger.js'
-
-export interface StoredMessage {
-  id: string
-  from: string
-  to: string
-  source: string
-  type: string
-  message: string
-  timestamp: string
-  thread_id?: string    // thread root message id
-  parent_id?: string    // direct reply-to message id
-  files?: Array<{ name: string; size: number; type: string }>
-  reactions?: Record<string, string[]>  // emoji → [agent_ids]
-  pinned?: boolean
-  metadata?: Record<string, unknown>
-}
+import type { StoredMessage } from '@widgetdc/contracts/orchestrator'
+export type { StoredMessage }
 
 const REDIS_KEY = 'orchestrator:messages'
 const REDIS_THREADS_KEY = 'orchestrator:threads'   // hash: thread_id → thread meta

@@ -31,7 +31,7 @@ import { chainsRouter } from './routes/chains.js'
 import { cognitiveRouter } from './routes/cognitive.js'
 import { cronRouter } from './routes/cron.js'
 import { dashboardRouter } from './routes/dashboard.js'
-import { openclawRouter } from './routes/openclaw.js'
+import { openclawRouter, initOpenClaw, isOpenClawHealthy } from './routes/openclaw.js'
 import { llmRouter } from './routes/llm.js'
 import { auditRouter } from './routes/audit.js'
 import { monitorRouter } from './routes/monitor.js'
@@ -117,6 +117,8 @@ app.get('/health', (_req, res) => {
     rlm_available: isRlmAvailable(),
     active_chains: listExecutions().filter(e => e.status === 'running').length,
     cron_jobs: listCronJobs().filter(j => j.enabled).length,
+    openclaw_healthy: isOpenClawHealthy(),
+    librechat_url: config.libreChatUrl || null,
     slack_enabled: isSlackEnabled(),
     timestamp: new Date().toISOString(),
   })
@@ -152,6 +154,7 @@ async function boot() {
   await hydrateMessages()
   await hydrateCronJobs()
   registerDefaultLoops()
+  initOpenClaw()
   initWebSocket(server)
 
   server.listen(config.port, () => {
