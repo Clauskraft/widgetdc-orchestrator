@@ -273,6 +273,48 @@ export function registerDefaultLoops(): void {
     },
   })
 
+  // CIA Guardian Loop — monitors fleet health and triggers autonomous remediation
+  registerCronJob({
+    id: 'cia-guardian',
+    name: 'CIA Guardian (Autonomous Remediation)',
+    schedule: '*/10 * * * *',
+    enabled: true,
+    chain: {
+      name: 'CIA Health Scan',
+      mode: 'sequential',
+      steps: [
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'llm.generate',
+          arguments: {
+            prompt: "Scan fleet health and identify CRITICAL domains for remediation. Use /api/intelligence/fleet-health."
+          },
+        },
+      ],
+    },
+  })
+
+  // Dynamic Watchtower — scans all topics defined in :WatchDefinition (Public IT, Vendors, Tenders)
+  registerCronJob({
+    id: 'dynamic-watchtower',
+    name: 'Intelligence Watchtower (Multi-Domain)',
+    schedule: '0 */4 * * *', // Every 4 hours
+    enabled: true,
+    chain: {
+      name: 'Dynamic Intelligence Pipeline',
+      mode: 'sequential',
+      steps: [
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'llm.generate',
+          arguments: {
+            prompt: "1. Trigger FileSystemHarvester to index local data (D:/Intel, Downloads). 2. Query Neo4j for all :WatchDefinition nodes. 3. For each watch, use osint.search to find signals. 4. Cross-reference new signals with local IntelligenceAssets. 5. Format as IntelligenceObservation and score via /api/intelligence/observation/score."
+          },
+        },
+      ],
+    },
+  })
+
   // Evolution event tracker — records graph health snapshot hourly
   registerCronJob({
     id: 'evolution-tracker',
