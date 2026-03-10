@@ -21,14 +21,14 @@ import type { AgentMessage } from '@widgetdc/contracts/orchestrator'
 // ─── Memory helpers — persist to multiple memory layers ──────────────────────
 
 /** Call MCP tool via backend */
-async function mcpCall(tool: string, args: Record<string, unknown>): Promise<unknown> {
+async function mcpCall(tool: string, payload: Record<string, unknown>): Promise<unknown> {
   const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...(config.backendApiKey ? { 'Authorization': `Bearer ${config.backendApiKey}` } : {}),
     },
-    body: JSON.stringify({ tool, args }),
+    body: JSON.stringify({ tool, payload }),
     signal: AbortSignal.timeout(30000),
   })
   const data = await res.json().catch(() => null)
@@ -355,7 +355,7 @@ chatRouter.post('/capture', async (req: Request, res: Response) => {
       },
       body: JSON.stringify({
         tool: 'srag.ingest',
-        args: {
+        payload: {
           content: context,
           source: 'command-center-chat',
           tags: tags || ['chat-capture'],
@@ -419,7 +419,7 @@ chatRouter.post('/summarize', async (req: Request, res: Response) => {
       },
       body: JSON.stringify({
         tool: 'llm.chat',
-        args: {
+        payload: {
           model: 'deepseek-chat',
           messages: [{
             role: 'user',
@@ -523,7 +523,7 @@ async function runDebate(debateId: string, agents: string[], topic: string, roun
           },
           body: JSON.stringify({
             tool: 'llm.chat',
-            args: {
+            payload: {
               model: 'deepseek-chat',
               messages: [{ role: 'user', content: prompt }],
               max_tokens: 300,
@@ -563,7 +563,7 @@ async function runDebate(debateId: string, agents: string[], topic: string, roun
       },
       body: JSON.stringify({
         tool: 'llm.chat',
-        args: {
+        payload: {
           model: 'deepseek-chat',
           messages: [{ role: 'user', content: `Synthesize the following debate on "${topic}" into a final summary. Identify areas of agreement, disagreement, and recommended action. Be concise (max 300 words).\n\n${allArgs}` }],
           max_tokens: 400,

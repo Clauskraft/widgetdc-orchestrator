@@ -113,11 +113,52 @@ function handleIncomingMessage(fromAgentId: string, msg: AgentMessage): void {
   } else {
     // Direct message to specific agent
     const target = connections.get(msg.to)
+    const storedMsg = {
+      id: (msg as any).id || msgId(),
+      from: msg.from,
+      to: msg.to,
+      source: msg.source,
+      type: msg.type,
+      message: msg.message,
+      timestamp: msg.timestamp || new Date().toISOString(),
+      thread_id: (msg as any).thread_id,
+      parent_id: (msg as any).parent_id,
+      metadata: (msg as any).metadata,
+    }
+    const payload = JSON.stringify({ type: 'message', data: storedMsg })
+
     if (target?.ws.readyState === WebSocket.OPEN) {
-      target.ws.send(JSON.stringify(msg))
+      // Deliver to target
+      target.ws.send(payload)
+      // Also send back to sender for confirmation
+      const sender = connections.get(fromAgentId)
+      if (sender?.ws.readyState === WebSocket.OPEN && fromAgentId !== msg.to) {
+        sender.ws.send(payload)
+      }
+      // Persist the DM
+      storeMessage(storedMsg as any).catch(() => {})
+      broadcastSSE('message', storedMsg)
     } else {
-      // Target not connected — broadcast as fallback
-      broadcastMessage(msg)
+      // Target offline — persist but do NOT broadcast to everyone
+      storeMessage(storedMsg as any).catch(() => {})
+      // Notify sender that target is offline
+      const sender = connections.get(fromAgentId)
+      if (sender?.ws.readyState === WebSocket.OPEN) {
+        sender.ws.send(payload)
+        sender.ws.send(JSON.stringify({
+          type: 'message',
+          data: {
+            id: msgId(),
+            from: 'System',
+            to: fromAgentId,
+            source: 'system',
+            type: 'Alert',
+            message: `${msg.to} is offline. Message saved.`,
+            timestamp: new Date().toISOString(),
+          },
+        }))
+      }
+      logger.info({ from: msg.from, to: msg.to }, 'DM stored for offline agent (not broadcast)')
     }
   }
 }
