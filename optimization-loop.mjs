@@ -29,8 +29,8 @@
 
 const BASE = 'https://orchestrator-production-c27e.up.railway.app'
 const BACKEND = 'https://backend-production-d3da.up.railway.app'
-const API_KEY = 'WidgeTDC_Orch_2026'
-const BACKEND_KEY = 'Heravej_22'
+const API_KEY = process.env.ORCHESTRATOR_API_KEY || 'WidgeTDC_Orch_2026'
+const BACKEND_KEY = process.env.WIDGETDC_API_KEY || 'Heravej_22'
 
 const MAX_EXPERIMENTS = parseInt(process.argv[2] || '50')
 const DOMAIN = process.argv[3] || 'all'
@@ -52,11 +52,11 @@ async function orch(path, opts = {}) {
   return { ok: res.ok, status: res.status, body: await res.json().catch(() => null) }
 }
 
-async function backend(tool, args) {
+async function backend(tool, payload) {
   const res = await fetch(`${BACKEND}/api/mcp/route`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${BACKEND_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ tool, args }),
+    body: JSON.stringify({ tool, payload }),
     signal: AbortSignal.timeout(30000),
   })
   const data = await res.json().catch(() => null)
