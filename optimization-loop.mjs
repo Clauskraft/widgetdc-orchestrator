@@ -27,10 +27,10 @@
  * Domains: all, rag, chains, cognitive, prompts
  */
 
-const BASE = 'https://orchestrator-production-c27e.up.railway.app'
-const BACKEND = 'https://backend-production-d3da.up.railway.app'
-const API_KEY = process.env.ORCHESTRATOR_API_KEY || 'WidgeTDC_Orch_2026'
-const BACKEND_KEY = process.env.WIDGETDC_API_KEY || 'Heravej_22'
+const BASE = process.env.ORCHESTRATOR_URL || 'https://orchestrator-production-c27e.up.railway.app'
+const BACKEND = process.env.BACKEND_URL || 'https://backend-production-d3da.up.railway.app'
+const API_KEY = process.env.ORCHESTRATOR_API_KEY
+const BACKEND_KEY = process.env.WIDGETDC_API_KEY
 
 const MAX_EXPERIMENTS = parseInt(process.argv[2] || '50')
 const DOMAIN = process.argv[3] || 'all'
@@ -44,6 +44,7 @@ let experimentsRun = 0
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 async function orch(path, opts = {}) {
+  if (!API_KEY) throw new Error("ORCHESTRATOR_API_KEY not set")
   const res = await fetch(`${BASE}${path}`, {
     ...opts,
     headers: { 'Authorization': `Bearer ${API_KEY}`, 'Content-Type': 'application/json', ...opts.headers },
@@ -53,6 +54,7 @@ async function orch(path, opts = {}) {
 }
 
 async function backend(tool, payload) {
+  if (!BACKEND_KEY) throw new Error("WIDGETDC_API_KEY not set")
   const res = await fetch(`${BACKEND}/api/mcp/route`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${BACKEND_KEY}`, 'Content-Type': 'application/json' },
