@@ -35,6 +35,7 @@ import { openclawRouter } from './routes/openclaw.js'
 import { llmRouter } from './routes/llm.js'
 import { auditRouter } from './routes/audit.js'
 import { monitorRouter } from './routes/monitor.js'
+import { s1s4Router } from './routes/s1-s4.js'
 import { auditMiddleware } from './audit.js'
 import { handleSSE, getSSEClientCount } from './sse.js'
 import { AgentRegistry } from './agent-registry.js'
@@ -99,6 +100,7 @@ app.use('/api/openclaw', requireApiKey, openclawRouter)
 app.use('/api/audit', requireApiKey, auditRouter)
 app.use('/api/llm', requireApiKey, llmRouter)
 app.use('/monitor', requireApiKey, monitorRouter)
+app.use('/api/s1-s4', requireApiKey, s1s4Router)
 app.get('/api/events', requireApiKey, handleSSE)
 
 // ─── Health ───────────────────────────────────────────────────────────────────
