@@ -114,16 +114,16 @@ function handleIncomingMessage(fromAgentId: string, msg: AgentMessage): void {
     // Direct message to specific agent
     const target = connections.get(msg.to)
     const storedMsg = {
-      id: (msg as any).id || msgId(),
+      id: msg.id || msgId(),
       from: msg.from,
       to: msg.to,
       source: msg.source,
       type: msg.type,
       message: msg.message,
       timestamp: msg.timestamp || new Date().toISOString(),
-      thread_id: (msg as any).thread_id,
-      parent_id: (msg as any).parent_id,
-      metadata: (msg as any).metadata,
+      thread_id: msg.thread_id,
+      parent_id: msg.parent_id,
+      metadata: msg.metadata,
     }
     const payload = JSON.stringify({ type: 'message', data: storedMsg })
 
@@ -136,11 +136,11 @@ function handleIncomingMessage(fromAgentId: string, msg: AgentMessage): void {
         sender.ws.send(payload)
       }
       // Persist the DM
-      storeMessage(storedMsg as any).catch(() => {})
+      storeMessage(storedMsg).catch(() => {})
       broadcastSSE('message', storedMsg)
     } else {
       // Target offline — persist but do NOT broadcast to everyone
-      storeMessage(storedMsg as any).catch(() => {})
+      storeMessage(storedMsg).catch(() => {})
       // Notify sender that target is offline
       const sender = connections.get(fromAgentId)
       if (sender?.ws.readyState === WebSocket.OPEN) {
@@ -166,17 +166,17 @@ function handleIncomingMessage(fromAgentId: string, msg: AgentMessage): void {
 export function broadcastMessage(msg: AgentMessage): void {
   // Persist message to Redis/memory store
   const storedMsg = {
-    id: (msg as any).id || msgId(),
+    id: msg.id || msgId(),
     from: msg.from,
     to: msg.to,
     source: msg.source,
     type: msg.type,
     message: msg.message,
     timestamp: msg.timestamp || new Date().toISOString(),
-    thread_id: (msg as any).thread_id,
-    parent_id: (msg as any).parent_id,
-    files: (msg as any).files,
-    metadata: (msg as any).metadata,
+    thread_id: msg.thread_id,
+    parent_id: msg.parent_id,
+    files: msg.files,
+    metadata: msg.metadata,
   }
   storeMessage(storedMsg).catch(() => {})
 
@@ -199,7 +199,7 @@ export function broadcastMessage(msg: AgentMessage): void {
 export function broadcastToolResult(callId: string, result: unknown, agentId: string): void {
   broadcastMessage({
     from: 'Orchestrator',
-    to: agentId as AgentMessage['to'],
+    to: agentId,
     source: 'orchestrator',
     type: 'ToolResult',
     message: `Tool call ${callId} completed`,

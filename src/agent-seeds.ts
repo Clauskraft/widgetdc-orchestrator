@@ -181,6 +181,62 @@ export const AGENT_SEEDS: AgentHandshakeData[] = [
     capabilities: ['mcp_tools', 'chat', 'chain_execution'],
     allowed_tool_namespaces: ['*'],
   },
+
+  // ─── LibreChat agents (visible in registry, not WS-connected) ────────────
+  {
+    agent_id: 'lc-prometheus',
+    display_name: 'Prometheus (LibreChat)',
+    source: 'librechat',
+    version: '1.0',
+    status: 'online',
+    capabilities: ['code_analysis', 'embeddings', 'governance', 'reinforcement_learning'],
+    allowed_tool_namespaces: ['prometheus', 'code', '*'],
+  },
+  {
+    agent_id: 'lc-roma',
+    display_name: 'Roma (LibreChat)',
+    source: 'librechat',
+    version: '1.0',
+    status: 'online',
+    capabilities: ['self_healing', 'incident_response', 'monitoring'],
+    allowed_tool_namespaces: ['roma', 'incident', '*'],
+  },
+  {
+    agent_id: 'lc-dot',
+    display_name: 'DOT Navigator (LibreChat)',
+    source: 'librechat',
+    version: '1.0',
+    status: 'online',
+    capabilities: ['navigation', 'task_routing', 'context_switching'],
+    allowed_tool_namespaces: ['dot', '*'],
+  },
+  {
+    agent_id: 'lc-harvester',
+    display_name: 'Harvester (LibreChat)',
+    source: 'librechat',
+    version: '1.0',
+    status: 'online',
+    capabilities: ['web_crawl', 'data_ingestion', 'extraction'],
+    allowed_tool_namespaces: ['harvest', 'ingestion', '*'],
+  },
+  {
+    agent_id: 'lc-sentinel',
+    display_name: 'Sentinel (LibreChat)',
+    source: 'librechat',
+    version: '1.0',
+    status: 'online',
+    capabilities: ['monitoring', 'alerting', 'threat_detection'],
+    allowed_tool_namespaces: ['sentinel', 'alert', '*'],
+  },
+  {
+    agent_id: 'lc-analyst',
+    display_name: 'Analyst (LibreChat)',
+    source: 'librechat',
+    version: '1.0',
+    status: 'online',
+    capabilities: ['data_analysis', 'reporting', 'visualization'],
+    allowed_tool_namespaces: ['analyst', 'report', '*'],
+  },
 ]
 
 /**

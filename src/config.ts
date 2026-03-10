@@ -43,6 +43,9 @@ export const config = {
   openclawUrl: optional('OPENCLAW_URL', ''),
   openclawToken: optional('OPENCLAW_GATEWAY_TOKEN', ''),
 
+  // LibreChat (optional — for agent visibility + health)
+  libreChatUrl: optional('LIBRECHAT_URL', ''),
+
   // Orchestrator identity
   orchestratorId: optional('ORCHESTRATOR_ID', 'widgetdc-orchestrator-v1'),
 

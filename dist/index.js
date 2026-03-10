@@ -47,6 +47,8 @@ var config = {
   // OpenClaw gateway (optional — for terminal/agent spawning)
   openclawUrl: optional("OPENCLAW_URL", ""),
   openclawToken: optional("OPENCLAW_GATEWAY_TOKEN", ""),
+  // LibreChat (optional — for agent visibility + health)
+  libreChatUrl: optional("LIBRECHAT_URL", ""),
   // Orchestrator identity
   orchestratorId: optional("ORCHESTRATOR_ID", "widgetdc-orchestrator-v1"),
   // WebSocket heartbeat interval (ms)
@@ -8413,6 +8415,30 @@ var AgentMessage = Type.Object({
   call_id: Type.Optional(Type.String({
     description: "Links this message to a specific tool call (for ToolResult messages)"
   })),
+  /** Storage-layer assigned message ID */
+  id: Type.Optional(Type.String({
+    description: "Storage-layer assigned message ID (e.g. UUID or Redis-generated)"
+  })),
+  /** Thread grouping — groups related messages (alias for thread) */
+  thread_id: Type.Optional(Type.String({
+    description: "Thread ID for grouping related messages"
+  })),
+  /** Direct reply-to message ID */
+  parent_id: Type.Optional(Type.String({
+    description: "ID of the message this is a direct reply to"
+  })),
+  /** Attached files */
+  files: Type.Optional(Type.Array(Type.Object({
+    name: Type.String(),
+    size: Type.Number(),
+    type: Type.String()
+  }), {
+    description: "File attachments on this message"
+  })),
+  /** Arbitrary metadata (provider info, conversation_id, etc.) */
+  metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown(), {
+    description: "Extensible metadata (e.g. provider, model, duration_ms, conversation_id)"
+  })),
   /** ISO timestamp */
   timestamp: Type.Optional(Type.String({
     format: "date-time",
@@ -8477,9 +8503,11 @@ var AgentHandshake = Type.Object({
   })),
   /** Current availability status */
   status: AgentHandshakeStatus,
-  /** Declared capabilities — Orchestrator enforces these as ACL */
-  capabilities: Type.Array(AgentCapability, {
-    description: "List of capabilities this agent is authorized to use",
+  /** Declared capabilities — Orchestrator enforces these as ACL.
+   *  Accepts both known AgentCapability literals and free-form strings
+   *  for domain-specific capabilities (e.g. 'sitrep', 'threat_hunting'). */
+  capabilities: Type.Array(Type.Union([AgentCapability, Type.String()]), {
+    description: "List of capabilities this agent is authorized to use (known + domain-specific)",
     minItems: 0
   }),
   /**
@@ -8506,6 +8534,26 @@ var AgentHandshake = Type.Object({
 }, {
   $id: "AgentHandshake",
   description: "Agent registration payload. Sent to Orchestrator on boot to declare identity, capabilities, and tool permissions."
+});
+
+// ../../../../widgetdc-contracts/dist/orchestrator/stored-message.js
+var StoredMessage = Type.Intersect([
+  AgentMessage,
+  Type.Object({
+    /** Storage-assigned unique ID (required for persistence) */
+    id: Type.String({
+      description: "Storage-assigned message ID"
+    }),
+    /** Emoji reactions: emoji → list of agent IDs */
+    reactions: Type.Optional(Type.Record(Type.String(), Type.Array(Type.String()), { description: "Emoji reactions: emoji key \u2192 agent IDs who reacted" })),
+    /** Whether this message is pinned */
+    pinned: Type.Optional(Type.Boolean({
+      description: "Whether this message is pinned in the chat"
+    }))
+  })
+], {
+  $id: "StoredMessage",
+  description: "Persisted agent message with storage-layer fields (id, reactions, pinned). Extends AgentMessage."
 });
 
 // src/validation.ts
@@ -9861,29 +9909,17 @@ chatRouter.post("/summarize", async (req, res) => {
       return;
     }
     const transcript = messages.sort((a, b) => (a.timestamp || "").localeCompare(b.timestamp || "")).map((m) => `[${(m.timestamp || "").slice(11, 19)}] ${m.from}: ${m.message}`).join("\n").slice(0, 8e3);
-    const llmRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
-      },
-      body: JSON.stringify({
-        tool: "llm.chat",
-        payload: {
-          model: "deepseek-chat",
-          messages: [{
-            role: "user",
-            content: `Summarize this conversation concisely. Include key decisions, action items, and outcomes. Reply in the same language as the conversation.
+    const llmResult = await chatLLM({
+      provider: "deepseek",
+      messages: [{
+        role: "user",
+        content: `Summarize this conversation concisely. Include key decisions, action items, and outcomes. Reply in the same language as the conversation.
 
 ${transcript}`
-          }],
-          max_tokens: 500
-        }
-      }),
-      signal: AbortSignal.timeout(6e4)
+      }],
+      max_tokens: 500
     });
-    const llmData = await llmRes.json().catch(() => null);
-    const summary = llmData?.result?.content || llmData?.result?.message || llmData?.result || "Summary generation failed";
+    const summary = llmResult.content || "Summary generation failed";
     broadcastMessage({
       from: "System",
       to: "All",
@@ -9946,25 +9982,12 @@ async function runDebate(debateId, agents, topic, rounds) {
       const prevContext = responses.length > 0 ? "\n\nPrevious arguments:\n" + responses.map((r) => `[${r.agent} R${r.round}]: ${r.response}`).join("\n") : "";
       const prompt = round === 1 ? `You are agent "${agent}" in a structured debate. Topic: "${topic}". Present your argument concisely (max 200 words).` : `You are agent "${agent}" in round ${round} of a debate on "${topic}". Review the previous arguments and provide your rebuttal or refined position (max 200 words).${prevContext}`;
       try {
-        const llmRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
-          },
-          body: JSON.stringify({
-            tool: "llm.chat",
-            payload: {
-              model: "deepseek-chat",
-              messages: [{ role: "user", content: prompt }],
-              max_tokens: 300
-            }
-          }),
-          signal: AbortSignal.timeout(6e4)
+        const llmResult = await chatLLM({
+          provider: "deepseek",
+          messages: [{ role: "user", content: prompt }],
+          max_tokens: 300
         });
-        const data = await llmRes.json().catch(() => null);
-        const response = data?.result?.content || data?.result?.message || data?.result || "(no response)";
-        const responseStr = typeof response === "string" ? response : JSON.stringify(response);
+        const responseStr = llmResult.content || "(no response)";
         responses.push({ agent, round, response: responseStr });
         broadcastMessage({
           from: agent,
@@ -9982,27 +10005,14 @@ async function runDebate(debateId, agents, topic, rounds) {
   }
   const allArgs = responses.map((r) => `[${r.agent} R${r.round}]: ${r.response}`).join("\n");
   try {
-    const synthRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
-      },
-      body: JSON.stringify({
-        tool: "llm.chat",
-        payload: {
-          model: "deepseek-chat",
-          messages: [{ role: "user", content: `Synthesize the following debate on "${topic}" into a final summary. Identify areas of agreement, disagreement, and recommended action. Be concise (max 300 words).
+    const synthResult = await chatLLM({
+      provider: "deepseek",
+      messages: [{ role: "user", content: `Synthesize the following debate on "${topic}" into a final summary. Identify areas of agreement, disagreement, and recommended action. Be concise (max 300 words).
 
 ${allArgs}` }],
-          max_tokens: 400
-        }
-      }),
-      signal: AbortSignal.timeout(6e4)
+      max_tokens: 400
     });
-    const synthData = await synthRes.json().catch(() => null);
-    const synthesis = synthData?.result?.content || synthData?.result?.message || synthData?.result || "(synthesis failed)";
-    const synthStr = typeof synthesis === "string" ? synthesis : JSON.stringify(synthesis);
+    const synthStr = synthResult.content || "(synthesis failed)";
     broadcastMessage({
       from: "System",
       to: "All",
@@ -10960,8 +10970,184 @@ cronRouter.delete("/:id", (req, res) => {
 });
 
 // src/routes/dashboard.ts
+import { Router as Router8 } from "express";
+
+// src/routes/openclaw.ts
 import { Router as Router7 } from "express";
-var dashboardRouter = Router7();
+var openclawRouter = Router7();
+var healthStatus = {
+  healthy: false,
+  checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
+  latencyMs: 0
+};
+var consecutiveFailures = 0;
+var CIRCUIT_THRESHOLD = 3;
+var CIRCUIT_RESET_MS = 3e4;
+var circuitOpenUntil = 0;
+function recordSuccess() {
+  consecutiveFailures = 0;
+  circuitOpenUntil = 0;
+}
+function recordFailure() {
+  consecutiveFailures++;
+  if (consecutiveFailures >= CIRCUIT_THRESHOLD) {
+    circuitOpenUntil = Date.now() + CIRCUIT_RESET_MS;
+    logger.warn({ failures: consecutiveFailures }, "OpenClaw circuit breaker OPEN");
+  }
+}
+function isCircuitOpen() {
+  if (circuitOpenUntil === 0) return false;
+  if (Date.now() > circuitOpenUntil) {
+    circuitOpenUntil = 0;
+    consecutiveFailures = 0;
+    logger.info("OpenClaw circuit breaker RESET (auto)");
+    return false;
+  }
+  return true;
+}
+var skillManifest = [];
+var skillsFetchedAt = "";
+async function fetchSkills() {
+  const openclawUrl = config.openclawUrl;
+  if (!openclawUrl) return;
+  try {
+    const token = config.openclawToken;
+    const headers = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const res = await fetch(`${openclawUrl}/setup/api/status`, {
+      headers,
+      signal: AbortSignal.timeout(1e4)
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const skills = data.skills ?? data.available_skills ?? [];
+      if (Array.isArray(skills)) {
+        skillManifest = skills;
+        skillsFetchedAt = (/* @__PURE__ */ new Date()).toISOString();
+        logger.info({ count: skills.length }, "OpenClaw skills discovered");
+      }
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, "OpenClaw skill discovery failed (non-fatal)");
+  }
+}
+async function pollHealth() {
+  const openclawUrl = config.openclawUrl;
+  if (!openclawUrl) {
+    healthStatus = { healthy: false, checkedAt: (/* @__PURE__ */ new Date()).toISOString(), latencyMs: 0, error: "OPENCLAW_URL not configured" };
+    return;
+  }
+  const start = Date.now();
+  try {
+    const token = config.openclawToken;
+    const headers = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const res = await fetch(`${openclawUrl}/healthz`, {
+      headers,
+      signal: AbortSignal.timeout(5e3)
+    });
+    const latencyMs = Date.now() - start;
+    healthStatus = {
+      healthy: res.ok,
+      checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      latencyMs,
+      ...res.ok ? {} : { error: `HTTP ${res.status}` }
+    };
+    if (res.ok) recordSuccess();
+    else recordFailure();
+  } catch (err) {
+    healthStatus = {
+      healthy: false,
+      checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      latencyMs: Date.now() - start,
+      error: String(err)
+    };
+    recordFailure();
+  }
+}
+function isOpenClawHealthy() {
+  return healthStatus.healthy && !isCircuitOpen();
+}
+function getOpenClawHealth() {
+  return { ...healthStatus, circuit_open: isCircuitOpen(), consecutive_failures: consecutiveFailures };
+}
+function getOpenClawSkills() {
+  return { skills: skillManifest, fetched_at: skillsFetchedAt };
+}
+function initOpenClaw() {
+  if (!config.openclawUrl) {
+    logger.info("OpenClaw not configured \u2014 skipping init");
+    return;
+  }
+  pollHealth();
+  fetchSkills();
+  setInterval(pollHealth, 6e4);
+  setInterval(fetchSkills, 5 * 6e4);
+}
+openclawRouter.get("/skills", (_req, res) => {
+  res.json({ success: true, data: getOpenClawSkills() });
+});
+openclawRouter.get("/health", (_req, res) => {
+  const health = getOpenClawHealth();
+  res.status(health.healthy ? 200 : 503).json({ success: health.healthy, data: health });
+});
+openclawRouter.all("/proxy/*", async (req, res) => {
+  const openclawUrl = config.openclawUrl;
+  if (!openclawUrl) {
+    res.status(503).json({ success: false, error: { code: "NOT_CONFIGURED", message: "OPENCLAW_URL not configured", status_code: 503 } });
+    return;
+  }
+  if (isCircuitOpen()) {
+    res.status(503).json({
+      success: false,
+      error: {
+        code: "CIRCUIT_OPEN",
+        message: `OpenClaw circuit breaker open (${consecutiveFailures} consecutive failures). Auto-reset in ${Math.ceil((circuitOpenUntil - Date.now()) / 1e3)}s.`,
+        status_code: 503
+      }
+    });
+    return;
+  }
+  const targetPath = req.params[0] ?? "";
+  const token = config.openclawToken;
+  try {
+    const headers = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const fetchOpts = {
+      method: req.method,
+      headers,
+      signal: AbortSignal.timeout(3e4)
+    };
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      fetchOpts.body = JSON.stringify(req.body);
+    }
+    const response = await fetch(`${openclawUrl}/${targetPath}`, fetchOpts);
+    const contentType = response.headers.get("content-type") ?? "";
+    recordSuccess();
+    if (contentType.includes("application/json")) {
+      const data = await response.json();
+      res.status(response.status).json(data);
+    } else {
+      const text = await response.text();
+      res.status(response.status).type(contentType).send(text);
+    }
+  } catch (err) {
+    recordFailure();
+    logger.warn({ err: String(err), path: targetPath, failures: consecutiveFailures }, "OpenClaw proxy error");
+    res.status(502).json({
+      success: false,
+      error: {
+        code: "GATEWAY_ERROR",
+        message: "OpenClaw gateway unreachable",
+        details: String(err),
+        status_code: 502
+      }
+    });
+  }
+});
+
+// src/routes/dashboard.ts
+var dashboardRouter = Router8();
 dashboardRouter.get("/data", async (_req, res) => {
   const agents = AgentRegistry.all().map((a) => ({
     agent_id: a.handshake.agent_id,
@@ -10993,6 +11179,10 @@ dashboardRouter.get("/data", async (_req, res) => {
     cronJobs,
     rlmAvailable,
     rlmHealth,
+    openclaw: {
+      health: getOpenClawHealth(),
+      skills: getOpenClawSkills()
+    },
     config: {
       backendUrl: config.backendUrl,
       orchestratorId: config.orchestratorId,
@@ -11000,42 +11190,6 @@ dashboardRouter.get("/data", async (_req, res) => {
     },
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   });
-});
-
-// src/routes/openclaw.ts
-import { Router as Router8 } from "express";
-var openclawRouter = Router8();
-openclawRouter.all("/proxy/*", async (req, res) => {
-  const openclawUrl = config.openclawUrl;
-  if (!openclawUrl) {
-    res.status(503).json({ success: false, error: "OPENCLAW_URL not configured" });
-    return;
-  }
-  const targetPath = req.params[0] ?? "";
-  const token = config.openclawToken;
-  try {
-    const headers = { "Content-Type": "application/json" };
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-    const fetchOpts = {
-      method: req.method,
-      headers
-    };
-    if (req.method !== "GET" && req.method !== "HEAD") {
-      fetchOpts.body = JSON.stringify(req.body);
-    }
-    const response = await fetch(`${openclawUrl}/${targetPath}`, fetchOpts);
-    const contentType = response.headers.get("content-type") ?? "";
-    if (contentType.includes("application/json")) {
-      const data = await response.json();
-      res.status(response.status).json(data);
-    } else {
-      const text = await response.text();
-      res.status(response.status).type(contentType).send(text);
-    }
-  } catch (err) {
-    logger.warn({ err: String(err), path: targetPath }, "OpenClaw proxy error");
-    res.status(502).json({ success: false, error: "OpenClaw gateway unreachable" });
-  }
 });
 
 // src/routes/llm.ts
@@ -11824,6 +11978,61 @@ var AGENT_SEEDS = [
     status: "online",
     capabilities: ["mcp_tools", "chat", "chain_execution"],
     allowed_tool_namespaces: ["*"]
+  },
+  // ─── LibreChat agents (visible in registry, not WS-connected) ────────────
+  {
+    agent_id: "lc-prometheus",
+    display_name: "Prometheus (LibreChat)",
+    source: "librechat",
+    version: "1.0",
+    status: "online",
+    capabilities: ["code_analysis", "embeddings", "governance", "reinforcement_learning"],
+    allowed_tool_namespaces: ["prometheus", "code", "*"]
+  },
+  {
+    agent_id: "lc-roma",
+    display_name: "Roma (LibreChat)",
+    source: "librechat",
+    version: "1.0",
+    status: "online",
+    capabilities: ["self_healing", "incident_response", "monitoring"],
+    allowed_tool_namespaces: ["roma", "incident", "*"]
+  },
+  {
+    agent_id: "lc-dot",
+    display_name: "DOT Navigator (LibreChat)",
+    source: "librechat",
+    version: "1.0",
+    status: "online",
+    capabilities: ["navigation", "task_routing", "context_switching"],
+    allowed_tool_namespaces: ["dot", "*"]
+  },
+  {
+    agent_id: "lc-harvester",
+    display_name: "Harvester (LibreChat)",
+    source: "librechat",
+    version: "1.0",
+    status: "online",
+    capabilities: ["web_crawl", "data_ingestion", "extraction"],
+    allowed_tool_namespaces: ["harvest", "ingestion", "*"]
+  },
+  {
+    agent_id: "lc-sentinel",
+    display_name: "Sentinel (LibreChat)",
+    source: "librechat",
+    version: "1.0",
+    status: "online",
+    capabilities: ["monitoring", "alerting", "threat_detection"],
+    allowed_tool_namespaces: ["sentinel", "alert", "*"]
+  },
+  {
+    agent_id: "lc-analyst",
+    display_name: "Analyst (LibreChat)",
+    source: "librechat",
+    version: "1.0",
+    status: "online",
+    capabilities: ["data_analysis", "reporting", "visualization"],
+    allowed_tool_namespaces: ["analyst", "report", "*"]
   }
 ];
 function seedAgents() {
@@ -11903,6 +12112,8 @@ app.get("/health", (_req, res) => {
     rlm_available: isRlmAvailable(),
     active_chains: listExecutions().filter((e) => e.status === "running").length,
     cron_jobs: listCronJobs().filter((j) => j.enabled).length,
+    openclaw_healthy: isOpenClawHealthy(),
+    librechat_url: config.libreChatUrl || null,
     slack_enabled: isSlackEnabled(),
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   });
@@ -11930,6 +12141,7 @@ async function boot() {
   await hydrateMessages();
   await hydrateCronJobs();
   registerDefaultLoops();
+  initOpenClaw();
   initWebSocket(server);
   server.listen(config.port, () => {
     logger.info(

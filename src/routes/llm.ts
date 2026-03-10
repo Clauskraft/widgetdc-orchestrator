@@ -36,9 +36,9 @@ llmRouter.post('/chat', async (req, res) => {
     if (broadcast !== false) {
       broadcastMessage({
         from: `${result.provider}/${result.model}`,
-        to: 'All' as any,
-        source: 'llm' as any,
-        type: 'Answer' as any,
+        to: 'All',
+        source: 'llm',
+        type: 'Answer',
         message: result.content,
         timestamp: new Date().toISOString(),
       })
