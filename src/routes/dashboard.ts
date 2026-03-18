@@ -9,6 +9,7 @@ import { listCronJobs } from '../cron-scheduler.js'
 import { isRlmAvailable, getRlmHealth } from '../cognitive-proxy.js'
 import { getOpenClawHealth, getOpenClawSkills } from './openclaw.js'
 import { config } from '../config.js'
+import { buildRoutingDashboardData } from '../routing-engine.js'
 
 export const dashboardRouter = Router()
 
@@ -28,6 +29,7 @@ dashboardRouter.get('/data', async (_req, res) => {
 
   const wsStats = getConnectionStats()
   const chains = listExecutions().slice(0, 50)
+  const routing = buildRoutingDashboardData(chains)
   const cronJobs = listCronJobs()
   const rlmAvailable = isRlmAvailable()
 
@@ -40,6 +42,7 @@ dashboardRouter.get('/data', async (_req, res) => {
     agents,
     wsStats,
     chains,
+    routing,
     cronJobs,
     rlmAvailable,
     rlmHealth,

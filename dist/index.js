@@ -8556,6 +8556,248 @@ var StoredMessage = Type.Intersect([
   description: "Persisted agent message with storage-layer fields (id, reactions, pinned). Extends AgentMessage."
 });
 
+// ../widgetdc-contracts/dist/orchestrator/agent-trust-profile.js
+var OrchestratorTaskDomain = Type.Union([
+  Type.Literal("intake"),
+  Type.Literal("decomposition"),
+  Type.Literal("recommendation"),
+  Type.Literal("learning"),
+  Type.Literal("routing"),
+  Type.Literal("audit")
+], {
+  $id: "OrchestratorTaskDomain",
+  description: "Narrow task domains used by the orchestrator trust model and scorecard mapping."
+});
+var TrustEvidenceSource = Type.Union([
+  Type.Literal("decision_quality_scorecard"),
+  Type.Literal("monitoring_audit_log"),
+  Type.Literal("operator_feedback"),
+  Type.Literal("runtime_readback")
+], {
+  $id: "TrustEvidenceSource",
+  description: "Canonical evidence sources allowed to influence routing trust."
+});
+var AgentTrustProfile = Type.Object({
+  agent_id: Type.Union([AgentId, Type.String()], {
+    description: "Canonical agent identifier or scoped runtime agent ID."
+  }),
+  task_domain: OrchestratorTaskDomain,
+  success_count: Type.Integer({
+    minimum: 0,
+    description: "Verified successful outcomes in this domain."
+  }),
+  fail_count: Type.Integer({
+    minimum: 0,
+    description: "Verified failed outcomes in this domain."
+  }),
+  bayesian_score: Type.Number({
+    minimum: 0,
+    maximum: 1,
+    description: "Bayesian trust score derived from verified runtime evidence."
+  }),
+  prior_weight: Type.Number({
+    minimum: 0,
+    description: "Weight of the prior used for Bayesian smoothing."
+  }),
+  default_prior_score: Type.Number({
+    minimum: 0,
+    maximum: 1,
+    description: "Configured prior score before domain-specific evidence accumulates."
+  }),
+  evidence_source: TrustEvidenceSource,
+  scorecard_dimension: Type.Union([
+    Type.Literal("prioritization_quality"),
+    Type.Literal("decomposition_quality"),
+    Type.Literal("promotion_precision"),
+    Type.Literal("decision_stability"),
+    Type.Literal("operator_acceptance")
+  ], {
+    description: "Primary scorecard dimension this trust profile is intended to improve."
+  }),
+  scope_owner: Type.Union([
+    Type.Literal("widgetdc-orchestrator"),
+    Type.Literal("widgetdc-librechat"),
+    Type.Literal("snout")
+  ], {
+    description: "Approved runtime owner/consumer scope for this trust profile."
+  }),
+  last_verified_at: Type.String({
+    format: "date-time",
+    description: "Latest runtime verification timestamp for this trust profile."
+  })
+}, {
+  $id: "AgentTrustProfile",
+  description: "Minimal orchestrator trust profile. Used only by widgetdc-orchestrator, widgetdc-librechat, and optional Snout routing support."
+});
+
+// ../widgetdc-contracts/dist/orchestrator/routing-intent.js
+var RoutingCapability = Type.Union([
+  Type.Literal("engagement_intake"),
+  Type.Literal("guided_decomposition"),
+  Type.Literal("verified_recommendation"),
+  Type.Literal("learning_feedback"),
+  Type.Literal("workflow_audit")
+], {
+  $id: "RoutingCapability",
+  description: "Capabilities the orchestrator may route within the active LIN-165 wedge."
+});
+var RoutingIntent = Type.Object({
+  intent_id: Type.String({
+    description: "Stable intent identifier for routing and lineage."
+  }),
+  capability: RoutingCapability,
+  task_domain: Type.Union([
+    Type.Literal("intake"),
+    Type.Literal("decomposition"),
+    Type.Literal("recommendation"),
+    Type.Literal("learning"),
+    Type.Literal("audit")
+  ], {
+    description: "Execution domain for scorecard and trust-model mapping."
+  }),
+  flow_ref: Type.Union([
+    Type.Literal("core-flow-1"),
+    Type.Literal("core-flow-2"),
+    Type.Literal("core-flow-3")
+  ], {
+    description: "Canonical LIN-165 flow this intent strengthens."
+  }),
+  route_scope: Type.Array(Type.Union([
+    Type.Literal("widgetdc-orchestrator"),
+    Type.Literal("widgetdc-librechat"),
+    Type.Literal("snout")
+  ]), {
+    minItems: 1,
+    uniqueItems: true,
+    description: "Only approved consumers for this routing intent."
+  }),
+  operator_visible: Type.Boolean({
+    description: "Whether this intent may be surfaced in LibreChat lineage UI."
+  }),
+  scorecard_dimensions: Type.Array(Type.Union([
+    Type.Literal("prioritization_quality"),
+    Type.Literal("decomposition_quality"),
+    Type.Literal("promotion_precision"),
+    Type.Literal("decision_stability"),
+    Type.Literal("operator_acceptance"),
+    Type.Literal("time_to_verified_decision"),
+    Type.Literal("tri_source_arbitration_divergence")
+  ]), {
+    minItems: 1,
+    uniqueItems: true,
+    description: "Decision-quality dimensions this routing intent is expected to affect."
+  })
+}, {
+  $id: "RoutingIntent",
+  description: "Canonical routing intent used by the orchestrator to classify and constrain work within the active WidgeTDC wedge."
+});
+
+// ../widgetdc-contracts/dist/orchestrator/routing-decision.js
+var RoutingDecision = Type.Object({
+  decision_id: Type.String({
+    description: "Stable routing decision identifier for runtime lineage and read-back."
+  }),
+  intent: RoutingIntent,
+  selected_agent_id: Type.Union([AgentId, Type.String()], {
+    description: "Selected agent or runtime agent ID chosen by the orchestrator."
+  }),
+  selected_capability: RoutingCapability,
+  trust_score: Type.Number({
+    minimum: 0,
+    maximum: 1,
+    description: "Trust score that justified the selected route."
+  }),
+  reason_code: Type.Union([
+    Type.Literal("TRUST_WIN"),
+    Type.Literal("COST_TIER_MATCH"),
+    Type.Literal("FLOW_SPECIALIZATION"),
+    Type.Literal("FALLBACK_ROUTE"),
+    Type.Literal("WAIVER_ROUTE")
+  ], {
+    description: "Why this route was selected."
+  }),
+  evidence_refs: Type.Array(Type.String(), {
+    minItems: 1,
+    description: "References to trust, scorecard, or runtime evidence used during routing."
+  }),
+  waiver_reason: Type.Optional(Type.String({
+    description: "Required when fallback or waiver routing is used instead of the ideal route."
+  })),
+  decided_at: Type.String({
+    format: "date-time",
+    description: "Timestamp when the routing decision was made."
+  })
+}, {
+  $id: "RoutingDecision",
+  description: "Minimal routing decision envelope. Supports orchestrator routing transparency without introducing a second governance truth."
+});
+
+// ../widgetdc-contracts/dist/orchestrator/workflow-envelope.js
+var WorkflowPhase = Type.Union([
+  Type.Literal("discover"),
+  Type.Literal("define"),
+  Type.Literal("develop"),
+  Type.Literal("deliver")
+], {
+  $id: "WorkflowPhase",
+  description: "Canonical orchestration phases, narrowed for orchestrator/librechat/snout usage only."
+});
+var WorkflowType = Type.Union([
+  Type.Literal("research"),
+  Type.Literal("delivery"),
+  Type.Literal("audit"),
+  Type.Literal("debate")
+], {
+  $id: "WorkflowType",
+  description: "Workflow families allowed for the scoped orchestration layer."
+});
+var AgentWorkflowEnvelope = Type.Object({
+  workflow_id: Type.String({
+    description: "Stable workflow identifier for orchestration lineage."
+  }),
+  workflow_type: WorkflowType,
+  current_phase: WorkflowPhase,
+  participants: Type.Array(Type.Union([AgentId, Type.String()]), {
+    minItems: 1,
+    uniqueItems: true,
+    description: "Participants involved in the current workflow envelope."
+  }),
+  primary_surface: Type.Union([
+    Type.Literal("widgetdc-orchestrator"),
+    Type.Literal("widgetdc-librechat"),
+    Type.Literal("snout")
+  ], {
+    description: "Primary consumer/runtime that owns this workflow envelope."
+  }),
+  flow_ref: Type.Union([
+    Type.Literal("core-flow-1"),
+    Type.Literal("core-flow-2"),
+    Type.Literal("core-flow-3")
+  ], {
+    description: "Canonical LIN-165 flow strengthened by this workflow."
+  }),
+  scorecard_ref: Type.String({
+    description: "Reference to the decision-quality scorecard batch or evidence packet."
+  }),
+  reasoning_lineage_visible: Type.Boolean({
+    description: "Whether the workflow lineage may be surfaced in LibreChat or other approved consumers."
+  }),
+  quorum_consensus: Type.Optional(Type.Boolean({
+    description: "Set when a workflow requires explicit agreement before progressing."
+  })),
+  started_at: Type.String({
+    format: "date-time",
+    description: "Workflow start timestamp."
+  }),
+  updated_at: Type.String({
+    format: "date-time",
+    description: "Last workflow state update timestamp."
+  })
+}, {
+  $id: "AgentWorkflowEnvelope",
+  description: "Minimal workflow envelope for orchestrator routing and lineage. Not a platform-wide execution bus or governance replacement."
+});
+
 // src/validation.ts
 if (!format_exports.Has("date-time")) {
   format_exports.Set("date-time", (v) => !isNaN(Date.parse(v)));
@@ -8933,7 +9175,7 @@ toolsRouter.get("/namespaces", async (_req, res) => {
 import { Router as Router3 } from "express";
 
 // src/chain-engine.ts
-import { v4 as uuid } from "uuid";
+import { v4 as uuid2 } from "uuid";
 
 // src/cognitive-proxy.ts
 var COGNITIVE_ROUTES = {
@@ -9034,6 +9276,212 @@ async function getRlmHealth() {
   }
 }
 
+// src/routing-engine.ts
+import { v4 as uuid } from "uuid";
+var CAPABILITY_CANDIDATES = {
+  engagement_intake: ["the-snout", "harvest", "lc-harvester"],
+  guided_decomposition: ["nexus", "rlm", "consulting"],
+  verified_recommendation: ["omega", "consulting", "rlm"],
+  learning_feedback: ["cma", "nexus", "rlm"],
+  workflow_audit: ["omega", "custodian", "legal", "lc-sentinel"]
+};
+var CAPABILITY_META = {
+  engagement_intake: {
+    taskDomain: "intake",
+    flowRef: "core-flow-1",
+    workflowType: "research",
+    workflowPhase: "discover",
+    scorecardDimensions: ["prioritization_quality", "time_to_verified_decision"],
+    trustDimension: "prioritization_quality"
+  },
+  guided_decomposition: {
+    taskDomain: "decomposition",
+    flowRef: "core-flow-2",
+    workflowType: "delivery",
+    workflowPhase: "define",
+    scorecardDimensions: ["decomposition_quality", "decision_stability"],
+    trustDimension: "decomposition_quality"
+  },
+  verified_recommendation: {
+    taskDomain: "recommendation",
+    flowRef: "core-flow-3",
+    workflowType: "delivery",
+    workflowPhase: "deliver",
+    scorecardDimensions: ["promotion_precision", "decision_stability", "time_to_verified_decision"],
+    trustDimension: "promotion_precision"
+  },
+  learning_feedback: {
+    taskDomain: "learning",
+    flowRef: "core-flow-3",
+    workflowType: "audit",
+    workflowPhase: "deliver",
+    scorecardDimensions: ["operator_acceptance", "decision_stability"],
+    trustDimension: "operator_acceptance"
+  },
+  workflow_audit: {
+    taskDomain: "audit",
+    flowRef: "core-flow-3",
+    workflowType: "audit",
+    workflowPhase: "deliver",
+    scorecardDimensions: ["tri_source_arbitration_divergence", "decision_stability"],
+    trustDimension: "decision_stability"
+  }
+};
+var recentRoutingDecisions = [];
+function roundScore(value) {
+  return Math.round(value * 1e3) / 1e3;
+}
+function inferCapabilityFromMessage(message) {
+  const text = message.toLowerCase();
+  if (text.includes("feedback") || text.includes("accept") || text.includes("reject") || text.includes("learning")) {
+    return "learning_feedback";
+  }
+  if (text.includes("audit") || text.includes("verify") || text.includes("compliance") || text.includes("policy")) {
+    return "workflow_audit";
+  }
+  if (text.includes("recommend") || text.includes("decision") || text.includes("promot") || text.includes("surface")) {
+    return "verified_recommendation";
+  }
+  if (text.includes("decompose") || text.includes("break down") || text.includes("plan") || text.includes("bridge")) {
+    return "guided_decomposition";
+  }
+  return "engagement_intake";
+}
+function buildIntent(capability, routeScope, operatorVisible) {
+  const meta = CAPABILITY_META[capability];
+  return {
+    intent_id: `intent-${uuid().slice(0, 8)}`,
+    capability,
+    task_domain: meta.taskDomain === "routing" ? "intake" : meta.taskDomain,
+    flow_ref: meta.flowRef,
+    route_scope: routeScope,
+    operator_visible: operatorVisible,
+    scorecard_dimensions: meta.scorecardDimensions
+  };
+}
+function getCandidateAgents(capability) {
+  return CAPABILITY_CANDIDATES[capability].filter((agentId) => AgentRegistry.get(agentId));
+}
+function summarizeEvidence(agentId, executions2) {
+  const references = [];
+  let successCount = 0;
+  let failCount = 0;
+  for (const execution of executions2.slice(0, 20)) {
+    const step = execution.results.find((result) => result.agent_id === agentId);
+    if (!step) continue;
+    const verifiedSuccess = step.status === "success" && step.verified !== false;
+    if (verifiedSuccess) {
+      successCount += 1;
+    } else if (step.status !== "success") {
+      failCount += 1;
+    }
+    references.push(`execution:${execution.execution_id}:${step.status}`);
+  }
+  return { successCount, failCount, evidenceRefs: references.slice(0, 5) };
+}
+function buildTrustProfile(agentId, capability, executions2) {
+  const meta = CAPABILITY_META[capability];
+  const priorWeight = 3;
+  const defaultPriorScore = 0.6;
+  const { successCount, failCount } = summarizeEvidence(agentId, executions2);
+  const bayesianScore = roundScore(
+    (defaultPriorScore * priorWeight + successCount) / (priorWeight + successCount + failCount)
+  );
+  return {
+    agent_id: agentId,
+    task_domain: meta.taskDomain,
+    success_count: successCount,
+    fail_count: failCount,
+    bayesian_score: bayesianScore,
+    prior_weight: priorWeight,
+    default_prior_score: defaultPriorScore,
+    evidence_source: successCount + failCount > 0 ? "runtime_readback" : "decision_quality_scorecard",
+    scorecard_dimension: meta.trustDimension,
+    scope_owner: "widgetdc-orchestrator",
+    last_verified_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function sortProfiles(profiles) {
+  return [...profiles].sort((left, right) => {
+    if (right.bayesian_score !== left.bayesian_score) {
+      return right.bayesian_score - left.bayesian_score;
+    }
+    return AgentRegistry.getActiveCalls(left.agent_id) - AgentRegistry.getActiveCalls(right.agent_id);
+  });
+}
+function buildWorkflowEnvelope(workflowId, intent, selectedAgentId, routeScope) {
+  const meta = CAPABILITY_META[intent.capability];
+  const participants = Array.from(/* @__PURE__ */ new Set(["master", selectedAgentId]));
+  return {
+    workflow_id: workflowId,
+    workflow_type: meta.workflowType,
+    current_phase: meta.workflowPhase,
+    participants,
+    primary_surface: routeScope.includes("widgetdc-librechat") ? "widgetdc-librechat" : routeScope[0],
+    flow_ref: meta.flowRef,
+    scorecard_ref: "LIN-261",
+    reasoning_lineage_visible: intent.operator_visible,
+    started_at: (/* @__PURE__ */ new Date()).toISOString(),
+    updated_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function rememberDecision(decision) {
+  recentRoutingDecisions.unshift(decision);
+  if (recentRoutingDecisions.length > 50) {
+    recentRoutingDecisions.length = 50;
+  }
+}
+function resolveRoutingDecision(input) {
+  const routeScope = input.routeScope && input.routeScope.length > 0 ? [...input.routeScope] : ["widgetdc-orchestrator"];
+  const operatorVisible = input.operatorVisible ?? true;
+  const capability = input.capabilityHint ?? inferCapabilityFromMessage(input.message);
+  const recentExecutions = input.recentExecutions ?? [];
+  const intent = buildIntent(capability, routeScope, operatorVisible);
+  const candidates = getCandidateAgents(capability);
+  const fallbackAgents = candidates.length > 0 ? candidates : ["rlm"];
+  const trustProfiles = sortProfiles(
+    fallbackAgents.map((agentId) => buildTrustProfile(agentId, capability, recentExecutions))
+  );
+  const selectedProfile = trustProfiles[0];
+  const workflowId = input.workflowId ?? `workflow-${uuid().slice(0, 8)}`;
+  const evidenceRefs = [
+    ...summarizeEvidence(selectedProfile.agent_id, recentExecutions).evidenceRefs,
+    `scorecard:LIN-261:${intent.capability}`
+  ];
+  const decision = {
+    decision_id: `route-${uuid().slice(0, 8)}`,
+    intent,
+    selected_agent_id: selectedProfile.agent_id,
+    selected_capability: capability,
+    trust_score: selectedProfile.bayesian_score,
+    reason_code: candidates.length > 0 && selectedProfile.success_count + selectedProfile.fail_count > 0 ? "TRUST_WIN" : candidates.length > 0 ? "FLOW_SPECIALIZATION" : "FALLBACK_ROUTE",
+    evidence_refs: evidenceRefs.slice(0, 6),
+    ...candidates.length > 0 ? {} : { waiver_reason: "No capability-specific agent was registered; defaulted to rlm." },
+    decided_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  rememberDecision(decision);
+  return {
+    selectedAgentId: selectedProfile.agent_id,
+    intent,
+    trustProfiles,
+    decision,
+    workflowEnvelope: buildWorkflowEnvelope(workflowId, intent, selectedProfile.agent_id, routeScope)
+  };
+}
+function getRecentRoutingDecisions() {
+  return [...recentRoutingDecisions];
+}
+function buildRoutingDashboardData(recentExecutions) {
+  const allProfiles = Object.keys(CAPABILITY_CANDIDATES).flatMap((capability) => {
+    const profiles = getCandidateAgents(capability).map((agentId) => buildTrustProfile(agentId, capability, recentExecutions));
+    return sortProfiles(profiles).slice(0, 2);
+  });
+  return {
+    recentDecisions: getRecentRoutingDecisions().slice(0, 10),
+    topTrustProfiles: allProfiles
+  };
+}
+
 // src/chain-engine.ts
 var executions = /* @__PURE__ */ new Map();
 function persistExecution(exec) {
@@ -9053,7 +9501,7 @@ function listExecutions() {
   return Array.from(executions.values()).sort((a, b) => b.started_at.localeCompare(a.started_at)).slice(0, 50);
 }
 async function executeStep(step, previousOutput) {
-  const stepId = step.id ?? uuid().slice(0, 8);
+  const stepId = step.id ?? uuid2().slice(0, 8);
   const t0 = Date.now();
   const prevStr = typeof previousOutput === "string" ? previousOutput : JSON.stringify(previousOutput ?? "");
   try {
@@ -9075,7 +9523,7 @@ async function executeStep(step, previousOutput) {
       const result = await callMcpTool({
         toolName: step.tool_name,
         args,
-        callId: uuid(),
+        callId: uuid2(),
         timeoutMs: step.timeout_ms ?? 3e4
       });
       if (result.status !== "success") {
@@ -9225,9 +9673,31 @@ Reply as JSON: {"synthesis": "best answer", "scores": [{"agent": "id", "confiden
   verifyResult.output = verification.synthesis ?? verifyResult.output;
   return [...debateResults, verifyResult];
 }
+async function resolveAutoSteps(def) {
+  const routingDecisions = [];
+  let workflowEnvelope;
+  const resolvedSteps = def.steps.map((step, index) => {
+    if (step.agent_id !== "auto") return step;
+    const resolution = resolveRoutingDecision({
+      message: step.prompt ?? def.query ?? def.name,
+      capabilityHint: step.capability,
+      routeScope: ["widgetdc-orchestrator", "widgetdc-librechat"],
+      operatorVisible: true,
+      recentExecutions: listExecutions(),
+      workflowId: def.chain_id ?? `adaptive-${index}-${Date.now().toString(36)}`
+    });
+    routingDecisions.push(resolution.decision);
+    workflowEnvelope = workflowEnvelope ?? resolution.workflowEnvelope;
+    return {
+      ...step,
+      agent_id: resolution.selectedAgentId
+    };
+  });
+  return { steps: resolvedSteps, routingDecisions, workflowEnvelope };
+}
 async function executeChain(def) {
-  const executionId = uuid();
-  const chainId = def.chain_id ?? uuid().slice(0, 12);
+  const executionId = uuid2();
+  const chainId = def.chain_id ?? uuid2().slice(0, 12);
   const t0 = Date.now();
   const execution = {
     execution_id: executionId,
@@ -9251,22 +9721,25 @@ async function executeChain(def) {
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   });
   try {
+    const { steps: resolvedSteps, routingDecisions, workflowEnvelope } = def.mode === "adaptive" || def.steps.some((step) => step.agent_id === "auto") ? await resolveAutoSteps(def) : { steps: def.steps, routingDecisions: [], workflowEnvelope: void 0 };
+    execution.routing_decisions = routingDecisions;
+    execution.workflow_envelope = workflowEnvelope;
     let results;
     switch (def.mode) {
       case "sequential":
-        results = await runSequential(def.steps);
+        results = await runSequential(resolvedSteps);
         break;
       case "parallel":
-        results = await runParallel(def.steps);
+        results = await runParallel(resolvedSteps);
         break;
       case "loop":
-        results = await runLoop(def.steps, def.max_iterations ?? 5, def.exit_condition);
+        results = await runLoop(resolvedSteps, def.max_iterations ?? 5, def.exit_condition);
         break;
       case "debate":
-        results = await runDebateGVU(def.steps, def.judge_agent, def.confidence_threshold);
+        results = await runDebateGVU(resolvedSteps, def.judge_agent, def.confidence_threshold);
         break;
       case "adaptive": {
-        const adaptive = await runAdaptive(def.steps, def.query, def.judge_agent, def.confidence_threshold);
+        const adaptive = await runAdaptive(resolvedSteps, def.query, def.judge_agent, def.confidence_threshold);
         results = adaptive.results;
         execution.chosen_topology = adaptive.chosen_topology;
         break;
@@ -9508,7 +9981,7 @@ function listProviders() {
 }
 
 // src/dual-rag.ts
-import { v4 as uuid2 } from "uuid";
+import { v4 as uuid3 } from "uuid";
 async function dualChannelRAG(query, options) {
   const t0 = Date.now();
   const maxResults = options?.maxResults ?? 10;
@@ -9517,7 +9990,7 @@ async function dualChannelRAG(query, options) {
     callMcpTool({
       toolName: "srag.query",
       args: { query },
-      callId: uuid2(),
+      callId: uuid3(),
       timeoutMs: 3e4
     }),
     callMcpTool({
@@ -9525,7 +9998,7 @@ async function dualChannelRAG(query, options) {
       args: {
         query: buildCypherQuery(query, depth)
       },
-      callId: uuid2(),
+      callId: uuid3(),
       timeoutMs: 15e3
     })
   ]);
@@ -9740,6 +10213,10 @@ ${context}` },
   }
 }
 var chatRouter = Router3();
+function shouldRouteViaOrchestrator(target) {
+  if (!target) return false;
+  return target === "master" || target === "Orchestrator";
+}
 chatRouter.post("/message", (req, res) => {
   const result = validate(validateMessage, req.body);
   if (!result.ok) {
@@ -9767,10 +10244,41 @@ chatRouter.post("/message", (req, res) => {
   logger.info({ from: msg.from, to: msg.to, type: msg.type }, "Chat message broadcast");
   const noReply = req.body.no_reply === true;
   if (!noReply && msg.to && msg.to !== "All" && msg.source !== "system" && msg.source !== "agent") {
-    const targetAgent = AgentRegistry.get(msg.to);
-    if (targetAgent) {
-      agentAutoReply(msg.to, msg.message, msg.from, req.body.thread_id, req.body.provider).catch(() => {
+    if (shouldRouteViaOrchestrator(msg.to)) {
+      const resolution = resolveRoutingDecision({
+        message: msg.message,
+        routeScope: ["widgetdc-orchestrator", "widgetdc-librechat"],
+        operatorVisible: true,
+        recentExecutions: listExecutions(),
+        workflowId: req.body.thread_id
       });
+      broadcastMessage({
+        from: "Orchestrator",
+        to: msg.from,
+        source: "orchestrator",
+        type: "Handover",
+        message: `Routing decision: ${resolution.decision.selected_agent_id} for ${resolution.decision.selected_capability} (${resolution.decision.reason_code}, trust=${resolution.decision.trust_score})`,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        ...req.body.thread_id ? { thread_id: req.body.thread_id } : {},
+        metadata: {
+          routing_decision: resolution.decision,
+          workflow_envelope: resolution.workflowEnvelope
+        }
+      });
+      agentAutoReply(
+        resolution.selectedAgentId,
+        msg.message,
+        msg.from,
+        req.body.thread_id,
+        req.body.provider
+      ).catch(() => {
+      });
+    } else {
+      const targetAgent = AgentRegistry.get(msg.to);
+      if (targetAgent) {
+        agentAutoReply(msg.to, msg.message, msg.from, req.body.thread_id, req.body.provider).catch(() => {
+        });
+      }
     }
   }
   res.json({ success: true, data: { id: msg.id, timestamp: msg.timestamp } });
@@ -10295,7 +10803,7 @@ chainsRouter.post("/execute", async (req, res) => {
       success: false,
       error: {
         code: "VALIDATION_ERROR",
-        message: "Required: name, mode (sequential|parallel|loop|debate), steps[] (non-empty)",
+        message: "Required: name, mode (sequential|parallel|loop|debate|adaptive), steps[] (non-empty)",
         status_code: 400
       }
     });
@@ -10313,6 +10821,13 @@ chainsRouter.post("/execute", async (req, res) => {
       res.status(400).json({
         success: false,
         error: { code: "VALIDATION_ERROR", message: "Each step needs tool_name or cognitive_action", status_code: 400 }
+      });
+      return;
+    }
+    if (step.agent_id === "auto" && !step.capability) {
+      res.status(400).json({
+        success: false,
+        error: { code: "VALIDATION_ERROR", message: "Auto-routed steps require capability", status_code: 400 }
       });
       return;
     }
@@ -10416,12 +10931,12 @@ import { Router as Router6 } from "express";
 import cron from "node-cron";
 
 // src/graph-self-correct.ts
-import { v4 as uuid3 } from "uuid";
+import { v4 as uuid4 } from "uuid";
 async function graphRead(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid3(),
+    callId: uuid4(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -10432,7 +10947,7 @@ async function graphWrite(cypher, params) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { parameters: params } : {} },
-    callId: uuid3(),
+    callId: uuid4(),
     timeoutMs: 15e3
   });
   return result.status === "success";
@@ -11163,6 +11678,7 @@ dashboardRouter.get("/data", async (_req, res) => {
   }));
   const wsStats = getConnectionStats();
   const chains = listExecutions().slice(0, 50);
+  const routing = buildRoutingDashboardData(chains);
   const cronJobs = listCronJobs();
   const rlmAvailable = isRlmAvailable();
   let rlmHealth = null;
@@ -11176,6 +11692,7 @@ dashboardRouter.get("/data", async (_req, res) => {
     agents,
     wsStats,
     chains,
+    routing,
     cronJobs,
     rlmAvailable,
     rlmHealth,
@@ -11502,13 +12019,13 @@ ${compressed}`,
 }
 
 // src/routes/monitor.ts
-import { v4 as uuid4 } from "uuid";
+import { v4 as uuid5 } from "uuid";
 var monitorRouter = Router11();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid4(),
+    callId: uuid5(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];

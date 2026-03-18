@@ -18,7 +18,7 @@ chainsRouter.post('/execute', async (req: Request, res: Response) => {
       success: false,
       error: {
         code: 'VALIDATION_ERROR',
-        message: 'Required: name, mode (sequential|parallel|loop|debate), steps[] (non-empty)',
+        message: 'Required: name, mode (sequential|parallel|loop|debate|adaptive), steps[] (non-empty)',
         status_code: 400,
       },
     })
@@ -38,6 +38,13 @@ chainsRouter.post('/execute', async (req: Request, res: Response) => {
       res.status(400).json({
         success: false,
         error: { code: 'VALIDATION_ERROR', message: 'Each step needs tool_name or cognitive_action', status_code: 400 },
+      })
+      return
+    }
+    if (step.agent_id === 'auto' && !step.capability) {
+      res.status(400).json({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: 'Auto-routed steps require capability', status_code: 400 },
       })
       return
     }

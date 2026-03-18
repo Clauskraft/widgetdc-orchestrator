@@ -14,12 +14,20 @@ import { callCognitive } from './cognitive-proxy.js'
 import { broadcastMessage } from './chat-broadcaster.js'
 import { logger } from './logger.js'
 import { getRedis } from './redis.js'
+import { resolveRoutingDecision } from './routing-engine.js'
+import type {
+  AgentWorkflowEnvelope,
+  RoutingCapability,
+  RoutingDecision,
+} from '@widgetdc/contracts/orchestrator'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export interface ChainStep {
   id?: string
   agent_id: string
+  /** Orchestrator-only capability hint for auto-routing */
+  capability?: RoutingCapability
   /** MCP tool to call (mutually exclusive with cognitive_action) */
   tool_name?: string
   /** Cognitive action: analyze | plan | reason | fold | learn */
@@ -62,6 +70,8 @@ export interface ChainExecution {
   duration_ms?: number
   final_output?: unknown
   error?: string
+  routing_decisions?: RoutingDecision[]
+  workflow_envelope?: AgentWorkflowEnvelope
 }
 
 interface StepResult {
@@ -354,6 +364,38 @@ Reply as JSON: {"synthesis": "best answer", "scores": [{"agent": "id", "confiden
   return [...debateResults, verifyResult]
 }
 
+async function resolveAutoSteps(def: ChainDefinition): Promise<{
+  steps: ChainStep[]
+  routingDecisions: RoutingDecision[]
+  workflowEnvelope?: AgentWorkflowEnvelope
+}> {
+  const routingDecisions: RoutingDecision[] = []
+  let workflowEnvelope: AgentWorkflowEnvelope | undefined
+
+  const resolvedSteps = def.steps.map((step, index) => {
+    if (step.agent_id !== 'auto') return step
+
+    const resolution = resolveRoutingDecision({
+      message: step.prompt ?? def.query ?? def.name,
+      capabilityHint: step.capability,
+      routeScope: ['widgetdc-orchestrator', 'widgetdc-librechat'],
+      operatorVisible: true,
+      recentExecutions: listExecutions(),
+      workflowId: def.chain_id ?? `adaptive-${index}-${Date.now().toString(36)}`,
+    })
+
+    routingDecisions.push(resolution.decision)
+    workflowEnvelope = workflowEnvelope ?? resolution.workflowEnvelope
+
+    return {
+      ...step,
+      agent_id: resolution.selectedAgentId,
+    }
+  })
+
+  return { steps: resolvedSteps, routingDecisions, workflowEnvelope }
+}
+
 // ─── Main Executor ──────────────────────────────────────────────────────────
 
 export async function executeChain(def: ChainDefinition): Promise<ChainExecution> {
@@ -387,23 +429,31 @@ export async function executeChain(def: ChainDefinition): Promise<ChainExecution
   })
 
   try {
+    const { steps: resolvedSteps, routingDecisions, workflowEnvelope } =
+      def.mode === 'adaptive' || def.steps.some(step => step.agent_id === 'auto')
+        ? await resolveAutoSteps(def)
+        : { steps: def.steps, routingDecisions: [], workflowEnvelope: undefined }
+
+    execution.routing_decisions = routingDecisions
+    execution.workflow_envelope = workflowEnvelope
+
     let results: StepResult[]
 
     switch (def.mode) {
       case 'sequential':
-        results = await runSequential(def.steps)
+        results = await runSequential(resolvedSteps)
         break
       case 'parallel':
-        results = await runParallel(def.steps)
+        results = await runParallel(resolvedSteps)
         break
       case 'loop':
-        results = await runLoop(def.steps, def.max_iterations ?? 5, def.exit_condition)
+        results = await runLoop(resolvedSteps, def.max_iterations ?? 5, def.exit_condition)
         break
       case 'debate':
-        results = await runDebateGVU(def.steps, def.judge_agent, def.confidence_threshold)
+        results = await runDebateGVU(resolvedSteps, def.judge_agent, def.confidence_threshold)
         break
       case 'adaptive': {
-        const adaptive = await runAdaptive(def.steps, def.query, def.judge_agent, def.confidence_threshold)
+        const adaptive = await runAdaptive(resolvedSteps, def.query, def.judge_agent, def.confidence_threshold)
         results = adaptive.results
         ;(execution as any).chosen_topology = adaptive.chosen_topology
         break

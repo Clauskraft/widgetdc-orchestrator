@@ -13,9 +13,11 @@ import { getHistory, getThread, searchMessages, togglePin, getPinnedMessages, ge
 import { config } from '../config.js'
 import { callCognitive, isRlmAvailable } from '../cognitive-proxy.js'
 import { executeChain } from '../chain-engine.js'
+import { listExecutions } from '../chain-engine.js'
 import { chatLLM } from '../llm-proxy.js'
 import { dualChannelRAG } from '../dual-rag.js'
 import { AgentRegistry } from '../agent-registry.js'
+import { resolveRoutingDecision } from '../routing-engine.js'
 import type { AgentMessage } from '@widgetdc/contracts/orchestrator'
 
 // ─── Memory helpers — persist to multiple memory layers ──────────────────────
@@ -195,6 +197,11 @@ async function agentAutoReply(agentId: string, userMessage: string, from: string
 
 export const chatRouter = Router()
 
+function shouldRouteViaOrchestrator(target: string | undefined): boolean {
+  if (!target) return false
+  return target === 'master' || target === 'Orchestrator'
+}
+
 // ─── POST /message — Broadcast + persist ─────────────────────────────────────
 chatRouter.post('/message', (req: Request, res: Response) => {
   const result = validate<AgentMessage>(validateMessage, req.body)
@@ -228,10 +235,44 @@ chatRouter.post('/message', (req: Request, res: Response) => {
   // Trigger agent auto-reply if message targets a specific registered agent
   const noReply = req.body.no_reply === true
   if (!noReply && msg.to && msg.to !== 'All' && msg.source !== 'system' && msg.source !== 'agent') {
-    const targetAgent = AgentRegistry.get(msg.to)
-    if (targetAgent) {
+    if (shouldRouteViaOrchestrator(msg.to)) {
+      const resolution = resolveRoutingDecision({
+        message: msg.message,
+        routeScope: ['widgetdc-orchestrator', 'widgetdc-librechat'],
+        operatorVisible: true,
+        recentExecutions: listExecutions(),
+        workflowId: req.body.thread_id,
+      })
+
+      broadcastMessage({
+        from: 'Orchestrator',
+        to: msg.from,
+        source: 'orchestrator',
+        type: 'Handover',
+        message:
+          `Routing decision: ${resolution.decision.selected_agent_id} for ${resolution.decision.selected_capability} ` +
+          `(${resolution.decision.reason_code}, trust=${resolution.decision.trust_score})`,
+        timestamp: new Date().toISOString(),
+        ...(req.body.thread_id ? { thread_id: req.body.thread_id } : {}),
+        metadata: {
+          routing_decision: resolution.decision,
+          workflow_envelope: resolution.workflowEnvelope,
+        },
+      })
+
+      agentAutoReply(
+        resolution.selectedAgentId,
+        msg.message,
+        msg.from,
+        req.body.thread_id,
+        req.body.provider
+      ).catch(() => {})
+    } else {
+      const targetAgent = AgentRegistry.get(msg.to)
+      if (targetAgent) {
       // Fire-and-forget — don't block the response
-      agentAutoReply(msg.to, msg.message, msg.from, req.body.thread_id, req.body.provider).catch(() => {})
+        agentAutoReply(msg.to, msg.message, msg.from, req.body.thread_id, req.body.provider).catch(() => {})
+      }
     }
   }
 
