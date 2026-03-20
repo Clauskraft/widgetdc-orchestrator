@@ -1,0 +1,48 @@
+name: Deploy to Railway
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy orchestrator to Railway
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RAILWAY_URL: ${{ secrets.RAILWAY_URL || vars.RAILWAY_URL || 'https://orchestrator-production-c27e.up.railway.app' }}
+      RAILWAY_PROJECT_ID: "0faf9e36-23d2-4bda-b51d-c713b6ff7c26"
+      RAILWAY_SERVICE_NAME: "orchestrator"
+      RAILWAY_ENVIRONMENT_NAME: "production"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Link Railway project
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway link -p "$RAILWAY_PROJECT_ID" -e "$RAILWAY_ENVIRONMENT_NAME" -s "$RAILWAY_SERVICE_NAME"
+
+      - name: Deploy to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway up --ci --service "$RAILWAY_SERVICE_NAME"
+
+      - name: Wait for rollout window
+        run: sleep 45
+
+      - name: Verify live health
+        run: curl -fsSL "$RAILWAY_URL/health"
