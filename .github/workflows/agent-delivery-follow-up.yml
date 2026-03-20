@@ -1,9 +1,7 @@
 name: Agent Delivery Follow-Up
 
 on:
-  push:
-    branches:
-      - main
+  deployment_status:
   workflow_dispatch:
     inputs:
       railway_url:
@@ -18,13 +16,18 @@ permissions:
 jobs:
   follow-up:
     name: Verify main push and Railway runtime
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.deployment_status.state == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
       RAILWAY_URL: ${{ inputs.railway_url || secrets.RAILWAY_URL || vars.RAILWAY_URL }}
+      TARGET_BRANCH: ${{ github.event.deployment.ref || github.ref_name }}
+      TARGET_SHA: ${{ github.event.deployment.sha || github.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.deployment.sha || github.sha }}
 
       - name: Setup Node.js when package.json exists
         if: ${{ hashFiles('package.json') != '' }}
@@ -65,8 +68,8 @@ jobs:
           {
             echo "### Agent Delivery Follow-Up"
             echo ""
-            echo "- Commit: \`${GITHUB_SHA}\`"
-            echo "- Branch: \`${GITHUB_REF_NAME}\`"
+            echo "- Commit: \`${TARGET_SHA}\`"
+            echo "- Branch: \`${TARGET_BRANCH}\`"
             if [ -n "${RAILWAY_URL:-}" ]; then
               echo "- Railway URL: \`${RAILWAY_URL}\`"
             else
@@ -80,15 +83,17 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            const sha = process.env.TARGET_SHA || context.sha;
+            const branch = process.env.TARGET_BRANCH || context.ref;
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `Deployment follow-up failed on main: ${context.sha.slice(0, 7)}`,
+              title: `Deployment follow-up failed on main: ${sha.slice(0, 7)}`,
               body: [
                 '## Agent Delivery Follow-Up Failure',
                 '',
-                `- Commit: ${context.sha}`,
-                `- Branch: ${context.ref}`,
+                `- Commit: ${sha}`,
+                `- Branch: ${branch}`,
                 `- Workflow: ${context.workflow}`,
                 '',
                 'The repository reached `main`, but the required Railway/runtime follow-up did not complete successfully.',
