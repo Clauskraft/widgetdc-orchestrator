@@ -1,61 +1,60 @@
 /**
- * slack.ts — Slack webhook integration for agent activity notifications.
+ * slack.ts — Slack notifications via MCP backend route.
  *
- * Posts to a Slack channel via Incoming Webhook when:
+ * Posts to a Slack channel via the backend MCP tool `slack.channel.post` when:
  * - An agent registers/deregisters
  * - A tool call completes (success or error)
  * - A chat message is broadcast
  *
- * Set SLACK_WEBHOOK_URL env var to enable.
+ * Requires BACKEND_URL and BACKEND_API_KEY (or API_KEY) env vars.
  */
 import { config } from './config.js'
 import { logger } from './logger.js'
 
-const webhookUrl = process.env['SLACK_WEBHOOK_URL'] ?? ''
-
 export function isSlackEnabled(): boolean {
-  return webhookUrl.length > 0
+  return Boolean(config.backendUrl) && Boolean(config.backendApiKey)
 }
 
-interface SlackBlock {
-  type: string
-  text?: { type: string; text: string; emoji?: boolean }
-  fields?: Array<{ type: string; text: string }>
-  elements?: Array<{ type: string; text: string }>
+interface SlackPostPayload {
+  text: string
+  level: 'info' | 'warn' | 'error'
+  title?: string
+  source: string
+  channel: string
 }
 
-async function postToSlack(blocks: SlackBlock[], text: string): Promise<void> {
+async function postToSlack(payload: SlackPostPayload): Promise<void> {
   if (!isSlackEnabled()) return
 
   try {
-    const res = await fetch(webhookUrl, {
+    const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, blocks }),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.backendApiKey}`,
+      },
+      body: JSON.stringify({
+        tool: 'slack.channel.post',
+        payload,
+      }),
     })
 
     if (!res.ok) {
-      logger.warn({ status: res.status }, 'Slack webhook failed')
+      logger.warn({ status: res.status }, 'Slack MCP post failed')
     }
   } catch (err) {
-    logger.warn({ err: String(err) }, 'Slack webhook error')
+    logger.warn({ err: String(err) }, 'Slack MCP post error')
   }
 }
 
 export function notifyAgentRegistered(agentId: string, displayName: string, namespaces: string[]): void {
-  postToSlack([
-    {
-      type: 'header',
-      text: { type: 'plain_text', text: `Agent Registered: ${displayName}`, emoji: true },
-    },
-    {
-      type: 'section',
-      fields: [
-        { type: 'mrkdwn', text: `*Agent ID:*\n\`${agentId}\`` },
-        { type: 'mrkdwn', text: `*Tool Namespaces:*\n${namespaces.join(', ')}` },
-      ],
-    },
-  ], `Agent ${displayName} (${agentId}) registered`)
+  postToSlack({
+    text: `Agent *${displayName}* (\`${agentId}\`) registered\nNamespaces: ${namespaces.join(', ')}`,
+    level: 'info',
+    title: `Agent Registered: ${displayName}`,
+    source: 'orchestrator',
+    channel: '#ops-alerts',
+  })
 }
 
 export function notifyToolCall(
@@ -66,36 +65,24 @@ export function notifyToolCall(
   errorMessage?: string | null,
 ): void {
   const emoji = status === 'success' ? ':white_check_mark:' : ':x:'
-  const color = status === 'success' ? '#36a64f' : '#e01e5a'
+  const level = status === 'success' ? 'info' as const : 'error' as const
+  const errorLine = errorMessage ? `\nError: \`${errorMessage.slice(0, 200)}\`` : ''
 
-  const fields: SlackBlock['fields'] = [
-    { type: 'mrkdwn', text: `*Agent:*\n\`${agentId}\`` },
-    { type: 'mrkdwn', text: `*Tool:*\n\`${toolName}\`` },
-    { type: 'mrkdwn', text: `*Status:*\n${emoji} ${status}` },
-    { type: 'mrkdwn', text: `*Duration:*\n${durationMs}ms` },
-  ]
-
-  if (errorMessage) {
-    fields.push({ type: 'mrkdwn', text: `*Error:*\n\`${errorMessage.slice(0, 200)}\`` })
-  }
-
-  postToSlack([
-    { type: 'section', fields },
-    {
-      type: 'context',
-      elements: [{ type: 'mrkdwn', text: `Orchestrator: \`${config.orchestratorId}\`` }],
-    },
-  ], `${emoji} ${agentId} called ${toolName} → ${status} (${durationMs}ms)`)
+  postToSlack({
+    text: `${emoji} \`${agentId}\` called \`${toolName}\` → *${status}* (${durationMs}ms)${errorLine}\nOrchestrator: \`${config.orchestratorId}\``,
+    level,
+    title: `Tool Call: ${toolName} → ${status}`,
+    source: 'orchestrator',
+    channel: '#ops-alerts',
+  })
 }
 
 export function notifyChatMessage(from: string, to: string, message: string): void {
-  postToSlack([
-    {
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: `*${from}* → *${to}*\n${message.slice(0, 500)}`,
-      },
-    },
-  ], `${from} → ${to}: ${message.slice(0, 100)}`)
+  postToSlack({
+    text: `*${from}* → *${to}*\n${message.slice(0, 500)}`,
+    level: 'info',
+    title: `Chat: ${from} → ${to}`,
+    source: 'orchestrator',
+    channel: '#ops-alerts',
+  })
 }
