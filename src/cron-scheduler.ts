@@ -315,12 +315,13 @@ export function registerDefaultLoops(): void {
     },
   })
 
-  // Evolution event tracker — records graph health snapshot hourly
+  // DEPRECATED (LIN-380): Evolution tracking consolidated into WidgeTDC graphSelfHealingCron R7.
+  // Kept as disabled reference; remove after verifying WidgeTDC cron covers same metrics.
   registerCronJob({
     id: 'evolution-tracker',
-    name: 'Evolution Event Tracker',
+    name: 'Evolution Event Tracker (DEPRECATED — see LIN-380)',
     schedule: '0 * * * *',
-    enabled: true,
+    enabled: false,
     chain: {
       name: 'Evolution Tracker',
       mode: 'parallel',
