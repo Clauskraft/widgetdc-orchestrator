@@ -599,78 +599,63 @@ var AgentRegistry = {
 };
 
 // src/slack.ts
-var webhookUrl = process.env["SLACK_WEBHOOK_URL"] ?? "";
 function isSlackEnabled() {
-  return webhookUrl.length > 0;
+  return Boolean(config.backendUrl) && Boolean(config.backendApiKey);
 }
-async function postToSlack(blocks, text) {
+async function postToSlack(payload) {
   if (!isSlackEnabled()) return;
   try {
-    const res = await fetch(webhookUrl, {
+    const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, blocks })
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${config.backendApiKey}`
+      },
+      body: JSON.stringify({
+        tool: "slack.channel.post",
+        payload
+      })
     });
     if (!res.ok) {
-      logger.warn({ status: res.status }, "Slack webhook failed");
+      logger.warn({ status: res.status }, "Slack MCP post failed");
     }
   } catch (err) {
-    logger.warn({ err: String(err) }, "Slack webhook error");
+    logger.warn({ err: String(err) }, "Slack MCP post error");
   }
 }
 function notifyAgentRegistered(agentId, displayName, namespaces) {
-  postToSlack([
-    {
-      type: "header",
-      text: { type: "plain_text", text: `Agent Registered: ${displayName}`, emoji: true }
-    },
-    {
-      type: "section",
-      fields: [
-        { type: "mrkdwn", text: `*Agent ID:*
-\`${agentId}\`` },
-        { type: "mrkdwn", text: `*Tool Namespaces:*
-${namespaces.join(", ")}` }
-      ]
-    }
-  ], `Agent ${displayName} (${agentId}) registered`);
+  postToSlack({
+    text: `Agent *${displayName}* (\`${agentId}\`) registered
+Namespaces: ${namespaces.join(", ")}`,
+    level: "info",
+    title: `Agent Registered: ${displayName}`,
+    source: "orchestrator",
+    channel: "#ops-alerts"
+  });
 }
 function notifyToolCall(agentId, toolName, status, durationMs, errorMessage) {
   const emoji = status === "success" ? ":white_check_mark:" : ":x:";
-  const color = status === "success" ? "#36a64f" : "#e01e5a";
-  const fields = [
-    { type: "mrkdwn", text: `*Agent:*
-\`${agentId}\`` },
-    { type: "mrkdwn", text: `*Tool:*
-\`${toolName}\`` },
-    { type: "mrkdwn", text: `*Status:*
-${emoji} ${status}` },
-    { type: "mrkdwn", text: `*Duration:*
-${durationMs}ms` }
-  ];
-  if (errorMessage) {
-    fields.push({ type: "mrkdwn", text: `*Error:*
-\`${errorMessage.slice(0, 200)}\`` });
-  }
-  postToSlack([
-    { type: "section", fields },
-    {
-      type: "context",
-      elements: [{ type: "mrkdwn", text: `Orchestrator: \`${config.orchestratorId}\`` }]
-    }
-  ], `${emoji} ${agentId} called ${toolName} \u2192 ${status} (${durationMs}ms)`);
+  const level = status === "success" ? "info" : "error";
+  const errorLine = errorMessage ? `
+Error: \`${errorMessage.slice(0, 200)}\`` : "";
+  postToSlack({
+    text: `${emoji} \`${agentId}\` called \`${toolName}\` \u2192 *${status}* (${durationMs}ms)${errorLine}
+Orchestrator: \`${config.orchestratorId}\``,
+    level,
+    title: `Tool Call: ${toolName} \u2192 ${status}`,
+    source: "orchestrator",
+    channel: "#ops-alerts"
+  });
 }
 function notifyChatMessage(from, to, message) {
-  postToSlack([
-    {
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text: `*${from}* \u2192 *${to}*
-${message.slice(0, 500)}`
-      }
-    }
-  ], `${from} \u2192 ${to}: ${message.slice(0, 100)}`);
+  postToSlack({
+    text: `*${from}* \u2192 *${to}*
+${message.slice(0, 500)}`,
+    level: "info",
+    title: `Chat: ${from} \u2192 ${to}`,
+    source: "orchestrator",
+    channel: "#ops-alerts"
+  });
 }
 
 // node_modules/@sinclair/typebox/build/esm/value/guard/guard.mjs
@@ -8254,6 +8239,42 @@ __export(type_exports3, {
 // ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/type/index.mjs
 var Type = type_exports3;
 
+// ../widgetdc-contracts/dist/orchestrator/fabric-proof.js
+var FabricProof = Type.Object({
+  proof_id: Type.String({
+    format: "uuid",
+    description: "Unique identifier for the issued fabric proof"
+  }),
+  proof_type: Type.Union([
+    Type.Literal("sgt"),
+    Type.String()
+  ], {
+    description: "Fabric proof mechanism identifier"
+  }),
+  verification_status: Type.Union([
+    Type.Literal("verified"),
+    Type.Literal("unverified"),
+    Type.Literal("expired"),
+    Type.Literal("revoked")
+  ], {
+    description: "Verification result for the proof at issuance or last refresh"
+  }),
+  authorized_tool_namespaces: Type.Array(Type.String(), {
+    description: 'Tool namespaces this proof authorizes. ["*"] grants all namespaces.'
+  }),
+  issued_at: Type.String({ format: "date-time" }),
+  expires_at: Type.Optional(Type.String({ format: "date-time" })),
+  issuer: Type.Optional(Type.String({
+    description: "Canonical issuer of the proof"
+  })),
+  handshake_id: Type.Optional(Type.String({
+    description: "Associated handshake identifier or fingerprint"
+  }))
+}, {
+  $id: "FabricProof",
+  description: "Verified immutable fabric proof issued during agent handshake. Used to authorize high-risk delegation and tool execution."
+});
+
 // ../widgetdc-contracts/dist/orchestrator/tool-call.js
 var OrchestratorToolCall = Type.Object({
   /** Unique call ID — used to correlate with OrchestratorToolResult */
@@ -8274,6 +8295,8 @@ var OrchestratorToolCall = Type.Object({
   arguments: Type.Record(Type.String(), Type.Unknown(), {
     description: "Tool-specific arguments (passed as payload to MCP route)"
   }),
+  /** Delegated fabric proof copied from verified handshake when high-risk namespaces are requested. */
+  fabric_proof: Type.Optional(FabricProof),
   /** Optional: cross-service trace ID for end-to-end correlation */
   trace_id: Type.Optional(Type.String({ format: "uuid" })),
   /** Priority hint — higher priority calls are processed first */
@@ -8377,8 +8400,12 @@ var AgentMessageType = Type.Union([
   // Formal agent handover (sprint transitions)
   Type.Literal("Alert"),
   // System alert or urgent notification
-  Type.Literal("ToolResult")
+  Type.Literal("ToolResult"),
   // Result of an Orchestrator tool call
+  Type.Literal("Arbitration"),
+  // Explicit arbitration packet in the governed routing loop
+  Type.Literal("Divergence")
+  // Explicit disagreement/divergence packet for tri-source review
 ], {
   $id: "AgentMessageType",
   description: "Classification of the message purpose"
@@ -8510,13 +8537,26 @@ var AgentHandshake = Type.Object({
     description: "List of capabilities this agent is authorized to use (known + domain-specific)",
     minItems: 0
   }),
-  /**
-   * Allowed MCP tool namespaces (e.g. ["graph", "audit", "consulting"])
-   * Empty = no MCP tool access. ["*"] = all tools (superuser — use with caution).
+  /** Allowed MCP tool namespaces (e.g. ["graph", "audit", "consulting"])
+   *  Empty = no MCP tool access. ["*"] = all tools (superuser — use with caution).
    */
   allowed_tool_namespaces: Type.Array(Type.String(), {
     description: 'MCP tool namespaces this agent may invoke (e.g. ["graph", "audit"])'
   }),
+  /** Verified immutable fabric proof for authorizing high-risk delegation/tool execution. */
+  fabric_proof: Type.Optional(FabricProof),
+  /** Optimized search index fingerprint for lazy-loading tools (Adoption: Anthropic Tool Search Index). Reduces handshake token bloat by 85%. */
+  capability_index: Type.Optional(Type.String({
+    description: "Optimized search index fingerprint for lazy-loading tools (Adoption: Anthropic Tool Search Index). Reduces handshake token bloat by 85%."
+  })),
+  /** Supported memory layers for this agent (Adoption: OpenClaw Memory Tiering). */
+  memory_tiers: Type.Optional(Type.Array(Type.Union([
+    Type.Literal("working"),
+    Type.Literal("episodic"),
+    Type.Literal("semantic")
+  ]), {
+    description: "Supported memory layers for this agent (Adoption: OpenClaw Memory Tiering)."
+  })),
   /** Max concurrent tool calls this agent is allowed to make */
   max_concurrent_calls: Type.Optional(Type.Integer({
     minimum: 1,
@@ -8556,6 +8596,38 @@ var StoredMessage = Type.Intersect([
   description: "Persisted agent message with storage-layer fields (id, reactions, pinned). Extends AgentMessage."
 });
 
+// ../widgetdc-contracts/dist/agent/enums.js
+var AgentTier = Type.Union([
+  Type.Literal("ANALYST"),
+  Type.Literal("ASSOCIATE"),
+  Type.Literal("MANAGER"),
+  Type.Literal("PARTNER"),
+  Type.Literal("ARCHITECT")
+], { $id: "AgentTier", description: "Consulting agent tier (ascending autonomy)" });
+var AgentPersona = Type.Union([
+  Type.Literal("RESEARCHER"),
+  Type.Literal("ENGINEER"),
+  Type.Literal("CUSTODIAN"),
+  Type.Literal("ARCHITECT"),
+  Type.Literal("SENTINEL"),
+  Type.Literal("ARCHIVIST"),
+  Type.Literal("HARVESTER"),
+  Type.Literal("ANALYST"),
+  Type.Literal("INTEGRATOR"),
+  Type.Literal("TESTER")
+], { $id: "AgentPersona", description: "RLM Engine agent persona" });
+var SignalType = Type.Union([
+  Type.Literal("task_started"),
+  Type.Literal("task_completed"),
+  Type.Literal("task_failed"),
+  Type.Literal("escalation"),
+  Type.Literal("quality_gate"),
+  Type.Literal("tool_executed"),
+  Type.Literal("deliverable_generated"),
+  Type.Literal("insight"),
+  Type.Literal("warning")
+], { $id: "SignalType", description: "Agent signal event type" });
+
 // ../widgetdc-contracts/dist/orchestrator/agent-trust-profile.js
 var OrchestratorTaskDomain = Type.Union([
   Type.Literal("intake"),
@@ -8577,10 +8649,41 @@ var TrustEvidenceSource = Type.Union([
   $id: "TrustEvidenceSource",
   description: "Canonical evidence sources allowed to influence routing trust."
 });
+var ScorecardDimension = Type.Union([
+  Type.Literal("prioritization_quality"),
+  Type.Literal("decomposition_quality"),
+  Type.Literal("promotion_precision"),
+  Type.Literal("decision_stability"),
+  Type.Literal("operator_acceptance"),
+  Type.Literal("normalization_quality"),
+  Type.Literal("arbitration_confidence"),
+  Type.Literal("time_to_verified_decision"),
+  Type.Literal("tri_source_arbitration_divergence")
+], {
+  $id: "ScorecardDimension",
+  description: "Canonical decision-quality dimensions approved for trust mapping and scorecard entries."
+});
+var ScopeOwner = Type.Union([
+  Type.Literal("widgetdc-orchestrator"),
+  Type.Literal("widgetdc-librechat"),
+  Type.Literal("snout")
+], {
+  $id: "ScopeOwner",
+  description: "Approved runtime owner or consumer scope for routing and trust contracts."
+});
 var AgentTrustProfile = Type.Object({
-  agent_id: Type.Union([AgentId, Type.String()], {
-    description: "Canonical agent identifier or scoped runtime agent ID."
-  }),
+  agent_persona: AgentPersona,
+  agent_id: Type.Optional(Type.Union([AgentId, Type.String()], {
+    description: "Legacy chat/runtime agent identifier. Optional because trust is anchored on persona, not provider."
+  })),
+  runtime_identity: Type.Optional(Type.String({
+    minLength: 1,
+    description: "Scoped runtime identity for a concrete worker, session, or delegated specialist."
+  })),
+  provider_source: Type.Optional(Type.String({
+    minLength: 1,
+    description: "Observed provider source for telemetry correlation only. Must not be used as the trust identity."
+  })),
   task_domain: OrchestratorTaskDomain,
   success_count: Type.Integer({
     minimum: 0,
@@ -8605,29 +8708,137 @@ var AgentTrustProfile = Type.Object({
     description: "Configured prior score before domain-specific evidence accumulates."
   }),
   evidence_source: TrustEvidenceSource,
-  scorecard_dimension: Type.Union([
-    Type.Literal("prioritization_quality"),
-    Type.Literal("decomposition_quality"),
-    Type.Literal("promotion_precision"),
-    Type.Literal("decision_stability"),
-    Type.Literal("operator_acceptance")
-  ], {
-    description: "Primary scorecard dimension this trust profile is intended to improve."
-  }),
-  scope_owner: Type.Union([
-    Type.Literal("widgetdc-orchestrator"),
-    Type.Literal("widgetdc-librechat"),
-    Type.Literal("snout")
-  ], {
-    description: "Approved runtime owner/consumer scope for this trust profile."
-  }),
+  scorecard_dimension: ScorecardDimension,
+  scope_owner: ScopeOwner,
   last_verified_at: Type.String({
     format: "date-time",
     description: "Latest runtime verification timestamp for this trust profile."
   })
 }, {
   $id: "AgentTrustProfile",
-  description: "Minimal orchestrator trust profile. Used only by widgetdc-orchestrator, widgetdc-librechat, and optional Snout routing support."
+  description: "Minimal orchestrator trust profile. Persona is the primary identity; provider identifiers are telemetry-only correlation metadata."
+});
+
+// ../widgetdc-contracts/dist/orchestrator/scorecard-entry.js
+var ScorecardMetricStatus = Type.Union([
+  Type.Literal("pass"),
+  Type.Literal("warn"),
+  Type.Literal("fail"),
+  Type.Literal("pending")
+], {
+  $id: "ScorecardMetricStatus",
+  description: "Evaluation status for a scorecard metric."
+});
+var ScorecardEntry = Type.Object({
+  entry_id: Type.String({
+    minLength: 1,
+    description: "Stable scorecard entry identifier for a batch, case, or evaluation window."
+  }),
+  recorded_at: Type.String({
+    format: "date-time",
+    description: "Timestamp when the scorecard entry was recorded."
+  }),
+  task_domain: OrchestratorTaskDomain,
+  scope_owner: ScopeOwner,
+  dimension: ScorecardDimension,
+  metric_name: Type.String({
+    minLength: 1,
+    description: "Human-readable metric label, e.g. Normalization Quality."
+  }),
+  metric_value: Type.Number({
+    description: "Observed metric value."
+  }),
+  target_value: Type.Optional(Type.Number({
+    description: "Target metric value for comparison."
+  })),
+  status: ScorecardMetricStatus,
+  confidence: Type.Number({
+    minimum: 0,
+    maximum: 1,
+    description: "Confidence in the metric evaluation."
+  }),
+  sample_size: Type.Integer({
+    minimum: 0,
+    description: "Number of observations underlying the metric."
+  }),
+  evidence_refs: Type.Array(Type.String(), {
+    minItems: 1,
+    description: "References to runtime, Linear, docs, or graph evidence."
+  }),
+  trust_profile: Type.Optional(AgentTrustProfile),
+  notes: Type.Optional(Type.String({
+    description: "Short explanatory note for operators or audits."
+  }))
+}, {
+  $id: "ScorecardEntry",
+  description: "Canonical decision-quality scorecard entry used for runtime enforcement, monitoring, and governed routing review."
+});
+
+// ../widgetdc-contracts/dist/orchestrator/telemetry-entry.js
+var TelemetryPhase = Type.Union([
+  Type.Literal("discover"),
+  Type.Literal("define"),
+  Type.Literal("develop"),
+  Type.Literal("deliver"),
+  Type.Literal("observe"),
+  Type.Literal("orient"),
+  Type.Literal("decide"),
+  Type.Literal("act")
+], {
+  $id: "TelemetryPhase",
+  description: "Canonical workflow or OODA phase associated with a telemetry sample."
+});
+var TelemetryOutcome = Type.Union([
+  Type.Literal("success"),
+  Type.Literal("warning"),
+  Type.Literal("timeout"),
+  Type.Literal("fail"),
+  Type.Literal("blocked")
+], {
+  $id: "TelemetryOutcome",
+  description: "Normalized runtime outcome for telemetry ingestion."
+});
+var TelemetryEntry = Type.Object({
+  telemetry_id: Type.Optional(Type.String({
+    minLength: 1,
+    description: "Stable telemetry identifier when available."
+  })),
+  timestamp: Type.String({
+    format: "date-time",
+    description: "Runtime timestamp for the event."
+  }),
+  scope_owner: ScopeOwner,
+  agent_persona: AgentPersona,
+  runtime_identity: Type.Optional(Type.String({
+    minLength: 1,
+    description: "Concrete runtime worker/session identity."
+  })),
+  provider_source: Type.Optional(Type.String({
+    minLength: 1,
+    description: "Observed provider for correlation only."
+  })),
+  task_domain: OrchestratorTaskDomain,
+  capability: Type.Optional(Type.String({
+    minLength: 1,
+    description: "Capability or workflow label associated with the event."
+  })),
+  phase: TelemetryPhase,
+  outcome: TelemetryOutcome,
+  duration_ms: Type.Integer({
+    minimum: 0,
+    description: "Observed duration in milliseconds."
+  }),
+  evidence_source: TrustEvidenceSource,
+  trace_id: Type.Optional(Type.String({
+    minLength: 1,
+    description: "Trace or checkpoint identifier for read-back correlation."
+  })),
+  metadata: Type.Optional(Type.Record(Type.String(), Type.Union([Type.String(), Type.Number(), Type.Boolean(), Type.Null()]), {
+    description: "Small scalar metadata only. Raw payloads and provider transcripts are out of scope."
+  }))
+}, {
+  $id: "TelemetryEntry",
+  description: "Normalized telemetry sample for orchestrator trust and scorecard ingestion. It aligns telemetry with persona-based trust instead of provider identity."
 });
 
 // ../widgetdc-contracts/dist/orchestrator/routing-intent.js
@@ -8712,10 +8923,26 @@ var RoutingDecision = Type.Object({
     Type.Literal("COST_TIER_MATCH"),
     Type.Literal("FLOW_SPECIALIZATION"),
     Type.Literal("FALLBACK_ROUTE"),
-    Type.Literal("WAIVER_ROUTE")
+    Type.Literal("WAIVER_ROUTE"),
+    Type.Literal("FABRIC_WIN")
   ], {
     description: "Why this route was selected."
   }),
+  fabric_route_id: Type.Optional(Type.String({
+    description: "Virtual fabric identifier for low-latency agent-to-agent communication (Adoption: NVIDIA NVLink 6)."
+  })),
+  latency_deterministic: Type.Optional(Type.Boolean({
+    description: "Whether the route guarantees deterministic response time for MoE (Mixture-of-Experts) swarms.",
+    default: false
+  })),
+  vampire_drain_rate: Type.Optional(Type.Number({
+    minimum: 0,
+    maximum: 1,
+    description: "Rate of intellectual or economic value extraction from the target competitor (Adoption: Strategic Strategy Vampire)."
+  })),
+  target_shadow_id: Type.Optional(Type.String({
+    description: "Reference to the CompetitorShadow node being drained or intercepted."
+  })),
   evidence_refs: Type.Array(Type.String(), {
     minItems: 1,
     description: "References to trust, scorecard, or runtime evidence used during routing."
@@ -8785,6 +9012,16 @@ var AgentWorkflowEnvelope = Type.Object({
   quorum_consensus: Type.Optional(Type.Boolean({
     description: "Set when a workflow requires explicit agreement before progressing."
   })),
+  compute_mode: Type.Optional(Type.Union([
+    Type.Literal("standard"),
+    Type.Literal("extreme")
+  ], {
+    description: "Allocated compute intensity for the current workflow phase.",
+    default: "standard"
+  })),
+  phase_parameters: Type.Optional(Type.Record(Type.String(), Type.Any(), {
+    description: "Optimized parameters for multi-step agentic execution (Adoption: OpenAI Phase Pattern). Reduces token usage via targeted tool discovery."
+  })),
   started_at: Type.String({
     format: "date-time",
     description: "Workflow start timestamp."
@@ -8796,6 +9033,561 @@ var AgentWorkflowEnvelope = Type.Object({
 }, {
   $id: "AgentWorkflowEnvelope",
   description: "Minimal workflow envelope for orchestrator routing and lineage. Not a platform-wide execution bus or governance replacement."
+});
+
+// ../widgetdc-contracts/dist/orchestrator/launcher-evidence-packet.js
+var LauncherEvidenceFamily = Type.Union([
+  Type.Literal("research"),
+  Type.Literal("regulatory"),
+  Type.Literal("enterprise")
+], {
+  $id: "LauncherEvidenceFamily",
+  description: "Canonical evidence families used by the launcher routing surface."
+});
+var LauncherEvidenceStatus = Type.Union([
+  Type.Literal("grounded"),
+  Type.Literal("coverage_gap"),
+  Type.Literal("unavailable")
+], {
+  $id: "LauncherEvidenceStatus",
+  description: "Availability state for one evidence family inside the launcher packet."
+});
+var LauncherEvidenceItem = Type.Object({
+  id: Type.String({
+    description: "Stable evidence identifier or runtime-derived synthetic key."
+  }),
+  family: LauncherEvidenceFamily,
+  title: Type.String({
+    description: "Human-readable evidence title suitable for launcher surfacing."
+  }),
+  summary: Type.String({
+    description: "Short evidence summary for routing and operator review."
+  }),
+  source_type: Type.String({
+    description: "Origin type such as graphrag, regulation, governance_read_model, or runtime_readback."
+  }),
+  score: Type.Optional(Type.Number({
+    description: "Relative relevance score when available."
+  })),
+  evidence_ref: Type.Optional(Type.String({
+    description: "Reference path, query id, or runtime correlation id for read-back."
+  }))
+}, {
+  $id: "LauncherEvidenceItem",
+  description: "One surfaced evidence item inside the launcher packet."
+});
+var LauncherEvidenceFamilyPacket = Type.Object({
+  family: LauncherEvidenceFamily,
+  status: LauncherEvidenceStatus,
+  summary: Type.String({
+    description: "Family-level summary used for launcher reasoning and UI surfacing."
+  }),
+  evidence_items: Type.Array(LauncherEvidenceItem, {
+    description: "Top evidence items selected for this family."
+  })
+}, {
+  $id: "LauncherEvidenceFamilyPacket",
+  description: "Per-family launcher evidence payload."
+});
+var LauncherEvidencePacket = Type.Object({
+  $id: Type.Literal("orchestrator/launcher-evidence-packet"),
+  packet_id: Type.String({
+    description: "Stable packet identifier for routing lineage and read-back."
+  }),
+  question: Type.String({
+    description: "Original launcher question used to build the packet."
+  }),
+  domain: Type.String({
+    description: "Domain or org scope used during retrieval."
+  }),
+  created_at: Type.String({
+    format: "date-time",
+    description: "Timestamp when the packet was created."
+  }),
+  tri_source_ready: Type.Boolean({
+    description: "True when research, regulatory, and enterprise families all have usable evidence."
+  }),
+  families: Type.Array(LauncherEvidenceFamilyPacket, {
+    minItems: 3,
+    maxItems: 3,
+    description: "Canonical tri-source evidence families for the launcher surface."
+  }),
+  evidence_refs: Type.Array(Type.String(), {
+    minItems: 1,
+    description: "References used for routing transparency and later read-back."
+  }),
+  governance: Type.Object({
+    promotion_status: Type.Union([
+      Type.Literal("not_promoted"),
+      Type.Literal("blocked")
+    ]),
+    can_promote: Type.Boolean({
+      description: "Launcher evidence packets are read-only and cannot promote by themselves."
+    }),
+    blocking_reasons: Type.Array(Type.String(), {
+      description: "Coverage gaps or governance blockers detected while building the packet."
+    })
+  })
+}, {
+  $id: "LauncherEvidencePacket",
+  description: "Canonical tri-source evidence packet for launcher routing. Read-only surface for backend and launcher coordination; not a promotion decision."
+});
+
+// ../widgetdc-contracts/dist/orchestrator/launcher-contracts.js
+var LauncherIntent = Type.Union([
+  Type.Literal("info"),
+  Type.Literal("analyze"),
+  Type.Literal("report"),
+  Type.Literal("research"),
+  Type.Literal("orchestrate")
+], {
+  $id: "LauncherIntent",
+  description: "Intent values supported by the WidgeTDC launcher surface."
+});
+var LauncherMode = Type.Union([
+  Type.Literal("tool_only"),
+  Type.Literal("single"),
+  Type.Literal("swarm")
+], {
+  $id: "LauncherMode",
+  description: "Execution modes exposed by launcher planning."
+});
+var LauncherRequest = Type.Object({
+  input: Type.String({
+    minLength: 1,
+    description: "User-provided launcher task or question."
+  }),
+  intent: LauncherIntent,
+  instruction: Type.Optional(Type.String({
+    minLength: 1,
+    description: "Canonical single instruction override field for orchestrated requests."
+  })),
+  instructions: Type.Optional(Type.String({
+    minLength: 1,
+    description: "Compatibility alias for instruction. Retained until all consumers converge."
+  }))
+}, {
+  $id: "LauncherRequest",
+  description: "Shared request contract for launcher surfaces. Surface-local UX payload fields belong outside this schema."
+});
+var LauncherRequestEcho = Type.Object({
+  input: Type.String({
+    minLength: 1,
+    description: "Echo of normalized launcher input."
+  }),
+  intent: LauncherIntent
+}, {
+  $id: "LauncherRequestEcho",
+  description: "Normalized launcher request echo returned by orchestrated launcher flows."
+});
+var LauncherHandoffPayload = Type.Object({
+  intent: LauncherIntent,
+  prompt: Type.String({
+    minLength: 1,
+    description: "Prompt payload handed to the deeper workspace surface."
+  }),
+  executionPath: Type.String({
+    minLength: 1,
+    description: "Canonical runtime path selected for the task."
+  })
+}, {
+  $id: "LauncherHandoffPayload",
+  description: "Shared handoff payload from launcher to downstream workspace/runtime surfaces."
+});
+var LauncherPlanCore = Type.Object({
+  intent: LauncherIntent,
+  mode: LauncherMode,
+  lineageId: Type.String({
+    minLength: 1,
+    description: "Stable lineage id for launcher planning and runtime traceability."
+  }),
+  status: Type.Union([
+    Type.Literal("planned"),
+    Type.Literal("in_progress"),
+    Type.Literal("completed"),
+    Type.Literal("failed")
+  ], {
+    description: "Plan state visible to downstream systems."
+  }),
+  source: Type.Literal("widgetdc-launcher-prototype", {
+    description: "Current launcher source surface."
+  }),
+  executionPath: Type.String({
+    minLength: 1,
+    description: "Runtime path selected for the launcher task."
+  }),
+  handoffPayload: LauncherHandoffPayload
+}, {
+  $id: "LauncherPlanCore",
+  description: "Shared launcher plan fields. Surface-local UX fields such as title, nextStep, openedSurface, and launchTarget stay outside this schema."
+});
+var LauncherGovernanceRoutePolicy = Type.Object({
+  foldingRequired: Type.Boolean(),
+  retrievalRequired: Type.Boolean(),
+  governanceRequired: Type.Boolean(),
+  graphVerificationRequired: Type.Boolean(),
+  renderValidationRequired: Type.Boolean()
+}, {
+  $id: "LauncherGovernanceRoutePolicy",
+  description: "Launcher-local route policy summary for operator visibility."
+});
+var LauncherGovernancePromotionPolicy = Type.Object({
+  qualityGate: Type.Boolean(),
+  policyAlignment: Type.Boolean(),
+  graphWriteVerification: Type.Boolean(),
+  readBackVerification: Type.Boolean(),
+  looseEndGenerationOnFailureOrBlock: Type.Boolean()
+}, {
+  $id: "LauncherGovernancePromotionPolicy",
+  description: "Launcher-local promotion policy summary. Read-only and non-canonical."
+});
+var LauncherGovernanceGate = Type.Object({
+  gate: Type.String({
+    minLength: 1,
+    description: "Stable gate identifier."
+  }),
+  status: Type.Union([
+    Type.Literal("pass"),
+    Type.Literal("fail"),
+    Type.Literal("skip"),
+    Type.Literal("coverage_gap")
+  ]),
+  reasonCode: Type.String({
+    minLength: 1,
+    description: "Machine-readable reason code for the gate outcome."
+  })
+}, {
+  $id: "LauncherGovernanceGate",
+  description: "One launcher-local governance gate result."
+});
+var LauncherGovernanceSummary = Type.Object({
+  promotionStatus: Type.Union([
+    Type.Literal("not_promoted"),
+    Type.Literal("blocked")
+  ]),
+  looseEnd: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  gates: Type.Array(LauncherGovernanceGate, {
+    minItems: 1
+  }),
+  targetKind: Type.String({
+    minLength: 1
+  }),
+  boundaryOwner: Type.String({
+    minLength: 1
+  }),
+  routePolicy: LauncherGovernanceRoutePolicy,
+  promotionPolicy: LauncherGovernancePromotionPolicy,
+  disclaimer: Type.String({
+    minLength: 1,
+    description: "Must state that launcher governance checks are local and not canonical promotion authority."
+  })
+}, {
+  $id: "LauncherGovernanceSummary",
+  description: "Read-only launcher governance rendering contract. Local-only governance context; not platform truth."
+});
+var LauncherExecutionMetadata = Type.Object({
+  evidenceDomain: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  reasonDomain: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  canonicalGovernance: Type.Optional(Type.Unknown({
+    description: "Canonical backend governance snapshot. Exact shape should converge in dedicated backend schemas."
+  })),
+  retrievalSummary: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  degradedReasoning: Type.Optional(Type.Boolean()),
+  fallbackToReason: Type.Optional(Type.Boolean()),
+  fallbackFrom: Type.Optional(Type.String()),
+  fallbackError: Type.Optional(Type.String())
+}, {
+  $id: "LauncherExecutionMetadata",
+  description: "Shared launcher execution metadata used for runtime transparency. Surface-only wording fields belong elsewhere.",
+  additionalProperties: true
+});
+var LauncherExecution = Type.Object({
+  source: Type.String({
+    minLength: 1,
+    description: "Execution source path, for example /reason or /api/rlm/ooda/run."
+  }),
+  summary: Type.String({
+    minLength: 1,
+    description: "Execution summary text returned by the current runtime path."
+  }),
+  trace: Type.Array(Type.String(), {
+    description: "Runtime trace snippets suitable for cross-service debugging."
+  }),
+  metadata: LauncherExecutionMetadata,
+  governance: LauncherGovernanceSummary
+}, {
+  $id: "LauncherExecution",
+  description: "Shared launcher execution contract."
+});
+var LauncherResponse = Type.Object({
+  request: LauncherRequestEcho,
+  plan: LauncherPlanCore,
+  execution: LauncherExecution
+}, {
+  $id: "LauncherResponse",
+  description: "Shared launcher response contract. Surface-local fields such as greeting and launcher-specific UX labels are intentionally excluded."
+});
+var OodaRuntimeContext = Type.Object({
+  graph_summary: Type.String({
+    minLength: 1,
+    description: "Folded or direct graph summary supplied to the OODA runtime."
+  }),
+  source_surface: Type.String({
+    minLength: 1,
+    description: "Surface invoking the OODA runtime."
+  }),
+  grounding_directive: Type.String({
+    minLength: 1,
+    description: "Grounding constraints applied to the runtime call."
+  }),
+  evidence_domain: Type.String({
+    minLength: 1
+  }),
+  reason_domain: Type.String({
+    minLength: 1
+  }),
+  report_layout_contract: Type.Optional(Type.String()),
+  evidence_context: Type.Optional(Type.String())
+}, {
+  $id: "OodaRuntimeContext",
+  description: "Context object supplied to the OODA runtime from launcher-like surfaces."
+});
+var OodaRuntimeRequest = Type.Object({
+  task: Type.String({
+    minLength: 1,
+    description: "Task passed to the OODA runtime."
+  }),
+  task_id: Type.String({
+    minLength: 1,
+    description: "Stable task id for runtime tracking."
+  }),
+  instruction: Type.String({
+    minLength: 1,
+    description: "Canonical instruction field for OODA runtime requests."
+  }),
+  instructions: Type.String({
+    minLength: 1,
+    description: "Compatibility alias retained until all consumers converge on instruction."
+  }),
+  context: OodaRuntimeContext
+}, {
+  $id: "OodaRuntimeRequest",
+  description: "Shared OODA runtime request contract used by launcher-style orchestration surfaces."
+});
+var ReasonRuntimeResponseContract = Type.Object({
+  jobStatement: Type.String(),
+  successShape: Type.String(),
+  requiredSections: Type.Array(Type.String()),
+  boundaryRules: Type.Array(Type.String()),
+  fallbackPolicy: Type.String()
+}, {
+  $id: "ReasonRuntimeResponseContract",
+  description: "Structured response contract guidance passed into the runtime request context."
+});
+var ReasonRuntimeContext = Type.Object({
+  response_contract: ReasonRuntimeResponseContract,
+  evidence_domain: Type.Optional(Type.String()),
+  reason_domain: Type.Optional(Type.String()),
+  enriched_prompt: Type.Optional(Type.String()),
+  _quality_task: Type.Optional(Type.String({
+    description: "Compatibility field retained during migration from local launcher runtime behavior."
+  })),
+  _skip_knowledge_enrichment: Type.Optional(Type.Boolean({
+    description: "Compatibility field retained during migration from local launcher runtime behavior."
+  })),
+  _output_mode: Type.Optional(Type.String({
+    description: "Compatibility field retained during migration from local launcher runtime behavior."
+  })),
+  _expected_format: Type.Optional(Type.String({
+    description: "Compatibility field retained during migration from local launcher runtime behavior."
+  })),
+  require_swarm: Type.Optional(Type.Boolean())
+}, {
+  $id: "ReasonRuntimeContext",
+  description: "Context passed to the /reason runtime. Compatibility fields are temporary until callers converge on typed fields.",
+  additionalProperties: true
+});
+var ReasonRuntimeRequest = Type.Object({
+  task: Type.String({
+    minLength: 1,
+    description: "Task passed to the /reason runtime."
+  }),
+  domain: Type.String({
+    minLength: 1,
+    description: "Resolved domain passed to the /reason runtime."
+  }),
+  context: ReasonRuntimeContext
+}, {
+  $id: "ReasonRuntimeRequest",
+  description: "Shared /reason runtime request contract used by launcher-like surfaces."
+});
+var ReasonRuntimeRouting = Type.Object({
+  provider: Type.String({
+    minLength: 1
+  }),
+  model: Type.String({
+    minLength: 1
+  }),
+  latency_ms: Type.Optional(Type.Number({
+    minimum: 0
+  }))
+}, {
+  $id: "ReasonRuntimeRouting",
+  description: "Routing metadata returned by the /reason runtime."
+});
+var ReasonRuntimeTelemetry = Type.Object({
+  used_swarm: Type.Boolean(),
+  used_rag: Type.Boolean()
+}, {
+  $id: "ReasonRuntimeTelemetry",
+  description: "Minimal runtime telemetry returned by the /reason runtime."
+});
+var ReasonRuntimeResponse = Type.Object({
+  recommendation: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  reasoning: Type.Optional(Type.String()),
+  confidence: Type.Optional(Type.Number({
+    minimum: 0,
+    maximum: 1
+  })),
+  routing: Type.Optional(ReasonRuntimeRouting),
+  telemetry: Type.Optional(ReasonRuntimeTelemetry),
+  reasoning_chain: Type.Optional(Type.Array(Type.String()))
+}, {
+  $id: "ReasonRuntimeResponse",
+  description: "Shared /reason runtime response contract used by launcher-like surfaces."
+});
+
+// ../widgetdc-contracts/dist/orchestrator/artifact-contracts.js
+var BackendGovernanceEvidenceItemResponseV1 = Type.Object({
+  id: Type.String({
+    minLength: 1,
+    description: "Stable evidence item id."
+  }),
+  summary: Type.String({
+    minLength: 1,
+    description: "Short evidence summary consumed by launcher-like surfaces."
+  }),
+  score: Type.Optional(Type.Number({
+    minimum: 0,
+    description: "Relative evidence relevance score when available."
+  })),
+  title: Type.Optional(Type.String()),
+  source_type: Type.Optional(Type.String())
+}, {
+  $id: "BackendGovernanceEvidenceItemResponseV1",
+  description: "Minimal evidence item shape returned inside backend governance evidence packet responses."
+});
+var BackendGovernanceEvidenceFamilyResponseV1 = Type.Object({
+  family: LauncherEvidenceFamily,
+  status: Type.Optional(LauncherEvidenceStatus),
+  summary: Type.String({
+    minLength: 1,
+    description: "Family summary consumed by launcher-like surfaces."
+  }),
+  evidence_items: Type.Array(BackendGovernanceEvidenceItemResponseV1)
+}, {
+  $id: "BackendGovernanceEvidenceFamilyResponseV1",
+  description: "Minimal family packet returned inside backend governance evidence packet responses."
+});
+var BackendGovernanceEvidencePacketGovernanceV1 = Type.Object({
+  blocking_reasons: Type.Array(Type.String(), {
+    description: "Coverage or governance blockers detected while composing the packet."
+  }),
+  promotion_status: Type.Optional(Type.Union([
+    Type.Literal("not_promoted"),
+    Type.Literal("blocked")
+  ])),
+  can_promote: Type.Optional(Type.Boolean())
+}, {
+  $id: "BackendGovernanceEvidencePacketGovernanceV1",
+  description: "Governance subsection of backend evidence packet responses."
+});
+var BackendGovernanceEvidencePacketResponseV1 = Type.Object({
+  packet_id: Type.String({
+    minLength: 1,
+    description: "Stable packet id for routing and read-back."
+  }),
+  tri_source_ready: Type.Boolean({
+    description: "True when enough evidence exists for multi-signal launcher use."
+  }),
+  governance: BackendGovernanceEvidencePacketGovernanceV1,
+  families: Type.Array(BackendGovernanceEvidenceFamilyResponseV1, {
+    minItems: 1,
+    description: "Family evidence summaries returned by backend governance surfaces."
+  }),
+  question: Type.Optional(Type.String()),
+  domain: Type.Optional(Type.String()),
+  created_at: Type.Optional(Type.String({ format: "date-time" })),
+  evidence_refs: Type.Optional(Type.Array(Type.String()))
+}, {
+  $id: "backend.governance.evidence_packet.response.v1",
+  description: "Shared backend governance evidence packet response contract for launcher-like consumers."
+});
+var ArtifactChallengeOutcomeV1 = Type.Object({
+  trace_id: Type.String({
+    minLength: 1,
+    description: "Trace id or outcome id emitted for the challenge action."
+  }),
+  status: Type.Literal("CHALLENGED"),
+  reason: Type.String({
+    minLength: 1,
+    description: "Challenge reason supplied by the surface or operator."
+  }),
+  evidence_uri: Type.Optional(Type.Union([Type.String({ format: "uri" }), Type.Null()]))
+}, {
+  $id: "ArtifactChallengeOutcomeV1",
+  description: "Outcome payload generated by artifact challenge requests."
+});
+var ArtifactChallengeGraphWriteV1 = Type.Object({
+  outcome_label: Type.Literal("Outcome"),
+  relation_type: Type.Literal("CHALLENGES"),
+  target_identity: Type.String({
+    minLength: 1,
+    description: "Target artifact identity for the challenge relation."
+  })
+}, {
+  $id: "ArtifactChallengeGraphWriteV1",
+  description: "Graph write instruction for artifact challenge envelopes."
+});
+var ArtifactChallengeEnvelopeV1 = Type.Object({
+  tool: Type.Literal("artifacts.challenge"),
+  artifact_id: Type.String({
+    minLength: 1
+  }),
+  artifact_slug: Type.Optional(Type.String({
+    minLength: 1,
+    description: "Compatibility metadata field retained during migration."
+  })),
+  outcome: ArtifactChallengeOutcomeV1,
+  graph_write: ArtifactChallengeGraphWriteV1
+}, {
+  $id: "artifact.challenge.envelope.v1",
+  description: "Shared artifact challenge envelope emitted by surfaces before canonical backend persistence."
+});
+var ArtifactRequestReviewGraphWriteV1 = Type.Object({
+  type: Type.Literal("ConstructionRequest"),
+  request_kind: Type.Literal("REVIEW"),
+  requested_by: Type.String({
+    minLength: 1,
+    description: "Actor requesting review."
+  }),
+  artifact_id: Type.String({
+    minLength: 1
+  })
+}, {
+  $id: "ArtifactRequestReviewGraphWriteV1",
+  description: "Graph write instruction for artifact request-review envelopes."
+});
+var ArtifactRequestReviewEnvelopeV1 = Type.Object({
+  tool: Type.Literal("artifacts.action"),
+  action: Type.Literal("request-review"),
+  artifact_id: Type.String({
+    minLength: 1
+  }),
+  graph_write: ArtifactRequestReviewGraphWriteV1
+}, {
+  $id: "artifact.request_review.envelope.v1",
+  description: "Shared artifact request-review envelope emitted by surfaces before canonical backend persistence."
 });
 
 // src/validation.ts
@@ -11392,9 +12184,9 @@ function registerDefaultLoops() {
   });
   registerCronJob({
     id: "evolution-tracker",
-    name: "Evolution Event Tracker",
+    name: "Evolution Event Tracker (DEPRECATED \u2014 see LIN-380)",
     schedule: "0 * * * *",
-    enabled: true,
+    enabled: false,
     chain: {
       name: "Evolution Tracker",
       mode: "parallel",
@@ -11411,6 +12203,173 @@ function registerDefaultLoops() {
           tool_name: "graph.read_cypher",
           arguments: {
             query: "MATCH (f:FailureMemory) RETURN count(f) AS total_failures, sum(f.hit_count) AS total_hits"
+          }
+        }
+      ]
+    }
+  });
+  registerCronJob({
+    id: "intel-knowledge-synthesis",
+    name: "Intelligence: Knowledge Synthesis",
+    schedule: "*/30 * * * *",
+    enabled: true,
+    chain: {
+      name: "Knowledge Synthesis Pipeline",
+      mode: "sequential",
+      steps: [
+        {
+          agent_id: "orchestrator",
+          tool_name: "srag.query",
+          arguments: { query: "recent platform changes, new patterns, knowledge gaps" }
+        },
+        {
+          agent_id: "orchestrator",
+          tool_name: "kg_rag.query",
+          arguments: { question: "What knowledge gaps exist in the consulting domain graph? What patterns are underconnected?", max_evidence: 15 }
+        },
+        {
+          agent_id: "orchestrator",
+          tool_name: "context_folding.fold",
+          arguments: { task: "Synthesize knowledge from SRAG + KG-RAG into actionable insights", context: { source: "{{prev}}" }, max_tokens: 2e3, domain: "intelligence" }
+        },
+        {
+          agent_id: "orchestrator",
+          tool_name: "graph.write_cypher",
+          arguments: {
+            query: "MERGE (s:StrategicInsight {id: 'intel-synthesis-' + toString(datetime().epochMillis)}) SET s.domain = 'knowledge-synthesis', s.insight = $insight, s.createdAt = datetime(), s.source = 'intelligence-loop', s.confidence = 0.7",
+            params: { insight: "{{prev}}" }
+          }
+        }
+      ]
+    }
+  });
+  registerCronJob({
+    id: "intel-graph-enrichment",
+    name: "Intelligence: Graph Enrichment",
+    schedule: "0 * * * *",
+    enabled: true,
+    chain: {
+      name: "Graph Enrichment Pipeline",
+      mode: "sequential",
+      steps: [
+        {
+          agent_id: "orchestrator",
+          tool_name: "autonomous.graphrag",
+          arguments: { query: "Find underconnected knowledge clusters and suggest new relationships between consulting domains, frameworks, and patterns", maxHops: 3 }
+        },
+        {
+          agent_id: "orchestrator",
+          tool_name: "graph.write_cypher",
+          arguments: {
+            query: "MERGE (e:EnrichmentEvent {id: 'enrich-' + toString(datetime().epochMillis)}) SET e.type = 'graph-enrichment', e.findings = $findings, e.createdAt = datetime(), e.source = 'intelligence-loop'",
+            params: { findings: "{{prev}}" }
+          }
+        },
+        {
+          agent_id: "orchestrator",
+          tool_name: "srag.query",
+          arguments: { query: "Verify enrichment: what new connections were discovered in the last hour?" }
+        }
+      ]
+    }
+  });
+  registerCronJob({
+    id: "intel-roma-observer",
+    name: "Intelligence: ROMA Optimization Observer",
+    schedule: "0 */4 * * *",
+    enabled: true,
+    chain: {
+      name: "ROMA Observer Pipeline",
+      mode: "sequential",
+      steps: [
+        {
+          agent_id: "orchestrator",
+          tool_name: "autonomous.agentteam.coordinate",
+          arguments: {
+            task: "Analyze platform optimization opportunities: review recent decisions, identify sub-optimal tool usage patterns, propose improvements",
+            context: { severity: "P2", scope: "platform-wide" }
+          }
+        },
+        {
+          agent_id: "orchestrator",
+          tool_name: "context_folding.fold",
+          arguments: { task: "Compress ROMA findings into actionable optimization report", context: { data: "{{prev}}" }, max_tokens: 1500, domain: "optimization" }
+        }
+      ]
+    }
+  });
+  registerCronJob({
+    id: "intel-compliance-scan",
+    name: "Intelligence: Compliance Scan",
+    schedule: "0 */6 * * *",
+    enabled: true,
+    chain: {
+      name: "Compliance Scan Pipeline",
+      mode: "sequential",
+      steps: [
+        {
+          agent_id: "orchestrator",
+          tool_name: "srag.governance-check",
+          arguments: { query: "Check compliance status of all active agents, tools, and recent decisions against governance policy" }
+        },
+        {
+          agent_id: "orchestrator",
+          tool_name: "audit.run",
+          arguments: { agentId: "orchestrator", output: "{{prev}}" }
+        }
+      ]
+    }
+  });
+  registerCronJob({
+    id: "intel-harvest-cycle",
+    name: "Intelligence: Knowledge Harvest",
+    schedule: "0 */8 * * *",
+    enabled: true,
+    chain: {
+      name: "Knowledge Harvest Pipeline",
+      mode: "sequential",
+      steps: [
+        {
+          agent_id: "orchestrator",
+          tool_name: "template.execute",
+          arguments: { templateId: "data-enrichment", input: { scope: "recent-24h" } }
+        },
+        {
+          agent_id: "orchestrator",
+          tool_name: "srag.query",
+          arguments: { query: "What new knowledge was harvested? Summarize new patterns and insights from the last 8 hours" }
+        },
+        {
+          agent_id: "orchestrator",
+          tool_name: "graph.write_cypher",
+          arguments: {
+            query: "MERGE (h:HarvestEvent {id: 'harvest-' + toString(datetime().epochMillis)}) SET h.type = 'knowledge-harvest', h.summary = $summary, h.createdAt = datetime(), h.source = 'intelligence-loop'",
+            params: { summary: "{{prev}}" }
+          }
+        }
+      ]
+    }
+  });
+  registerCronJob({
+    id: "intel-metrics-snapshot",
+    name: "Intelligence: Metrics Snapshot",
+    schedule: "30 * * * *",
+    enabled: true,
+    chain: {
+      name: "Metrics Snapshot Pipeline",
+      mode: "sequential",
+      steps: [
+        {
+          agent_id: "orchestrator",
+          tool_name: "metrics.summary",
+          arguments: {}
+        },
+        {
+          agent_id: "orchestrator",
+          tool_name: "graph.write_cypher",
+          arguments: {
+            query: "MERGE (m:MetricsSnapshot {id: 'metrics-' + toString(datetime().epochMillis)}) SET m.data = $data, m.createdAt = datetime(), m.source = 'intelligence-loop'",
+            params: { data: "{{prev}}" }
           }
         }
       ]
@@ -12323,6 +13282,171 @@ function requireApiKey(req, res, next) {
   });
 }
 
+// src/state-machine.ts
+var REDIS_FSM_PREFIX = "orchestrator:fsm:";
+async function listPlans() {
+  const redis2 = getRedis();
+  if (!redis2) return [];
+  try {
+    const keys = await redis2.keys(`${REDIS_FSM_PREFIX}*`);
+    const plans = [];
+    for (const key of keys) {
+      const raw = await redis2.get(key);
+      if (raw) plans.push(JSON.parse(raw));
+    }
+    return plans.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  } catch {
+    return [];
+  }
+}
+
+// src/harvest-pipeline.ts
+import { v4 as uuid6 } from "uuid";
+async function extract(domain) {
+  const callId = `harvest-extract-${uuid6().substring(0, 8)}`;
+  try {
+    const result = await callMcpTool({
+      toolName: "srag.query",
+      args: {
+        query: `Find reusable consulting frameworks, templates, and solution patterns in the ${domain} domain. Focus on methodologies that can be generalized across clients.`
+      },
+      callId,
+      timeoutMs: 3e4
+    });
+    const items = result?.sources ?? result?.results ?? [];
+    logger.info({ domain, items: Array.isArray(items) ? items.length : 0 }, "Harvest extract complete");
+    return Array.isArray(items) ? items : [];
+  } catch (err) {
+    logger.warn({ domain, err: String(err) }, "Harvest extract failed");
+    return [];
+  }
+}
+function generalize(items, domain) {
+  return items.map((item, i) => {
+    const name = String(item.name ?? item.title ?? `${domain}-pattern-${i}`);
+    const content = String(item.content ?? item.description ?? item.summary ?? "");
+    let tier = "component";
+    if (content.length > 2e3 || name.toLowerCase().includes("framework")) tier = "framework";
+    else if (content.length > 500 || name.toLowerCase().includes("template")) tier = "template";
+    return {
+      id: `harvest-${uuid6().substring(0, 12)}`,
+      name,
+      tier,
+      description: content.substring(0, 300),
+      content: content.substring(0, 5e3),
+      // Cap at 5K chars
+      industries: [domain],
+      capabilities: [],
+      reuse_count: 0,
+      status: "draft",
+      created_at: (/* @__PURE__ */ new Date()).toISOString(),
+      source: `harvest-pipeline/${domain}`
+    };
+  });
+}
+async function store(components) {
+  if (components.length === 0) return 0;
+  const callId = `harvest-store-${uuid6().substring(0, 8)}`;
+  const labelMap = {
+    framework: "Framework",
+    template: "Template",
+    component: "Component"
+  };
+  let stored = 0;
+  for (const comp of components) {
+    try {
+      const label = labelMap[comp.tier];
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `MERGE (c:${label}:HarvestedComponent {id: $id})
+                  SET c.name = $name, c.description = $desc, c.content = $content,
+                      c.tier = $tier, c.status = $status, c.reuseCount = $reuseCount,
+                      c.source = $source, c.createdAt = datetime()
+                  WITH c
+                  UNWIND $industries AS ind
+                  MERGE (i:Industry {name: ind})
+                  MERGE (c)-[:APPLICABLE_TO]->(i)
+                  RETURN c.id`,
+          params: {
+            id: comp.id,
+            name: comp.name,
+            desc: comp.description,
+            content: comp.content,
+            tier: comp.tier,
+            status: comp.status,
+            reuseCount: comp.reuse_count,
+            source: comp.source,
+            industries: comp.industries
+          }
+        },
+        callId,
+        timeoutMs: 15e3
+      });
+      stored++;
+    } catch (err) {
+      logger.warn({ id: comp.id, err: String(err) }, "Harvest store failed for component");
+    }
+  }
+  logger.info({ stored, total: components.length }, "Harvest store complete");
+  return stored;
+}
+async function verify(components) {
+  let verified = 0;
+  for (const comp of components) {
+    try {
+      const result = await callMcpTool({
+        toolName: "srag.query",
+        args: { query: `${comp.tier} for ${comp.industries[0]}: ${comp.name}` },
+        callId: `harvest-verify-${uuid6().substring(0, 8)}`,
+        timeoutMs: 15e3
+      });
+      const resultStr = JSON.stringify(result).toLowerCase();
+      if (resultStr.includes(comp.name.toLowerCase().substring(0, 20))) {
+        verified++;
+      }
+    } catch {
+    }
+  }
+  logger.info({ verified, total: components.length }, "Harvest verify complete");
+  return verified;
+}
+async function runHarvestPipeline(domain) {
+  const start = Date.now();
+  logger.info({ domain }, "Harvest pipeline starting");
+  const raw = await extract(domain);
+  const components = generalize(raw, domain);
+  const stored = await store(components);
+  const verified = await verify(components);
+  const result = {
+    extracted: raw.length,
+    stored,
+    verified,
+    duration_ms: Date.now() - start
+  };
+  logger.info(result, "Harvest pipeline complete");
+  return result;
+}
+async function runFullHarvest() {
+  const domains = [
+    "Strategy",
+    "Financial",
+    "Operations",
+    "Technology",
+    "Cybersecurity",
+    "ESG & Sustainability",
+    "Digital & Analytics",
+    "Risk & Compliance",
+    "Supply Chain",
+    "Due Diligence"
+  ];
+  const results = {};
+  for (const domain of domains) {
+    results[domain] = await runHarvestPipeline(domain);
+  }
+  return results;
+}
+
 // src/agent-seeds.ts
 var AGENT_SEEDS = [
   {
@@ -12615,6 +13739,30 @@ app.use("/api/audit", requireApiKey, auditRouter);
 app.use("/api/llm", requireApiKey, llmRouter);
 app.use("/monitor", requireApiKey, monitorRouter);
 app.use("/api/s1-s4", requireApiKey, s1s4Router);
+app.get("/api/plans", requireApiKey, async (_req, res) => {
+  try {
+    const plans = await listPlans();
+    res.json({ success: true, plans, count: plans.length });
+  } catch (err) {
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
+app.post("/api/harvest/:domain", requireApiKey, async (req, res) => {
+  try {
+    const result = await runHarvestPipeline(req.params.domain);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
+app.post("/api/harvest", requireApiKey, async (_req, res) => {
+  try {
+    const results = await runFullHarvest();
+    res.json({ success: true, results });
+  } catch (err) {
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
 app.get("/api/events", requireApiKey, handleSSE);
 app.get("/health", (_req, res) => {
   res.json({
