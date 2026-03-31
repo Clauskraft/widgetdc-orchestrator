@@ -19,9 +19,12 @@ import { chatLLM, type LLMMessage } from '../llm-proxy.js'
 import { callMcpTool } from '../mcp-caller.js'
 import { dualChannelRAG } from '../dual-rag.js'
 import { callCognitive, isRlmAvailable } from '../cognitive-proxy.js'
+import { ORCHESTRATOR_TOOLS, executeToolCalls } from '../tool-executor.js'
 import { logger } from '../logger.js'
 import { config } from '../config.js'
 import { v4 as uuid } from 'uuid'
+
+const MAX_TOOL_ROUNDS = 3
 
 export const openaiCompatRouter = Router()
 
@@ -221,91 +224,104 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
   logger.info({ model, provider, stream, messageCount: llmMessages.length, contextLen: orchestratedContext.length }, 'OpenAI compat request (orchestrated)')
 
   try {
+    // ─── TOOL-CALL LOOP: LLM may request tools, orchestrator executes ──
+    let loopMessages = [...llmMessages]
+    let finalContent = ''
+    let totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+    let toolRounds = 0
+
+    for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
+      const result = await chatLLM({
+        provider,
+        messages: loopMessages,
+        model: providerModel,
+        temperature: temperature ?? 0.7,
+        max_tokens: max_tokens ?? 4096,
+        tools: ORCHESTRATOR_TOOLS,
+      })
+
+      // Accumulate usage
+      if (result.usage) {
+        totalUsage.prompt_tokens += result.usage.prompt_tokens
+        totalUsage.completion_tokens += result.usage.completion_tokens
+        totalUsage.total_tokens += result.usage.total_tokens
+      }
+
+      // Check if LLM wants to call tools
+      if (result.tool_calls && result.tool_calls.length > 0 && round < MAX_TOOL_ROUNDS) {
+        toolRounds++
+        logger.info({ round, tools: result.tool_calls.map(tc => tc.function.name) }, 'Tool calls requested')
+
+        // Add assistant message with tool_calls
+        loopMessages.push({
+          role: 'assistant',
+          content: result.content || '',
+          tool_calls: result.tool_calls,
+        })
+
+        // Execute all tool calls in parallel
+        const toolResults = await executeToolCalls(result.tool_calls)
+
+        // Add tool results as messages
+        for (const tr of toolResults) {
+          loopMessages.push({
+            role: 'tool',
+            content: tr.content,
+            tool_call_id: tr.tool_call_id,
+          })
+        }
+
+        // Continue loop — LLM will see tool results and respond
+        continue
+      }
+
+      // No tool calls — this is the final response
+      finalContent = result.content
+      break
+    }
+
+    logger.info({ model, provider, toolRounds, duration_ms: Date.now() - t0 }, 'OpenAI compat complete (orchestrated)')
+
+    // ─── Return response (streaming or non-streaming) ─────────────────
     if (stream) {
-      // ─── Streaming SSE response ─────────────────────────────────────
       res.setHeader('Content-Type', 'text/event-stream')
       res.setHeader('Cache-Control', 'no-cache')
       res.setHeader('Connection', 'keep-alive')
 
-      // Call LLM (non-streaming internally, stream output chunk-by-chunk)
-      const result = await chatLLM({
-        provider,
-        messages: llmMessages,
-        model: providerModel,
-        temperature: temperature ?? 0.7,
-        max_tokens: max_tokens ?? 4096,
-      })
-
-      // Simulate streaming by chunking the response
-      const content = result.content
-      const chunkSize = 20 // characters per chunk
-      const chunks = []
-      for (let i = 0; i < content.length; i += chunkSize) {
-        chunks.push(content.slice(i, i + chunkSize))
-      }
-
-      for (const chunk of chunks) {
-        const event = {
+      const chunkSize = 20
+      for (let i = 0; i < finalContent.length; i += chunkSize) {
+        const chunk = finalContent.slice(i, i + chunkSize)
+        res.write(`data: ${JSON.stringify({
           id: requestId,
           object: 'chat.completion.chunk',
           created: Math.floor(Date.now() / 1000),
           model: model || 'gemini-flash',
-          choices: [{
-            index: 0,
-            delta: { content: chunk },
-            finish_reason: null,
-          }],
-        }
-        res.write(`data: ${JSON.stringify(event)}\n\n`)
+          choices: [{ index: 0, delta: { content: chunk }, finish_reason: null }],
+        })}\n\n`)
       }
 
-      // Send finish event
-      const finishEvent = {
+      res.write(`data: ${JSON.stringify({
         id: requestId,
         object: 'chat.completion.chunk',
         created: Math.floor(Date.now() / 1000),
         model: model || 'gemini-flash',
-        choices: [{
-          index: 0,
-          delta: {},
-          finish_reason: 'stop',
-        }],
-      }
-      res.write(`data: ${JSON.stringify(finishEvent)}\n\n`)
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      })}\n\n`)
       res.write('data: [DONE]\n\n')
       res.end()
-
-      logger.info({ model, provider, duration_ms: Date.now() - t0, tokens: content.length / 4 }, 'OpenAI compat stream complete')
-
     } else {
-      // ─── Non-streaming response ─────────────────────────────────────
-      const result = await chatLLM({
-        provider,
-        messages: llmMessages,
-        model: providerModel,
-        temperature: temperature ?? 0.7,
-        max_tokens: max_tokens ?? 4096,
-      })
-
-      const response = {
+      res.json({
         id: requestId,
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
         model: model || 'gemini-flash',
         choices: [{
           index: 0,
-          message: { role: 'assistant', content: result.content },
+          message: { role: 'assistant', content: finalContent },
           finish_reason: 'stop',
         }],
-        usage: result.usage || {
-          prompt_tokens: Math.ceil(JSON.stringify(llmMessages).length / 4),
-          completion_tokens: Math.ceil(result.content.length / 4),
-          total_tokens: Math.ceil((JSON.stringify(llmMessages).length + result.content.length) / 4),
-        },
-      }
-
-      res.json(response)
-      logger.info({ model, provider, duration_ms: Date.now() - t0 }, 'OpenAI compat complete')
+        usage: totalUsage,
+      })
     }
 
   } catch (err) {

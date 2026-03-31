@@ -8,8 +8,10 @@ import { config } from './config.js'
 import { logger } from './logger.js'
 
 export interface LLMMessage {
-  role: 'system' | 'user' | 'assistant'
+  role: 'system' | 'user' | 'assistant' | 'tool'
   content: string
+  tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>
+  tool_call_id?: string
 }
 
 export interface LLMRequest {
@@ -18,12 +20,14 @@ export interface LLMRequest {
   model?: string
   temperature?: number
   max_tokens?: number
+  tools?: Array<{ type: string; function: { name: string; description: string; parameters: unknown } }>
 }
 
 export interface LLMResponse {
   provider: string
   model: string
   content: string
+  tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }
   duration_ms: number
 }
@@ -103,18 +107,23 @@ async function callOpenAICompat(provider: ProviderConfig, req: LLMRequest): Prom
   const start = Date.now()
   const model = req.model || provider.defaultModel
 
+  const body: Record<string, unknown> = {
+    model,
+    messages: req.messages,
+    temperature: req.temperature ?? 0.7,
+    max_tokens: req.max_tokens ?? 2048,
+  }
+  if (req.tools && req.tools.length > 0) {
+    body.tools = req.tools
+  }
+
   const res = await fetch(`${provider.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${provider.apiKey}`,
     },
-    body: JSON.stringify({
-      model,
-      messages: req.messages,
-      temperature: req.temperature ?? 0.7,
-      max_tokens: req.max_tokens ?? 2048,
-    }),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(60000),
   })
 
@@ -124,10 +133,12 @@ async function callOpenAICompat(provider: ProviderConfig, req: LLMRequest): Prom
   }
 
   const data = await res.json() as any
+  const message = data.choices?.[0]?.message
   return {
     provider: req.provider,
     model: data.model || model,
-    content: data.choices?.[0]?.message?.content || '',
+    content: message?.content || '',
+    tool_calls: message?.tool_calls,
     usage: data.usage,
     duration_ms: Date.now() - start,
   }
@@ -147,6 +158,15 @@ async function callGemini(provider: ProviderConfig, req: LLMRequest): Promise<LL
 
   const systemInstruction = req.messages.find(m => m.role === 'system')
 
+  // Convert OpenAI tools format to Gemini format
+  const geminiTools = req.tools && req.tools.length > 0 ? [{
+    functionDeclarations: req.tools.map(t => ({
+      name: t.function.name,
+      description: t.function.description,
+      parameters: t.function.parameters,
+    })),
+  }] : undefined
+
   const res = await fetch(
     `${provider.baseUrl}/models/${model}:generateContent?key=${provider.apiKey}`,
     {
@@ -155,6 +175,7 @@ async function callGemini(provider: ProviderConfig, req: LLMRequest): Promise<LL
       body: JSON.stringify({
         contents,
         ...(systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction.content }] } } : {}),
+        ...(geminiTools ? { tools: geminiTools } : {}),
         generationConfig: {
           temperature: req.temperature ?? 0.7,
           maxOutputTokens: req.max_tokens ?? 2048,
@@ -170,11 +191,25 @@ async function callGemini(provider: ProviderConfig, req: LLMRequest): Promise<LL
   }
 
   const data = await res.json() as any
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+  const parts = data.candidates?.[0]?.content?.parts || []
+  const textParts = parts.filter((p: any) => p.text).map((p: any) => p.text)
+  const functionCalls = parts.filter((p: any) => p.functionCall)
+
+  // Convert Gemini function calls to OpenAI tool_calls format
+  const tool_calls = functionCalls.length > 0 ? functionCalls.map((fc: any, i: number) => ({
+    id: `call_gemini_${i}_${Date.now()}`,
+    type: 'function' as const,
+    function: {
+      name: fc.functionCall.name,
+      arguments: JSON.stringify(fc.functionCall.args || {}),
+    },
+  })) : undefined
+
   return {
     provider: 'gemini',
     model,
-    content: text,
+    content: textParts.join('') || '',
+    tool_calls,
     usage: data.usageMetadata ? {
       prompt_tokens: data.usageMetadata.promptTokenCount || 0,
       completion_tokens: data.usageMetadata.candidatesTokenCount || 0,
