@@ -45,6 +45,7 @@ import { isSlackEnabled } from './slack.js'
 import { isRlmAvailable } from './cognitive-proxy.js'
 import { hydrateCronJobs, registerDefaultLoops, listCronJobs } from './cron-scheduler.js'
 import { listExecutions } from './chain-engine.js'
+import { listPlans, type FSMState } from './state-machine.js'
 import { seedAgents } from './agent-seeds.js'
 import { hydrateMessages } from './chat-store.js'
 
@@ -101,6 +102,16 @@ app.use('/api/audit', requireApiKey, auditRouter)
 app.use('/api/llm', requireApiKey, llmRouter)
 app.use('/monitor', requireApiKey, monitorRouter)
 app.use('/api/s1-s4', requireApiKey, s1s4Router)
+
+// FSM Plans endpoint
+app.get('/api/plans', requireApiKey, async (_req, res) => {
+  try {
+    const plans = await listPlans()
+    res.json({ success: true, plans, count: plans.length })
+  } catch (err) {
+    res.status(500).json({ success: false, error: String(err) })
+  }
+})
 app.get('/api/events', requireApiKey, handleSSE)
 
 // ─── Health ───────────────────────────────────────────────────────────────────

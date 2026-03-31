@@ -315,12 +315,13 @@ export function registerDefaultLoops(): void {
     },
   })
 
-  // Evolution event tracker — records graph health snapshot hourly
+  // DEPRECATED (LIN-380): Evolution tracking consolidated into WidgeTDC graphSelfHealingCron R7.
+  // Kept as disabled reference; remove after verifying WidgeTDC cron covers same metrics.
   registerCronJob({
     id: 'evolution-tracker',
-    name: 'Evolution Event Tracker',
+    name: 'Evolution Event Tracker (DEPRECATED — see LIN-380)',
     schedule: '0 * * * *',
-    enabled: true,
+    enabled: false,
     chain: {
       name: 'Evolution Tracker',
       mode: 'parallel',
@@ -337,6 +338,191 @@ export function registerDefaultLoops(): void {
           tool_name: 'graph.read_cypher',
           arguments: {
             query: "MATCH (f:FailureMemory) RETURN count(f) AS total_failures, sum(f.hit_count) AS total_hits",
+          },
+        },
+      ],
+    },
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // INTELLIGENCE LOOPS — Drive advancedPct from 0% → 20%+
+  // Each chain calls advanced MCP tools (complexity ≥ 8) automatically.
+  // Pattern from: GSD-2 auto-loop + Palantir Flow Capture + LangGraph cron
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // 1. Knowledge Synthesis — SRAG + KG-RAG + Context Folding (*/30 min)
+  registerCronJob({
+    id: 'intel-knowledge-synthesis',
+    name: 'Intelligence: Knowledge Synthesis',
+    schedule: '*/30 * * * *',
+    enabled: true,
+    chain: {
+      name: 'Knowledge Synthesis Pipeline',
+      mode: 'sequential',
+      steps: [
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'srag.query',
+          arguments: { query: 'recent platform changes, new patterns, knowledge gaps' },
+        },
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'kg_rag.query',
+          arguments: { question: 'What knowledge gaps exist in the consulting domain graph? What patterns are underconnected?', max_evidence: 15 },
+        },
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'context_folding.fold',
+          arguments: { task: 'Synthesize knowledge from SRAG + KG-RAG into actionable insights', context: { source: '{{prev}}' }, max_tokens: 2000, domain: 'intelligence' },
+        },
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'graph.write_cypher',
+          arguments: {
+            query: "MERGE (s:StrategicInsight {id: 'intel-synthesis-' + toString(datetime().epochMillis)}) SET s.domain = 'knowledge-synthesis', s.insight = $insight, s.createdAt = datetime(), s.source = 'intelligence-loop', s.confidence = 0.7",
+            params: { insight: '{{prev}}' },
+          },
+        },
+      ],
+    },
+  })
+
+  // 2. Graph Enrichment — Autonomous GraphRAG deep analysis (*/1h)
+  registerCronJob({
+    id: 'intel-graph-enrichment',
+    name: 'Intelligence: Graph Enrichment',
+    schedule: '0 * * * *',
+    enabled: true,
+    chain: {
+      name: 'Graph Enrichment Pipeline',
+      mode: 'sequential',
+      steps: [
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'autonomous.graphrag',
+          arguments: { query: 'Find underconnected knowledge clusters and suggest new relationships between consulting domains, frameworks, and patterns', maxHops: 3 },
+        },
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'graph.write_cypher',
+          arguments: {
+            query: "MERGE (e:EnrichmentEvent {id: 'enrich-' + toString(datetime().epochMillis)}) SET e.type = 'graph-enrichment', e.findings = $findings, e.createdAt = datetime(), e.source = 'intelligence-loop'",
+            params: { findings: '{{prev}}' },
+          },
+        },
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'srag.query',
+          arguments: { query: 'Verify enrichment: what new connections were discovered in the last hour?' },
+        },
+      ],
+    },
+  })
+
+  // 3. ROMA Observer — Multi-agent coordination analysis (*/4h)
+  registerCronJob({
+    id: 'intel-roma-observer',
+    name: 'Intelligence: ROMA Optimization Observer',
+    schedule: '0 */4 * * *',
+    enabled: true,
+    chain: {
+      name: 'ROMA Observer Pipeline',
+      mode: 'sequential',
+      steps: [
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'autonomous.agentteam.coordinate',
+          arguments: {
+            task: 'Analyze platform optimization opportunities: review recent decisions, identify sub-optimal tool usage patterns, propose improvements',
+            context: { severity: 'P2', scope: 'platform-wide' },
+          },
+        },
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'context_folding.fold',
+          arguments: { task: 'Compress ROMA findings into actionable optimization report', context: { data: '{{prev}}' }, max_tokens: 1500, domain: 'optimization' },
+        },
+      ],
+    },
+  })
+
+  // 4. Compliance Scan — Governance check (*/6h)
+  registerCronJob({
+    id: 'intel-compliance-scan',
+    name: 'Intelligence: Compliance Scan',
+    schedule: '0 */6 * * *',
+    enabled: true,
+    chain: {
+      name: 'Compliance Scan Pipeline',
+      mode: 'sequential',
+      steps: [
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'srag.governance-check',
+          arguments: { query: 'Check compliance status of all active agents, tools, and recent decisions against governance policy' },
+        },
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'audit.run',
+          arguments: { agentId: 'orchestrator', output: '{{prev}}' },
+        },
+      ],
+    },
+  })
+
+  // 5. Harvest Cycle — Template-based knowledge harvesting (*/8h)
+  registerCronJob({
+    id: 'intel-harvest-cycle',
+    name: 'Intelligence: Knowledge Harvest',
+    schedule: '0 */8 * * *',
+    enabled: true,
+    chain: {
+      name: 'Knowledge Harvest Pipeline',
+      mode: 'sequential',
+      steps: [
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'template.execute',
+          arguments: { templateId: 'data-enrichment', input: { scope: 'recent-24h' } },
+        },
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'srag.query',
+          arguments: { query: 'What new knowledge was harvested? Summarize new patterns and insights from the last 8 hours' },
+        },
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'graph.write_cypher',
+          arguments: {
+            query: "MERGE (h:HarvestEvent {id: 'harvest-' + toString(datetime().epochMillis)}) SET h.type = 'knowledge-harvest', h.summary = $summary, h.createdAt = datetime(), h.source = 'intelligence-loop'",
+            params: { summary: '{{prev}}' },
+          },
+        },
+      ],
+    },
+  })
+
+  // 6. Metrics Snapshot — Platform KPI tracking (*/1h)
+  registerCronJob({
+    id: 'intel-metrics-snapshot',
+    name: 'Intelligence: Metrics Snapshot',
+    schedule: '30 * * * *',
+    enabled: true,
+    chain: {
+      name: 'Metrics Snapshot Pipeline',
+      mode: 'sequential',
+      steps: [
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'metrics.summary',
+          arguments: {},
+        },
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'graph.write_cypher',
+          arguments: {
+            query: "MERGE (m:MetricsSnapshot {id: 'metrics-' + toString(datetime().epochMillis)}) SET m.data = $data, m.createdAt = datetime(), m.source = 'intelligence-loop'",
+            params: { data: '{{prev}}' },
           },
         },
       ],
