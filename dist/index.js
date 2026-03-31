@@ -13577,6 +13577,35 @@ var ORCHESTRATOR_TOOLS = [
         required: ["query"]
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "linear_issues",
+      description: "Get issues from Linear project management. Use for project status, active tasks, sprint progress, blockers, or specific issue details (LIN-xxx). Returns real-time Linear data.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: 'Search query or issue identifier (e.g., "LIN-493" or "cloud chat platform")' },
+          status: { type: "string", enum: ["active", "done", "backlog", "all"], description: "Filter by status (default: active)" },
+          limit: { type: "number", description: "Max results (default 10)" }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "linear_issue_detail",
+      description: "Get detailed info about a specific Linear issue by identifier (e.g., LIN-493). Returns full description, comments, status, assignee, sub-issues.",
+      parameters: {
+        type: "object",
+        properties: {
+          identifier: { type: "string", description: "Issue identifier (e.g., LIN-493)" }
+        },
+        required: ["identifier"]
+      }
+    }
   }
 ];
 async function executeToolCalls(toolCalls) {
@@ -13685,6 +13714,40 @@ ${result.merged_context}` : "No results found for this query.";
       });
       if (result.status !== "success") return `Document search failed: ${result.error_message}`;
       return JSON.stringify(result.result, null, 2).slice(0, 3e3);
+    }
+    case "linear_issues": {
+      const status = args.status ?? "active";
+      const limit = args.limit ?? 10;
+      const query = args.query ?? "";
+      const payload = { limit };
+      if (query) payload.query = query;
+      if (status === "active") payload.status = "started";
+      else if (status === "done") payload.status = "completed";
+      else if (status === "backlog") payload.status = "backlog";
+      const result = await callMcpTool({
+        toolName: "linear.issues",
+        args: payload,
+        callId: uuid7(),
+        timeoutMs: 15e3
+      });
+      if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
+      const data = result.result;
+      const issues = data?.issues ?? data ?? [];
+      if (!Array.isArray(issues) || issues.length === 0) return "No Linear issues found.";
+      return issues.map(
+        (i) => `- [${i.identifier}] ${i.title} (${i.status}) ${i.assignee ? `\u2192 ${i.assignee}` : ""} ${i.url ?? ""}`
+      ).join("\n");
+    }
+    case "linear_issue_detail": {
+      const identifier = args.identifier;
+      const result = await callMcpTool({
+        toolName: "linear.issue_get",
+        args: { identifier },
+        callId: uuid7(),
+        timeoutMs: 15e3
+      });
+      if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
+      return JSON.stringify(result.result, null, 2).slice(0, 4e3);
     }
     default:
       return `Unknown tool: ${name}`;

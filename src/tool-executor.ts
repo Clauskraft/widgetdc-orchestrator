@@ -118,6 +118,35 @@ export const ORCHESTRATOR_TOOLS = [
       },
     },
   },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'linear_issues',
+      description: 'Get issues from Linear project management. Use for project status, active tasks, sprint progress, blockers, or specific issue details (LIN-xxx). Returns real-time Linear data.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search query or issue identifier (e.g., "LIN-493" or "cloud chat platform")' },
+          status: { type: 'string', enum: ['active', 'done', 'backlog', 'all'], description: 'Filter by status (default: active)' },
+          limit: { type: 'number', description: 'Max results (default 10)' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'linear_issue_detail',
+      description: 'Get detailed info about a specific Linear issue by identifier (e.g., LIN-493). Returns full description, comments, status, assignee, sub-issues.',
+      parameters: {
+        type: 'object',
+        properties: {
+          identifier: { type: 'string', description: 'Issue identifier (e.g., LIN-493)' },
+        },
+        required: ['identifier'],
+      },
+    },
+  },
 ]
 
 // ─── Tool execution ─────────────────────────────────────────────────────────
@@ -257,6 +286,47 @@ async function executeOne(tc: ToolCall): Promise<string> {
       })
       if (result.status !== 'success') return `Document search failed: ${result.error_message}`
       return JSON.stringify(result.result, null, 2).slice(0, 3000)
+    }
+
+    case 'linear_issues': {
+      const status = (args.status as string) ?? 'active'
+      const limit = (args.limit as number) ?? 10
+      const query = args.query as string ?? ''
+
+      // Use linear.issues MCP tool (backend has LINEAR_API_KEY)
+      const payload: Record<string, unknown> = { limit }
+      if (query) payload.query = query
+      if (status === 'active') payload.status = 'started'
+      else if (status === 'done') payload.status = 'completed'
+      else if (status === 'backlog') payload.status = 'backlog'
+
+      const result = await callMcpTool({
+        toolName: 'linear.issues',
+        args: payload,
+        callId: uuid(),
+        timeoutMs: 15000,
+      })
+      if (result.status !== 'success') return `Linear query failed: ${result.error_message}`
+
+      const data = result.result as any
+      const issues = data?.issues ?? data ?? []
+      if (!Array.isArray(issues) || issues.length === 0) return 'No Linear issues found.'
+
+      return issues.map((i: any) =>
+        `- [${i.identifier}] ${i.title} (${i.status}) ${i.assignee ? `→ ${i.assignee}` : ''} ${i.url ?? ''}`
+      ).join('\n')
+    }
+
+    case 'linear_issue_detail': {
+      const identifier = args.identifier as string
+      const result = await callMcpTool({
+        toolName: 'linear.issue_get',
+        args: { identifier },
+        callId: uuid(),
+        timeoutMs: 15000,
+      })
+      if (result.status !== 'success') return `Linear issue lookup failed: ${result.error_message}`
+      return JSON.stringify(result.result, null, 2).slice(0, 4000)
     }
 
     default:
