@@ -13465,6 +13465,64 @@ BRUG ALTID avancerede tools for analyse:
 
 Svar p\xE5 dansk medmindre brugeren skriver engelsk.
 V\xE6r proaktiv \u2014 foresl\xE5 avancerede tools og intelligence loops.`;
+async function getOrchestratedContext(userMessage, requestId) {
+  const parts = [];
+  try {
+    const ragResult = await dualChannelRAG(userMessage, { maxResults: 8 });
+    if (ragResult.merged_context.length > 0) {
+      parts.push(`=== PLATFORM KNOWLEDGE (${ragResult.srag_count} semantic + ${ragResult.cypher_count} graph results, ${ragResult.duration_ms}ms) ===`);
+      parts.push(ragResult.merged_context);
+    }
+    logger.info({ requestId, srag: ragResult.srag_count, cypher: ragResult.cypher_count, ms: ragResult.duration_ms }, "Dual-RAG retrieval");
+  } catch (err) {
+    logger.warn({ requestId, err: String(err) }, "Dual-RAG failed \u2014 continuing without context");
+  }
+  const isComplex = userMessage.length > 100 || /\b(analy|strateg|compar|evaluat|why|how does|explain|plan|recommend|architect)\b/i.test(userMessage);
+  if (isComplex && isRlmAvailable()) {
+    try {
+      const rlmResult = await callCognitive("reason", {
+        prompt: userMessage,
+        context: { source: "open-webui-chat", request_id: requestId },
+        agent_id: "chat-orchestrator",
+        depth: 1
+      }, 3e4);
+      if (rlmResult) {
+        const rlmText = typeof rlmResult === "string" ? rlmResult : JSON.stringify(rlmResult, null, 2);
+        if (rlmText.length > 20) {
+          parts.push(`=== RLM DEEP REASONING ===`);
+          parts.push(rlmText.slice(0, 2e3));
+        }
+      }
+      logger.info({ requestId, complex: true }, "RLM reasoning complete");
+    } catch (err) {
+      logger.warn({ requestId, err: String(err) }, "RLM reasoning failed \u2014 continuing without");
+    }
+  }
+  if (/\b(linear|task|issue|sprint|backlog|status|next step|blocker|plan)\b/i.test(userMessage)) {
+    try {
+      const linearResult = await callMcpTool({
+        toolName: "graph.read_cypher",
+        args: {
+          query: `MATCH (n) WHERE (n:Task OR n:L3Task) AND n.status IN ['In Progress', 'Todo', 'Backlog']
+                  RETURN n.title AS title, n.status AS status, coalesce(n.identifier, n.id) AS id
+                  ORDER BY n.updatedAt DESC LIMIT 10`
+        },
+        callId: uuid7(),
+        timeoutMs: 1e4
+      });
+      if (linearResult.status === "success" && linearResult.result) {
+        const rows = Array.isArray(linearResult.result) ? linearResult.result : linearResult.result?.results ?? [];
+        if (rows.length > 0) {
+          parts.push(`=== ACTIVE TASKS (from graph) ===`);
+          parts.push(rows.map((r) => `- [${r.id ?? "?"}] ${r.title} (${r.status})`).join("\n"));
+        }
+      }
+    } catch (err) {
+      logger.warn({ requestId, err: String(err) }, "Task context failed");
+    }
+  }
+  return parts.join("\n\n");
+}
 var MODELS = [
   { id: "claude-sonnet", provider: "claude", displayName: "Claude Sonnet 4" },
   { id: "claude-opus", provider: "claude", displayName: "Claude Opus 4" },
@@ -13501,13 +13559,40 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
   const mapping = MODEL_TO_PROVIDER[model] || MODEL_TO_PROVIDER["gemini-flash"];
   const provider = mapping.provider;
   const providerModel = mapping.model;
+  const userMessages = (messages || []).filter((m) => m.role === "user");
+  const lastUserMessage = userMessages.length > 0 ? userMessages[userMessages.length - 1].content : "";
+  let orchestratedContext = "";
+  if (lastUserMessage.length > 2) {
+    try {
+      orchestratedContext = await getOrchestratedContext(lastUserMessage, requestId);
+    } catch (err) {
+      logger.warn({ requestId, err: String(err) }, "Orchestration failed \u2014 falling back to plain chat");
+    }
+  }
+  const enrichedSystemPrompt = orchestratedContext.length > 0 ? `${SYSTEM_PROMPT}
+
+${orchestratedContext}
+
+Brug ovenst\xE5ende platformdata til at give et pr\xE6cist, datadrevet svar. Cit\xE9r kilder n\xE5r muligt.` : SYSTEM_PROMPT;
   const llmMessages = [...messages || []];
   const hasSystem = llmMessages.some((m) => m.role === "system");
   if (!hasSystem) {
-    llmMessages.unshift({ role: "system", content: SYSTEM_PROMPT });
+    llmMessages.unshift({ role: "system", content: enrichedSystemPrompt });
+  } else {
+    if (orchestratedContext.length > 0) {
+      const sysIdx = llmMessages.findIndex((m) => m.role === "system");
+      if (sysIdx >= 0) {
+        llmMessages[sysIdx] = {
+          ...llmMessages[sysIdx],
+          content: `${llmMessages[sysIdx].content}
+
+${orchestratedContext}`
+        };
+      }
+    }
   }
   const t0 = Date.now();
-  logger.info({ model, provider, stream, messageCount: llmMessages.length }, "OpenAI compat request");
+  logger.info({ model, provider, stream, messageCount: llmMessages.length, contextLen: orchestratedContext.length }, "OpenAI compat request (orchestrated)");
   try {
     if (stream) {
       res.setHeader("Content-Type", "text/event-stream");
