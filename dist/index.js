@@ -13447,6 +13447,157 @@ async function runFullHarvest() {
   return results;
 }
 
+// src/routes/openai-compat.ts
+import { Router as Router13 } from "express";
+import { v4 as uuid7 } from "uuid";
+var openaiCompatRouter = Router13();
+var SYSTEM_PROMPT = `Du er strategisk partner for WidgeTDC consulting intelligence platform (v2.4.0).
+
+PLATFORM: 448 MCP tools, 520K Neo4j nodes, 3 Railway services, 10 A2A skills.
+MISSION: Drive advancedPct fra 0% til 20%, eliminere human bottleneck, harveste consulting-viden.
+KPI: advancedPct (m\xE5l 20%), complexity avg (m\xE5l 3.0), embedding coverage (m\xE5l 100%).
+
+BRUG ALTID avancerede tools for analyse:
+- srag.query for semantic search (complexity 3)
+- kg_rag.query for multi-hop reasoning (complexity 4)
+- autonomous.graphrag for deep synthesis (complexity 8)
+- ALDRIG default til simple Cypher for komplekse sp\xF8rgsm\xE5l.
+
+Svar p\xE5 dansk medmindre brugeren skriver engelsk.
+V\xE6r proaktiv \u2014 foresl\xE5 avancerede tools og intelligence loops.`;
+var MODELS = [
+  { id: "claude-sonnet", provider: "claude", displayName: "Claude Sonnet 4" },
+  { id: "claude-opus", provider: "claude", displayName: "Claude Opus 4" },
+  { id: "gemini-flash", provider: "gemini", displayName: "Gemini 2.0 Flash" },
+  { id: "deepseek-chat", provider: "deepseek", displayName: "DeepSeek Chat" },
+  { id: "qwen-plus", provider: "qwen", displayName: "Qwen Plus" },
+  { id: "gpt-4o", provider: "openai", displayName: "GPT-4o" },
+  { id: "groq-llama", provider: "groq", displayName: "Groq Llama 3.3 70B" }
+];
+var MODEL_TO_PROVIDER = {
+  "claude-sonnet": { provider: "claude", model: "claude-sonnet-4-20250514" },
+  "claude-opus": { provider: "claude", model: "claude-opus-4-20250514" },
+  "gemini-flash": { provider: "gemini", model: "gemini-2.0-flash" },
+  "deepseek-chat": { provider: "deepseek", model: "deepseek-chat" },
+  "qwen-plus": { provider: "qwen", model: "qwen-plus" },
+  "gpt-4o": { provider: "openai", model: "gpt-4o" },
+  "groq-llama": { provider: "groq", model: "llama-3.3-70b-versatile" }
+};
+openaiCompatRouter.get("/v1/models", (_req, res) => {
+  const models = MODELS.map((m) => ({
+    id: m.id,
+    object: "model",
+    created: 17e8,
+    owned_by: m.provider,
+    permission: [],
+    root: m.id,
+    parent: null
+  }));
+  res.json({ object: "list", data: models });
+});
+openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
+  const { model, messages, stream, temperature, max_tokens } = req.body;
+  const requestId = `chatcmpl-${uuid7().substring(0, 12)}`;
+  const mapping = MODEL_TO_PROVIDER[model] || MODEL_TO_PROVIDER["gemini-flash"];
+  const provider = mapping.provider;
+  const providerModel = mapping.model;
+  const llmMessages = [...messages || []];
+  const hasSystem = llmMessages.some((m) => m.role === "system");
+  if (!hasSystem) {
+    llmMessages.unshift({ role: "system", content: SYSTEM_PROMPT });
+  }
+  const t0 = Date.now();
+  logger.info({ model, provider, stream, messageCount: llmMessages.length }, "OpenAI compat request");
+  try {
+    if (stream) {
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      const result = await chatLLM({
+        provider,
+        messages: llmMessages,
+        model: providerModel,
+        temperature: temperature ?? 0.7,
+        max_tokens: max_tokens ?? 4096
+      });
+      const content = result.content;
+      const chunkSize = 20;
+      const chunks = [];
+      for (let i = 0; i < content.length; i += chunkSize) {
+        chunks.push(content.slice(i, i + chunkSize));
+      }
+      for (const chunk of chunks) {
+        const event = {
+          id: requestId,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1e3),
+          model: model || "gemini-flash",
+          choices: [{
+            index: 0,
+            delta: { content: chunk },
+            finish_reason: null
+          }]
+        };
+        res.write(`data: ${JSON.stringify(event)}
+
+`);
+      }
+      const finishEvent = {
+        id: requestId,
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1e3),
+        model: model || "gemini-flash",
+        choices: [{
+          index: 0,
+          delta: {},
+          finish_reason: "stop"
+        }]
+      };
+      res.write(`data: ${JSON.stringify(finishEvent)}
+
+`);
+      res.write("data: [DONE]\n\n");
+      res.end();
+      logger.info({ model, provider, duration_ms: Date.now() - t0, tokens: content.length / 4 }, "OpenAI compat stream complete");
+    } else {
+      const result = await chatLLM({
+        provider,
+        messages: llmMessages,
+        model: providerModel,
+        temperature: temperature ?? 0.7,
+        max_tokens: max_tokens ?? 4096
+      });
+      const response = {
+        id: requestId,
+        object: "chat.completion",
+        created: Math.floor(Date.now() / 1e3),
+        model: model || "gemini-flash",
+        choices: [{
+          index: 0,
+          message: { role: "assistant", content: result.content },
+          finish_reason: "stop"
+        }],
+        usage: result.usage || {
+          prompt_tokens: Math.ceil(JSON.stringify(llmMessages).length / 4),
+          completion_tokens: Math.ceil(result.content.length / 4),
+          total_tokens: Math.ceil((JSON.stringify(llmMessages).length + result.content.length) / 4)
+        }
+      };
+      res.json(response);
+      logger.info({ model, provider, duration_ms: Date.now() - t0 }, "OpenAI compat complete");
+    }
+  } catch (err) {
+    logger.error({ model, provider, err: String(err) }, "OpenAI compat error");
+    res.status(500).json({
+      error: {
+        message: String(err),
+        type: "server_error",
+        code: "internal_error"
+      }
+    });
+  }
+});
+
 // src/agent-seeds.ts
 var AGENT_SEEDS = [
   {
@@ -13739,6 +13890,7 @@ app.use("/api/audit", requireApiKey, auditRouter);
 app.use("/api/llm", requireApiKey, llmRouter);
 app.use("/monitor", requireApiKey, monitorRouter);
 app.use("/api/s1-s4", requireApiKey, s1s4Router);
+app.use(openaiCompatRouter);
 app.get("/api/plans", requireApiKey, async (_req, res) => {
   try {
     const plans = await listPlans();
