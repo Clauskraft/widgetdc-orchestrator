@@ -46,6 +46,7 @@ import { isRlmAvailable } from './cognitive-proxy.js'
 import { hydrateCronJobs, registerDefaultLoops, listCronJobs } from './cron-scheduler.js'
 import { listExecutions } from './chain-engine.js'
 import { listPlans, type FSMState } from './state-machine.js'
+import { runHarvestPipeline, runFullHarvest } from './harvest-pipeline.js'
 import { seedAgents } from './agent-seeds.js'
 import { hydrateMessages } from './chat-store.js'
 
@@ -108,6 +109,25 @@ app.get('/api/plans', requireApiKey, async (_req, res) => {
   try {
     const plans = await listPlans()
     res.json({ success: true, plans, count: plans.length })
+  } catch (err) {
+    res.status(500).json({ success: false, error: String(err) })
+  }
+})
+
+// Harvest pipeline endpoints
+app.post('/api/harvest/:domain', requireApiKey, async (req, res) => {
+  try {
+    const result = await runHarvestPipeline(req.params.domain)
+    res.json({ success: true, ...result })
+  } catch (err) {
+    res.status(500).json({ success: false, error: String(err) })
+  }
+})
+
+app.post('/api/harvest', requireApiKey, async (_req, res) => {
+  try {
+    const results = await runFullHarvest()
+    res.json({ success: true, results })
   } catch (err) {
     res.status(500).json({ success: false, error: String(err) })
   }

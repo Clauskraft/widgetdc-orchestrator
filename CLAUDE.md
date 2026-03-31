@@ -1,4 +1,29 @@
-# WidgeTDC Orchestrator — Multi-Agent Coordination Layer
+# WidgeTDC Orchestrator — Project Cockpit
+
+Central autonomous intelligence platform for WidgeTDC. Single cockpit for all 6 repos.
+
+## Shared Skills (centralt vedligeholdt i WidgeTDC)
+
+Skills vedligeholdes centralt i WidgeTDC repo og deles via filsystem:
+- Fuld kapabilitetsliste: `Read C:\Users\claus\Projetcs\WidgeTDC\.claude\skills\shared-capabilities.md`
+- Alle skills: `Read C:\Users\claus\Projetcs\WidgeTDC\.claude\skills\<skill-name>.md`
+
+Platform: v2.4.0 — 448 MCP tools, 16 lib modules, 10 A2A skills, 6 crons.
+
+## Key Modules
+
+- `src/chain-engine.ts` — 5-mode agent chain execution (sequential/parallel/loop/debate/adaptive)
+- `src/cron-scheduler.ts` — Scheduled chains incl. 6 intelligence loops
+- `src/state-machine.ts` — LangGraph-inspired FSM with Redis checkpoints
+- `src/verification-gate.ts` — Post-chain verification with tripwire guardrails
+- `src/harvest-pipeline.ts` — Backstage-pattern consulting component harvesting
+- `src/mcp-caller.ts` — Backend MCP bridge with retry
+- `src/routing-engine.ts` — Capability-based agent routing
+
+## Global Governance
+
+This file inherits the cross-repo baseline defined in `GLOBAL_AGENT_GOVERNANCE.md`.
+Repo-specific agent instructions may extend this file, but they must not weaken global rules for operational truth, runtime enforcement, verification, or completion.
 
 <!-- BEGIN SHARED RULES -->
 ## Autonomi
