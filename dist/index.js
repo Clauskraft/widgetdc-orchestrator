@@ -9877,97 +9877,95 @@ async function aggregateSseStream(res, callId, log) {
   }
 }
 
-// src/routes/tools.ts
-var toolsRouter = Router2();
-toolsRouter.post("/call", async (req, res) => {
-  const result = validate(validateToolCall, req.body);
-  if (!result.ok) {
-    res.status(400).json({
-      success: false,
-      error: {
-        code: "VALIDATION_ERROR",
-        message: "Invalid OrchestratorToolCall payload",
-        details: result.errors,
-        status_code: 400
-      }
-    });
-    return;
-  }
-  const call = result.data;
-  const log = childLogger(call.trace_id ?? call.call_id);
-  if (config.agentOpenAccess) {
-    AgentRegistry.canCallTool(call.agent_id, call.tool_name);
-  } else {
-    const acl = AgentRegistry.canCallTool(call.agent_id, call.tool_name);
-    if (!acl.allowed) {
-      log.warn({ agent_id: call.agent_id, tool: call.tool_name }, `ACL denied: ${acl.reason}`);
-      res.status(403).json({
-        call_id: call.call_id,
-        status: "unauthorized",
-        result: null,
-        error_message: acl.reason,
-        error_code: "UNAUTHORIZED",
-        duration_ms: 0,
-        completed_at: (/* @__PURE__ */ new Date()).toISOString()
+// src/dual-rag.ts
+import { v4 as uuid } from "uuid";
+async function dualChannelRAG(query, options) {
+  const t0 = Date.now();
+  const maxResults = options?.maxResults ?? 10;
+  const depth = options?.cypherDepth ?? 2;
+  const [sragResult, cypherResult] = await Promise.allSettled([
+    callMcpTool({
+      toolName: "srag.query",
+      args: { query },
+      callId: uuid(),
+      timeoutMs: 3e4
+    }),
+    callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: buildCypherQuery(query, depth)
+      },
+      callId: uuid(),
+      timeoutMs: 15e3
+    })
+  ]);
+  const results = [];
+  if (sragResult.status === "fulfilled" && sragResult.value.status === "success") {
+    const sragData = sragResult.value.result;
+    const items = Array.isArray(sragData) ? sragData : sragData?.results ? sragData.results : sragData?.chunks ? sragData.chunks : [];
+    for (const item of items.slice(0, maxResults)) {
+      results.push({
+        source: "srag",
+        content: item.content || item.text || item.chunk || JSON.stringify(item).slice(0, 500),
+        score: item.score || item.similarity || 0.5,
+        metadata: { title: item.title, tags: item.tags }
       });
-      return;
     }
   }
-  const active = AgentRegistry.getActiveCalls(call.agent_id);
-  if (active >= config.maxConcurrentPerAgent) {
-    res.status(429).json({
-      call_id: call.call_id,
-      status: "rate_limited",
-      result: null,
-      error_message: `Max ${config.maxConcurrentPerAgent} concurrent calls`,
-      error_code: "RATE_LIMITED",
-      duration_ms: 0,
-      completed_at: (/* @__PURE__ */ new Date()).toISOString()
-    });
-    return;
-  }
-  AgentRegistry.incrementActive(call.agent_id);
-  log.info({ agent_id: call.agent_id, tool: call.tool_name }, "Tool call start");
-  try {
-    const toolResult = await callMcpTool({
-      toolName: call.tool_name,
-      args: call.arguments,
-      callId: call.call_id,
-      traceId: call.trace_id,
-      timeoutMs: call.timeout_ms
-    });
-    res.json(toolResult);
-    if (toolResult.status === "success") {
-      broadcastToolResult(call.call_id, toolResult.result, call.agent_id);
+  if (cypherResult.status === "fulfilled" && cypherResult.value.status === "success") {
+    const cypherData = cypherResult.value.result;
+    const rows = cypherData?.results || cypherData || [];
+    if (Array.isArray(rows)) {
+      for (const row of rows.slice(0, maxResults)) {
+        const content = Object.values(row).map(
+          (v) => typeof v === "string" ? v : JSON.stringify(v)
+        ).join(" | ");
+        results.push({
+          source: "cypher",
+          content: content.slice(0, 500),
+          score: 0.7,
+          // graph results are structurally relevant
+          metadata: row
+        });
+      }
     }
-    notifyToolCall(call.agent_id, call.tool_name, toolResult.status, toolResult.duration_ms ?? 0, toolResult.error_message);
-    log.info({ tool: call.tool_name, status: toolResult.status, ms: toolResult.duration_ms }, "Tool call done");
-  } finally {
-    AgentRegistry.decrementActive(call.agent_id);
-    AgentRegistry.heartbeat(call.agent_id);
   }
-});
-toolsRouter.get("/namespaces", async (_req, res) => {
-  try {
-    const r = await fetch(`${config.backendUrl}/api/mcp/tools`, {
-      headers: { Authorization: `Bearer ${config.backendApiKey}` }
-    });
-    if (!r.ok) {
-      res.status(502).json({ success: false, error: { message: `Backend ${r.status}` } });
-      return;
-    }
-    const tools = await r.json();
-    res.json({ success: true, data: tools });
-  } catch (err) {
-    res.status(502).json({ success: false, error: { message: String(err) } });
+  results.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  const merged = results.slice(0, maxResults).map(
+    (r, i) => `[${r.source.toUpperCase()} #${i + 1}] ${r.content}`
+  ).join("\n\n");
+  const sragCount = results.filter((r) => r.source === "srag").length;
+  const cypherCount = results.filter((r) => r.source === "cypher").length;
+  logger.debug({ query: query.slice(0, 60), sragCount, cypherCount, ms: Date.now() - t0 }, "Dual-channel RAG");
+  return {
+    query,
+    results: results.slice(0, maxResults),
+    srag_count: sragCount,
+    cypher_count: cypherCount,
+    merged_context: merged,
+    duration_ms: Date.now() - t0
+  };
+}
+function buildCypherQuery(query, depth) {
+  const stopWords = /* @__PURE__ */ new Set(["the", "and", "for", "with", "that", "this", "from", "are", "was", "how", "what", "which", "where", "when", "why", "can", "does", "will", "not", "all", "has", "have", "been", "our", "their", "its"]);
+  const keywords = query.toLowerCase().replace(/[^a-zA-Z0-9æøåÆØÅ\s]/g, "").split(/\s+/).filter((w) => w.length >= 3 && !stopWords.has(w)).slice(0, 5);
+  if (keywords.length === 0) {
+    return "MATCH (n:StrategicInsight) RETURN n.title AS title, n.domain AS domain LIMIT 5";
   }
-});
-
-// src/routes/chat.ts
-import { Router as Router3 } from "express";
-
-// src/chain-engine.ts
-import { v4 as uuid2 } from "uuid";
+  const kwConditions = keywords.map(
+    (kw) => `toLower(coalesce(n.title, n.name, n.description, '')) CONTAINS '${kw}'`
+  ).join(" OR ");
+  return `MATCH (n) WHERE (n:StrategicInsight OR n:Pattern OR n:Lesson OR n:Knowledge OR n:Memory OR n:TDCDocument)
+AND (${kwConditions})
+WITH n, labels(n)[0] AS label
+OPTIONAL MATCH (n)-[r]-(m)
+RETURN label,
+       coalesce(n.title, n.name, n.filename) AS title,
+       substring(coalesce(n.description, n.content, n.value, ''), 0, 300) AS content,
+       type(r) AS rel,
+       labels(m)[0] AS connected_to
+LIMIT 15`;
+}
 
 // src/cognitive-proxy.ts
 var COGNITIVE_ROUTES = {
@@ -10068,8 +10066,11 @@ async function getRlmHealth() {
   }
 }
 
+// src/chain-engine.ts
+import { v4 as uuid3 } from "uuid";
+
 // src/routing-engine.ts
-import { v4 as uuid } from "uuid";
+import { v4 as uuid2 } from "uuid";
 var CAPABILITY_CANDIDATES = {
   engagement_intake: ["the-snout", "harvest", "lc-harvester"],
   guided_decomposition: ["nexus", "rlm", "consulting"],
@@ -10142,7 +10143,7 @@ function inferCapabilityFromMessage(message) {
 function buildIntent(capability, routeScope, operatorVisible) {
   const meta = CAPABILITY_META[capability];
   return {
-    intent_id: `intent-${uuid().slice(0, 8)}`,
+    intent_id: `intent-${uuid2().slice(0, 8)}`,
     capability,
     task_domain: meta.taskDomain === "routing" ? "intake" : meta.taskDomain,
     flow_ref: meta.flowRef,
@@ -10235,13 +10236,13 @@ function resolveRoutingDecision(input) {
     fallbackAgents.map((agentId) => buildTrustProfile(agentId, capability, recentExecutions))
   );
   const selectedProfile = trustProfiles[0];
-  const workflowId = input.workflowId ?? `workflow-${uuid().slice(0, 8)}`;
+  const workflowId = input.workflowId ?? `workflow-${uuid2().slice(0, 8)}`;
   const evidenceRefs = [
     ...summarizeEvidence(selectedProfile.agent_id, recentExecutions).evidenceRefs,
     `scorecard:LIN-261:${intent.capability}`
   ];
   const decision = {
-    decision_id: `route-${uuid().slice(0, 8)}`,
+    decision_id: `route-${uuid2().slice(0, 8)}`,
     intent,
     selected_agent_id: selectedProfile.agent_id,
     selected_capability: capability,
@@ -10293,7 +10294,7 @@ function listExecutions() {
   return Array.from(executions.values()).sort((a, b) => b.started_at.localeCompare(a.started_at)).slice(0, 50);
 }
 async function executeStep(step, previousOutput) {
-  const stepId = step.id ?? uuid2().slice(0, 8);
+  const stepId = step.id ?? uuid3().slice(0, 8);
   const t0 = Date.now();
   const prevStr = typeof previousOutput === "string" ? previousOutput : JSON.stringify(previousOutput ?? "");
   try {
@@ -10315,7 +10316,7 @@ async function executeStep(step, previousOutput) {
       const result = await callMcpTool({
         toolName: step.tool_name,
         args,
-        callId: uuid2(),
+        callId: uuid3(),
         timeoutMs: step.timeout_ms ?? 3e4
       });
       if (result.status !== "success") {
@@ -10488,8 +10489,8 @@ async function resolveAutoSteps(def) {
   return { steps: resolvedSteps, routingDecisions, workflowEnvelope };
 }
 async function executeChain(def) {
-  const executionId = uuid2();
-  const chainId = def.chain_id ?? uuid2().slice(0, 12);
+  const executionId = uuid3();
+  const chainId = def.chain_id ?? uuid3().slice(0, 12);
   const t0 = Date.now();
   const execution = {
     execution_id: executionId,
@@ -10569,6 +10570,709 @@ async function executeChain(def) {
   });
   return execution;
 }
+
+// src/verification-gate.ts
+import { v4 as uuid4 } from "uuid";
+async function verifyChainOutput(chainOutput, config2) {
+  const maxRetries = config2.max_retries ?? 3;
+  const start = Date.now();
+  let retries = 0;
+  let lastResult = null;
+  while (retries <= maxRetries) {
+    const checkResults = await runChecksParallel(config2.checks, chainOutput);
+    const tripwireTripped = config2.tripwire_check ? checkResults.some((c) => c.name === config2.tripwire_check && c.status !== "pass") : false;
+    const allPassed = checkResults.every((c) => c.status === "pass");
+    lastResult = {
+      passed: allPassed && !tripwireTripped,
+      checks: checkResults,
+      retries_attempted: retries,
+      total_duration_ms: Date.now() - start,
+      aborted_by_tripwire: tripwireTripped
+    };
+    if (allPassed) {
+      logger.info({ retries, checks: checkResults.length }, "Verification gate: PASSED");
+      return lastResult;
+    }
+    if (tripwireTripped) {
+      logger.warn({ tripwire: config2.tripwire_check }, "Verification gate: TRIPWIRE ABORT");
+      return lastResult;
+    }
+    retries++;
+    if (retries <= maxRetries) {
+      logger.info({ retry: retries, maxRetries, failed: checkResults.filter((c) => c.status !== "pass").map((c) => c.name) }, "Verification gate: retrying");
+      await new Promise((r) => setTimeout(r, 1e3 * retries));
+    }
+  }
+  logger.warn({ retries: maxRetries }, "Verification gate: FAILED after max retries");
+  return lastResult;
+}
+async function runChecksParallel(checks, chainOutput) {
+  const results = await Promise.allSettled(
+    checks.map(async (check) => {
+      const start = Date.now();
+      try {
+        const args = { ...check.arguments };
+        for (const [k, v] of Object.entries(args)) {
+          if (v === "{{output}}") args[k] = chainOutput;
+        }
+        const result = await callMcpTool({
+          toolName: check.tool_name,
+          args,
+          callId: `verify-${uuid4().substring(0, 8)}`,
+          timeoutMs: 15e3
+        });
+        let passed = true;
+        if (check.validate) {
+          passed = check.validate(result);
+        } else if (check.expected_key) {
+          const actual = result?.[check.expected_key];
+          passed = actual === check.expected_value;
+        }
+        return {
+          name: check.name,
+          status: passed ? "pass" : "fail",
+          output: result,
+          duration_ms: Date.now() - start
+        };
+      } catch (err) {
+        return {
+          name: check.name,
+          status: "error",
+          output: String(err),
+          duration_ms: Date.now() - start
+        };
+      }
+    })
+  );
+  return results.map(
+    (r, i) => r.status === "fulfilled" ? r.value : {
+      name: checks[i].name,
+      status: "error",
+      output: String(r.reason),
+      duration_ms: 0
+    }
+  );
+}
+
+// src/tool-executor.ts
+import { v4 as uuid5 } from "uuid";
+var ORCHESTRATOR_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "search_knowledge",
+      description: "Search the WidgeTDC knowledge graph and semantic vector store. Use for ANY question about platform data, consulting knowledge, patterns, documents, or entities. Returns merged results from SRAG (semantic) and Neo4j (graph).",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Natural language search query" },
+          max_results: { type: "number", description: "Max results (default 10)" }
+        },
+        required: ["query"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "reason_deeply",
+      description: "Send a complex question to the RLM reasoning engine for deep multi-step analysis. Use for strategy questions, architecture analysis, comparisons, evaluations, and planning. More powerful than search \u2014 actually reasons about the data.",
+      parameters: {
+        type: "object",
+        properties: {
+          question: { type: "string", description: "The complex question to reason about" },
+          mode: { type: "string", enum: ["reason", "analyze", "plan"], description: "Reasoning mode (default: reason)" }
+        },
+        required: ["question"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "query_graph",
+      description: "Execute a Cypher query against the Neo4j knowledge graph (520K nodes, 4M relationships). Use for structured data queries like counting nodes, finding relationships, listing entities, or checking status.",
+      parameters: {
+        type: "object",
+        properties: {
+          cypher: { type: "string", description: "Neo4j Cypher query (read-only, parameterized)" },
+          params: { type: "object", description: "Query parameters (optional)" }
+        },
+        required: ["cypher"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "check_tasks",
+      description: "Get active tasks, issues, and project status from the knowledge graph. Use when asked about project status, next steps, blockers, sprints, or Linear issues.",
+      parameters: {
+        type: "object",
+        properties: {
+          filter: { type: "string", enum: ["active", "blocked", "recent", "all"], description: "Task filter (default: active)" },
+          keyword: { type: "string", description: "Optional keyword to filter tasks" }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "call_mcp_tool",
+      description: "Call any of the 448 MCP tools on the WidgeTDC backend. Use for specific platform operations like embedding, compliance checks, memory operations, agent coordination, etc. Check tool name carefully.",
+      parameters: {
+        type: "object",
+        properties: {
+          tool_name: { type: "string", description: "MCP tool name (e.g., srag.query, graph.health, audit.dashboard)" },
+          payload: { type: "object", description: "Tool payload arguments" }
+        },
+        required: ["tool_name"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_platform_health",
+      description: "Get current health status of all WidgeTDC platform services (backend, RLM engine, Neo4j graph, Redis). Use when asked about system status, uptime, or health.",
+      parameters: {
+        type: "object",
+        properties: {}
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_documents",
+      description: "Search for specific documents, files, reports, or artifacts in the platform. Returns document metadata and content snippets.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Document search query" },
+          doc_type: { type: "string", description: "Optional filter: TDCDocument, ConsultingArtifact, Pattern, etc." }
+        },
+        required: ["query"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "linear_issues",
+      description: "Get issues from Linear project management. Use for project status, active tasks, sprint progress, blockers, or specific issue details (LIN-xxx). Returns real-time Linear data.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: 'Search query or issue identifier (e.g., "LIN-493" or "cloud chat platform")' },
+          status: { type: "string", enum: ["active", "done", "backlog", "all"], description: "Filter by status (default: active)" },
+          limit: { type: "number", description: "Max results (default 10)" }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "linear_issue_detail",
+      description: "Get detailed info about a specific Linear issue by identifier (e.g., LIN-493). Returns full description, comments, status, assignee, sub-issues.",
+      parameters: {
+        type: "object",
+        properties: {
+          identifier: { type: "string", description: "Issue identifier (e.g., LIN-493)" }
+        },
+        required: ["identifier"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "run_chain",
+      description: "Execute a multi-step agent chain. Supports sequential (A\u2192B\u2192C), parallel (A+B+C), debate (two agents argue, third judges), and loop modes. Use for complex workflows that need multiple tool calls coordinated together.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Chain name/description" },
+          mode: { type: "string", enum: ["sequential", "parallel", "debate", "loop"], description: "Execution mode" },
+          steps: {
+            type: "array",
+            description: "Chain steps \u2014 each has tool_name or cognitive_action + arguments",
+            items: {
+              type: "object",
+              properties: {
+                agent_id: { type: "string", description: "Agent identifier" },
+                tool_name: { type: "string", description: "MCP tool to call" },
+                cognitive_action: { type: "string", description: "RLM action: reason, analyze, plan" },
+                prompt: { type: "string", description: "Prompt or arguments" }
+              }
+            }
+          }
+        },
+        required: ["name", "mode", "steps"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "verify_output",
+      description: "Run verification checks on a piece of content or data. Checks quality, accuracy, and compliance. Use after getting results from other tools to validate them before presenting to user.",
+      parameters: {
+        type: "object",
+        properties: {
+          content: { type: "string", description: "Content to verify" },
+          checks: {
+            type: "array",
+            description: "Verification checks to run",
+            items: {
+              type: "object",
+              properties: {
+                name: { type: "string", description: "Check name" },
+                tool_name: { type: "string", description: "MCP tool for verification" }
+              }
+            }
+          }
+        },
+        required: ["content"]
+      }
+    }
+  }
+];
+var totalTokensSaved = 0;
+var totalFoldingCalls = 0;
+function getTokenSavings() {
+  return { totalTokensSaved, totalFoldingCalls, avgSavingsPerFold: totalFoldingCalls > 0 ? Math.round(totalTokensSaved / totalFoldingCalls) : 0 };
+}
+function foldToolResult(content, toolName) {
+  const MAX_CHARS = 800;
+  const TARGET_CHARS = 500;
+  if (content.length <= MAX_CHARS) return content;
+  const originalTokens = Math.ceil(content.length / 4);
+  totalFoldingCalls++;
+  let folded;
+  try {
+    const parsed = JSON.parse(content);
+    if (Array.isArray(parsed)) {
+      const truncated = parsed.slice(0, 5);
+      folded = JSON.stringify(truncated, null, 1).slice(0, TARGET_CHARS);
+      folded += `
+... (${parsed.length} total items, showing first 5)`;
+    } else if (typeof parsed === "object") {
+      const slim = {};
+      for (const [k, v] of Object.entries(parsed)) {
+        if (typeof v === "string" && v.length > 200) {
+          slim[k] = v.slice(0, 200) + "...";
+        } else if (Array.isArray(v) && v.length > 3) {
+          slim[k] = [...v.slice(0, 3), `... +${v.length - 3} more`];
+        } else {
+          slim[k] = v;
+        }
+      }
+      folded = JSON.stringify(slim, null, 1).slice(0, TARGET_CHARS);
+    } else {
+      folded = content.slice(0, TARGET_CHARS) + "...";
+    }
+  } catch {
+    const lines = content.split("\n");
+    folded = lines.slice(0, 15).join("\n").slice(0, TARGET_CHARS);
+    if (lines.length > 15) folded += `
+... (${lines.length} total lines)`;
+  }
+  const foldedTokens = Math.ceil(folded.length / 4);
+  const saved = originalTokens - foldedTokens;
+  totalTokensSaved += saved;
+  logger.debug({ tool: toolName, originalTokens, foldedTokens, saved }, "Tool result folded");
+  return folded;
+}
+async function executeToolCalls(toolCalls) {
+  const results = await Promise.allSettled(
+    toolCalls.map((tc) => executeOne(tc))
+  );
+  return results.map((r, i) => {
+    const raw = r.status === "fulfilled" ? r.value : `Error: ${r.reason}`;
+    return {
+      tool_call_id: toolCalls[i].id,
+      role: "tool",
+      content: foldToolResult(raw, toolCalls[i].function.name)
+    };
+  });
+}
+async function executeOne(tc) {
+  let args;
+  try {
+    args = JSON.parse(tc.function.arguments);
+  } catch {
+    return `Error: Invalid JSON arguments`;
+  }
+  const name = tc.function.name;
+  logger.info({ tool: name, args_keys: Object.keys(args) }, "Executing tool call");
+  try {
+    return await executeToolByName(name, args);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ tool: name, error: msg }, "Tool execution failed \u2014 returning graceful fallback");
+    return buildToolFallback(name, msg);
+  }
+}
+function buildToolFallback(toolName, error) {
+  const short = error.length > 200 ? error.slice(0, 200) + "..." : error;
+  switch (toolName) {
+    case "search_knowledge":
+      return `Knowledge search unavailable (${short}). Try query_graph with a direct Cypher query, or call_mcp_tool with srag.query as a fallback.`;
+    case "reason_deeply":
+      return `RLM reasoning unavailable (${short}). Try breaking the question into simpler parts using search_knowledge or query_graph.`;
+    case "query_graph":
+      return `Neo4j graph query failed (${short}). The graph may be temporarily slow \u2014 try a simpler query or use search_knowledge instead.`;
+    case "linear_issues":
+    case "linear_issue_detail":
+      return `Linear query failed (${short}). Linear data may be temporarily unavailable.`;
+    default:
+      return `Tool "${toolName}" failed: ${short}`;
+  }
+}
+async function executeToolByName(name, args) {
+  switch (name) {
+    case "search_knowledge": {
+      const result = await dualChannelRAG(args.query, {
+        maxResults: args.max_results ?? 10
+      });
+      return result.merged_context.length > 0 ? `Found ${result.srag_count} semantic + ${result.cypher_count} graph results (${result.duration_ms}ms):
+
+${result.merged_context}` : "No results found for this query.";
+    }
+    case "reason_deeply": {
+      if (!isRlmAvailable()) return "RLM Engine is not available.";
+      const mode = args.mode ?? "reason";
+      const result = await callCognitive(mode, {
+        prompt: args.question,
+        context: { source: "chat-tool-call" },
+        agent_id: "chat-orchestrator",
+        depth: 1
+      }, 45e3);
+      return typeof result === "string" ? result : JSON.stringify(result, null, 2);
+    }
+    case "query_graph": {
+      const result = await callMcpTool({
+        toolName: "graph.read_cypher",
+        args: { query: args.cypher, params: args.params ?? {} },
+        callId: uuid5(),
+        timeoutMs: 15e3
+      });
+      if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
+      const rows = Array.isArray(result.result) ? result.result : result.result?.results ?? result.result;
+      return JSON.stringify(rows, null, 2).slice(0, 800);
+    }
+    case "check_tasks": {
+      const filter = args.filter ?? "active";
+      const keyword = args.keyword ?? "";
+      let cypher;
+      if (filter === "blocked") {
+        cypher = `MATCH (n) WHERE (n:Task OR n:L3Task) AND toLower(coalesce(n.status,'')) CONTAINS 'block' RETURN coalesce(n.identifier,n.id) AS id, n.title AS title, n.status AS status ORDER BY n.updatedAt DESC LIMIT 15`;
+      } else if (filter === "recent") {
+        cypher = `MATCH (n) WHERE (n:Task OR n:L3Task) RETURN coalesce(n.identifier,n.id) AS id, n.title AS title, n.status AS status ORDER BY n.updatedAt DESC LIMIT 15`;
+      } else {
+        cypher = `MATCH (n) WHERE (n:Task OR n:L3Task) AND n.status IN ['In Progress', 'Todo', 'Backlog'] RETURN coalesce(n.identifier,n.id) AS id, n.title AS title, n.status AS status ORDER BY n.updatedAt DESC LIMIT 15`;
+      }
+      const result = await callMcpTool({
+        toolName: "graph.read_cypher",
+        args: { query: cypher },
+        callId: uuid5(),
+        timeoutMs: 1e4
+      });
+      if (result.status !== "success") return `Task query failed: ${result.error_message}`;
+      const rows = result.result?.results ?? result.result ?? [];
+      if (!Array.isArray(rows) || rows.length === 0) return "No tasks found.";
+      return rows.map((r) => `- [${r.id ?? "?"}] ${r.title ?? "Untitled"} (${r.status ?? "?"})`).join("\n");
+    }
+    case "call_mcp_tool": {
+      const result = await callMcpTool({
+        toolName: args.tool_name,
+        args: args.payload ?? {},
+        callId: uuid5(),
+        timeoutMs: 3e4
+      });
+      if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
+      return JSON.stringify(result.result, null, 2).slice(0, 800);
+    }
+    case "get_platform_health": {
+      const [backendHealth, graphHealth] = await Promise.allSettled([
+        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid5(), timeoutMs: 1e4 }),
+        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid5(), timeoutMs: 1e4 })
+      ]);
+      const parts = [];
+      if (backendHealth.status === "fulfilled" && backendHealth.value.status === "success") {
+        parts.push(`Neo4j: ${JSON.stringify(backendHealth.value.result)}`);
+      }
+      if (graphHealth.status === "fulfilled" && graphHealth.value.status === "success") {
+        const stats = graphHealth.value.result;
+        parts.push(`Graph: ${stats?.nodes ?? "?"} nodes, ${stats?.relationships ?? "?"} rels`);
+      }
+      return parts.join("\n") || "Health check returned no data.";
+    }
+    case "search_documents": {
+      const result = await callMcpTool({
+        toolName: "srag.query",
+        args: { query: args.query },
+        callId: uuid5(),
+        timeoutMs: 2e4
+      });
+      if (result.status !== "success") return `Document search failed: ${result.error_message}`;
+      return JSON.stringify(result.result, null, 2).slice(0, 800);
+    }
+    case "linear_issues": {
+      const status = args.status ?? "active";
+      const limit = args.limit ?? 10;
+      const query = args.query ?? "";
+      const payload = { limit };
+      if (query) payload.query = query;
+      if (status === "active") payload.status = "started";
+      else if (status === "done") payload.status = "completed";
+      else if (status === "backlog") payload.status = "backlog";
+      const result = await callMcpTool({
+        toolName: "linear.issues",
+        args: payload,
+        callId: uuid5(),
+        timeoutMs: 15e3
+      });
+      if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
+      const data = result.result;
+      const issues = data?.issues ?? data ?? [];
+      if (!Array.isArray(issues) || issues.length === 0) return "No Linear issues found.";
+      return issues.map(
+        (i) => `- [${i.identifier}] ${i.title} (${i.status}) ${i.assignee ? `\u2192 ${i.assignee}` : ""} ${i.url ?? ""}`
+      ).join("\n");
+    }
+    case "linear_issue_detail": {
+      const identifier = args.identifier;
+      const result = await callMcpTool({
+        toolName: "linear.issue_get",
+        args: { identifier },
+        callId: uuid5(),
+        timeoutMs: 15e3
+      });
+      if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
+      return JSON.stringify(result.result, null, 2).slice(0, 800);
+    }
+    case "run_chain": {
+      const steps = args.steps ?? [];
+      const chainDef = {
+        name: args.name,
+        mode: args.mode ?? "sequential",
+        steps: steps.map((s, i) => ({
+          id: `step-${i}`,
+          agent_id: s.agent_id ?? "chat-orchestrator",
+          tool_name: s.tool_name,
+          cognitive_action: s.cognitive_action,
+          prompt: s.prompt,
+          arguments: s.arguments ?? (s.prompt ? { query: s.prompt } : {})
+        }))
+      };
+      try {
+        const execution = await executeChain(chainDef);
+        const summary = `Chain "${execution.name}" (${execution.mode}): ${execution.status} \u2014 ${execution.steps_completed}/${execution.steps_total} steps, ${execution.duration_ms}ms`;
+        const output = execution.final_output ? `
+
+Result: ${typeof execution.final_output === "string" ? execution.final_output : JSON.stringify(execution.final_output, null, 2).slice(0, 800)}` : "";
+        return summary + output + (execution.error ? `
+Error: ${execution.error}` : "");
+      } catch (err) {
+        return `Chain execution failed: ${err}`;
+      }
+    }
+    case "verify_output": {
+      const content = args.content;
+      const checks = args.checks ?? [
+        { name: "graph_health", tool_name: "graph.health", arguments: {} }
+      ];
+      try {
+        const result = await verifyChainOutput(
+          { content },
+          {
+            checks: checks.map((c) => ({
+              name: c.name ?? "check",
+              tool_name: c.tool_name ?? "graph.health",
+              arguments: c.arguments ?? {}
+            }))
+          }
+        );
+        return JSON.stringify(result, null, 2).slice(0, 800);
+      } catch (err) {
+        return `Verification failed: ${err}`;
+      }
+    }
+    default:
+      return `Unknown tool: ${name}`;
+  }
+}
+
+// src/routes/tools.ts
+var toolsRouter = Router2();
+toolsRouter.post("/call", async (req, res) => {
+  const result = validate(validateToolCall, req.body);
+  if (!result.ok) {
+    res.status(400).json({
+      success: false,
+      error: {
+        code: "VALIDATION_ERROR",
+        message: "Invalid OrchestratorToolCall payload",
+        details: result.errors,
+        status_code: 400
+      }
+    });
+    return;
+  }
+  const call = result.data;
+  const log = childLogger(call.trace_id ?? call.call_id);
+  if (config.agentOpenAccess) {
+    AgentRegistry.canCallTool(call.agent_id, call.tool_name);
+  } else {
+    const acl = AgentRegistry.canCallTool(call.agent_id, call.tool_name);
+    if (!acl.allowed) {
+      log.warn({ agent_id: call.agent_id, tool: call.tool_name }, `ACL denied: ${acl.reason}`);
+      res.status(403).json({
+        call_id: call.call_id,
+        status: "unauthorized",
+        result: null,
+        error_message: acl.reason,
+        error_code: "UNAUTHORIZED",
+        duration_ms: 0,
+        completed_at: (/* @__PURE__ */ new Date()).toISOString()
+      });
+      return;
+    }
+  }
+  const active = AgentRegistry.getActiveCalls(call.agent_id);
+  if (active >= config.maxConcurrentPerAgent) {
+    res.status(429).json({
+      call_id: call.call_id,
+      status: "rate_limited",
+      result: null,
+      error_message: `Max ${config.maxConcurrentPerAgent} concurrent calls`,
+      error_code: "RATE_LIMITED",
+      duration_ms: 0,
+      completed_at: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    return;
+  }
+  AgentRegistry.incrementActive(call.agent_id);
+  log.info({ agent_id: call.agent_id, tool: call.tool_name }, "Tool call start");
+  try {
+    const toolResult = await callMcpTool({
+      toolName: call.tool_name,
+      args: call.arguments,
+      callId: call.call_id,
+      traceId: call.trace_id,
+      timeoutMs: call.timeout_ms
+    });
+    res.json(toolResult);
+    if (toolResult.status === "success") {
+      broadcastToolResult(call.call_id, toolResult.result, call.agent_id);
+    }
+    notifyToolCall(call.agent_id, call.tool_name, toolResult.status, toolResult.duration_ms ?? 0, toolResult.error_message);
+    log.info({ tool: call.tool_name, status: toolResult.status, ms: toolResult.duration_ms }, "Tool call done");
+  } finally {
+    AgentRegistry.decrementActive(call.agent_id);
+    AgentRegistry.heartbeat(call.agent_id);
+  }
+});
+toolsRouter.get("/namespaces", async (_req, res) => {
+  try {
+    const r = await fetch(`${config.backendUrl}/api/mcp/tools`, {
+      headers: { Authorization: `Bearer ${config.backendApiKey}` }
+    });
+    if (!r.ok) {
+      res.status(502).json({ success: false, error: { message: `Backend ${r.status}` } });
+      return;
+    }
+    const tools = await r.json();
+    res.json({ success: true, data: tools });
+  } catch (err) {
+    res.status(502).json({ success: false, error: { message: String(err) } });
+  }
+});
+var CATALOG_CACHE_KEY = "orchestrator:tool-catalog";
+var CATALOG_TTL_SECONDS = 3600;
+function deriveCategory(name) {
+  if (name.includes("knowledge") || name.includes("search_doc")) return "knowledge";
+  if (name.includes("graph") || name.includes("cypher")) return "graph";
+  if (name.includes("linear") || name.includes("task")) return "linear";
+  if (name.includes("health") || name.includes("platform")) return "health";
+  if (name.includes("chain") || name.includes("run_chain")) return "chains";
+  if (name.includes("reason") || name.includes("cognitive")) return "cognitive";
+  if (name.includes("verify")) return "compliance";
+  if (name.includes("mcp")) return "mcp";
+  return "general";
+}
+function deriveBackendTool(name) {
+  const mapping = {
+    search_knowledge: "srag.query + graph.read_cypher",
+    reason_deeply: "rlm.reason",
+    query_graph: "graph.read_cypher",
+    check_tasks: "graph.read_cypher",
+    call_mcp_tool: "(dynamic)",
+    get_platform_health: "graph.health + graph.stats",
+    search_documents: "srag.query",
+    linear_issues: "linear.issues",
+    linear_issue_detail: "linear.issue_get",
+    run_chain: "chain-engine",
+    verify_output: "verification-gate"
+  };
+  return mapping[name] ?? null;
+}
+function deriveAvailableIn(name) {
+  const base = ["command-center"];
+  if (["search_knowledge", "search_documents", "reason_deeply"].includes(name)) {
+    return ["open-webui", "obsidian", ...base];
+  }
+  if (["linear_issues", "linear_issue_detail", "check_tasks"].includes(name)) {
+    return ["open-webui", ...base];
+  }
+  return base;
+}
+function buildCatalog() {
+  const tools = ORCHESTRATOR_TOOLS.map((t) => ({
+    name: t.function.name,
+    category: deriveCategory(t.function.name),
+    description: t.function.description,
+    available_in: deriveAvailableIn(t.function.name),
+    backend_tool: deriveBackendTool(t.function.name)
+  }));
+  const categories = [...new Set(tools.map((t) => t.category))].sort();
+  return {
+    tools,
+    categories,
+    total: tools.length,
+    generated_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+toolsRouter.get("/catalog", async (_req, res) => {
+  const redis2 = getRedis();
+  if (redis2) {
+    try {
+      const cached = await redis2.get(CATALOG_CACHE_KEY);
+      if (cached) {
+        res.json(JSON.parse(cached));
+        return;
+      }
+    } catch (err) {
+      logger.warn({ err: String(err) }, "Redis cache read failed for tool catalog");
+    }
+  }
+  const catalog = buildCatalog();
+  if (redis2) {
+    try {
+      await redis2.set(CATALOG_CACHE_KEY, JSON.stringify(catalog), "EX", CATALOG_TTL_SECONDS);
+    } catch (err) {
+      logger.warn({ err: String(err) }, "Redis cache write failed for tool catalog");
+    }
+  }
+  res.json(catalog);
+});
+
+// src/routes/chat.ts
+import { Router as Router3 } from "express";
 
 // src/llm-proxy.ts
 function getProviders() {
@@ -10842,96 +11546,6 @@ function listProviders() {
     { id: "claude", name: "Claude", model: "claude-sonnet-4-20250514" }
   ];
   return all.map((p) => ({ ...p, available: !!providers[p.id] }));
-}
-
-// src/dual-rag.ts
-import { v4 as uuid3 } from "uuid";
-async function dualChannelRAG(query, options) {
-  const t0 = Date.now();
-  const maxResults = options?.maxResults ?? 10;
-  const depth = options?.cypherDepth ?? 2;
-  const [sragResult, cypherResult] = await Promise.allSettled([
-    callMcpTool({
-      toolName: "srag.query",
-      args: { query },
-      callId: uuid3(),
-      timeoutMs: 3e4
-    }),
-    callMcpTool({
-      toolName: "graph.read_cypher",
-      args: {
-        query: buildCypherQuery(query, depth)
-      },
-      callId: uuid3(),
-      timeoutMs: 15e3
-    })
-  ]);
-  const results = [];
-  if (sragResult.status === "fulfilled" && sragResult.value.status === "success") {
-    const sragData = sragResult.value.result;
-    const items = Array.isArray(sragData) ? sragData : sragData?.results ? sragData.results : sragData?.chunks ? sragData.chunks : [];
-    for (const item of items.slice(0, maxResults)) {
-      results.push({
-        source: "srag",
-        content: item.content || item.text || item.chunk || JSON.stringify(item).slice(0, 500),
-        score: item.score || item.similarity || 0.5,
-        metadata: { title: item.title, tags: item.tags }
-      });
-    }
-  }
-  if (cypherResult.status === "fulfilled" && cypherResult.value.status === "success") {
-    const cypherData = cypherResult.value.result;
-    const rows = cypherData?.results || cypherData || [];
-    if (Array.isArray(rows)) {
-      for (const row of rows.slice(0, maxResults)) {
-        const content = Object.values(row).map(
-          (v) => typeof v === "string" ? v : JSON.stringify(v)
-        ).join(" | ");
-        results.push({
-          source: "cypher",
-          content: content.slice(0, 500),
-          score: 0.7,
-          // graph results are structurally relevant
-          metadata: row
-        });
-      }
-    }
-  }
-  results.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
-  const merged = results.slice(0, maxResults).map(
-    (r, i) => `[${r.source.toUpperCase()} #${i + 1}] ${r.content}`
-  ).join("\n\n");
-  const sragCount = results.filter((r) => r.source === "srag").length;
-  const cypherCount = results.filter((r) => r.source === "cypher").length;
-  logger.debug({ query: query.slice(0, 60), sragCount, cypherCount, ms: Date.now() - t0 }, "Dual-channel RAG");
-  return {
-    query,
-    results: results.slice(0, maxResults),
-    srag_count: sragCount,
-    cypher_count: cypherCount,
-    merged_context: merged,
-    duration_ms: Date.now() - t0
-  };
-}
-function buildCypherQuery(query, depth) {
-  const stopWords = /* @__PURE__ */ new Set(["the", "and", "for", "with", "that", "this", "from", "are", "was", "how", "what", "which", "where", "when", "why", "can", "does", "will", "not", "all", "has", "have", "been", "our", "their", "its"]);
-  const keywords = query.toLowerCase().replace(/[^a-zA-Z0-9æøåÆØÅ\s]/g, "").split(/\s+/).filter((w) => w.length >= 3 && !stopWords.has(w)).slice(0, 5);
-  if (keywords.length === 0) {
-    return "MATCH (n:StrategicInsight) RETURN n.title AS title, n.domain AS domain LIMIT 5";
-  }
-  const kwConditions = keywords.map(
-    (kw) => `toLower(coalesce(n.title, n.name, n.description, '')) CONTAINS '${kw}'`
-  ).join(" OR ");
-  return `MATCH (n) WHERE (n:StrategicInsight OR n:Pattern OR n:Lesson OR n:Knowledge OR n:Memory OR n:TDCDocument)
-AND (${kwConditions})
-WITH n, labels(n)[0] AS label
-OPTIONAL MATCH (n)-[r]-(m)
-RETURN label,
-       coalesce(n.title, n.name, n.filename) AS title,
-       substring(coalesce(n.description, n.content, n.value, ''), 0, 300) AS content,
-       type(r) AS rel,
-       labels(m)[0] AS connected_to
-LIMIT 15`;
 }
 
 // src/routes/chat.ts
@@ -11795,12 +12409,12 @@ import { Router as Router6 } from "express";
 import cron from "node-cron";
 
 // src/graph-self-correct.ts
-import { v4 as uuid4 } from "uuid";
+import { v4 as uuid6 } from "uuid";
 async function graphRead(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid4(),
+    callId: uuid6(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -11811,7 +12425,7 @@ async function graphWrite(cypher, params) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { parameters: params } : {} },
-    callId: uuid4(),
+    callId: uuid6(),
     timeoutMs: 15e3
   });
   return result.status === "success";
@@ -13177,8 +13791,87 @@ knowledgeRouter.get("/briefing", async (_req, res) => {
   }
 });
 
-// src/routes/monitor.ts
+// src/routes/adoption.ts
 import { Router as Router12 } from "express";
+var adoptionRouter = Router12();
+var REDIS_KEY4 = "orchestrator:adoption-metrics";
+var DEFAULT_METRICS = {
+  features_done: 14,
+  features_total: 54,
+  features_pct: 25.9,
+  milestones: {
+    M0: { status: "complete", tasks: 3, done: 3 },
+    M1: { status: "complete", tasks: 8, done: 8 },
+    M2: { status: "in_progress", tasks: 6, done: 6 },
+    M3: { status: "in_progress", tasks: 6, done: 0 },
+    M4: { status: "pending", tasks: 31, done: 0 }
+  },
+  assistants: 5,
+  pipelines: 3,
+  obsidian_views: 3
+};
+adoptionRouter.get("/metrics", async (_req, res) => {
+  const redis2 = getRedis();
+  if (redis2) {
+    try {
+      const cached = await redis2.get(REDIS_KEY4);
+      if (cached) {
+        res.json(JSON.parse(cached));
+        return;
+      }
+    } catch (err) {
+      logger.warn({ err: String(err) }, "Redis read failed for adoption metrics");
+    }
+  }
+  const metrics = {
+    ...DEFAULT_METRICS,
+    generated_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  if (redis2) {
+    try {
+      await redis2.set(REDIS_KEY4, JSON.stringify(metrics));
+    } catch (err) {
+      logger.warn({ err: String(err) }, "Redis write failed for adoption metrics");
+    }
+  }
+  res.json(metrics);
+});
+adoptionRouter.put("/metrics", async (req, res) => {
+  const redis2 = getRedis();
+  const body = req.body;
+  let current = { ...DEFAULT_METRICS, generated_at: (/* @__PURE__ */ new Date()).toISOString() };
+  if (redis2) {
+    try {
+      const cached = await redis2.get(REDIS_KEY4);
+      if (cached) current = JSON.parse(cached);
+    } catch (err) {
+      logger.warn({ err: String(err) }, "Redis read failed during adoption metrics update");
+    }
+  }
+  if (typeof body.features_done === "number") current.features_done = body.features_done;
+  if (typeof body.features_total === "number") current.features_total = body.features_total;
+  if (typeof body.assistants === "number") current.assistants = body.assistants;
+  if (typeof body.pipelines === "number") current.pipelines = body.pipelines;
+  if (typeof body.obsidian_views === "number") current.obsidian_views = body.obsidian_views;
+  if (body.milestones && typeof body.milestones === "object") {
+    current.milestones = { ...current.milestones, ...body.milestones };
+  }
+  current.features_pct = current.features_total > 0 ? Math.round(current.features_done / current.features_total * 1e3) / 10 : 0;
+  current.generated_at = (/* @__PURE__ */ new Date()).toISOString();
+  if (redis2) {
+    try {
+      await redis2.set(REDIS_KEY4, JSON.stringify(current));
+    } catch (err) {
+      logger.warn({ err: String(err) }, "Redis write failed for adoption metrics update");
+      res.status(500).json({ success: false, error: "Failed to persist metrics" });
+      return;
+    }
+  }
+  res.json({ success: true, metrics: current });
+});
+
+// src/routes/monitor.ts
+import { Router as Router13 } from "express";
 
 // src/context-compress.ts
 var DEFAULT_MAX_TOKENS = 2e3;
@@ -13299,13 +13992,13 @@ ${compressed}`,
 }
 
 // src/routes/monitor.ts
-import { v4 as uuid5 } from "uuid";
-var monitorRouter = Router12();
+import { v4 as uuid7 } from "uuid";
+var monitorRouter = Router13();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid5(),
+    callId: uuid7(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];
@@ -13517,8 +14210,8 @@ monitorRouter.post("/compress", async (req, res) => {
 });
 
 // src/routes/s1-s4.ts
-import { Router as Router13 } from "express";
-var s1s4Router = Router13();
+import { Router as Router14 } from "express";
+var s1s4Router = Router14();
 s1s4Router.post("/trigger", async (req, res) => {
   const { url, source_type, topic, weights } = req.body;
   if (!url) {
@@ -13622,9 +14315,9 @@ async function listPlans() {
 }
 
 // src/harvest-pipeline.ts
-import { v4 as uuid6 } from "uuid";
+import { v4 as uuid8 } from "uuid";
 async function extract(domain) {
-  const callId = `harvest-extract-${uuid6().substring(0, 8)}`;
+  const callId = `harvest-extract-${uuid8().substring(0, 8)}`;
   try {
     const result = await callMcpTool({
       toolName: "srag.query",
@@ -13650,7 +14343,7 @@ function generalize(items, domain) {
     if (content.length > 2e3 || name.toLowerCase().includes("framework")) tier = "framework";
     else if (content.length > 500 || name.toLowerCase().includes("template")) tier = "template";
     return {
-      id: `harvest-${uuid6().substring(0, 12)}`,
+      id: `harvest-${uuid8().substring(0, 12)}`,
       name,
       tier,
       description: content.substring(0, 300),
@@ -13667,7 +14360,7 @@ function generalize(items, domain) {
 }
 async function store(components) {
   if (components.length === 0) return 0;
-  const callId = `harvest-store-${uuid6().substring(0, 8)}`;
+  const callId = `harvest-store-${uuid8().substring(0, 8)}`;
   const labelMap = {
     framework: "Framework",
     template: "Template",
@@ -13719,7 +14412,7 @@ async function verify(components) {
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: `${comp.tier} for ${comp.industries[0]}: ${comp.name}` },
-        callId: `harvest-verify-${uuid6().substring(0, 8)}`,
+        callId: `harvest-verify-${uuid8().substring(0, 8)}`,
         timeoutMs: 15e3
       });
       const resultStr = JSON.stringify(result).toLowerCase();
@@ -13769,545 +14462,7 @@ async function runFullHarvest() {
 }
 
 // src/routes/openai-compat.ts
-import { Router as Router14 } from "express";
-
-// src/verification-gate.ts
-import { v4 as uuid7 } from "uuid";
-async function verifyChainOutput(chainOutput, config2) {
-  const maxRetries = config2.max_retries ?? 3;
-  const start = Date.now();
-  let retries = 0;
-  let lastResult = null;
-  while (retries <= maxRetries) {
-    const checkResults = await runChecksParallel(config2.checks, chainOutput);
-    const tripwireTripped = config2.tripwire_check ? checkResults.some((c) => c.name === config2.tripwire_check && c.status !== "pass") : false;
-    const allPassed = checkResults.every((c) => c.status === "pass");
-    lastResult = {
-      passed: allPassed && !tripwireTripped,
-      checks: checkResults,
-      retries_attempted: retries,
-      total_duration_ms: Date.now() - start,
-      aborted_by_tripwire: tripwireTripped
-    };
-    if (allPassed) {
-      logger.info({ retries, checks: checkResults.length }, "Verification gate: PASSED");
-      return lastResult;
-    }
-    if (tripwireTripped) {
-      logger.warn({ tripwire: config2.tripwire_check }, "Verification gate: TRIPWIRE ABORT");
-      return lastResult;
-    }
-    retries++;
-    if (retries <= maxRetries) {
-      logger.info({ retry: retries, maxRetries, failed: checkResults.filter((c) => c.status !== "pass").map((c) => c.name) }, "Verification gate: retrying");
-      await new Promise((r) => setTimeout(r, 1e3 * retries));
-    }
-  }
-  logger.warn({ retries: maxRetries }, "Verification gate: FAILED after max retries");
-  return lastResult;
-}
-async function runChecksParallel(checks, chainOutput) {
-  const results = await Promise.allSettled(
-    checks.map(async (check) => {
-      const start = Date.now();
-      try {
-        const args = { ...check.arguments };
-        for (const [k, v] of Object.entries(args)) {
-          if (v === "{{output}}") args[k] = chainOutput;
-        }
-        const result = await callMcpTool({
-          toolName: check.tool_name,
-          args,
-          callId: `verify-${uuid7().substring(0, 8)}`,
-          timeoutMs: 15e3
-        });
-        let passed = true;
-        if (check.validate) {
-          passed = check.validate(result);
-        } else if (check.expected_key) {
-          const actual = result?.[check.expected_key];
-          passed = actual === check.expected_value;
-        }
-        return {
-          name: check.name,
-          status: passed ? "pass" : "fail",
-          output: result,
-          duration_ms: Date.now() - start
-        };
-      } catch (err) {
-        return {
-          name: check.name,
-          status: "error",
-          output: String(err),
-          duration_ms: Date.now() - start
-        };
-      }
-    })
-  );
-  return results.map(
-    (r, i) => r.status === "fulfilled" ? r.value : {
-      name: checks[i].name,
-      status: "error",
-      output: String(r.reason),
-      duration_ms: 0
-    }
-  );
-}
-
-// src/tool-executor.ts
-import { v4 as uuid8 } from "uuid";
-var ORCHESTRATOR_TOOLS = [
-  {
-    type: "function",
-    function: {
-      name: "search_knowledge",
-      description: "Search the WidgeTDC knowledge graph and semantic vector store. Use for ANY question about platform data, consulting knowledge, patterns, documents, or entities. Returns merged results from SRAG (semantic) and Neo4j (graph).",
-      parameters: {
-        type: "object",
-        properties: {
-          query: { type: "string", description: "Natural language search query" },
-          max_results: { type: "number", description: "Max results (default 10)" }
-        },
-        required: ["query"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "reason_deeply",
-      description: "Send a complex question to the RLM reasoning engine for deep multi-step analysis. Use for strategy questions, architecture analysis, comparisons, evaluations, and planning. More powerful than search \u2014 actually reasons about the data.",
-      parameters: {
-        type: "object",
-        properties: {
-          question: { type: "string", description: "The complex question to reason about" },
-          mode: { type: "string", enum: ["reason", "analyze", "plan"], description: "Reasoning mode (default: reason)" }
-        },
-        required: ["question"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "query_graph",
-      description: "Execute a Cypher query against the Neo4j knowledge graph (520K nodes, 4M relationships). Use for structured data queries like counting nodes, finding relationships, listing entities, or checking status.",
-      parameters: {
-        type: "object",
-        properties: {
-          cypher: { type: "string", description: "Neo4j Cypher query (read-only, parameterized)" },
-          params: { type: "object", description: "Query parameters (optional)" }
-        },
-        required: ["cypher"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "check_tasks",
-      description: "Get active tasks, issues, and project status from the knowledge graph. Use when asked about project status, next steps, blockers, sprints, or Linear issues.",
-      parameters: {
-        type: "object",
-        properties: {
-          filter: { type: "string", enum: ["active", "blocked", "recent", "all"], description: "Task filter (default: active)" },
-          keyword: { type: "string", description: "Optional keyword to filter tasks" }
-        }
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "call_mcp_tool",
-      description: "Call any of the 448 MCP tools on the WidgeTDC backend. Use for specific platform operations like embedding, compliance checks, memory operations, agent coordination, etc. Check tool name carefully.",
-      parameters: {
-        type: "object",
-        properties: {
-          tool_name: { type: "string", description: "MCP tool name (e.g., srag.query, graph.health, audit.dashboard)" },
-          payload: { type: "object", description: "Tool payload arguments" }
-        },
-        required: ["tool_name"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "get_platform_health",
-      description: "Get current health status of all WidgeTDC platform services (backend, RLM engine, Neo4j graph, Redis). Use when asked about system status, uptime, or health.",
-      parameters: {
-        type: "object",
-        properties: {}
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "search_documents",
-      description: "Search for specific documents, files, reports, or artifacts in the platform. Returns document metadata and content snippets.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: { type: "string", description: "Document search query" },
-          doc_type: { type: "string", description: "Optional filter: TDCDocument, ConsultingArtifact, Pattern, etc." }
-        },
-        required: ["query"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "linear_issues",
-      description: "Get issues from Linear project management. Use for project status, active tasks, sprint progress, blockers, or specific issue details (LIN-xxx). Returns real-time Linear data.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: { type: "string", description: 'Search query or issue identifier (e.g., "LIN-493" or "cloud chat platform")' },
-          status: { type: "string", enum: ["active", "done", "backlog", "all"], description: "Filter by status (default: active)" },
-          limit: { type: "number", description: "Max results (default 10)" }
-        }
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "linear_issue_detail",
-      description: "Get detailed info about a specific Linear issue by identifier (e.g., LIN-493). Returns full description, comments, status, assignee, sub-issues.",
-      parameters: {
-        type: "object",
-        properties: {
-          identifier: { type: "string", description: "Issue identifier (e.g., LIN-493)" }
-        },
-        required: ["identifier"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "run_chain",
-      description: "Execute a multi-step agent chain. Supports sequential (A\u2192B\u2192C), parallel (A+B+C), debate (two agents argue, third judges), and loop modes. Use for complex workflows that need multiple tool calls coordinated together.",
-      parameters: {
-        type: "object",
-        properties: {
-          name: { type: "string", description: "Chain name/description" },
-          mode: { type: "string", enum: ["sequential", "parallel", "debate", "loop"], description: "Execution mode" },
-          steps: {
-            type: "array",
-            description: "Chain steps \u2014 each has tool_name or cognitive_action + arguments",
-            items: {
-              type: "object",
-              properties: {
-                agent_id: { type: "string", description: "Agent identifier" },
-                tool_name: { type: "string", description: "MCP tool to call" },
-                cognitive_action: { type: "string", description: "RLM action: reason, analyze, plan" },
-                prompt: { type: "string", description: "Prompt or arguments" }
-              }
-            }
-          }
-        },
-        required: ["name", "mode", "steps"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "verify_output",
-      description: "Run verification checks on a piece of content or data. Checks quality, accuracy, and compliance. Use after getting results from other tools to validate them before presenting to user.",
-      parameters: {
-        type: "object",
-        properties: {
-          content: { type: "string", description: "Content to verify" },
-          checks: {
-            type: "array",
-            description: "Verification checks to run",
-            items: {
-              type: "object",
-              properties: {
-                name: { type: "string", description: "Check name" },
-                tool_name: { type: "string", description: "MCP tool for verification" }
-              }
-            }
-          }
-        },
-        required: ["content"]
-      }
-    }
-  }
-];
-var totalTokensSaved = 0;
-var totalFoldingCalls = 0;
-function getTokenSavings() {
-  return { totalTokensSaved, totalFoldingCalls, avgSavingsPerFold: totalFoldingCalls > 0 ? Math.round(totalTokensSaved / totalFoldingCalls) : 0 };
-}
-function foldToolResult(content, toolName) {
-  const MAX_CHARS = 800;
-  const TARGET_CHARS = 500;
-  if (content.length <= MAX_CHARS) return content;
-  const originalTokens = Math.ceil(content.length / 4);
-  totalFoldingCalls++;
-  let folded;
-  try {
-    const parsed = JSON.parse(content);
-    if (Array.isArray(parsed)) {
-      const truncated = parsed.slice(0, 5);
-      folded = JSON.stringify(truncated, null, 1).slice(0, TARGET_CHARS);
-      folded += `
-... (${parsed.length} total items, showing first 5)`;
-    } else if (typeof parsed === "object") {
-      const slim = {};
-      for (const [k, v] of Object.entries(parsed)) {
-        if (typeof v === "string" && v.length > 200) {
-          slim[k] = v.slice(0, 200) + "...";
-        } else if (Array.isArray(v) && v.length > 3) {
-          slim[k] = [...v.slice(0, 3), `... +${v.length - 3} more`];
-        } else {
-          slim[k] = v;
-        }
-      }
-      folded = JSON.stringify(slim, null, 1).slice(0, TARGET_CHARS);
-    } else {
-      folded = content.slice(0, TARGET_CHARS) + "...";
-    }
-  } catch {
-    const lines = content.split("\n");
-    folded = lines.slice(0, 15).join("\n").slice(0, TARGET_CHARS);
-    if (lines.length > 15) folded += `
-... (${lines.length} total lines)`;
-  }
-  const foldedTokens = Math.ceil(folded.length / 4);
-  const saved = originalTokens - foldedTokens;
-  totalTokensSaved += saved;
-  logger.debug({ tool: toolName, originalTokens, foldedTokens, saved }, "Tool result folded");
-  return folded;
-}
-async function executeToolCalls(toolCalls) {
-  const results = await Promise.allSettled(
-    toolCalls.map((tc) => executeOne(tc))
-  );
-  return results.map((r, i) => {
-    const raw = r.status === "fulfilled" ? r.value : `Error: ${r.reason}`;
-    return {
-      tool_call_id: toolCalls[i].id,
-      role: "tool",
-      content: foldToolResult(raw, toolCalls[i].function.name)
-    };
-  });
-}
-async function executeOne(tc) {
-  let args;
-  try {
-    args = JSON.parse(tc.function.arguments);
-  } catch {
-    return `Error: Invalid JSON arguments`;
-  }
-  const name = tc.function.name;
-  logger.info({ tool: name, args_keys: Object.keys(args) }, "Executing tool call");
-  try {
-    return await executeToolByName(name, args);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    logger.warn({ tool: name, error: msg }, "Tool execution failed \u2014 returning graceful fallback");
-    return buildToolFallback(name, msg);
-  }
-}
-function buildToolFallback(toolName, error) {
-  const short = error.length > 200 ? error.slice(0, 200) + "..." : error;
-  switch (toolName) {
-    case "search_knowledge":
-      return `Knowledge search unavailable (${short}). Try query_graph with a direct Cypher query, or call_mcp_tool with srag.query as a fallback.`;
-    case "reason_deeply":
-      return `RLM reasoning unavailable (${short}). Try breaking the question into simpler parts using search_knowledge or query_graph.`;
-    case "query_graph":
-      return `Neo4j graph query failed (${short}). The graph may be temporarily slow \u2014 try a simpler query or use search_knowledge instead.`;
-    case "linear_issues":
-    case "linear_issue_detail":
-      return `Linear query failed (${short}). Linear data may be temporarily unavailable.`;
-    default:
-      return `Tool "${toolName}" failed: ${short}`;
-  }
-}
-async function executeToolByName(name, args) {
-  switch (name) {
-    case "search_knowledge": {
-      const result = await dualChannelRAG(args.query, {
-        maxResults: args.max_results ?? 10
-      });
-      return result.merged_context.length > 0 ? `Found ${result.srag_count} semantic + ${result.cypher_count} graph results (${result.duration_ms}ms):
-
-${result.merged_context}` : "No results found for this query.";
-    }
-    case "reason_deeply": {
-      if (!isRlmAvailable()) return "RLM Engine is not available.";
-      const mode = args.mode ?? "reason";
-      const result = await callCognitive(mode, {
-        prompt: args.question,
-        context: { source: "chat-tool-call" },
-        agent_id: "chat-orchestrator",
-        depth: 1
-      }, 45e3);
-      return typeof result === "string" ? result : JSON.stringify(result, null, 2);
-    }
-    case "query_graph": {
-      const result = await callMcpTool({
-        toolName: "graph.read_cypher",
-        args: { query: args.cypher, params: args.params ?? {} },
-        callId: uuid8(),
-        timeoutMs: 15e3
-      });
-      if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
-      const rows = Array.isArray(result.result) ? result.result : result.result?.results ?? result.result;
-      return JSON.stringify(rows, null, 2).slice(0, 800);
-    }
-    case "check_tasks": {
-      const filter = args.filter ?? "active";
-      const keyword = args.keyword ?? "";
-      let cypher;
-      if (filter === "blocked") {
-        cypher = `MATCH (n) WHERE (n:Task OR n:L3Task) AND toLower(coalesce(n.status,'')) CONTAINS 'block' RETURN coalesce(n.identifier,n.id) AS id, n.title AS title, n.status AS status ORDER BY n.updatedAt DESC LIMIT 15`;
-      } else if (filter === "recent") {
-        cypher = `MATCH (n) WHERE (n:Task OR n:L3Task) RETURN coalesce(n.identifier,n.id) AS id, n.title AS title, n.status AS status ORDER BY n.updatedAt DESC LIMIT 15`;
-      } else {
-        cypher = `MATCH (n) WHERE (n:Task OR n:L3Task) AND n.status IN ['In Progress', 'Todo', 'Backlog'] RETURN coalesce(n.identifier,n.id) AS id, n.title AS title, n.status AS status ORDER BY n.updatedAt DESC LIMIT 15`;
-      }
-      const result = await callMcpTool({
-        toolName: "graph.read_cypher",
-        args: { query: cypher },
-        callId: uuid8(),
-        timeoutMs: 1e4
-      });
-      if (result.status !== "success") return `Task query failed: ${result.error_message}`;
-      const rows = result.result?.results ?? result.result ?? [];
-      if (!Array.isArray(rows) || rows.length === 0) return "No tasks found.";
-      return rows.map((r) => `- [${r.id ?? "?"}] ${r.title ?? "Untitled"} (${r.status ?? "?"})`).join("\n");
-    }
-    case "call_mcp_tool": {
-      const result = await callMcpTool({
-        toolName: args.tool_name,
-        args: args.payload ?? {},
-        callId: uuid8(),
-        timeoutMs: 3e4
-      });
-      if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
-      return JSON.stringify(result.result, null, 2).slice(0, 800);
-    }
-    case "get_platform_health": {
-      const [backendHealth, graphHealth] = await Promise.allSettled([
-        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid8(), timeoutMs: 1e4 }),
-        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid8(), timeoutMs: 1e4 })
-      ]);
-      const parts = [];
-      if (backendHealth.status === "fulfilled" && backendHealth.value.status === "success") {
-        parts.push(`Neo4j: ${JSON.stringify(backendHealth.value.result)}`);
-      }
-      if (graphHealth.status === "fulfilled" && graphHealth.value.status === "success") {
-        const stats = graphHealth.value.result;
-        parts.push(`Graph: ${stats?.nodes ?? "?"} nodes, ${stats?.relationships ?? "?"} rels`);
-      }
-      return parts.join("\n") || "Health check returned no data.";
-    }
-    case "search_documents": {
-      const result = await callMcpTool({
-        toolName: "srag.query",
-        args: { query: args.query },
-        callId: uuid8(),
-        timeoutMs: 2e4
-      });
-      if (result.status !== "success") return `Document search failed: ${result.error_message}`;
-      return JSON.stringify(result.result, null, 2).slice(0, 800);
-    }
-    case "linear_issues": {
-      const status = args.status ?? "active";
-      const limit = args.limit ?? 10;
-      const query = args.query ?? "";
-      const payload = { limit };
-      if (query) payload.query = query;
-      if (status === "active") payload.status = "started";
-      else if (status === "done") payload.status = "completed";
-      else if (status === "backlog") payload.status = "backlog";
-      const result = await callMcpTool({
-        toolName: "linear.issues",
-        args: payload,
-        callId: uuid8(),
-        timeoutMs: 15e3
-      });
-      if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
-      const data = result.result;
-      const issues = data?.issues ?? data ?? [];
-      if (!Array.isArray(issues) || issues.length === 0) return "No Linear issues found.";
-      return issues.map(
-        (i) => `- [${i.identifier}] ${i.title} (${i.status}) ${i.assignee ? `\u2192 ${i.assignee}` : ""} ${i.url ?? ""}`
-      ).join("\n");
-    }
-    case "linear_issue_detail": {
-      const identifier = args.identifier;
-      const result = await callMcpTool({
-        toolName: "linear.issue_get",
-        args: { identifier },
-        callId: uuid8(),
-        timeoutMs: 15e3
-      });
-      if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
-      return JSON.stringify(result.result, null, 2).slice(0, 800);
-    }
-    case "run_chain": {
-      const steps = args.steps ?? [];
-      const chainDef = {
-        name: args.name,
-        mode: args.mode ?? "sequential",
-        steps: steps.map((s, i) => ({
-          id: `step-${i}`,
-          agent_id: s.agent_id ?? "chat-orchestrator",
-          tool_name: s.tool_name,
-          cognitive_action: s.cognitive_action,
-          prompt: s.prompt,
-          arguments: s.arguments ?? (s.prompt ? { query: s.prompt } : {})
-        }))
-      };
-      try {
-        const execution = await executeChain(chainDef);
-        const summary = `Chain "${execution.name}" (${execution.mode}): ${execution.status} \u2014 ${execution.steps_completed}/${execution.steps_total} steps, ${execution.duration_ms}ms`;
-        const output = execution.final_output ? `
-
-Result: ${typeof execution.final_output === "string" ? execution.final_output : JSON.stringify(execution.final_output, null, 2).slice(0, 800)}` : "";
-        return summary + output + (execution.error ? `
-Error: ${execution.error}` : "");
-      } catch (err) {
-        return `Chain execution failed: ${err}`;
-      }
-    }
-    case "verify_output": {
-      const content = args.content;
-      const checks = args.checks ?? [
-        { name: "graph_health", tool_name: "graph.health", arguments: {} }
-      ];
-      try {
-        const result = await verifyChainOutput(
-          { content },
-          {
-            checks: checks.map((c) => ({
-              name: c.name ?? "check",
-              tool_name: c.tool_name ?? "graph.health",
-              arguments: c.arguments ?? {}
-            }))
-          }
-        );
-        return JSON.stringify(result, null, 2).slice(0, 800);
-      } catch (err) {
-        return `Verification failed: ${err}`;
-      }
-    }
-    default:
-      return `Unknown tool: ${name}`;
-  }
-}
-
-// src/routes/openai-compat.ts
+import { Router as Router15 } from "express";
 import { v4 as uuid9 } from "uuid";
 var MAX_TOOL_ROUNDS = 2;
 var TOOL_CATEGORIES = [
@@ -14340,7 +14495,7 @@ function recordMetrics(model, toolCalls, toolRounds, totalTokens, toolsOffered) 
   metricsBuffer.push({ model, tool_calls: toolCalls, tool_rounds: toolRounds, total_tokens: totalTokens, timestamp: Date.now() });
   if (metricsBuffer.length > MAX_METRICS) metricsBuffer.splice(0, metricsBuffer.length - MAX_METRICS);
 }
-var openaiCompatRouter = Router14();
+var openaiCompatRouter = Router15();
 var rateLimitMap = /* @__PURE__ */ new Map();
 var RATE_LIMIT_WINDOW_MS = 6e4;
 var RATE_LIMIT_MAX = 30;
@@ -14929,6 +15084,7 @@ app.use("/api/dashboard", dashboardRouter);
 app.use("/api/openclaw", requireApiKey, openclawRouter);
 app.use("/api/audit", requireApiKey, auditRouter);
 app.use("/api/knowledge", requireApiKey, knowledgeRouter);
+app.use("/api/adoption", requireApiKey, adoptionRouter);
 app.use("/api/llm", requireApiKey, llmRouter);
 app.use("/monitor", requireApiKey, monitorRouter);
 app.use("/api/s1-s4", requireApiKey, s1s4Router);
