@@ -13433,7 +13433,10 @@ dashboardRouter.get("/data", async (_req, res) => {
   let rlmHealth = null;
   if (rlmAvailable) {
     try {
-      rlmHealth = await getRlmHealth();
+      rlmHealth = await Promise.race([
+        getRlmHealth(),
+        new Promise((_r, rej) => setTimeout(() => rej(new Error("timeout")), 2e3))
+      ]);
     } catch {
     }
   }
@@ -13457,8 +13460,12 @@ dashboardRouter.get("/data", async (_req, res) => {
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   };
   if (redis2) {
-    redis2.set(CACHE_KEY, JSON.stringify(payload), "EX", CACHE_TTL).catch(() => {
-    });
+    try {
+      const json = JSON.stringify(payload);
+      redis2.set(CACHE_KEY, json, "EX", CACHE_TTL).catch(() => {
+      });
+    } catch {
+    }
   }
   res.setHeader("X-Cache", "MISS");
   res.json(payload);

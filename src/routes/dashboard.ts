@@ -51,9 +51,15 @@ dashboardRouter.get('/data', async (_req, res) => {
   const cronJobs = listCronJobs()
   const rlmAvailable = isRlmAvailable()
 
+  // RLM health with 2s timeout — don't let cold-start block dashboard
   let rlmHealth = null
   if (rlmAvailable) {
-    try { rlmHealth = await getRlmHealth() } catch { /* ignore */ }
+    try {
+      rlmHealth = await Promise.race([
+        getRlmHealth(),
+        new Promise((_r, rej) => setTimeout(() => rej(new Error('timeout')), 2000)),
+      ])
+    } catch { /* timeout or error — skip */ }
   }
 
   const payload = {
@@ -76,9 +82,12 @@ dashboardRouter.get('/data', async (_req, res) => {
     timestamp: new Date().toISOString(),
   }
 
-  // Cache in Redis (fire-and-forget)
+  // Cache in Redis
   if (redis) {
-    redis.set(CACHE_KEY, JSON.stringify(payload), 'EX', CACHE_TTL).catch(() => {})
+    try {
+      const json = JSON.stringify(payload)
+      redis.set(CACHE_KEY, json, 'EX', CACHE_TTL).catch(() => {})
+    } catch { /* stringify failed — skip cache */ }
   }
 
   res.setHeader('X-Cache', 'MISS')
