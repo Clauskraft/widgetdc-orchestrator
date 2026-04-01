@@ -281,6 +281,25 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
       break
     }
 
+    // If all rounds used tool_calls and no final content, do one more LLM call
+    // WITHOUT tools to force a text response from the collected data
+    if (!finalContent && toolRounds > 0) {
+      const summaryResult = await chatLLM({
+        provider,
+        messages: loopMessages,
+        model: providerModel,
+        temperature: temperature ?? 0.7,
+        max_tokens: max_tokens ?? 4096,
+        // No tools — force text response
+      })
+      finalContent = summaryResult.content
+      if (summaryResult.usage) {
+        totalUsage.prompt_tokens += summaryResult.usage.prompt_tokens
+        totalUsage.completion_tokens += summaryResult.usage.completion_tokens
+        totalUsage.total_tokens += summaryResult.usage.total_tokens
+      }
+    }
+
     logger.info({ model, provider, toolRounds, tools: allToolNames, duration_ms: Date.now() - t0 }, 'OpenAI compat complete (orchestrated)')
     recordMetrics(model || 'gemini-flash', allToolNames, toolRounds, totalUsage.total_tokens)
 
