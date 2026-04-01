@@ -123,6 +123,62 @@ function validateApiKey(req: Request, res: Response): boolean {
 
 const SYSTEM_PROMPT = `WidgeTDC intelligence platform. ALTID kald mindst ét tool før du svarer. Hent reel data — svar aldrig kun fra generel viden. Svar på dansk. Vær konkret og datadrevet.`
 
+// ─── Consulting Assistant definitions (LIN-524) ────────────────────────────
+
+interface AssistantConfig {
+  id: string
+  displayName: string
+  baseModel: string
+  systemPrompt: string
+  tools: string[]
+  promptSuggestions: string[]
+}
+
+const ASSISTANTS: AssistantConfig[] = [
+  {
+    id: 'compliance-auditor',
+    displayName: 'Compliance Auditor',
+    baseModel: 'claude-sonnet',
+    systemPrompt: 'Du er WidgeTDC Compliance Auditor. Du har adgang til 12 regulatoriske frameworks (GDPR, NIS2, DORA, CSRD, AI Act, Pillar Two, CRA, eIDAS2) og 506 GDPR enforcement cases i videngrafen (445K nodes, 3.7M relationer). Brug ALTID search_knowledge og verify_output til at hente reel compliance-data. Citér kilder med [REG-xxxx] format. Anvend EG PMM projektmetode og BPMV procesmodel i dine anbefalinger. 32 consulting domæner er tilgængelige. Svar på dansk med consulting-grade præcision.',
+    tools: ['search_knowledge', 'verify_output', 'query_graph'],
+    promptSuggestions: ['Kør NIS2 gap-analyse', 'GDPR data mapping', 'DORA compliance status'],
+  },
+  {
+    id: 'graph-analyst',
+    displayName: 'Graph Analyst',
+    baseModel: 'gemini-flash',
+    systemPrompt: 'Du er WidgeTDC Graph Analyst med direkte adgang til Neo4j videngrafen: 445,918 nodes, 3,771,937 relationer, 32 consulting domæner, 270+ frameworks, 288 KPIs, 52,925 McKinsey insights. Brug query_graph til Cypher-forespørgsler og search_knowledge til semantisk søgning. Visualisér resultater som tabeller og lister. Svar på dansk.',
+    tools: ['query_graph', 'search_knowledge'],
+    promptSuggestions: ['Vis domain-statistik', 'Find orphan nodes', 'Framework-dækning per domæne'],
+  },
+  {
+    id: 'project-manager',
+    displayName: 'Project Manager',
+    baseModel: 'claude-sonnet',
+    systemPrompt: 'Du er WidgeTDC Project Manager. Brug linear_issues til at hente sprint-status, blockers og opgaver fra Linear. Brug search_knowledge til at forstå konteksten. Rapportér med KPIs: velocity, blockers, sprint burn. Anvend EG PMM projektmetode (faser, leverancer, gates) og BPMV procesmodel i projektplanlægning. 38 consulting-processer og 9 consulting-services er tilgængelige i grafen. Svar på dansk med actionable næste-skridt.',
+    tools: ['linear_issues', 'linear_issue_detail', 'search_knowledge'],
+    promptSuggestions: ['Sprint status', 'Næste prioritet', 'Blocker-rapport'],
+  },
+  {
+    id: 'consulting-partner',
+    displayName: 'Consulting Partner',
+    baseModel: 'claude-opus',
+    systemPrompt: 'Du er WidgeTDC Consulting Partner — strategisk rådgiver med adgang til verdens mest avancerede consulting intelligence platform. 84 frameworks (Balanced Scorecard, BCG Matrix, Porter Five Forces, McKinsey 7S, Design Thinking, EG PMM, BPMV m.fl.), 52,925 McKinsey insights, 1,201 consulting artifacts, 825 KPIs, 506 case studies, 35 consulting skills, 38 processer. Brug reason_deeply for dyb analyse og search_knowledge for grafdata. Leverér consulting-grade output med frameworks, data og handlingsplaner. Svar på dansk.',
+    tools: ['reason_deeply', 'search_knowledge', 'query_graph'],
+    promptSuggestions: ['Strategisk analyse af [emne]', 'Framework selection', 'Markedsanalyse'],
+  },
+  {
+    id: 'platform-health',
+    displayName: 'Platform Health',
+    baseModel: 'gemini-flash',
+    systemPrompt: 'Du er WidgeTDC Platform Health Monitor. Brug get_platform_health til at tjekke alle services (backend, RLM engine, orchestrator, Neo4j, Redis, Pipelines). Brug call_mcp_tool til avancerede MCP-kald. Rapportér: service health, Neo4j stats (445K nodes), agent fleet (430+ agenter), cron jobs, Redis status. Svar på dansk med real-time data.',
+    tools: ['get_platform_health', 'call_mcp_tool', 'query_graph'],
+    promptSuggestions: ['Service status', 'Neo4j health', 'Agent fleet oversigt'],
+  },
+]
+
+const ASSISTANT_MAP = new Map<string, AssistantConfig>(ASSISTANTS.map(a => [a.id, a]))
+
 // ─── Model registry ─────────────────────────────────────────────────────────
 
 interface ModelEntry {
@@ -139,6 +195,8 @@ const MODELS: ModelEntry[] = [
   { id: 'qwen-plus', provider: 'qwen', displayName: 'Qwen Plus' },
   { id: 'gpt-4o', provider: 'openai', displayName: 'GPT-4o' },
   { id: 'groq-llama', provider: 'groq', displayName: 'Groq Llama 3.3 70B' },
+  // Consulting Assistants (LIN-524)
+  ...ASSISTANTS.map(a => ({ id: a.id, provider: 'widgetdc', displayName: a.displayName })),
 ]
 
 const MODEL_TO_PROVIDER: Record<string, { provider: string; model?: string }> = {
@@ -204,15 +262,26 @@ openaiCompatRouter.get('/v1/metrics', (req: Request, res: Response) => {
 openaiCompatRouter.get('/v1/models', (req: Request, res: Response) => {
   if (!validateApiKey(req, res)) return
 
-  const models = MODELS.map(m => ({
-    id: m.id,
-    object: 'model',
-    created: 1700000000,
-    owned_by: m.provider,
-    permission: [],
-    root: m.id,
-    parent: null,
-  }))
+  const models = MODELS.map(m => {
+    const assistant = ASSISTANT_MAP.get(m.id)
+    return {
+      id: m.id,
+      object: 'model',
+      created: 1700000000,
+      owned_by: m.provider,
+      permission: [],
+      root: m.id,
+      parent: null,
+      ...(assistant ? {
+        meta: {
+          description: assistant.displayName,
+          prompt_suggestions: assistant.promptSuggestions,
+          base_model: assistant.baseModel,
+          tools: assistant.tools,
+        },
+      } : {}),
+    }
+  })
 
   res.json({ object: 'list', data: models })
 })
@@ -231,16 +300,26 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
   const { model, messages, stream, temperature, max_tokens } = req.body
   const requestId = `chatcmpl-${uuid().substring(0, 12)}`
 
-  // Resolve provider
-  const mapping = MODEL_TO_PROVIDER[model] || MODEL_TO_PROVIDER['gemini-flash']
+  // Check if this is a consulting assistant (LIN-524)
+  const assistant = ASSISTANT_MAP.get(model)
+
+  // Resolve provider — assistants route through their base model's provider
+  const resolvedModel = assistant ? assistant.baseModel : model
+  const mapping = MODEL_TO_PROVIDER[resolvedModel] || MODEL_TO_PROVIDER['gemini-flash']
   const provider = mapping.provider
   const providerModel = mapping.model
 
-  // Inject system prompt if not present
+  // Inject system prompt — assistants REPLACE the default prompt
   const llmMessages: LLMMessage[] = [...(messages || [])]
   const hasSystem = llmMessages.some(m => m.role === 'system')
   if (!hasSystem) {
-    llmMessages.unshift({ role: 'system', content: SYSTEM_PROMPT })
+    llmMessages.unshift({ role: 'system', content: assistant ? assistant.systemPrompt : SYSTEM_PROMPT })
+  } else if (assistant) {
+    // Replace existing system prompt with assistant-specific one
+    const sysIdx = llmMessages.findIndex(m => m.role === 'system')
+    if (sysIdx !== -1) {
+      llmMessages[sysIdx] = { role: 'system', content: assistant.systemPrompt }
+    }
   }
 
   const t0 = Date.now()
@@ -254,10 +333,12 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
     let toolRounds = 0
     const allToolNames: string[] = []
 
-    // Select only relevant tools based on user query (LIN-498)
+    // Select tools: assistants use fixed tools, regular models use dynamic selection (LIN-498/LIN-524)
     const userMsg = (messages || []).filter((m: any) => m.role === 'user').pop()?.content || ''
-    const selectedTools = selectToolsForQuery(userMsg)
-    logger.debug({ selectedTools: selectedTools.map(t => t.function.name), query: userMsg.slice(0, 50) }, 'Dynamic tool selection')
+    const selectedTools = assistant
+      ? ORCHESTRATOR_TOOLS.filter(t => assistant.tools.includes(t.function.name))
+      : selectToolsForQuery(userMsg)
+    logger.debug({ selectedTools: selectedTools.map(t => t.function.name), query: userMsg.slice(0, 50), assistant: assistant?.id || null }, 'Tool selection')
 
     for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
       const result = await chatLLM({

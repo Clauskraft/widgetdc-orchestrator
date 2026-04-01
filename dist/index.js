@@ -14369,6 +14369,49 @@ function validateApiKey(req, res) {
   return true;
 }
 var SYSTEM_PROMPT = `WidgeTDC intelligence platform. ALTID kald mindst \xE9t tool f\xF8r du svarer. Hent reel data \u2014 svar aldrig kun fra generel viden. Svar p\xE5 dansk. V\xE6r konkret og datadrevet.`;
+var ASSISTANTS = [
+  {
+    id: "compliance-auditor",
+    displayName: "Compliance Auditor",
+    baseModel: "claude-sonnet",
+    systemPrompt: "Du er WidgeTDC Compliance Auditor. Du har adgang til 12 regulatoriske frameworks (GDPR, NIS2, DORA, CSRD, AI Act, Pillar Two, CRA, eIDAS2) og 506 GDPR enforcement cases i videngrafen (445K nodes, 3.7M relationer). Brug ALTID search_knowledge og verify_output til at hente reel compliance-data. Cit\xE9r kilder med [REG-xxxx] format. Anvend EG PMM projektmetode og BPMV procesmodel i dine anbefalinger. 32 consulting dom\xE6ner er tilg\xE6ngelige. Svar p\xE5 dansk med consulting-grade pr\xE6cision.",
+    tools: ["search_knowledge", "verify_output", "query_graph"],
+    promptSuggestions: ["K\xF8r NIS2 gap-analyse", "GDPR data mapping", "DORA compliance status"]
+  },
+  {
+    id: "graph-analyst",
+    displayName: "Graph Analyst",
+    baseModel: "gemini-flash",
+    systemPrompt: "Du er WidgeTDC Graph Analyst med direkte adgang til Neo4j videngrafen: 445,918 nodes, 3,771,937 relationer, 32 consulting dom\xE6ner, 270+ frameworks, 288 KPIs, 52,925 McKinsey insights. Brug query_graph til Cypher-foresp\xF8rgsler og search_knowledge til semantisk s\xF8gning. Visualis\xE9r resultater som tabeller og lister. Svar p\xE5 dansk.",
+    tools: ["query_graph", "search_knowledge"],
+    promptSuggestions: ["Vis domain-statistik", "Find orphan nodes", "Framework-d\xE6kning per dom\xE6ne"]
+  },
+  {
+    id: "project-manager",
+    displayName: "Project Manager",
+    baseModel: "claude-sonnet",
+    systemPrompt: "Du er WidgeTDC Project Manager. Brug linear_issues til at hente sprint-status, blockers og opgaver fra Linear. Brug search_knowledge til at forst\xE5 konteksten. Rapport\xE9r med KPIs: velocity, blockers, sprint burn. Anvend EG PMM projektmetode (faser, leverancer, gates) og BPMV procesmodel i projektplanl\xE6gning. 38 consulting-processer og 9 consulting-services er tilg\xE6ngelige i grafen. Svar p\xE5 dansk med actionable n\xE6ste-skridt.",
+    tools: ["linear_issues", "linear_issue_detail", "search_knowledge"],
+    promptSuggestions: ["Sprint status", "N\xE6ste prioritet", "Blocker-rapport"]
+  },
+  {
+    id: "consulting-partner",
+    displayName: "Consulting Partner",
+    baseModel: "claude-opus",
+    systemPrompt: "Du er WidgeTDC Consulting Partner \u2014 strategisk r\xE5dgiver med adgang til verdens mest avancerede consulting intelligence platform. 84 frameworks (Balanced Scorecard, BCG Matrix, Porter Five Forces, McKinsey 7S, Design Thinking, EG PMM, BPMV m.fl.), 52,925 McKinsey insights, 1,201 consulting artifacts, 825 KPIs, 506 case studies, 35 consulting skills, 38 processer. Brug reason_deeply for dyb analyse og search_knowledge for grafdata. Lever\xE9r consulting-grade output med frameworks, data og handlingsplaner. Svar p\xE5 dansk.",
+    tools: ["reason_deeply", "search_knowledge", "query_graph"],
+    promptSuggestions: ["Strategisk analyse af [emne]", "Framework selection", "Markedsanalyse"]
+  },
+  {
+    id: "platform-health",
+    displayName: "Platform Health",
+    baseModel: "gemini-flash",
+    systemPrompt: "Du er WidgeTDC Platform Health Monitor. Brug get_platform_health til at tjekke alle services (backend, RLM engine, orchestrator, Neo4j, Redis, Pipelines). Brug call_mcp_tool til avancerede MCP-kald. Rapport\xE9r: service health, Neo4j stats (445K nodes), agent fleet (430+ agenter), cron jobs, Redis status. Svar p\xE5 dansk med real-time data.",
+    tools: ["get_platform_health", "call_mcp_tool", "query_graph"],
+    promptSuggestions: ["Service status", "Neo4j health", "Agent fleet oversigt"]
+  }
+];
+var ASSISTANT_MAP = new Map(ASSISTANTS.map((a) => [a.id, a]));
 var MODELS = [
   { id: "claude-sonnet", provider: "claude", displayName: "Claude Sonnet 4" },
   { id: "claude-opus", provider: "claude", displayName: "Claude Opus 4" },
@@ -14376,7 +14419,9 @@ var MODELS = [
   { id: "deepseek-chat", provider: "deepseek", displayName: "DeepSeek Chat" },
   { id: "qwen-plus", provider: "qwen", displayName: "Qwen Plus" },
   { id: "gpt-4o", provider: "openai", displayName: "GPT-4o" },
-  { id: "groq-llama", provider: "groq", displayName: "Groq Llama 3.3 70B" }
+  { id: "groq-llama", provider: "groq", displayName: "Groq Llama 3.3 70B" },
+  // Consulting Assistants (LIN-524)
+  ...ASSISTANTS.map((a) => ({ id: a.id, provider: "widgetdc", displayName: a.displayName }))
 ];
 var MODEL_TO_PROVIDER = {
   "claude-sonnet": { provider: "claude", model: "claude-sonnet-4-20250514" },
@@ -14428,15 +14473,26 @@ openaiCompatRouter.get("/v1/metrics", (req, res) => {
 });
 openaiCompatRouter.get("/v1/models", (req, res) => {
   if (!validateApiKey(req, res)) return;
-  const models = MODELS.map((m) => ({
-    id: m.id,
-    object: "model",
-    created: 17e8,
-    owned_by: m.provider,
-    permission: [],
-    root: m.id,
-    parent: null
-  }));
+  const models = MODELS.map((m) => {
+    const assistant = ASSISTANT_MAP.get(m.id);
+    return {
+      id: m.id,
+      object: "model",
+      created: 17e8,
+      owned_by: m.provider,
+      permission: [],
+      root: m.id,
+      parent: null,
+      ...assistant ? {
+        meta: {
+          description: assistant.displayName,
+          prompt_suggestions: assistant.promptSuggestions,
+          base_model: assistant.baseModel,
+          tools: assistant.tools
+        }
+      } : {}
+    };
+  });
   res.json({ object: "list", data: models });
 });
 openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
@@ -14448,13 +14504,20 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
   }
   const { model, messages, stream, temperature, max_tokens } = req.body;
   const requestId = `chatcmpl-${uuid9().substring(0, 12)}`;
-  const mapping = MODEL_TO_PROVIDER[model] || MODEL_TO_PROVIDER["gemini-flash"];
+  const assistant = ASSISTANT_MAP.get(model);
+  const resolvedModel = assistant ? assistant.baseModel : model;
+  const mapping = MODEL_TO_PROVIDER[resolvedModel] || MODEL_TO_PROVIDER["gemini-flash"];
   const provider = mapping.provider;
   const providerModel = mapping.model;
   const llmMessages = [...messages || []];
   const hasSystem = llmMessages.some((m) => m.role === "system");
   if (!hasSystem) {
-    llmMessages.unshift({ role: "system", content: SYSTEM_PROMPT });
+    llmMessages.unshift({ role: "system", content: assistant ? assistant.systemPrompt : SYSTEM_PROMPT });
+  } else if (assistant) {
+    const sysIdx = llmMessages.findIndex((m) => m.role === "system");
+    if (sysIdx !== -1) {
+      llmMessages[sysIdx] = { role: "system", content: assistant.systemPrompt };
+    }
   }
   const t0 = Date.now();
   logger.info({ model, provider, stream, messageCount: llmMessages.length, ip: clientIp }, "OpenAI compat request");
@@ -14465,8 +14528,8 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     let toolRounds = 0;
     const allToolNames = [];
     const userMsg = (messages || []).filter((m) => m.role === "user").pop()?.content || "";
-    const selectedTools = selectToolsForQuery(userMsg);
-    logger.debug({ selectedTools: selectedTools.map((t) => t.function.name), query: userMsg.slice(0, 50) }, "Dynamic tool selection");
+    const selectedTools = assistant ? ORCHESTRATOR_TOOLS.filter((t) => assistant.tools.includes(t.function.name)) : selectToolsForQuery(userMsg);
+    logger.debug({ selectedTools: selectedTools.map((t) => t.function.name), query: userMsg.slice(0, 50), assistant: assistant?.id || null }, "Tool selection");
     for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
       const result = await chatLLM({
         provider,
