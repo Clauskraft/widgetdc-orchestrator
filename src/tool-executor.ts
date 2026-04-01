@@ -308,6 +308,33 @@ async function executeOne(tc: ToolCall): Promise<string> {
   const name = tc.function.name
   logger.info({ tool: name, args_keys: Object.keys(args) }, 'Executing tool call')
 
+  try {
+    return await executeToolByName(name, args)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    logger.warn({ tool: name, error: msg }, 'Tool execution failed — returning graceful fallback')
+    return buildToolFallback(name, msg)
+  }
+}
+
+function buildToolFallback(toolName: string, error: string): string {
+  const short = error.length > 200 ? error.slice(0, 200) + '...' : error
+  switch (toolName) {
+    case 'search_knowledge':
+      return `Knowledge search unavailable (${short}). Try query_graph with a direct Cypher query, or call_mcp_tool with srag.query as a fallback.`
+    case 'reason_deeply':
+      return `RLM reasoning unavailable (${short}). Try breaking the question into simpler parts using search_knowledge or query_graph.`
+    case 'query_graph':
+      return `Neo4j graph query failed (${short}). The graph may be temporarily slow — try a simpler query or use search_knowledge instead.`
+    case 'linear_issues':
+    case 'linear_issue_detail':
+      return `Linear query failed (${short}). Linear data may be temporarily unavailable.`
+    default:
+      return `Tool "${toolName}" failed: ${short}`
+  }
+}
+
+async function executeToolByName(name: string, args: Record<string, unknown>): Promise<string> {
   switch (name) {
     case 'search_knowledge': {
       const result = await dualChannelRAG(args.query as string, {
