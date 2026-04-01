@@ -204,6 +204,68 @@ export const ORCHESTRATOR_TOOLS = [
   },
 ]
 
+// ─── Token tracking ─────────────────────────────────────────────────────────
+
+let totalTokensSaved = 0
+let totalFoldingCalls = 0
+
+export function getTokenSavings() {
+  return { totalTokensSaved, totalFoldingCalls, avgSavingsPerFold: totalFoldingCalls > 0 ? Math.round(totalTokensSaved / totalFoldingCalls) : 0 }
+}
+
+/**
+ * Compress tool result if too large. Estimates ~4 chars per token.
+ * Results over 1500 chars (~375 tokens) get folded to max 800 chars.
+ */
+function foldToolResult(content: string, toolName: string): string {
+  const MAX_CHARS = 1500
+  const TARGET_CHARS = 800
+
+  if (content.length <= MAX_CHARS) return content
+
+  const originalTokens = Math.ceil(content.length / 4)
+  totalFoldingCalls++
+
+  // Smart truncation: keep structure, remove noise
+  let folded: string
+  try {
+    const parsed = JSON.parse(content)
+    if (Array.isArray(parsed)) {
+      // Truncate arrays to first 5 items + count
+      const truncated = parsed.slice(0, 5)
+      folded = JSON.stringify(truncated, null, 1).slice(0, TARGET_CHARS)
+      folded += `\n... (${parsed.length} total items, showing first 5)`
+    } else if (typeof parsed === 'object') {
+      // Keep top-level keys, truncate nested values
+      const slim: Record<string, unknown> = {}
+      for (const [k, v] of Object.entries(parsed)) {
+        if (typeof v === 'string' && v.length > 200) {
+          slim[k] = v.slice(0, 200) + '...'
+        } else if (Array.isArray(v) && v.length > 3) {
+          slim[k] = [...v.slice(0, 3), `... +${v.length - 3} more`]
+        } else {
+          slim[k] = v
+        }
+      }
+      folded = JSON.stringify(slim, null, 1).slice(0, TARGET_CHARS)
+    } else {
+      folded = content.slice(0, TARGET_CHARS) + '...'
+    }
+  } catch {
+    // Not JSON — plain text truncation with section preservation
+    const lines = content.split('\n')
+    folded = lines.slice(0, 15).join('\n').slice(0, TARGET_CHARS)
+    if (lines.length > 15) folded += `\n... (${lines.length} total lines)`
+  }
+
+  const foldedTokens = Math.ceil(folded.length / 4)
+  const saved = originalTokens - foldedTokens
+  totalTokensSaved += saved
+
+  logger.debug({ tool: toolName, originalTokens, foldedTokens, saved }, 'Tool result folded')
+  return folded
+}
+
 // ─── Tool execution ─────────────────────────────────────────────────────────
 
 interface ToolCall {
@@ -225,11 +287,14 @@ export async function executeToolCalls(toolCalls: ToolCall[]): Promise<ToolResul
     toolCalls.map(tc => executeOne(tc))
   )
 
-  return results.map((r, i) => ({
-    tool_call_id: toolCalls[i].id,
-    role: 'tool' as const,
-    content: r.status === 'fulfilled' ? r.value : `Error: ${(r as PromiseRejectedResult).reason}`,
-  }))
+  return results.map((r, i) => {
+    const raw = r.status === 'fulfilled' ? r.value : `Error: ${(r as PromiseRejectedResult).reason}`
+    return {
+      tool_call_id: toolCalls[i].id,
+      role: 'tool' as const,
+      content: foldToolResult(raw, toolCalls[i].function.name),
+    }
+  })
 }
 
 async function executeOne(tc: ToolCall): Promise<string> {

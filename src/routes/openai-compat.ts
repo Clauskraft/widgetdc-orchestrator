@@ -16,7 +16,7 @@
  */
 import { Router, Request, Response } from 'express'
 import { chatLLM, type LLMMessage } from '../llm-proxy.js'
-import { ORCHESTRATOR_TOOLS, executeToolCalls } from '../tool-executor.js'
+import { ORCHESTRATOR_TOOLS, executeToolCalls, getTokenSavings } from '../tool-executor.js'
 import { logger } from '../logger.js'
 import { config } from '../config.js'
 import { v4 as uuid } from 'uuid'
@@ -153,6 +153,9 @@ openaiCompatRouter.get('/v1/metrics', (req: Request, res: Response) => {
   const requestsWithTools = recent.filter(m => m.tool_calls.length > 0).length
   const advancedPct = totalRequests > 0 ? ((requestsWithTools / totalRequests) * 100).toFixed(1) : '0'
 
+  const savings = getTokenSavings()
+  const avgTokensPerRequest = totalRequests > 0 ? Math.round(totalTokens / totalRequests) : 0
+
   res.json({
     period: '24h',
     total_requests: totalRequests,
@@ -160,6 +163,12 @@ openaiCompatRouter.get('/v1/metrics', (req: Request, res: Response) => {
     advanced_pct: parseFloat(advancedPct),
     avg_tool_rounds: parseFloat(avgToolRounds),
     total_tokens: totalTokens,
+    avg_tokens_per_request: avgTokensPerRequest,
+    token_savings: {
+      total_saved: savings.totalTokensSaved,
+      folding_calls: savings.totalFoldingCalls,
+      avg_per_fold: savings.avgSavingsPerFold,
+    },
     tool_call_counts: toolCallCounts,
     model_counts: modelCounts,
   })

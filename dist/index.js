@@ -13744,15 +13744,64 @@ var ORCHESTRATOR_TOOLS = [
     }
   }
 ];
+var totalTokensSaved = 0;
+var totalFoldingCalls = 0;
+function getTokenSavings() {
+  return { totalTokensSaved, totalFoldingCalls, avgSavingsPerFold: totalFoldingCalls > 0 ? Math.round(totalTokensSaved / totalFoldingCalls) : 0 };
+}
+function foldToolResult(content, toolName) {
+  const MAX_CHARS = 1500;
+  const TARGET_CHARS = 800;
+  if (content.length <= MAX_CHARS) return content;
+  const originalTokens = Math.ceil(content.length / 4);
+  totalFoldingCalls++;
+  let folded;
+  try {
+    const parsed = JSON.parse(content);
+    if (Array.isArray(parsed)) {
+      const truncated = parsed.slice(0, 5);
+      folded = JSON.stringify(truncated, null, 1).slice(0, TARGET_CHARS);
+      folded += `
+... (${parsed.length} total items, showing first 5)`;
+    } else if (typeof parsed === "object") {
+      const slim = {};
+      for (const [k, v] of Object.entries(parsed)) {
+        if (typeof v === "string" && v.length > 200) {
+          slim[k] = v.slice(0, 200) + "...";
+        } else if (Array.isArray(v) && v.length > 3) {
+          slim[k] = [...v.slice(0, 3), `... +${v.length - 3} more`];
+        } else {
+          slim[k] = v;
+        }
+      }
+      folded = JSON.stringify(slim, null, 1).slice(0, TARGET_CHARS);
+    } else {
+      folded = content.slice(0, TARGET_CHARS) + "...";
+    }
+  } catch {
+    const lines = content.split("\n");
+    folded = lines.slice(0, 15).join("\n").slice(0, TARGET_CHARS);
+    if (lines.length > 15) folded += `
+... (${lines.length} total lines)`;
+  }
+  const foldedTokens = Math.ceil(folded.length / 4);
+  const saved = originalTokens - foldedTokens;
+  totalTokensSaved += saved;
+  logger.debug({ tool: toolName, originalTokens, foldedTokens, saved }, "Tool result folded");
+  return folded;
+}
 async function executeToolCalls(toolCalls) {
   const results = await Promise.allSettled(
     toolCalls.map((tc) => executeOne(tc))
   );
-  return results.map((r, i) => ({
-    tool_call_id: toolCalls[i].id,
-    role: "tool",
-    content: r.status === "fulfilled" ? r.value : `Error: ${r.reason}`
-  }));
+  return results.map((r, i) => {
+    const raw = r.status === "fulfilled" ? r.value : `Error: ${r.reason}`;
+    return {
+      tool_call_id: toolCalls[i].id,
+      role: "tool",
+      content: foldToolResult(raw, toolCalls[i].function.name)
+    };
+  });
 }
 async function executeOne(tc) {
   let args;
@@ -14028,6 +14077,8 @@ openaiCompatRouter.get("/v1/metrics", (req, res) => {
   const avgToolRounds = totalRequests > 0 ? (totalToolRounds / totalRequests).toFixed(1) : "0";
   const requestsWithTools = recent.filter((m) => m.tool_calls.length > 0).length;
   const advancedPct = totalRequests > 0 ? (requestsWithTools / totalRequests * 100).toFixed(1) : "0";
+  const savings = getTokenSavings();
+  const avgTokensPerRequest = totalRequests > 0 ? Math.round(totalTokens / totalRequests) : 0;
   res.json({
     period: "24h",
     total_requests: totalRequests,
@@ -14035,6 +14086,12 @@ openaiCompatRouter.get("/v1/metrics", (req, res) => {
     advanced_pct: parseFloat(advancedPct),
     avg_tool_rounds: parseFloat(avgToolRounds),
     total_tokens: totalTokens,
+    avg_tokens_per_request: avgTokensPerRequest,
+    token_savings: {
+      total_saved: savings.totalTokensSaved,
+      folding_calls: savings.totalFoldingCalls,
+      avg_per_fold: savings.avgSavingsPerFold
+    },
     tool_call_counts: toolCallCounts,
     model_counts: modelCounts
   });
