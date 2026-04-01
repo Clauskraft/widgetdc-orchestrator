@@ -13896,8 +13896,332 @@ adoptionRouter.put("/metrics", async (req, res) => {
   res.json({ success: true, metrics: current });
 });
 
-// src/routes/monitor.ts
+// src/routes/artifacts.ts
 import { Router as Router13 } from "express";
+import { randomUUID } from "crypto";
+var artifactRouter = Router13();
+var ARTIFACT_PREFIX = "orchestrator:artifact:";
+var ARTIFACT_INDEX = "orchestrator:artifacts:index";
+var TTL_SECONDS3 = 2592e3;
+async function storeArtifact(artifact) {
+  const redis2 = getRedis();
+  if (!redis2) return false;
+  const key = `${ARTIFACT_PREFIX}${artifact.$id}`;
+  try {
+    await redis2.set(key, JSON.stringify(artifact), "EX", TTL_SECONDS3);
+    await redis2.sadd(ARTIFACT_INDEX, artifact.$id);
+    return true;
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Redis store failed for artifact");
+    return false;
+  }
+}
+async function loadArtifact(id) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${ARTIFACT_PREFIX}${id}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    logger.warn({ err: String(err), id }, "Redis load failed for artifact");
+    return null;
+  }
+}
+async function listAllIds() {
+  const redis2 = getRedis();
+  if (!redis2) return [];
+  try {
+    return await redis2.smembers(ARTIFACT_INDEX);
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Redis list failed for artifact index");
+    return [];
+  }
+}
+artifactRouter.post("/", async (req, res) => {
+  const body = req.body;
+  if (!body.title || !body.source || !Array.isArray(body.blocks) || !body.created_by) {
+    res.status(400).json({ success: false, error: "Missing required fields: title, source, blocks, created_by" });
+    return;
+  }
+  const id = `widgetdc:artifact:${randomUUID()}`;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const artifact = {
+    $id: id,
+    $schema: "widgetdc:analysis:v1",
+    title: String(body.title),
+    source: String(body.source),
+    blocks: body.blocks,
+    graph_refs: Array.isArray(body.graph_refs) ? body.graph_refs : void 0,
+    tags: Array.isArray(body.tags) ? body.tags : void 0,
+    status: "draft",
+    created_by: String(body.created_by),
+    created_at: now,
+    updated_at: now
+  };
+  const stored = await storeArtifact(artifact);
+  if (!stored) {
+    res.status(503).json({ success: false, error: "Redis not available" });
+    return;
+  }
+  logger.info({ id: artifact.$id, title: artifact.title }, "Artifact created");
+  res.status(201).json({ success: true, artifact });
+});
+artifactRouter.get("/", async (req, res) => {
+  const statusFilter = req.query.status;
+  const tagFilter = req.query.tag;
+  const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 200);
+  const offset = Math.max(parseInt(req.query.offset) || 0, 0);
+  const allIds = await listAllIds();
+  const redis2 = getRedis();
+  if (!redis2) {
+    res.json({ artifacts: [], total: 0, limit, offset });
+    return;
+  }
+  const artifacts = [];
+  try {
+    const pipeline = redis2.pipeline();
+    for (const id of allIds) {
+      pipeline.get(`${ARTIFACT_PREFIX}${id}`);
+    }
+    const results = await pipeline.exec();
+    if (results) {
+      for (const [err, raw] of results) {
+        if (!err && typeof raw === "string") {
+          try {
+            artifacts.push(JSON.parse(raw));
+          } catch {
+          }
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Redis pipeline failed for artifact list");
+  }
+  let filtered = artifacts.filter((a) => a.status !== "archived");
+  if (statusFilter) {
+    filtered = filtered.filter((a) => a.status === statusFilter);
+  }
+  if (tagFilter) {
+    filtered = filtered.filter((a) => a.tags?.includes(tagFilter));
+  }
+  filtered.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  const total = filtered.length;
+  const page = filtered.slice(offset, offset + limit);
+  res.json({ artifacts: page, total, limit, offset });
+});
+artifactRouter.get("/:id", async (req, res) => {
+  const id = req.params.id;
+  if (id.endsWith(".md")) {
+    return renderMarkdown(req, res, id.replace(/\.md$/, ""));
+  }
+  if (id.endsWith(".html")) {
+    return renderHtml(req, res, id.replace(/\.html$/, ""));
+  }
+  const artifact = await loadArtifact(id);
+  if (!artifact) {
+    res.status(404).json({ success: false, error: "Artifact not found" });
+    return;
+  }
+  res.json(artifact);
+});
+artifactRouter.put("/:id", async (req, res) => {
+  const id = req.params.id;
+  const existing = await loadArtifact(id);
+  if (!existing) {
+    res.status(404).json({ success: false, error: "Artifact not found" });
+    return;
+  }
+  const body = req.body;
+  if (body.title) existing.title = body.title;
+  if (body.source) existing.source = body.source;
+  if (body.blocks) existing.blocks = body.blocks;
+  if (body.graph_refs !== void 0) existing.graph_refs = body.graph_refs;
+  if (body.tags !== void 0) existing.tags = body.tags;
+  if (body.status && ["draft", "published", "archived"].includes(body.status)) {
+    existing.status = body.status;
+  }
+  existing.updated_at = (/* @__PURE__ */ new Date()).toISOString();
+  const stored = await storeArtifact(existing);
+  if (!stored) {
+    res.status(503).json({ success: false, error: "Redis not available" });
+    return;
+  }
+  logger.info({ id, title: existing.title }, "Artifact updated");
+  res.json({ success: true, artifact: existing });
+});
+artifactRouter.delete("/:id", async (req, res) => {
+  const id = req.params.id;
+  const existing = await loadArtifact(id);
+  if (!existing) {
+    res.status(404).json({ success: false, error: "Artifact not found" });
+    return;
+  }
+  existing.status = "archived";
+  existing.updated_at = (/* @__PURE__ */ new Date()).toISOString();
+  const stored = await storeArtifact(existing);
+  if (!stored) {
+    res.status(503).json({ success: false, error: "Redis not available" });
+    return;
+  }
+  logger.info({ id }, "Artifact archived");
+  res.json({ success: true });
+});
+function trendEmoji(trend) {
+  if (trend === "up") return "\u2191";
+  if (trend === "down") return "\u2193";
+  return "\u2192";
+}
+function blockToMarkdown(block) {
+  const c = block.content;
+  switch (block.type) {
+    case "text":
+      return String(c.body ?? c.text ?? c ?? "");
+    case "table": {
+      const headers = c.headers ?? c.columns ?? [];
+      const rows = c.rows ?? c.data ?? [];
+      if (headers.length === 0) return "";
+      const headerLine = `| ${headers.join(" | ")} |`;
+      const separatorLine = `| ${headers.map(() => "---").join(" | ")} |`;
+      const dataLines = rows.map((r) => `| ${r.map(String).join(" | ")} |`);
+      return [headerLine, separatorLine, ...dataLines].join("\n");
+    }
+    case "chart":
+      return `\`\`\`widgetdc-query
+type: ${String(c.chart_type ?? c.type ?? "bar")}
+data: ${JSON.stringify(c.data ?? c)}
+\`\`\``;
+    case "cypher":
+      return `\`\`\`widgetdc-query
+cypher: ${String(c.query ?? c.cypher ?? c)}
+\`\`\``;
+    case "mermaid":
+      return "```mermaid\n" + String(c.diagram ?? c.code ?? c) + "\n```";
+    case "kpi_card": {
+      const label = String(c.label ?? block.label ?? "KPI");
+      const value = String(c.value ?? "");
+      const trend = trendEmoji(c.trend);
+      return `**${label}**: ${value} ${trend}`;
+    }
+    case "deep_link": {
+      const label = String(c.label ?? c.title ?? "Link");
+      const uri = String(c.uri ?? c.url ?? c.href ?? "#");
+      return `[${label}](${uri})`;
+    }
+    default:
+      return `<!-- unknown block type: ${block.type} -->
+${JSON.stringify(c, null, 2)}`;
+  }
+}
+async function renderMarkdown(req, res, id) {
+  const artifact = await loadArtifact(id);
+  if (!artifact) {
+    res.status(404).json({ success: false, error: "Artifact not found" });
+    return;
+  }
+  const lines = [];
+  lines.push(`# ${artifact.title}`);
+  lines.push("");
+  lines.push(`> Source: ${artifact.source} | Status: ${artifact.status} | Created: ${artifact.created_at}`);
+  if (artifact.tags?.length) {
+    lines.push(`> Tags: ${artifact.tags.map((t) => `#${t}`).join(" ")}`);
+  }
+  lines.push("");
+  for (const block of artifact.blocks) {
+    if (block.label) {
+      lines.push(`## ${block.label}`);
+      lines.push("");
+    }
+    lines.push(blockToMarkdown(block));
+    lines.push("");
+  }
+  if (artifact.graph_refs?.length) {
+    lines.push("---");
+    lines.push("## Graph References");
+    for (const ref of artifact.graph_refs) {
+      lines.push(`- \`${ref}\``);
+    }
+  }
+  res.type("text/markdown").send(lines.join("\n"));
+}
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function blockToHtml(block) {
+  const c = block.content;
+  const labelHtml = block.label ? `<h3>${escapeHtml(block.label)}</h3>
+` : "";
+  switch (block.type) {
+    case "text":
+      return `${labelHtml}<div class="wad-text">${escapeHtml(String(c.body ?? c.text ?? c ?? ""))}</div>`;
+    case "table": {
+      const headers = c.headers ?? c.columns ?? [];
+      const rows = c.rows ?? c.data ?? [];
+      const thRow = headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("");
+      const bodyRows = rows.map(
+        (r) => `<tr>${r.map((cell) => `<td>${escapeHtml(String(cell))}</td>`).join("")}</tr>`
+      ).join("\n");
+      return `${labelHtml}<table><thead><tr>${thRow}</tr></thead><tbody>
+${bodyRows}
+</tbody></table>`;
+    }
+    case "chart": {
+      const chartType = String(c.chart_type ?? c.type ?? "bar");
+      const config2 = JSON.stringify(c.data ?? c);
+      return `${labelHtml}<div class="wad-chart" data-type="${escapeHtml(chartType)}" data-config="${escapeHtml(config2)}">Chart: ${escapeHtml(chartType)}</div>`;
+    }
+    case "kpi_card": {
+      const label = String(c.label ?? block.label ?? "KPI");
+      const value = String(c.value ?? "");
+      const trend = trendEmoji(c.trend);
+      return `${labelHtml}<div class="wad-kpi"><span class="label">${escapeHtml(label)}</span><span class="value">${escapeHtml(value)}</span><span class="trend">${trend}</span></div>`;
+    }
+    case "cypher":
+      return `${labelHtml}<pre class="wad-cypher"><code>${escapeHtml(String(c.query ?? c.cypher ?? c))}</code></pre>`;
+    case "mermaid":
+      return `${labelHtml}<div class="wad-mermaid"><pre class="mermaid">${escapeHtml(String(c.diagram ?? c.code ?? c))}</pre></div>`;
+    case "deep_link": {
+      const label = String(c.label ?? c.title ?? "Link");
+      const uri = String(c.uri ?? c.url ?? c.href ?? "#");
+      return `${labelHtml}<a class="wad-link" href="${escapeHtml(uri)}">${escapeHtml(label)}</a>`;
+    }
+    default:
+      return `${labelHtml}<div class="wad-unknown"><pre>${escapeHtml(JSON.stringify(c, null, 2))}</pre></div>`;
+  }
+}
+async function renderHtml(_req, res, id) {
+  const artifact = await loadArtifact(id);
+  if (!artifact) {
+    res.status(404).json({ success: false, error: "Artifact not found" });
+    return;
+  }
+  const parts = [];
+  parts.push(`<article class="wad-artifact" data-id="${escapeHtml(artifact.$id)}" data-status="${artifact.status}">`);
+  parts.push(`  <h1>${escapeHtml(artifact.title)}</h1>`);
+  parts.push(`  <div class="wad-meta">Source: ${escapeHtml(artifact.source)} | Status: ${artifact.status} | ${artifact.created_at}</div>`);
+  if (artifact.tags?.length) {
+    parts.push(`  <div class="wad-tags">${artifact.tags.map((t) => `<span class="wad-tag">${escapeHtml(t)}</span>`).join(" ")}</div>`);
+  }
+  for (const block of artifact.blocks) {
+    parts.push(`  <section class="wad-block wad-block-${block.type}">`);
+    parts.push(`    ${blockToHtml(block)}`);
+    parts.push("  </section>");
+  }
+  if (artifact.graph_refs?.length) {
+    parts.push('  <footer class="wad-graph-refs">');
+    parts.push("    <h3>Graph References</h3>");
+    parts.push("    <ul>");
+    for (const ref of artifact.graph_refs) {
+      parts.push(`      <li><code>${escapeHtml(ref)}</code></li>`);
+    }
+    parts.push("    </ul>");
+    parts.push("  </footer>");
+  }
+  parts.push("</article>");
+  res.type("text/html").send(parts.join("\n"));
+}
+
+// src/routes/monitor.ts
+import { Router as Router14 } from "express";
 
 // src/context-compress.ts
 var DEFAULT_MAX_TOKENS = 2e3;
@@ -14019,7 +14343,7 @@ ${compressed}`,
 
 // src/routes/monitor.ts
 import { v4 as uuid7 } from "uuid";
-var monitorRouter = Router13();
+var monitorRouter = Router14();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
@@ -14236,8 +14560,8 @@ monitorRouter.post("/compress", async (req, res) => {
 });
 
 // src/routes/s1-s4.ts
-import { Router as Router14 } from "express";
-var s1s4Router = Router14();
+import { Router as Router15 } from "express";
+var s1s4Router = Router15();
 s1s4Router.post("/trigger", async (req, res) => {
   const { url, source_type, topic, weights } = req.body;
   if (!url) {
@@ -14488,7 +14812,7 @@ async function runFullHarvest() {
 }
 
 // src/routes/openai-compat.ts
-import { Router as Router15 } from "express";
+import { Router as Router16 } from "express";
 import { v4 as uuid9 } from "uuid";
 var MAX_TOOL_ROUNDS = 2;
 var TOOL_CATEGORIES = [
@@ -14521,7 +14845,7 @@ function recordMetrics(model, toolCalls, toolRounds, totalTokens, toolsOffered) 
   metricsBuffer.push({ model, tool_calls: toolCalls, tool_rounds: toolRounds, total_tokens: totalTokens, timestamp: Date.now() });
   if (metricsBuffer.length > MAX_METRICS) metricsBuffer.splice(0, metricsBuffer.length - MAX_METRICS);
 }
-var openaiCompatRouter = Router15();
+var openaiCompatRouter = Router16();
 var rateLimitMap = /* @__PURE__ */ new Map();
 var RATE_LIMIT_WINDOW_MS = 6e4;
 var RATE_LIMIT_MAX = 30;
@@ -14821,22 +15145,22 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
 });
 
 // src/routes/prompt-generator.ts
-import { Router as Router16 } from "express";
-var promptGeneratorRouter = Router16();
+import { Router as Router17 } from "express";
+var promptGeneratorRouter = Router17();
 var intentRules = [
   {
     keywords: ["pr\xE6sentation", "praesentation", "presentation", "slides", "deck", "slide"],
-    skill: "/octo:deck",
-    explanation: "Brug /octo:deck til at generere slide decks fra et brief.",
-    alternatives: ["/octo:docs"],
-    buildPrompt: (d) => `/octo:deck brief="${d}" slides=10 audience="stakeholders"`
+    skill: "/wocto:deck",
+    explanation: "Brug /wocto:deck til at generere slide decks fra et brief (WidgeTDC-beriget).",
+    alternatives: ["/wocto:docs", "/octo:deck"],
+    buildPrompt: (d) => `/wocto:deck brief="${d}" slides=10 audience="stakeholders"`
   },
   {
     keywords: ["rapport", "pdf", "docx", "dokument", "document", "report"],
-    skill: "/octo:docs",
-    explanation: "Brug /octo:docs til at generere PDF/DOCX rapporter.",
-    alternatives: ["/octo:deck"],
-    buildPrompt: (d) => `/octo:docs format=pdf topic="${d}"`
+    skill: "/wocto:docs",
+    explanation: "Brug /wocto:docs til at generere PDF/DOCX rapporter (WidgeTDC-beriget).",
+    alternatives: ["/wocto:deck", "/octo:docs"],
+    buildPrompt: (d) => `/wocto:docs format=pdf topic="${d}"`
   },
   {
     keywords: ["prd", "product requirement", "kravspec"],
@@ -14854,10 +15178,10 @@ var intentRules = [
   },
   {
     keywords: ["research", "unders\xF8g", "undersog", "analyse", "analysis", "deep dive"],
-    skill: "/octo:research",
-    explanation: "Brug /octo:research til deep research med multi-source syntese.",
-    alternatives: ["/obsidian-research", "/octo:discover"],
-    buildPrompt: (d) => `/octo:research "${d}"`
+    skill: "/wocto:research",
+    explanation: "Brug /wocto:research til deep research med multi-source syntese (WidgeTDC-beriget).",
+    alternatives: ["/obsidian-research", "/octo:discover", "/octo:research"],
+    buildPrompt: (d) => `/wocto:research "${d}"`
   },
   {
     keywords: ["osint", "intelligence", "konkurrent", "competitor"],
@@ -14882,10 +15206,10 @@ var intentRules = [
   },
   {
     keywords: ["debug", "fix", "bug", "fejl", "error", "traceback", "crash", "broken"],
-    skill: "/octo:debug",
-    explanation: "Brug /octo:debug til systematisk debugging og problemunders\xF8gelse.",
-    alternatives: ["/agent-chain"],
-    buildPrompt: (d) => `/octo:debug "${d}"`
+    skill: "/wocto:debug",
+    explanation: "Brug /wocto:debug til systematisk debugging med WidgeTDC governance.",
+    alternatives: ["/agent-chain", "/octo:debug"],
+    buildPrompt: (d) => `/wocto:debug "${d}"`
   },
   {
     keywords: ["review", "pr", "pull request", "code review"],
@@ -15335,6 +15659,7 @@ app.use("/api/openclaw", requireApiKey, openclawRouter);
 app.use("/api/audit", requireApiKey, auditRouter);
 app.use("/api/knowledge", requireApiKey, knowledgeRouter);
 app.use("/api/adoption", requireApiKey, adoptionRouter);
+app.use("/api/artifacts", requireApiKey, artifactRouter);
 app.use("/api/llm", requireApiKey, llmRouter);
 app.use("/monitor", requireApiKey, monitorRouter);
 app.use("/api/s1-s4", requireApiKey, s1s4Router);
