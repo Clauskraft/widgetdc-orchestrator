@@ -14825,7 +14825,7 @@ import { Router as Router16 } from "express";
 var promptGeneratorRouter = Router16();
 var intentRules = [
   {
-    keywords: ["pr\xE6sentation", "presentation", "slides", "deck", "slide"],
+    keywords: ["pr\xE6sentation", "praesentation", "presentation", "slides", "deck", "slide"],
     skill: "/octo:deck",
     explanation: "Brug /octo:deck til at generere slide decks fra et brief.",
     alternatives: ["/octo:docs"],

@@ -26,7 +26,7 @@ interface IntentRule {
 
 const intentRules: IntentRule[] = [
   {
-    keywords: ['præsentation', 'presentation', 'slides', 'deck', 'slide'],
+    keywords: ['præsentation', 'praesentation', 'presentation', 'slides', 'deck', 'slide'],
     skill: '/octo:deck',
     explanation: 'Brug /octo:deck til at generere slide decks fra et brief.',
     alternatives: ['/octo:docs'],
