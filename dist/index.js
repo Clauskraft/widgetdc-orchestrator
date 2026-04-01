@@ -10733,6 +10733,46 @@ async function callAnthropic(provider, req) {
   const model = req.model || provider.defaultModel;
   const systemMsg = req.messages.find((m) => m.role === "system");
   const nonSystem = req.messages.filter((m) => m.role !== "system");
+  const anthropicTools = req.tools?.map((t) => ({
+    name: t.function.name,
+    description: t.function.description,
+    input_schema: t.function.parameters
+  }));
+  const anthropicMessages = nonSystem.map((m) => {
+    if (m.role === "assistant" && m.tool_calls) {
+      const content = [];
+      if (m.content) content.push({ type: "text", text: m.content });
+      for (const tc of m.tool_calls) {
+        content.push({
+          type: "tool_use",
+          id: tc.id,
+          name: tc.function.name,
+          input: JSON.parse(tc.function.arguments || "{}")
+        });
+      }
+      return { role: "assistant", content };
+    }
+    if (m.role === "tool" && m.tool_call_id) {
+      return {
+        role: "user",
+        content: [{
+          type: "tool_result",
+          tool_use_id: m.tool_call_id,
+          content: m.content
+        }]
+      };
+    }
+    return { role: m.role === "tool" ? "user" : m.role, content: m.content };
+  });
+  const body = {
+    model,
+    max_tokens: req.max_tokens ?? 2048,
+    ...systemMsg ? { system: systemMsg.content } : {},
+    messages: anthropicMessages
+  };
+  if (anthropicTools && anthropicTools.length > 0) {
+    body.tools = anthropicTools;
+  }
   const res = await fetch(`${provider.baseUrl}/messages`, {
     method: "POST",
     headers: {
@@ -10740,12 +10780,7 @@ async function callAnthropic(provider, req) {
       "x-api-key": provider.apiKey,
       "anthropic-version": "2023-06-01"
     },
-    body: JSON.stringify({
-      model,
-      max_tokens: req.max_tokens ?? 2048,
-      ...systemMsg ? { system: systemMsg.content } : {},
-      messages: nonSystem.map((m) => ({ role: m.role, content: m.content }))
-    }),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(6e4)
   });
   if (!res.ok) {
@@ -10753,10 +10788,22 @@ async function callAnthropic(provider, req) {
     throw new Error(`Claude error: ${err}`);
   }
   const data = await res.json();
+  const contentBlocks = data.content || [];
+  const textBlocks = contentBlocks.filter((b) => b.type === "text");
+  const toolUseBlocks = contentBlocks.filter((b) => b.type === "tool_use");
+  const tool_calls = toolUseBlocks.length > 0 ? toolUseBlocks.map((tu) => ({
+    id: tu.id,
+    type: "function",
+    function: {
+      name: tu.name,
+      arguments: JSON.stringify(tu.input || {})
+    }
+  })) : void 0;
   return {
     provider: "claude",
     model: data.model || model,
-    content: data.content?.[0]?.text || "",
+    content: textBlocks.map((b) => b.text).join("") || "",
+    tool_calls,
     usage: data.usage ? {
       prompt_tokens: data.usage.input_tokens || 0,
       completion_tokens: data.usage.output_tokens || 0,
@@ -13750,8 +13797,8 @@ function getTokenSavings() {
   return { totalTokensSaved, totalFoldingCalls, avgSavingsPerFold: totalFoldingCalls > 0 ? Math.round(totalTokensSaved / totalFoldingCalls) : 0 };
 }
 function foldToolResult(content, toolName) {
-  const MAX_CHARS = 1500;
-  const TARGET_CHARS = 800;
+  const MAX_CHARS = 800;
+  const TARGET_CHARS = 500;
   if (content.length <= MAX_CHARS) return content;
   const originalTokens = Math.ceil(content.length / 4);
   totalFoldingCalls++;
@@ -13841,7 +13888,7 @@ ${result.merged_context}` : "No results found for this query.";
       });
       if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
       const rows = Array.isArray(result.result) ? result.result : result.result?.results ?? result.result;
-      return JSON.stringify(rows, null, 2).slice(0, 3e3);
+      return JSON.stringify(rows, null, 2).slice(0, 800);
     }
     case "check_tasks": {
       const filter = args.filter ?? "active";
@@ -13873,7 +13920,7 @@ ${result.merged_context}` : "No results found for this query.";
         timeoutMs: 3e4
       });
       if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
-      return JSON.stringify(result.result, null, 2).slice(0, 3e3);
+      return JSON.stringify(result.result, null, 2).slice(0, 800);
     }
     case "get_platform_health": {
       const [backendHealth, graphHealth] = await Promise.allSettled([
@@ -13898,7 +13945,7 @@ ${result.merged_context}` : "No results found for this query.";
         timeoutMs: 2e4
       });
       if (result.status !== "success") return `Document search failed: ${result.error_message}`;
-      return JSON.stringify(result.result, null, 2).slice(0, 3e3);
+      return JSON.stringify(result.result, null, 2).slice(0, 800);
     }
     case "linear_issues": {
       const status = args.status ?? "active";
@@ -13932,7 +13979,7 @@ ${result.merged_context}` : "No results found for this query.";
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
-      return JSON.stringify(result.result, null, 2).slice(0, 4e3);
+      return JSON.stringify(result.result, null, 2).slice(0, 800);
     }
     case "run_chain": {
       const steps = args.steps ?? [];
@@ -13953,7 +14000,7 @@ ${result.merged_context}` : "No results found for this query.";
         const summary = `Chain "${execution.name}" (${execution.mode}): ${execution.status} \u2014 ${execution.steps_completed}/${execution.steps_total} steps, ${execution.duration_ms}ms`;
         const output = execution.final_output ? `
 
-Result: ${typeof execution.final_output === "string" ? execution.final_output : JSON.stringify(execution.final_output, null, 2).slice(0, 2e3)}` : "";
+Result: ${typeof execution.final_output === "string" ? execution.final_output : JSON.stringify(execution.final_output, null, 2).slice(0, 800)}` : "";
         return summary + output + (execution.error ? `
 Error: ${execution.error}` : "");
       } catch (err) {
@@ -13976,7 +14023,7 @@ Error: ${execution.error}` : "");
             }))
           }
         );
-        return JSON.stringify(result, null, 2).slice(0, 2e3);
+        return JSON.stringify(result, null, 2).slice(0, 800);
       } catch (err) {
         return `Verification failed: ${err}`;
       }

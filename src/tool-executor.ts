@@ -218,8 +218,8 @@ export function getTokenSavings() {
  * Results over 1500 chars (~375 tokens) get folded to max 800 chars.
  */
 function foldToolResult(content: string, toolName: string): string {
-  const MAX_CHARS = 1500
-  const TARGET_CHARS = 800
+  const MAX_CHARS = 800
+  const TARGET_CHARS = 500
 
   if (content.length <= MAX_CHARS) return content
 
@@ -340,7 +340,7 @@ async function executeOne(tc: ToolCall): Promise<string> {
       if (result.status !== 'success') return `Graph query failed: ${result.error_message}`
       const rows = Array.isArray(result.result) ? result.result
         : (result.result as any)?.results ?? result.result
-      return JSON.stringify(rows, null, 2).slice(0, 3000)
+      return JSON.stringify(rows, null, 2).slice(0, 800)
     }
 
     case 'check_tasks': {
@@ -377,7 +377,7 @@ async function executeOne(tc: ToolCall): Promise<string> {
         timeoutMs: 30000,
       })
       if (result.status !== 'success') return `MCP tool failed: ${result.error_message}`
-      return JSON.stringify(result.result, null, 2).slice(0, 3000)
+      return JSON.stringify(result.result, null, 2).slice(0, 800)
     }
 
     case 'get_platform_health': {
@@ -405,7 +405,7 @@ async function executeOne(tc: ToolCall): Promise<string> {
         timeoutMs: 20000,
       })
       if (result.status !== 'success') return `Document search failed: ${result.error_message}`
-      return JSON.stringify(result.result, null, 2).slice(0, 3000)
+      return JSON.stringify(result.result, null, 2).slice(0, 800)
     }
 
     case 'linear_issues': {
@@ -446,7 +446,7 @@ async function executeOne(tc: ToolCall): Promise<string> {
         timeoutMs: 15000,
       })
       if (result.status !== 'success') return `Linear issue lookup failed: ${result.error_message}`
-      return JSON.stringify(result.result, null, 2).slice(0, 4000)
+      return JSON.stringify(result.result, null, 2).slice(0, 800)
     }
 
     case 'run_chain': {
@@ -467,7 +467,7 @@ async function executeOne(tc: ToolCall): Promise<string> {
         const execution = await executeChain(chainDef)
         const summary = `Chain "${execution.name}" (${execution.mode}): ${execution.status} — ${execution.steps_completed}/${execution.steps_total} steps, ${execution.duration_ms}ms`
         const output = execution.final_output
-          ? `\n\nResult: ${typeof execution.final_output === 'string' ? execution.final_output : JSON.stringify(execution.final_output, null, 2).slice(0, 2000)}`
+          ? `\n\nResult: ${typeof execution.final_output === 'string' ? execution.final_output : JSON.stringify(execution.final_output, null, 2).slice(0, 800)}`
           : ''
         return summary + output + (execution.error ? `\nError: ${execution.error}` : '')
       } catch (err) {
@@ -491,7 +491,7 @@ async function executeOne(tc: ToolCall): Promise<string> {
             })),
           }
         )
-        return JSON.stringify(result, null, 2).slice(0, 2000)
+        return JSON.stringify(result, null, 2).slice(0, 800)
       } catch (err) {
         return `Verification failed: ${err}`
       }

@@ -226,6 +226,53 @@ async function callAnthropic(provider: ProviderConfig, req: LLMRequest): Promise
   const systemMsg = req.messages.find(m => m.role === 'system')
   const nonSystem = req.messages.filter(m => m.role !== 'system')
 
+  // Convert OpenAI tools format to Anthropic format
+  const anthropicTools = req.tools?.map(t => ({
+    name: t.function.name,
+    description: t.function.description,
+    input_schema: t.function.parameters,
+  }))
+
+  // Convert messages: handle tool_calls and tool results
+  const anthropicMessages = nonSystem.map(m => {
+    if (m.role === 'assistant' && m.tool_calls) {
+      // Assistant message with tool_calls → Anthropic content blocks
+      const content: any[] = []
+      if (m.content) content.push({ type: 'text', text: m.content })
+      for (const tc of m.tool_calls) {
+        content.push({
+          type: 'tool_use',
+          id: tc.id,
+          name: tc.function.name,
+          input: JSON.parse(tc.function.arguments || '{}'),
+        })
+      }
+      return { role: 'assistant', content }
+    }
+    if (m.role === 'tool' && m.tool_call_id) {
+      // Tool result → Anthropic tool_result block
+      return {
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: m.tool_call_id,
+          content: m.content,
+        }],
+      }
+    }
+    return { role: m.role === 'tool' ? 'user' : m.role, content: m.content }
+  })
+
+  const body: Record<string, unknown> = {
+    model,
+    max_tokens: req.max_tokens ?? 2048,
+    ...(systemMsg ? { system: systemMsg.content } : {}),
+    messages: anthropicMessages,
+  }
+  if (anthropicTools && anthropicTools.length > 0) {
+    body.tools = anthropicTools
+  }
+
   const res = await fetch(`${provider.baseUrl}/messages`, {
     method: 'POST',
     headers: {
@@ -233,12 +280,7 @@ async function callAnthropic(provider: ProviderConfig, req: LLMRequest): Promise
       'x-api-key': provider.apiKey,
       'anthropic-version': '2023-06-01',
     },
-    body: JSON.stringify({
-      model,
-      max_tokens: req.max_tokens ?? 2048,
-      ...(systemMsg ? { system: systemMsg.content } : {}),
-      messages: nonSystem.map(m => ({ role: m.role, content: m.content })),
-    }),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(60000),
   })
 
@@ -248,10 +290,25 @@ async function callAnthropic(provider: ProviderConfig, req: LLMRequest): Promise
   }
 
   const data = await res.json() as any
+  const contentBlocks = data.content || []
+  const textBlocks = contentBlocks.filter((b: any) => b.type === 'text')
+  const toolUseBlocks = contentBlocks.filter((b: any) => b.type === 'tool_use')
+
+  // Convert Anthropic tool_use blocks to OpenAI tool_calls format
+  const tool_calls = toolUseBlocks.length > 0 ? toolUseBlocks.map((tu: any) => ({
+    id: tu.id,
+    type: 'function' as const,
+    function: {
+      name: tu.name,
+      arguments: JSON.stringify(tu.input || {}),
+    },
+  })) : undefined
+
   return {
     provider: 'claude',
     model: data.model || model,
-    content: data.content?.[0]?.text || '',
+    content: textBlocks.map((b: any) => b.text).join('') || '',
+    tool_calls,
     usage: data.usage ? {
       prompt_tokens: data.usage.input_tokens || 0,
       completion_tokens: data.usage.output_tokens || 0,
