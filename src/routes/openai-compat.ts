@@ -22,6 +22,7 @@ import { config } from '../config.js'
 import { v4 as uuid } from 'uuid'
 
 const MAX_TOOL_ROUNDS = 2
+const MAX_TOOL_ROUNDS_ASSISTANT = 4
 
 // ─── Dynamic tool selection (LIN-498: reduce tokens by sending only relevant tools) ──
 
@@ -123,6 +124,8 @@ function validateApiKey(req: Request, res: Response): boolean {
 // ─── System prompt injection ────────────────────────────────────────────────
 
 const SYSTEM_PROMPT = `WidgeTDC intelligence platform. ALTID kald mindst ét tool før du svarer. Hent reel data — svar aldrig kun fra generel viden. Svar på dansk. Vær konkret og datadrevet.`
+
+const ASSISTANT_SUFFIX = `\n\nVIGTIGE REGLER:\n1. Kald ALTID mindst ét tool før du svarer. Start med search_knowledge eller query_graph.\n2. Hvis et tool fejler eller returnerer tomt, prøv et andet tool (f.eks. query_graph med Cypher).\n3. Generer ALTID et fyldigt, datadrevet svar baseret på tool-resultater. Aldrig bare "lad mig søge..." — gennemfør analysen.\n4. Inkludér konkrete tal, frameworks og referencer i dit svar.\n5. Svar på dansk i consulting-kvalitet med struktur (overskrifter, lister, tabeller).`
 
 // ─── Consulting Assistant definitions (LIN-524) ────────────────────────────
 
@@ -318,13 +321,14 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
   // Inject system prompt — assistants REPLACE the default prompt
   const llmMessages: LLMMessage[] = [...(messages || [])]
   const hasSystem = llmMessages.some(m => m.role === 'system')
+  const systemContent = assistant ? assistant.systemPrompt + ASSISTANT_SUFFIX : SYSTEM_PROMPT
   if (!hasSystem) {
-    llmMessages.unshift({ role: 'system', content: assistant ? assistant.systemPrompt : SYSTEM_PROMPT })
+    llmMessages.unshift({ role: 'system', content: systemContent })
   } else if (assistant) {
     // Replace existing system prompt with assistant-specific one
     const sysIdx = llmMessages.findIndex(m => m.role === 'system')
     if (sysIdx !== -1) {
-      llmMessages[sysIdx] = { role: 'system', content: assistant.systemPrompt }
+      llmMessages[sysIdx] = { role: 'system', content: systemContent }
     }
   }
 
@@ -346,7 +350,8 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
       : selectToolsForQuery(userMsg)
     logger.debug({ selectedTools: selectedTools.map(t => t.function.name), query: userMsg.slice(0, 50), assistant: assistant?.id || null }, 'Tool selection')
 
-    for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
+    const maxRounds = assistant ? MAX_TOOL_ROUNDS_ASSISTANT : MAX_TOOL_ROUNDS
+    for (let round = 0; round <= maxRounds; round++) {
       const result = await chatLLM({
         provider,
         messages: loopMessages,
@@ -364,7 +369,7 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
       }
 
       // Check if LLM wants to call tools
-      if (result.tool_calls && result.tool_calls.length > 0 && round < MAX_TOOL_ROUNDS) {
+      if (result.tool_calls && result.tool_calls.length > 0 && round < maxRounds) {
         toolRounds++
         const toolNames = result.tool_calls.map(tc => tc.function.name)
         allToolNames.push(...toolNames)

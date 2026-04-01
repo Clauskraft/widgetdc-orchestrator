@@ -43,7 +43,7 @@ export async function dualChannelRAG(query: string, options?: {
       toolName: 'srag.query',
       args: { query },
       callId: uuid(),
-      timeoutMs: 30000,
+      timeoutMs: 45000,
     }),
     callMcpTool({
       toolName: 'graph.read_cypher',
@@ -51,7 +51,7 @@ export async function dualChannelRAG(query: string, options?: {
         query: buildCypherQuery(query, depth),
       },
       callId: uuid(),
-      timeoutMs: 15000,
+      timeoutMs: 20000,
     }),
   ])
 

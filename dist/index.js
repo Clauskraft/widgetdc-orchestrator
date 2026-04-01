@@ -9910,7 +9910,7 @@ async function dualChannelRAG(query, options) {
       toolName: "srag.query",
       args: { query },
       callId: uuid(),
-      timeoutMs: 3e4
+      timeoutMs: 45e3
     }),
     callMcpTool({
       toolName: "graph.read_cypher",
@@ -9918,7 +9918,7 @@ async function dualChannelRAG(query, options) {
         query: buildCypherQuery(query, depth)
       },
       callId: uuid(),
-      timeoutMs: 15e3
+      timeoutMs: 2e4
     })
   ]);
   const results = [];
@@ -15757,6 +15757,7 @@ import { Router as Router18 } from "express";
 init_config();
 import { v4 as uuid10 } from "uuid";
 var MAX_TOOL_ROUNDS = 2;
+var MAX_TOOL_ROUNDS_ASSISTANT = 4;
 var TOOL_CATEGORIES = [
   { keywords: /\b(health|status|uptime|service|railway|deploy|online)\b/i, tools: ["get_platform_health"] },
   { keywords: /\b(linear|issue|task|sprint|backlog|blocker|LIN-\d+|projekt|project)\b/i, tools: ["linear_issues", "linear_issue_detail"] },
@@ -15817,6 +15818,14 @@ function validateApiKey(req, res) {
   return true;
 }
 var SYSTEM_PROMPT = `WidgeTDC intelligence platform. ALTID kald mindst \xE9t tool f\xF8r du svarer. Hent reel data \u2014 svar aldrig kun fra generel viden. Svar p\xE5 dansk. V\xE6r konkret og datadrevet.`;
+var ASSISTANT_SUFFIX = `
+
+VIGTIGE REGLER:
+1. Kald ALTID mindst \xE9t tool f\xF8r du svarer. Start med search_knowledge eller query_graph.
+2. Hvis et tool fejler eller returnerer tomt, pr\xF8v et andet tool (f.eks. query_graph med Cypher).
+3. Generer ALTID et fyldigt, datadrevet svar baseret p\xE5 tool-resultater. Aldrig bare "lad mig s\xF8ge..." \u2014 gennemf\xF8r analysen.
+4. Inklud\xE9r konkrete tal, frameworks og referencer i dit svar.
+5. Svar p\xE5 dansk i consulting-kvalitet med struktur (overskrifter, lister, tabeller).`;
 var ASSISTANTS = [
   {
     id: "compliance-auditor",
@@ -15964,12 +15973,13 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
   const providerModel = mapping.model;
   const llmMessages = [...messages || []];
   const hasSystem = llmMessages.some((m) => m.role === "system");
+  const systemContent = assistant ? assistant.systemPrompt + ASSISTANT_SUFFIX : SYSTEM_PROMPT;
   if (!hasSystem) {
-    llmMessages.unshift({ role: "system", content: assistant ? assistant.systemPrompt : SYSTEM_PROMPT });
+    llmMessages.unshift({ role: "system", content: systemContent });
   } else if (assistant) {
     const sysIdx = llmMessages.findIndex((m) => m.role === "system");
     if (sysIdx !== -1) {
-      llmMessages[sysIdx] = { role: "system", content: assistant.systemPrompt };
+      llmMessages[sysIdx] = { role: "system", content: systemContent };
     }
   }
   const t0 = Date.now();
@@ -15983,7 +15993,8 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     const userMsg = (messages || []).filter((m) => m.role === "user").pop()?.content || "";
     const selectedTools = assistant ? ORCHESTRATOR_TOOLS.filter((t) => assistant.tools.includes(t.function.name)) : selectToolsForQuery(userMsg);
     logger.debug({ selectedTools: selectedTools.map((t) => t.function.name), query: userMsg.slice(0, 50), assistant: assistant?.id || null }, "Tool selection");
-    for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
+    const maxRounds = assistant ? MAX_TOOL_ROUNDS_ASSISTANT : MAX_TOOL_ROUNDS;
+    for (let round = 0; round <= maxRounds; round++) {
       const result = await chatLLM({
         provider,
         messages: loopMessages,
@@ -15997,7 +16008,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
         totalUsage.completion_tokens += result.usage.completion_tokens;
         totalUsage.total_tokens += result.usage.total_tokens;
       }
-      if (result.tool_calls && result.tool_calls.length > 0 && round < MAX_TOOL_ROUNDS) {
+      if (result.tool_calls && result.tool_calls.length > 0 && round < maxRounds) {
         toolRounds++;
         const toolNames = result.tool_calls.map((tc) => tc.function.name);
         allToolNames.push(...toolNames);
