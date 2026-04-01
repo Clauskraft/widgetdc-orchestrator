@@ -50,6 +50,7 @@ import { listExecutions } from './chain-engine.js'
 import { listPlans, type FSMState } from './state-machine.js'
 import { runHarvestPipeline, runFullHarvest } from './harvest-pipeline.js'
 import { openaiCompatRouter } from './routes/openai-compat.js'
+import { promptGeneratorRouter } from './routes/prompt-generator.js'
 import { seedAgents } from './agent-seeds.js'
 import { hydrateMessages } from './chat-store.js'
 
@@ -108,6 +109,9 @@ app.use('/api/adoption', requireApiKey, adoptionRouter)
 app.use('/api/llm', requireApiKey, llmRouter)
 app.use('/monitor', requireApiKey, monitorRouter)
 app.use('/api/s1-s4', requireApiKey, s1s4Router)
+
+// Prompt Generator (no auth — utility endpoint)
+app.use('/api/prompt-generator', promptGeneratorRouter)
 
 // OpenAI-compatible API (for Open WebUI)
 app.use(openaiCompatRouter)
