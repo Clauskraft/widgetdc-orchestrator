@@ -16008,11 +16008,14 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
         totalUsage.completion_tokens += result.usage.completion_tokens;
         totalUsage.total_tokens += result.usage.total_tokens;
       }
+      if (result.content && result.content.length > 0) {
+        finalContent = result.content;
+      }
       if (result.tool_calls && result.tool_calls.length > 0 && round < maxRounds) {
         toolRounds++;
         const toolNames = result.tool_calls.map((tc) => tc.function.name);
         allToolNames.push(...toolNames);
-        logger.info({ round, tools: toolNames }, "Tool calls requested");
+        logger.info({ round, tools: toolNames, partialContent: (result.content || "").length }, "Tool calls requested");
         loopMessages.push({
           role: "assistant",
           content: result.content || "",
@@ -16032,6 +16035,11 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
       break;
     }
     if (!finalContent && toolRounds > 0) {
+      loopMessages.push({
+        role: "user",
+        content: "Baseret p\xE5 alle tool-resultater ovenfor, generer nu dit fulde svar. Inklud\xE9r konkrete data, tal og referencer. Svar p\xE5 dansk i consulting-kvalitet med overskrifter og struktur."
+      });
+      logger.info({ toolRounds, messageCount: loopMessages.length }, "Forcing text synthesis after tool rounds");
       const summaryResult = await chatLLM({
         provider,
         messages: loopMessages,
@@ -16041,6 +16049,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
         // No tools — force text response
       });
       finalContent = summaryResult.content;
+      logger.info({ contentLength: finalContent?.length ?? 0, hasContent: !!finalContent }, "Synthesis result");
       if (summaryResult.usage) {
         totalUsage.prompt_tokens += summaryResult.usage.prompt_tokens;
         totalUsage.completion_tokens += summaryResult.usage.completion_tokens;

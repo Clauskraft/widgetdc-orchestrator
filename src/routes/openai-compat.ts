@@ -368,12 +368,17 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
         totalUsage.total_tokens += result.usage.total_tokens
       }
 
+      // Capture any partial text content alongside tool calls
+      if (result.content && result.content.length > 0) {
+        finalContent = result.content
+      }
+
       // Check if LLM wants to call tools
       if (result.tool_calls && result.tool_calls.length > 0 && round < maxRounds) {
         toolRounds++
         const toolNames = result.tool_calls.map(tc => tc.function.name)
         allToolNames.push(...toolNames)
-        logger.info({ round, tools: toolNames }, 'Tool calls requested')
+        logger.info({ round, tools: toolNames, partialContent: (result.content || '').length }, 'Tool calls requested')
 
         // Add assistant message with tool_calls
         loopMessages.push({
@@ -406,6 +411,12 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
     // If all rounds used tool_calls and no final content, do one more LLM call
     // WITHOUT tools to force a text response from the collected data
     if (!finalContent && toolRounds > 0) {
+      // Add explicit synthesis instruction
+      loopMessages.push({
+        role: 'user',
+        content: 'Baseret på alle tool-resultater ovenfor, generer nu dit fulde svar. Inkludér konkrete data, tal og referencer. Svar på dansk i consulting-kvalitet med overskrifter og struktur.',
+      })
+      logger.info({ toolRounds, messageCount: loopMessages.length }, 'Forcing text synthesis after tool rounds')
       const summaryResult = await chatLLM({
         provider,
         messages: loopMessages,
@@ -415,6 +426,7 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
         // No tools — force text response
       })
       finalContent = summaryResult.content
+      logger.info({ contentLength: finalContent?.length ?? 0, hasContent: !!finalContent }, 'Synthesis result')
       if (summaryResult.usage) {
         totalUsage.prompt_tokens += summaryResult.usage.prompt_tokens
         totalUsage.completion_tokens += summaryResult.usage.completion_tokens
