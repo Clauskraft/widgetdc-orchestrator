@@ -11039,6 +11039,36 @@ var ORCHESTRATOR_TOOLS = [
   {
     type: "function",
     function: {
+      name: "create_notebook",
+      description: "Create an interactive consulting notebook with query, insight, data, and action cells. Executes all cells and returns a full notebook with results. Great for structured analysis on any topic.",
+      parameters: {
+        type: "object",
+        properties: {
+          topic: { type: "string", description: "The topic to build a notebook around" },
+          cells: {
+            type: "array",
+            description: "Optional: custom cells array. If omitted, auto-generates cells from topic.",
+            items: {
+              type: "object",
+              properties: {
+                type: { type: "string", enum: ["query", "insight", "data", "action"] },
+                id: { type: "string" },
+                query: { type: "string" },
+                prompt: { type: "string" },
+                source_cell_id: { type: "string" },
+                visualization: { type: "string", enum: ["table", "chart"] },
+                recommendation: { type: "string" }
+              }
+            }
+          }
+        },
+        required: ["topic"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
       name: "verify_output",
       description: "Run verification checks on a piece of content or data. Checks quality, accuracy, and compliance. Use after getting results from other tools to validate them before presenting to user.",
       parameters: {
@@ -14460,8 +14490,604 @@ async function renderHtml(_req, res, id) {
   res.type("text/html").send(parts.join("\n"));
 }
 
-// src/routes/monitor.ts
+// src/routes/notebooks.ts
 import { Router as Router14 } from "express";
+import { randomUUID as randomUUID2 } from "crypto";
+import { v4 as uuid7 } from "uuid";
+var notebookRouter = Router14();
+var NOTEBOOK_PREFIX = "orchestrator:notebook:";
+var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
+var TTL_SECONDS4 = 2592e3;
+async function storeNotebook(notebook) {
+  const redis2 = getRedis();
+  if (!redis2) return false;
+  const key = `${NOTEBOOK_PREFIX}${notebook.$id}`;
+  try {
+    await redis2.set(key, JSON.stringify(notebook), "EX", TTL_SECONDS4);
+    await redis2.sadd(NOTEBOOK_INDEX, notebook.$id);
+    return true;
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Redis store failed for notebook");
+    return false;
+  }
+}
+async function loadNotebook(id) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${NOTEBOOK_PREFIX}${id}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    logger.warn({ err: String(err), id }, "Redis load failed for notebook");
+    return null;
+  }
+}
+function isCypher(text) {
+  const cypherKeywords = /^\s*(MATCH|CREATE|MERGE|RETURN|WITH|OPTIONAL|UNWIND|CALL)\b/i;
+  return cypherKeywords.test(text.trim());
+}
+async function executeQueryCell(cell, _context) {
+  const query = cell.query.trim();
+  try {
+    if (isCypher(query)) {
+      const result = await callMcpTool({
+        toolName: "graph.read_cypher",
+        args: { query, params: {} },
+        callId: uuid7(),
+        timeoutMs: 15e3
+      });
+      cell.result = result.status === "success" ? result.result : { error: result.error_message };
+    } else {
+      const result = await callMcpTool({
+        toolName: "kg_rag.query",
+        args: { question: query, max_evidence: 10 },
+        callId: uuid7(),
+        timeoutMs: 2e4
+      });
+      cell.result = result.status === "success" ? result.result : { error: result.error_message };
+    }
+  } catch (err) {
+    cell.result = { error: String(err) };
+  }
+  return cell;
+}
+async function executeInsightCell(cell, context) {
+  try {
+    const prompt = cell.prompt + (context ? `
+
+Context from previous cells:
+${context}` : "");
+    const result = await callCognitive("reason", {
+      prompt,
+      context: { source: "notebook-insight" },
+      agent_id: "notebook-executor"
+    }, 45e3);
+    cell.content = typeof result === "string" ? result : JSON.stringify(result, null, 2);
+  } catch (err) {
+    cell.content = `Insight generation failed: ${String(err)}`;
+  }
+  return cell;
+}
+function executeDataCell(cell, cellResults) {
+  const sourceResult = cellResults.get(cell.source_cell_id);
+  if (!sourceResult) {
+    cell.result = { error: `Source cell "${cell.source_cell_id}" not found or has no result` };
+    return cell;
+  }
+  if (cell.visualization === "chart") {
+    if (Array.isArray(sourceResult)) {
+      const columns = sourceResult.length > 0 ? Object.keys(sourceResult[0]) : [];
+      cell.result = { type: "chart", columns, data: sourceResult };
+    } else {
+      cell.result = { type: "chart", data: sourceResult };
+    }
+  } else {
+    if (Array.isArray(sourceResult)) {
+      const columns = sourceResult.length > 0 ? Object.keys(sourceResult[0]) : [];
+      const rows = sourceResult.map((r) => {
+        const row = r;
+        return columns.map((c) => row[c]);
+      });
+      cell.result = { type: "table", columns, rows, row_count: rows.length };
+    } else {
+      cell.result = { type: "table", data: sourceResult };
+    }
+  }
+  return cell;
+}
+notebookRouter.post("/execute", async (req, res) => {
+  const body = req.body;
+  if (!body.title || !Array.isArray(body.cells) || body.cells.length === 0) {
+    res.status(400).json({ success: false, error: "Missing required fields: title, cells (non-empty array)" });
+    return;
+  }
+  const id = `widgetdc:notebook:${randomUUID2()}`;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const cells = body.cells;
+  for (let i = 0; i < cells.length; i++) {
+    if (!cells[i].id) {
+      cells[i].id = `cell-${i}`;
+    }
+  }
+  logger.info({ id, title: body.title, cellCount: cells.length }, "Notebook execution started");
+  const cellResults = /* @__PURE__ */ new Map();
+  let context = "";
+  for (const cell of cells) {
+    switch (cell.type) {
+      case "query": {
+        await executeQueryCell(cell, context);
+        cellResults.set(cell.id, cell.result);
+        const resultStr = JSON.stringify(cell.result ?? "").slice(0, 500);
+        context += `
+[Query "${cell.query.slice(0, 80)}"]: ${resultStr}`;
+        break;
+      }
+      case "insight": {
+        await executeInsightCell(cell, context);
+        cellResults.set(cell.id, cell.content);
+        context += `
+[Insight]: ${(cell.content ?? "").slice(0, 300)}`;
+        break;
+      }
+      case "data": {
+        executeDataCell(cell, cellResults);
+        cellResults.set(cell.id, cell.result);
+        break;
+      }
+      case "action": {
+        cellResults.set(cell.id, cell.recommendation);
+        break;
+      }
+    }
+  }
+  const notebook = {
+    $id: id,
+    $schema: "widgetdc:notebook:v1",
+    title: String(body.title),
+    cells,
+    created_at: now,
+    updated_at: now,
+    created_by: String(body.created_by ?? "anonymous")
+  };
+  const stored = await storeNotebook(notebook);
+  if (!stored) {
+    logger.warn({ id }, "Notebook executed but Redis storage failed");
+  }
+  logger.info({ id, title: notebook.title, cellsExecuted: cells.length }, "Notebook execution complete");
+  res.status(201).json({ success: true, notebook });
+});
+notebookRouter.get("/:id", async (req, res) => {
+  const id = req.params.id;
+  if (id.endsWith(".md")) {
+    return renderNotebookMarkdown(req, res, id.replace(/\.md$/, ""));
+  }
+  const notebook = await loadNotebook(id);
+  if (!notebook) {
+    res.status(404).json({ success: false, error: "Notebook not found" });
+    return;
+  }
+  res.json({ success: true, notebook });
+});
+async function renderNotebookMarkdown(_req, res, id) {
+  const notebook = await loadNotebook(id);
+  if (!notebook) {
+    res.status(404).json({ success: false, error: "Notebook not found" });
+    return;
+  }
+  const lines = [];
+  lines.push(`# ${notebook.title}`);
+  lines.push("");
+  lines.push(`> Notebook: ${notebook.$id} | Created: ${notebook.created_at} | By: ${notebook.created_by}`);
+  lines.push("");
+  for (const cell of notebook.cells) {
+    switch (cell.type) {
+      case "query": {
+        const q = cell;
+        lines.push("```widgetdc-query");
+        lines.push(isCypher(q.query) ? q.query : `? ${q.query}`);
+        lines.push("```");
+        lines.push("");
+        if (q.result) {
+          lines.push("> Last result:");
+          const resultStr = typeof q.result === "string" ? q.result : JSON.stringify(q.result, null, 2);
+          lines.push(`> ${resultStr.slice(0, 300).replace(/\n/g, "\n> ")}`);
+          lines.push("");
+        }
+        break;
+      }
+      case "insight": {
+        const i = cell;
+        lines.push(`## Insight: ${i.prompt.slice(0, 80)}`);
+        lines.push("");
+        if (i.content) {
+          lines.push(i.content);
+          lines.push("");
+        }
+        break;
+      }
+      case "data": {
+        const d = cell;
+        lines.push(`### Data (from ${d.source_cell_id})`);
+        lines.push("");
+        if (d.result && typeof d.result === "object") {
+          const r = d.result;
+          if (r.type === "table" && Array.isArray(r.columns) && Array.isArray(r.rows)) {
+            const cols = r.columns;
+            const rows = r.rows;
+            lines.push(`| ${cols.join(" | ")} |`);
+            lines.push(`| ${cols.map(() => "---").join(" | ")} |`);
+            for (const row of rows.slice(0, 50)) {
+              lines.push(`| ${row.map(String).join(" | ")} |`);
+            }
+            lines.push("");
+          } else {
+            lines.push("```json");
+            lines.push(JSON.stringify(d.result, null, 2).slice(0, 500));
+            lines.push("```");
+            lines.push("");
+          }
+        }
+        break;
+      }
+      case "action": {
+        const a = cell;
+        lines.push(`### Action`);
+        lines.push("");
+        lines.push(`- [ ] ${a.recommendation}`);
+        if (a.linear_issue) {
+          lines.push(`  - Linear: ${a.linear_issue}`);
+        }
+        lines.push("");
+        break;
+      }
+    }
+  }
+  res.type("text/markdown").send(lines.join("\n"));
+}
+
+// src/routes/drill.ts
+import { Router as Router15 } from "express";
+import { randomUUID as randomUUID3 } from "crypto";
+var drillRouter = Router15();
+var DRILL_PREFIX = "orchestrator:drill:";
+var SESSION_TTL = 3600;
+var MCP_TIMEOUT_MS2 = 12e3;
+async function callMcp2(tool, payload) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MCP_TIMEOUT_MS2);
+  try {
+    const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.backendApiKey}`
+      },
+      body: JSON.stringify({ tool, payload }),
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      return { ok: false, error: `MCP ${tool} returned ${res.status}` };
+    }
+    const data = await res.json();
+    return { ok: true, data };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `MCP ${tool} failed: ${msg}` };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function extractRecords(data) {
+  if (Array.isArray(data)) return data;
+  if (data && typeof data === "object") {
+    const d = data;
+    if (Array.isArray(d.records)) return d.records;
+    if (Array.isArray(d.data)) return d.data;
+    if (Array.isArray(d.results)) return d.results;
+  }
+  return [];
+}
+var LEVEL_ORDER = ["domain", "segment", "framework", "kpi", "trend", "recommendation"];
+function nextLevel(current) {
+  const idx = LEVEL_ORDER.indexOf(current);
+  return idx >= 0 && idx < LEVEL_ORDER.length - 1 ? LEVEL_ORDER[idx + 1] : null;
+}
+function childrenQuery(level, id) {
+  switch (level) {
+    case "domain":
+      return {
+        query: `MATCH (d:ConsultingDomain {name: $name})-[:HAS_SEGMENT]->(s) RETURN s.name AS label, elementId(s) AS id, 'segment' AS level`,
+        params: { name: id }
+      };
+    case "segment":
+      return {
+        query: `MATCH (s {name: $name})-[:HAS_FRAMEWORK]->(f:ConsultingFramework) RETURN f.name AS label, elementId(f) AS id, 'framework' AS level`,
+        params: { name: id }
+      };
+    case "framework":
+      return {
+        query: `MATCH (f:ConsultingFramework {name: $name})-[:HAS_KPI]->(k:KPI) RETURN k.name AS label, elementId(k) AS id, 'kpi' AS level`,
+        params: { name: id }
+      };
+    case "kpi":
+      return {
+        query: `MATCH (k:KPI {name: $name})-[:HAS_TREND]->(t) RETURN t.name AS label, elementId(t) AS id, 'trend' AS level`,
+        params: { name: id }
+      };
+    case "trend":
+      return {
+        query: `MATCH (t {name: $name})-[:HAS_RECOMMENDATION]->(r) RETURN r.name AS label, elementId(r) AS id, 'recommendation' AS level`,
+        params: { name: id }
+      };
+    default:
+      return null;
+  }
+}
+function domainFrameworksFallback() {
+  return {
+    query: `MATCH (d:ConsultingDomain {name: $name})-[:HAS_FRAMEWORK]->(f:ConsultingFramework) RETURN f.name AS label, elementId(f) AS id, 'framework' AS level`,
+    params: { name: "" }
+    // filled at call site
+  };
+}
+async function fetchChildren(level, label) {
+  const q = childrenQuery(level, label);
+  if (!q) return [];
+  const result = await callMcp2("graph.read_cypher", { query: q.query, params: q.params });
+  if (!result.ok) {
+    logger.warn({ level, label, error: result.error }, "Drill children query failed");
+    return [];
+  }
+  let records = extractRecords(result.data);
+  if (level === "domain" && records.length === 0) {
+    const fb = domainFrameworksFallback();
+    fb.params.name = label;
+    const fbResult = await callMcp2("graph.read_cypher", { query: fb.query, params: fb.params });
+    if (fbResult.ok) {
+      records = extractRecords(fbResult.data);
+    }
+  }
+  return records.map((r) => ({
+    id: String(r.id ?? ""),
+    label: String(r.label ?? ""),
+    type: String(r.level ?? nextLevel(level) ?? "unknown"),
+    count: typeof r.count === "number" ? r.count : void 0
+  }));
+}
+async function saveContext(sessionId, ctx) {
+  const redis2 = getRedis();
+  if (!redis2) return false;
+  try {
+    await redis2.set(`${DRILL_PREFIX}${sessionId}`, JSON.stringify(ctx), "EX", SESSION_TTL);
+    return true;
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Redis save failed for drill context");
+    return false;
+  }
+}
+async function loadContext(sessionId) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${DRILL_PREFIX}${sessionId}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Redis load failed for drill context");
+    return null;
+  }
+}
+function buildBreadcrumbs(ctx) {
+  return [
+    ...ctx.stack,
+    { level: ctx.current_level, id: ctx.current_id, label: ctx.current_label }
+  ];
+}
+drillRouter.post("/start", async (req, res) => {
+  const { domain } = req.body;
+  if (!domain) {
+    res.status(400).json({ success: false, error: "Missing required field: domain" });
+    return;
+  }
+  const sessionId = randomUUID3();
+  const ctx = {
+    stack: [],
+    current_level: "domain",
+    current_id: domain,
+    current_label: domain,
+    domain
+  };
+  const saved = await saveContext(sessionId, ctx);
+  if (!saved) {
+    res.status(503).json({ success: false, error: "Redis not available" });
+    return;
+  }
+  const children = await fetchChildren("domain", domain);
+  logger.info({ session_id: sessionId, domain, children_count: children.length }, "Drill session started");
+  res.json({
+    success: true,
+    session_id: sessionId,
+    context: ctx,
+    children,
+    breadcrumbs: buildBreadcrumbs(ctx)
+  });
+});
+drillRouter.post("/down", async (req, res) => {
+  const { session_id, target_id, target_level } = req.body;
+  if (!session_id || !target_id || !target_level) {
+    res.status(400).json({ success: false, error: "Missing required fields: session_id, target_id, target_level" });
+    return;
+  }
+  const ctx = await loadContext(session_id);
+  if (!ctx) {
+    res.status(404).json({ success: false, error: "Drill session not found or expired" });
+    return;
+  }
+  ctx.stack.push({
+    level: ctx.current_level,
+    id: ctx.current_id,
+    label: ctx.current_label
+  });
+  ctx.current_level = target_level;
+  ctx.current_id = target_id;
+  ctx.current_label = target_id;
+  await saveContext(session_id, ctx);
+  const children = await fetchChildren(target_level, target_id);
+  logger.info({ session_id, target_level, target_id, depth: ctx.stack.length }, "Drill down");
+  res.json({
+    success: true,
+    context: ctx,
+    children,
+    breadcrumbs: buildBreadcrumbs(ctx)
+  });
+});
+drillRouter.post("/up", async (req, res) => {
+  const { session_id } = req.body;
+  if (!session_id) {
+    res.status(400).json({ success: false, error: "Missing required field: session_id" });
+    return;
+  }
+  const ctx = await loadContext(session_id);
+  if (!ctx) {
+    res.status(404).json({ success: false, error: "Drill session not found or expired" });
+    return;
+  }
+  if (ctx.stack.length === 0) {
+    res.status(400).json({ success: false, error: "Already at top level" });
+    return;
+  }
+  const parent = ctx.stack.pop();
+  ctx.current_level = parent.level;
+  ctx.current_id = parent.id;
+  ctx.current_label = parent.label;
+  await saveContext(session_id, ctx);
+  const children = await fetchChildren(ctx.current_level, ctx.current_label);
+  logger.info({ session_id, level: ctx.current_level, label: ctx.current_label }, "Drill up");
+  res.json({
+    success: true,
+    context: ctx,
+    children,
+    breadcrumbs: buildBreadcrumbs(ctx)
+  });
+});
+drillRouter.get("/children", async (req, res) => {
+  const sessionId = req.query.session_id;
+  if (!sessionId) {
+    res.status(400).json({ success: false, error: "Missing required query param: session_id" });
+    return;
+  }
+  const ctx = await loadContext(sessionId);
+  if (!ctx) {
+    res.status(404).json({ success: false, error: "Drill session not found or expired" });
+    return;
+  }
+  const children = await fetchChildren(ctx.current_level, ctx.current_label);
+  res.json({
+    success: true,
+    children,
+    context: ctx,
+    breadcrumbs: buildBreadcrumbs(ctx)
+  });
+});
+drillRouter.get("/moc", async (req, res) => {
+  const domain = req.query.domain;
+  if (!domain) {
+    res.status(400).json({ success: false, error: "Missing required query param: domain" });
+    return;
+  }
+  const hierarchyQuery = `
+    MATCH (d:ConsultingDomain {name: $domain})
+    OPTIONAL MATCH (d)-[:HAS_FRAMEWORK]->(f:ConsultingFramework)
+    OPTIONAL MATCH (f)-[:HAS_KPI]->(k:KPI)
+    RETURN d.name AS domain_name, f.name AS framework_name, k.name AS kpi_name, k.value AS kpi_value, k.trend AS kpi_trend
+    ORDER BY f.name, k.name
+  `;
+  const result = await callMcp2("graph.read_cypher", {
+    query: hierarchyQuery,
+    params: { domain }
+  });
+  if (!result.ok) {
+    res.status(502).json({ success: false, error: result.error ?? "Neo4j query failed" });
+    return;
+  }
+  const records = extractRecords(result.data);
+  const frameworks = /* @__PURE__ */ new Map();
+  for (const rec of records) {
+    const fName = rec.framework_name ? String(rec.framework_name) : null;
+    if (!fName) continue;
+    if (!frameworks.has(fName)) {
+      frameworks.set(fName, { kpis: [] });
+    }
+    const kName = rec.kpi_name ? String(rec.kpi_name) : null;
+    if (kName) {
+      frameworks.get(fName).kpis.push({
+        name: kName,
+        value: String(rec.kpi_value ?? ""),
+        trend: trendArrow(rec.kpi_trend)
+      });
+    }
+  }
+  const lines = [];
+  lines.push(`# ${domain} \u2014 Map of Content`);
+  lines.push("");
+  lines.push(`> Generated: ${(/* @__PURE__ */ new Date()).toISOString()}`);
+  lines.push(`> Source: WidgeTDC Neo4j Knowledge Graph`);
+  lines.push("");
+  if (frameworks.size > 0) {
+    lines.push("## Frameworks");
+    lines.push("");
+    for (const [fName, fData] of frameworks) {
+      lines.push(`- [[${fName}]] (${fData.kpis.length} KPIs)`);
+    }
+    lines.push("");
+    lines.push("## KPIs");
+    lines.push("");
+    for (const [fName, fData] of frameworks) {
+      if (fData.kpis.length === 0) continue;
+      lines.push(`### ${fName}`);
+      lines.push("");
+      for (const kpi of fData.kpis) {
+        const valueStr = kpi.value ? `: ${kpi.value} ${kpi.trend}` : ` ${kpi.trend}`;
+        lines.push(`- ${kpi.name}${valueStr}`);
+      }
+      lines.push("");
+    }
+  } else {
+    lines.push("*No frameworks found for this domain.*");
+    lines.push("");
+  }
+  const recsQuery = `
+    MATCH (d:ConsultingDomain {name: $domain})-[:HAS_FRAMEWORK]->(f)-[:HAS_KPI]->(k)-[:HAS_RECOMMENDATION]->(r)
+    RETURN r.name AS rec_name, r.description AS rec_desc, elementId(r) AS rec_id
+    LIMIT 20
+  `;
+  const recsResult = await callMcp2("graph.read_cypher", { query: recsQuery, params: { domain } });
+  const recs = recsResult.ok ? extractRecords(recsResult.data) : [];
+  if (recs.length > 0) {
+    lines.push("## Recommendations");
+    lines.push("");
+    for (const rec of recs) {
+      const name = String(rec.rec_name ?? "Unnamed");
+      const desc = rec.rec_desc ? ` \u2014 ${String(rec.rec_desc)}` : "";
+      const id = String(rec.rec_id ?? "");
+      lines.push(`- [${name}](obsidian://widgetdc-open?artifact=${encodeURIComponent(id)})${desc}`);
+    }
+    lines.push("");
+  }
+  lines.push("---");
+  lines.push(`*Map of Content for ${domain} \u2014 WidgeTDC Adoption Blueprint*`);
+  logger.info({ domain, frameworks: frameworks.size, records: records.length }, "MOC generated");
+  res.type("text/markdown").send(lines.join("\n"));
+});
+function trendArrow(trend) {
+  if (!trend) return "\u2192";
+  const t = trend.toLowerCase();
+  if (t === "up" || t === "rising" || t === "increasing") return "\u2191";
+  if (t === "down" || t === "falling" || t === "decreasing") return "\u2193";
+  return "\u2192";
+}
+
+// src/routes/monitor.ts
+import { Router as Router16 } from "express";
 
 // src/context-compress.ts
 var DEFAULT_MAX_TOKENS = 2e3;
@@ -14582,13 +15208,13 @@ ${compressed}`,
 }
 
 // src/routes/monitor.ts
-import { v4 as uuid7 } from "uuid";
-var monitorRouter = Router14();
+import { v4 as uuid8 } from "uuid";
+var monitorRouter = Router16();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid7(),
+    callId: uuid8(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];
@@ -14800,8 +15426,8 @@ monitorRouter.post("/compress", async (req, res) => {
 });
 
 // src/routes/s1-s4.ts
-import { Router as Router15 } from "express";
-var s1s4Router = Router15();
+import { Router as Router17 } from "express";
+var s1s4Router = Router17();
 s1s4Router.post("/trigger", async (req, res) => {
   const { url, source_type, topic, weights } = req.body;
   if (!url) {
@@ -14905,9 +15531,9 @@ async function listPlans() {
 }
 
 // src/harvest-pipeline.ts
-import { v4 as uuid8 } from "uuid";
+import { v4 as uuid9 } from "uuid";
 async function extract(domain) {
-  const callId = `harvest-extract-${uuid8().substring(0, 8)}`;
+  const callId = `harvest-extract-${uuid9().substring(0, 8)}`;
   try {
     const result = await callMcpTool({
       toolName: "srag.query",
@@ -14933,7 +15559,7 @@ function generalize(items, domain) {
     if (content.length > 2e3 || name.toLowerCase().includes("framework")) tier = "framework";
     else if (content.length > 500 || name.toLowerCase().includes("template")) tier = "template";
     return {
-      id: `harvest-${uuid8().substring(0, 12)}`,
+      id: `harvest-${uuid9().substring(0, 12)}`,
       name,
       tier,
       description: content.substring(0, 300),
@@ -14950,7 +15576,7 @@ function generalize(items, domain) {
 }
 async function store(components) {
   if (components.length === 0) return 0;
-  const callId = `harvest-store-${uuid8().substring(0, 8)}`;
+  const callId = `harvest-store-${uuid9().substring(0, 8)}`;
   const labelMap = {
     framework: "Framework",
     template: "Template",
@@ -15002,7 +15628,7 @@ async function verify(components) {
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: `${comp.tier} for ${comp.industries[0]}: ${comp.name}` },
-        callId: `harvest-verify-${uuid8().substring(0, 8)}`,
+        callId: `harvest-verify-${uuid9().substring(0, 8)}`,
         timeoutMs: 15e3
       });
       const resultStr = JSON.stringify(result).toLowerCase();
@@ -15052,8 +15678,8 @@ async function runFullHarvest() {
 }
 
 // src/routes/openai-compat.ts
-import { Router as Router16 } from "express";
-import { v4 as uuid9 } from "uuid";
+import { Router as Router18 } from "express";
+import { v4 as uuid10 } from "uuid";
 var MAX_TOOL_ROUNDS = 2;
 var TOOL_CATEGORIES = [
   { keywords: /\b(health|status|uptime|service|railway|deploy|online)\b/i, tools: ["get_platform_health"] },
@@ -15085,7 +15711,7 @@ function recordMetrics(model, toolCalls, toolRounds, totalTokens, toolsOffered) 
   metricsBuffer.push({ model, tool_calls: toolCalls, tool_rounds: toolRounds, total_tokens: totalTokens, timestamp: Date.now() });
   if (metricsBuffer.length > MAX_METRICS) metricsBuffer.splice(0, metricsBuffer.length - MAX_METRICS);
 }
-var openaiCompatRouter = Router16();
+var openaiCompatRouter = Router18();
 var rateLimitMap = /* @__PURE__ */ new Map();
 var RATE_LIMIT_WINDOW_MS = 6e4;
 var RATE_LIMIT_MAX = 30;
@@ -15248,7 +15874,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     return;
   }
   const { model, messages, stream, temperature, max_tokens } = req.body;
-  const requestId = `chatcmpl-${uuid9().substring(0, 12)}`;
+  const requestId = `chatcmpl-${uuid10().substring(0, 12)}`;
   const assistant = ASSISTANT_MAP.get(model);
   const resolvedModel = assistant ? assistant.baseModel : model;
   const mapping = MODEL_TO_PROVIDER[resolvedModel] || MODEL_TO_PROVIDER["gemini-flash"];
@@ -15385,8 +16011,8 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
 });
 
 // src/routes/prompt-generator.ts
-import { Router as Router17 } from "express";
-var promptGeneratorRouter = Router17();
+import { Router as Router19 } from "express";
+var promptGeneratorRouter = Router19();
 var intentRules = [
   {
     keywords: ["pr\xE6sentation", "praesentation", "presentation", "slides", "deck", "slide"],
@@ -15900,6 +16526,8 @@ app.use("/api/audit", requireApiKey, auditRouter);
 app.use("/api/knowledge", requireApiKey, knowledgeRouter);
 app.use("/api/adoption", requireApiKey, adoptionRouter);
 app.use("/api/artifacts", requireApiKey, artifactRouter);
+app.use("/api/notebooks", requireApiKey, notebookRouter);
+app.use("/api/drill", requireApiKey, drillRouter);
 app.use("/api/llm", requireApiKey, llmRouter);
 app.use("/monitor", requireApiKey, monitorRouter);
 app.use("/api/s1-s4", requireApiKey, s1s4Router);

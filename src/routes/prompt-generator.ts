@@ -27,17 +27,17 @@ interface IntentRule {
 const intentRules: IntentRule[] = [
   {
     keywords: ['præsentation', 'praesentation', 'presentation', 'slides', 'deck', 'slide'],
-    skill: '/octo:deck',
-    explanation: 'Brug /octo:deck til at generere slide decks fra et brief.',
-    alternatives: ['/octo:docs'],
-    buildPrompt: (d) => `/octo:deck brief="${d}" slides=10 audience="stakeholders"`,
+    skill: '/wocto:deck',
+    explanation: 'Brug /wocto:deck til at generere slide decks fra et brief (WidgeTDC-beriget).',
+    alternatives: ['/wocto:docs', '/octo:deck'],
+    buildPrompt: (d) => `/wocto:deck brief="${d}" slides=10 audience="stakeholders"`,
   },
   {
     keywords: ['rapport', 'pdf', 'docx', 'dokument', 'document', 'report'],
-    skill: '/octo:docs',
-    explanation: 'Brug /octo:docs til at generere PDF/DOCX rapporter.',
-    alternatives: ['/octo:deck'],
-    buildPrompt: (d) => `/octo:docs format=pdf topic="${d}"`,
+    skill: '/wocto:docs',
+    explanation: 'Brug /wocto:docs til at generere PDF/DOCX rapporter (WidgeTDC-beriget).',
+    alternatives: ['/wocto:deck', '/octo:docs'],
+    buildPrompt: (d) => `/wocto:docs format=pdf topic="${d}"`,
   },
   {
     keywords: ['prd', 'product requirement', 'kravspec'],
@@ -55,10 +55,10 @@ const intentRules: IntentRule[] = [
   },
   {
     keywords: ['research', 'undersøg', 'undersog', 'analyse', 'analysis', 'deep dive'],
-    skill: '/octo:research',
-    explanation: 'Brug /octo:research til deep research med multi-source syntese.',
-    alternatives: ['/obsidian-research', '/octo:discover'],
-    buildPrompt: (d) => `/octo:research "${d}"`,
+    skill: '/wocto:research',
+    explanation: 'Brug /wocto:research til deep research med multi-source syntese (WidgeTDC-beriget).',
+    alternatives: ['/obsidian-research', '/octo:discover', '/octo:research'],
+    buildPrompt: (d) => `/wocto:research "${d}"`,
   },
   {
     keywords: ['osint', 'intelligence', 'konkurrent', 'competitor'],
@@ -83,16 +83,16 @@ const intentRules: IntentRule[] = [
   },
   {
     keywords: ['debug', 'fix', 'bug', 'fejl', 'error', 'traceback', 'crash', 'broken'],
-    skill: '/octo:debug',
-    explanation: 'Brug /octo:debug til systematisk debugging og problemundersøgelse.',
-    alternatives: ['/agent-chain'],
-    buildPrompt: (d) => `/octo:debug "${d}"`,
+    skill: '/wocto:debug',
+    explanation: 'Brug /wocto:debug til systematisk debugging med WidgeTDC governance.',
+    alternatives: ['/agent-chain', '/octo:debug'],
+    buildPrompt: (d) => `/wocto:debug "${d}"`,
   },
   {
     keywords: ['review', 'pr', 'pull request', 'code review'],
     skill: '/code-review:code-review',
     explanation: 'Brug /code-review:code-review til PR code review med inline kommentarer.',
-    alternatives: ['/octo:review', '/octo:staged-review'],
+    alternatives: ['/wocto:review', '/octo:staged-review'],
     buildPrompt: (d) => {
       const prMatch = d.match(/#?(\d{2,6})/)
       return prMatch ? `/code-review:code-review ${prMatch[1]}` : `/code-review:code-review "${d}"`
@@ -102,15 +102,15 @@ const intentRules: IntentRule[] = [
     keywords: ['feature', 'implementer', 'implement', 'byg', 'build', 'tilføj', 'add', 'create'],
     skill: '/agent-chain',
     explanation: 'Brug /agent-chain til at auto-klassificere og orkestrere den rette agent-sekvens.',
-    alternatives: ['/octo:factory', '/octo:embrace'],
+    alternatives: ['/wocto:factory', '/octo:embrace'],
     buildPrompt: (d) => `/agent-chain ${d}`,
   },
   {
     keywords: ['sikkerhed', 'security', 'audit', 'owasp', 'vulnerability', 'sårbarhed'],
-    skill: '/octo:security',
-    explanation: 'Brug /octo:security til OWASP compliance og sårbarhedsscanning.',
-    alternatives: ['/security-hardener'],
-    buildPrompt: (d) => `/octo:security scope="${d}"`,
+    skill: '/wocto:security',
+    explanation: 'Brug /wocto:security til OWASP compliance og sårbarhedsscanning (WidgeTDC-beriget).',
+    alternatives: ['/security-hardener', '/octo:security'],
+    buildPrompt: (d) => `/wocto:security scope="${d}"`,
   },
   {
     keywords: ['deploy', 'deployment', 'release', 'version', 'tag'],
@@ -128,10 +128,10 @@ const intentRules: IntentRule[] = [
   },
   {
     keywords: ['test', 'tdd', 'unit test', 'integration test'],
-    skill: '/octo:tdd',
-    explanation: 'Brug /octo:tdd til test-driven development med red-green-refactor.',
-    alternatives: ['/qa-guardian'],
-    buildPrompt: (d) => `/octo:tdd "${d}"`,
+    skill: '/wocto:tdd',
+    explanation: 'Brug /wocto:tdd til test-driven development med WidgeTDC governance.',
+    alternatives: ['/qa-guardian', '/octo:tdd'],
+    buildPrompt: (d) => `/wocto:tdd "${d}"`,
   },
   {
     keywords: ['compliance', 'gdpr', 'nis2', 'regulering', 'regulation'],
@@ -156,10 +156,10 @@ const intentRules: IntentRule[] = [
   },
   {
     keywords: ['plan', 'strategi', 'strategy', 'roadmap'],
-    skill: '/octo:plan',
-    explanation: 'Brug /octo:plan til at bygge strategiske eksekveringsplaner.',
-    alternatives: ['/octo:embrace', '/project-manager-widgetdc'],
-    buildPrompt: (d) => `/octo:plan "${d}"`,
+    skill: '/wocto:plan',
+    explanation: 'Brug /wocto:plan til at bygge strategiske eksekveringsplaner (WidgeTDC-beriget).',
+    alternatives: ['/octo:embrace', '/project-manager-widgetdc', '/octo:plan'],
+    buildPrompt: (d) => `/wocto:plan "${d}"`,
   },
   {
     keywords: ['ui', 'ux', 'design', 'palette', 'typography', 'style guide'],
@@ -206,12 +206,12 @@ function classifyIntent(description: string): SkillMatch {
     }
   }
 
-  // Fallback: /octo:octo smart router
+  // Fallback: /wocto smart router (WidgeTDC-beriget octo router)
   return {
-    skill: '/octo:octo',
-    prompt: `/octo:octo "${description}"`,
-    explanation: 'Ingen specifik skill matchede — /octo:octo router automatisk til den bedste skill.',
-    alternatives: ['/agent-chain'],
+    skill: '/wocto',
+    prompt: `/wocto "${description}"`,
+    explanation: 'Ingen specifik skill matchede — /wocto router automatisk til den bedste skill (WidgeTDC-beriget).',
+    alternatives: ['/octo:octo', '/agent-chain'],
   }
 }
 
@@ -256,7 +256,7 @@ promptGeneratorRouter.get('/skills', (_req, res) => {
     data: {
       skills,
       total: skills.length,
-      fallback: '/octo:octo',
+      fallback: '/wocto',
     },
   })
 })
