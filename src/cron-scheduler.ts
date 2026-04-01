@@ -9,6 +9,7 @@ import { executeChain, type ChainDefinition } from './chain-engine.js'
 import { logger } from './logger.js'
 import { getRedis } from './redis.js'
 import { broadcastMessage } from './chat-broadcaster.js'
+import { broadcastSSE } from './sse.js'
 import { runSelfCorrect } from './graph-self-correct.js'
 
 interface CronJob {
@@ -99,6 +100,35 @@ export async function runCronJob(jobId: string): Promise<void> {
     job.last_status = result.status
     job.run_count++
     persistCronJobs()
+
+    // Post-chain: cache knowledge feed in Redis and broadcast via SSE
+    if (job.id === 'daily-knowledge-feed' && result.status === 'completed') {
+      const feed = {
+        generated_at: new Date().toISOString(),
+        execution_id: result.execution_id,
+        steps: result.results.map(r => ({
+          step: r.step_id,
+          action: r.action,
+          status: r.status,
+          output: r.output,
+          duration_ms: r.duration_ms,
+        })),
+        graph_pulse: result.results[0]?.output ?? null,
+        gap_analysis: result.results[1]?.output ?? null,
+        emerging_clusters: result.results[2]?.output ?? null,
+      }
+      const redis = getRedis()
+      if (redis) {
+        await redis.set('orchestrator:knowledge-feed', JSON.stringify(feed), 'EX', 86400)
+
+        // G2.8: Build condensed briefing prompt for Open WebUI system prompt injection
+        const briefing = buildKnowledgeBriefing(feed)
+        await redis.set('orchestrator:knowledge-briefing-prompt', briefing, 'EX', 86400)
+        logger.info('Knowledge briefing prompt cached for Open WebUI')
+      }
+      broadcastSSE('knowledge-feed', feed)
+      logger.info({ execution_id: result.execution_id }, 'Daily knowledge feed cached and broadcast')
+    }
   } catch (err) {
     job.last_run = new Date().toISOString()
     job.last_status = 'failed'
@@ -185,6 +215,62 @@ export async function hydrateCronJobs(): Promise<void> {
   } catch (err) {
     logger.warn({ err: String(err) }, 'Failed to hydrate cron jobs')
   }
+}
+
+/**
+ * G2.8: Build a condensed briefing string (max ~500 chars) from the full feed.
+ * This is stored in Redis and served via GET /api/knowledge/briefing for
+ * injection into Open WebUI system prompts.
+ */
+function buildKnowledgeBriefing(feed: Record<string, unknown>): string {
+  const date = new Date().toISOString().slice(0, 10)
+
+  // Extract graph pulse numbers
+  let newToday = 0
+  let totalDomains = 0
+  const pulse = feed.graph_pulse as Record<string, unknown> | null
+  if (pulse) {
+    const dist = pulse.label_distribution as Record<string, number> | undefined
+    if (dist) {
+      totalDomains = Object.keys(dist).length
+      newToday = Object.values(dist).reduce((a, b) => a + b, 0)
+    }
+  }
+
+  // Extract top insights (first 3)
+  const insights = Array.isArray(feed.top_insights) ? feed.top_insights : []
+  const topInsights = insights
+    .slice(0, 3)
+    .map((c: Record<string, unknown>) => String(c.title ?? c.summary ?? '').slice(0, 60))
+    .filter(Boolean)
+
+  // Extract gap alerts (first 2)
+  const gaps = Array.isArray(feed.gap_alerts) ? feed.gap_alerts : []
+  const topGaps = gaps
+    .slice(0, 2)
+    .map((c: Record<string, unknown>) => String(c.title ?? c.summary ?? '').slice(0, 60))
+    .filter(Boolean)
+
+  const lines: string[] = [
+    `Daily Knowledge Briefing (${date}):`,
+    `- Graph: ${newToday} nodes across ${totalDomains} active domains`,
+  ]
+
+  if (topInsights.length > 0) {
+    lines.push(`- Top insights: ${topInsights.join('; ')}`)
+  }
+  if (topGaps.length > 0) {
+    lines.push(`- Gaps: ${topGaps.join('; ')}`)
+  }
+
+  lines.push('Use search_knowledge for details.')
+
+  // Cap at 500 chars
+  let result = lines.join('\n')
+  if (result.length > 500) {
+    result = result.slice(0, 497) + '...'
+  }
+  return result
 }
 
 /**
@@ -523,6 +609,46 @@ export function registerDefaultLoops(): void {
           arguments: {
             query: "MERGE (m:MetricsSnapshot {id: 'metrics-' + toString(datetime().epochMillis)}) SET m.data = $data, m.createdAt = datetime(), m.source = 'intelligence-loop'",
             params: { data: '{{prev}}' },
+          },
+        },
+      ],
+    },
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // G2.7: Daily Knowledge Feed — Adoption Blueprint
+  // Runs daily at 06:00 UTC. Graph pulse → gap analysis → emerging clusters.
+  // Results cached in Redis (orchestrator:knowledge-feed, 24h TTL) and
+  // broadcast via SSE to connected Command Center clients.
+  // ═══════════════════════════════════════════════════════════════════════
+  registerCronJob({
+    id: 'daily-knowledge-feed',
+    name: 'Daily Knowledge Feed',
+    schedule: '0 6 * * *',
+    enabled: true,
+    chain: {
+      name: 'Daily Knowledge Feed',
+      mode: 'sequential',
+      steps: [
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'graph.read_cypher',
+          arguments: {
+            query: "MATCH (n) WHERE n.createdAt > datetime() - duration('P1D') RETURN labels(n)[0] AS type, count(*) AS new_today ORDER BY new_today DESC",
+          },
+        },
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'kg_rag.query',
+          arguments: {
+            question: 'What knowledge gaps exist across all 17 domains?',
+          },
+        },
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'graph.read_cypher',
+          arguments: {
+            query: "MATCH (n) WHERE n.updatedAt > datetime() - duration('P7D') WITH labels(n)[0] AS type, count(*) AS count WHERE count > 10 RETURN type, count ORDER BY count DESC LIMIT 10",
           },
         },
       ],

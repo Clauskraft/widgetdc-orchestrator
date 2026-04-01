@@ -12077,6 +12077,31 @@ async function runCronJob(jobId) {
     job.last_status = result.status;
     job.run_count++;
     persistCronJobs();
+    if (job.id === "daily-knowledge-feed" && result.status === "completed") {
+      const feed = {
+        generated_at: (/* @__PURE__ */ new Date()).toISOString(),
+        execution_id: result.execution_id,
+        steps: result.results.map((r) => ({
+          step: r.step_id,
+          action: r.action,
+          status: r.status,
+          output: r.output,
+          duration_ms: r.duration_ms
+        })),
+        graph_pulse: result.results[0]?.output ?? null,
+        gap_analysis: result.results[1]?.output ?? null,
+        emerging_clusters: result.results[2]?.output ?? null
+      };
+      const redis2 = getRedis();
+      if (redis2) {
+        await redis2.set("orchestrator:knowledge-feed", JSON.stringify(feed), "EX", 86400);
+        const briefing = buildKnowledgeBriefing(feed);
+        await redis2.set("orchestrator:knowledge-briefing-prompt", briefing, "EX", 86400);
+        logger.info("Knowledge briefing prompt cached for Open WebUI");
+      }
+      broadcastSSE("knowledge-feed", feed);
+      logger.info({ execution_id: result.execution_id }, "Daily knowledge feed cached and broadcast");
+    }
   } catch (err) {
     job.last_run = (/* @__PURE__ */ new Date()).toISOString();
     job.last_status = "failed";
@@ -12138,6 +12163,39 @@ async function hydrateCronJobs() {
   } catch (err) {
     logger.warn({ err: String(err) }, "Failed to hydrate cron jobs");
   }
+}
+function buildKnowledgeBriefing(feed) {
+  const date = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  let newToday = 0;
+  let totalDomains = 0;
+  const pulse = feed.graph_pulse;
+  if (pulse) {
+    const dist = pulse.label_distribution;
+    if (dist) {
+      totalDomains = Object.keys(dist).length;
+      newToday = Object.values(dist).reduce((a, b) => a + b, 0);
+    }
+  }
+  const insights = Array.isArray(feed.top_insights) ? feed.top_insights : [];
+  const topInsights = insights.slice(0, 3).map((c) => String(c.title ?? c.summary ?? "").slice(0, 60)).filter(Boolean);
+  const gaps = Array.isArray(feed.gap_alerts) ? feed.gap_alerts : [];
+  const topGaps = gaps.slice(0, 2).map((c) => String(c.title ?? c.summary ?? "").slice(0, 60)).filter(Boolean);
+  const lines = [
+    `Daily Knowledge Briefing (${date}):`,
+    `- Graph: ${newToday} nodes across ${totalDomains} active domains`
+  ];
+  if (topInsights.length > 0) {
+    lines.push(`- Top insights: ${topInsights.join("; ")}`);
+  }
+  if (topGaps.length > 0) {
+    lines.push(`- Gaps: ${topGaps.join("; ")}`);
+  }
+  lines.push("Use search_knowledge for details.");
+  let result = lines.join("\n");
+  if (result.length > 500) {
+    result = result.slice(0, 497) + "...";
+  }
+  return result;
 }
 function registerDefaultLoops() {
   registerCronJob({
@@ -12442,6 +12500,39 @@ function registerDefaultLoops() {
           arguments: {
             query: "MERGE (m:MetricsSnapshot {id: 'metrics-' + toString(datetime().epochMillis)}) SET m.data = $data, m.createdAt = datetime(), m.source = 'intelligence-loop'",
             params: { data: "{{prev}}" }
+          }
+        }
+      ]
+    }
+  });
+  registerCronJob({
+    id: "daily-knowledge-feed",
+    name: "Daily Knowledge Feed",
+    schedule: "0 6 * * *",
+    enabled: true,
+    chain: {
+      name: "Daily Knowledge Feed",
+      mode: "sequential",
+      steps: [
+        {
+          agent_id: "orchestrator",
+          tool_name: "graph.read_cypher",
+          arguments: {
+            query: "MATCH (n) WHERE n.createdAt > datetime() - duration('P1D') RETURN labels(n)[0] AS type, count(*) AS new_today ORDER BY new_today DESC"
+          }
+        },
+        {
+          agent_id: "orchestrator",
+          tool_name: "kg_rag.query",
+          arguments: {
+            question: "What knowledge gaps exist across all 17 domains?"
+          }
+        },
+        {
+          agent_id: "orchestrator",
+          tool_name: "graph.read_cypher",
+          arguments: {
+            query: "MATCH (n) WHERE n.updatedAt > datetime() - duration('P7D') WITH labels(n)[0] AS type, count(*) AS count WHERE count > 10 RETURN type, count ORDER BY count DESC LIMIT 10"
           }
         }
       ]
@@ -12928,8 +13019,166 @@ auditRouter.get("/log", async (req, res) => {
   res.json({ success: true, data: { entries: filtered, total: filtered.length, limit, offset } });
 });
 
-// src/routes/monitor.ts
+// src/routes/knowledge.ts
 import { Router as Router11 } from "express";
+var knowledgeRouter = Router11();
+var FEED_CACHE_KEY = "orchestrator:knowledge-feed";
+var BRIEFING_CACHE_KEY = "orchestrator:knowledge-briefing-prompt";
+var FEED_TTL_SECONDS = 86400;
+var MCP_TIMEOUT_MS = 1e4;
+async function callMcp(tool, payload) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MCP_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.backendApiKey}`
+      },
+      body: JSON.stringify({ tool, payload }),
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      return { ok: false, error: `MCP ${tool} returned ${res.status}` };
+    }
+    const data = await res.json();
+    return { ok: true, data };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `MCP ${tool} failed: ${msg}` };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function normalizeCards(raw, source) {
+  if (!raw || typeof raw !== "object") return [];
+  const items = Array.isArray(raw) ? raw : Array.isArray(raw.results) ? raw.results : Array.isArray(raw.data) ? raw.data : Array.isArray(raw.entries) ? raw.entries : [];
+  return items.map((item, idx) => {
+    const r = item && typeof item === "object" ? item : {};
+    return {
+      id: String(r.id ?? r.node_id ?? `${source}-${idx}`),
+      title: String(r.title ?? r.name ?? r.label ?? "Untitled"),
+      summary: String(r.summary ?? r.content ?? r.text ?? r.description ?? ""),
+      score: typeof r.score === "number" ? r.score : typeof r.relevance === "number" ? r.relevance : 0,
+      domain: String(r.domain ?? r.type ?? r.category ?? "unknown"),
+      source_ref: String(r.source_ref ?? r.source ?? r.url ?? source)
+    };
+  });
+}
+knowledgeRouter.get("/cards", async (req, res) => {
+  const q = req.query.q;
+  if (!q) {
+    res.status(400).json({ cards: [], error: "Missing required query param: q", query: "" });
+    return;
+  }
+  const topK = Math.min(Math.max(parseInt(req.query.top_k) || 5, 1), 50);
+  const domains = req.query.domains || "all";
+  const kgResult = await callMcp("kg_rag.query", { question: q, top_k: topK });
+  if (kgResult.ok) {
+    const cards = normalizeCards(kgResult.data, "kg_rag");
+    if (cards.length > 0) {
+      res.json({ cards, source: "kg_rag", query: q, count: cards.length });
+      return;
+    }
+  }
+  logger.info({ query: q }, "kg_rag empty or failed, falling back to srag.query");
+  const sragResult = await callMcp("srag.query", { query: q, domains });
+  if (sragResult.ok) {
+    const cards = normalizeCards(sragResult.data, "srag");
+    res.json({ cards, source: "srag", query: q, count: cards.length });
+    return;
+  }
+  const errorMsg = [kgResult.error, sragResult.error].filter(Boolean).join("; ");
+  res.json({ cards: [], error: errorMsg, query: q, count: 0 });
+});
+knowledgeRouter.get("/feed", async (_req, res) => {
+  const redis2 = getRedis();
+  if (redis2) {
+    try {
+      const cached = await redis2.get(FEED_CACHE_KEY);
+      if (cached) {
+        res.json(JSON.parse(cached));
+        return;
+      }
+    } catch (err) {
+      logger.warn({ err: String(err) }, "Redis cache read failed for knowledge feed");
+    }
+  }
+  const feed = {
+    generated_at: (/* @__PURE__ */ new Date()).toISOString(),
+    graph_pulse: null,
+    top_insights: [],
+    gap_alerts: [],
+    domain_coverage: {}
+  };
+  const errors = [];
+  const graphResult = await callMcp("graph.read_cypher", {
+    query: "MATCH (n) RETURN labels(n) AS type, count(*) AS count ORDER BY count DESC LIMIT 20"
+  });
+  if (graphResult.ok) {
+    const data = graphResult.data;
+    const records = Array.isArray(data) ? data : Array.isArray(data?.records) ? data.records : Array.isArray(data?.data) ? data.data : [];
+    const domainCoverage = {};
+    let totalNodes = 0;
+    for (const rec of records) {
+      const label = String(rec.type ?? rec.labels ?? "Unknown");
+      const count = typeof rec.count === "number" ? rec.count : parseInt(String(rec.count)) || 0;
+      domainCoverage[label] = count;
+      totalNodes += count;
+    }
+    feed.graph_pulse = { total_nodes: totalNodes, label_distribution: domainCoverage };
+    feed.domain_coverage = domainCoverage;
+  } else {
+    errors.push(graphResult.error ?? "graph.read_cypher failed");
+  }
+  const insightResult = await callMcp("kg_rag.query", {
+    question: "What are the most important recent insights and gaps?",
+    top_k: 10
+  });
+  if (insightResult.ok) {
+    const cards = normalizeCards(insightResult.data, "kg_rag");
+    feed.top_insights = cards.filter((c) => c.score >= 0.5 || cards.length <= 5);
+    feed.gap_alerts = cards.filter((c) => {
+      const lower = c.summary.toLowerCase();
+      return lower.includes("gap") || lower.includes("missing") || lower.includes("incomplete");
+    });
+  } else {
+    errors.push(insightResult.error ?? "kg_rag.query failed for insights");
+  }
+  if (errors.length > 0) {
+    feed.error = errors.join("; ");
+  }
+  if (redis2) {
+    try {
+      await redis2.set(FEED_CACHE_KEY, JSON.stringify(feed), "EX", FEED_TTL_SECONDS);
+    } catch (err) {
+      logger.warn({ err: String(err) }, "Redis cache write failed for knowledge feed");
+    }
+  }
+  res.json(feed);
+});
+knowledgeRouter.get("/briefing", async (_req, res) => {
+  const redis2 = getRedis();
+  if (!redis2) {
+    res.status(503).json({ error: "Redis not available", briefing: null });
+    return;
+  }
+  try {
+    const briefing = await redis2.get(BRIEFING_CACHE_KEY);
+    if (!briefing) {
+      res.status(204).end();
+      return;
+    }
+    res.type("text/plain").send(briefing);
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Redis read failed for knowledge briefing");
+    res.status(500).json({ error: "Failed to read briefing from cache" });
+  }
+});
+
+// src/routes/monitor.ts
+import { Router as Router12 } from "express";
 
 // src/context-compress.ts
 var DEFAULT_MAX_TOKENS = 2e3;
@@ -13051,7 +13300,7 @@ ${compressed}`,
 
 // src/routes/monitor.ts
 import { v4 as uuid5 } from "uuid";
-var monitorRouter = Router11();
+var monitorRouter = Router12();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
@@ -13268,8 +13517,8 @@ monitorRouter.post("/compress", async (req, res) => {
 });
 
 // src/routes/s1-s4.ts
-import { Router as Router12 } from "express";
-var s1s4Router = Router12();
+import { Router as Router13 } from "express";
+var s1s4Router = Router13();
 s1s4Router.post("/trigger", async (req, res) => {
   const { url, source_type, topic, weights } = req.body;
   if (!url) {
@@ -13520,7 +13769,7 @@ async function runFullHarvest() {
 }
 
 // src/routes/openai-compat.ts
-import { Router as Router13 } from "express";
+import { Router as Router14 } from "express";
 
 // src/verification-gate.ts
 import { v4 as uuid7 } from "uuid";
@@ -14091,7 +14340,7 @@ function recordMetrics(model, toolCalls, toolRounds, totalTokens, toolsOffered) 
   metricsBuffer.push({ model, tool_calls: toolCalls, tool_rounds: toolRounds, total_tokens: totalTokens, timestamp: Date.now() });
   if (metricsBuffer.length > MAX_METRICS) metricsBuffer.splice(0, metricsBuffer.length - MAX_METRICS);
 }
-var openaiCompatRouter = Router13();
+var openaiCompatRouter = Router14();
 var rateLimitMap = /* @__PURE__ */ new Map();
 var RATE_LIMIT_WINDOW_MS = 6e4;
 var RATE_LIMIT_MAX = 30;
@@ -14616,6 +14865,7 @@ app.use("/cron", requireApiKey, cronRouter);
 app.use("/api/dashboard", dashboardRouter);
 app.use("/api/openclaw", requireApiKey, openclawRouter);
 app.use("/api/audit", requireApiKey, auditRouter);
+app.use("/api/knowledge", requireApiKey, knowledgeRouter);
 app.use("/api/llm", requireApiKey, llmRouter);
 app.use("/monitor", requireApiKey, monitorRouter);
 app.use("/api/s1-s4", requireApiKey, s1s4Router);

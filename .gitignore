@@ -4,4 +4,5 @@ node_modules/
 *.env.local
 logs/
 *.log
-.claude/worktrees  
+.claude/worktrees
+pipelines/__pycache__/

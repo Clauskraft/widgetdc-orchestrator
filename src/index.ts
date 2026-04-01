@@ -34,6 +34,7 @@ import { dashboardRouter } from './routes/dashboard.js'
 import { openclawRouter, initOpenClaw, isOpenClawHealthy } from './routes/openclaw.js'
 import { llmRouter } from './routes/llm.js'
 import { auditRouter } from './routes/audit.js'
+import { knowledgeRouter } from './routes/knowledge.js'
 import { monitorRouter } from './routes/monitor.js'
 import { s1s4Router } from './routes/s1-s4.js'
 import { auditMiddleware } from './audit.js'
@@ -101,6 +102,7 @@ app.use('/cron', requireApiKey, cronRouter)
 app.use('/api/dashboard', dashboardRouter)
 app.use('/api/openclaw', requireApiKey, openclawRouter)
 app.use('/api/audit', requireApiKey, auditRouter)
+app.use('/api/knowledge', requireApiKey, knowledgeRouter)
 app.use('/api/llm', requireApiKey, llmRouter)
 app.use('/monitor', requireApiKey, monitorRouter)
 app.use('/api/s1-s4', requireApiKey, s1s4Router)
