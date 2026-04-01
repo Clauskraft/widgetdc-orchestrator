@@ -12,6 +12,7 @@ import { broadcastMessage } from './chat-broadcaster.js'
 import { broadcastSSE } from './sse.js'
 import { runSelfCorrect } from './graph-self-correct.js'
 import { captureAdoptionSnapshot, type AdoptionSnapshot } from './routes/adoption.js'
+import { runLooseEndScan } from './routes/loose-ends.js'
 import { notifyAdoptionDigest } from './slack.js'
 
 interface CronJob {
@@ -151,6 +152,34 @@ export async function runCronJob(jobId: string): Promise<void> {
         job.run_count++
         persistCronJobs()
         logger.error({ id: job.id, err: String(err) }, 'Adoption weekly digest failed')
+      }
+      return
+    }
+
+    // Special handler for loose-end detection scan
+    if (job.id === 'loose-end-daily-scan') {
+      try {
+        const scanResult = await runLooseEndScan()
+        job.last_run = new Date().toISOString()
+        job.last_status = scanResult.summary.critical > 0 ? 'critical' : 'completed'
+        job.run_count++
+        persistCronJobs()
+
+        const emoji = scanResult.summary.critical > 0 ? '🔴' : scanResult.summary.warning > 0 ? '🟡' : '🟢'
+        broadcastMessage({
+          from: 'Orchestrator',
+          to: 'All',
+          source: 'orchestrator',
+          type: 'Message',
+          message: `${emoji} Loose-end scan: ${scanResult.summary.critical} critical, ${scanResult.summary.warning} warnings, ${scanResult.summary.info} info (${scanResult.duration_ms}ms)`,
+          timestamp: new Date().toISOString(),
+        })
+      } catch (err) {
+        job.last_run = new Date().toISOString()
+        job.last_status = 'failed'
+        job.run_count++
+        persistCronJobs()
+        logger.error({ id: job.id, err: String(err) }, 'Loose-end scan failed')
       }
       return
     }
@@ -506,6 +535,23 @@ export function registerDefaultLoops(): void {
           },
         },
       ],
+    },
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // LOOSE-END DETECTOR (LIN-535) — Daily scan for orphans, contradictions, gaps
+  // Runs 5 detection queries against Neo4j, persists results, broadcasts via SSE
+  // ═══════════════════════════════════════════════════════════════════════
+
+  registerCronJob({
+    id: 'loose-end-daily-scan',
+    name: 'Loose-End Daily Scan',
+    schedule: '30 7 * * *', // 07:30 UTC daily (after adoption snapshot)
+    enabled: true,
+    chain: {
+      name: 'Loose-End Detection',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
     },
   })
 
