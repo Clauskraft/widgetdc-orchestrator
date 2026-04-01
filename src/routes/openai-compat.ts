@@ -23,6 +23,46 @@ import { v4 as uuid } from 'uuid'
 
 const MAX_TOOL_ROUNDS = 2
 
+// ─── Dynamic tool selection (LIN-498: reduce tokens by sending only relevant tools) ──
+
+interface ToolCategory {
+  keywords: RegExp
+  tools: string[]
+}
+
+const TOOL_CATEGORIES: ToolCategory[] = [
+  { keywords: /\b(health|status|uptime|service|railway|deploy|online)\b/i, tools: ['get_platform_health'] },
+  { keywords: /\b(linear|issue|task|sprint|backlog|blocker|LIN-\d+|projekt|project)\b/i, tools: ['linear_issues', 'linear_issue_detail'] },
+  { keywords: /\b(søg|search|find|pattern|knowledge|viden|consulting|document|artifact)\b/i, tools: ['search_knowledge', 'search_documents'] },
+  { keywords: /\b(analy|strateg|reason|deep|complex|evaluat|plan|why|how does|architect|OODA)\b/i, tools: ['reason_deeply', 'search_knowledge'] },
+  { keywords: /\b(graph|cypher|node|relation|neo4j|count|match)\b/i, tools: ['query_graph'] },
+  { keywords: /\b(chain|workflow|sequential|parallel|debate|multi.step|pipeline)\b/i, tools: ['run_chain'] },
+  { keywords: /\b(verify|check|quality|audit|compliance|valid)\b/i, tools: ['verify_output'] },
+  { keywords: /\b(mcp|tool|call|endpoint|api)\b/i, tools: ['call_mcp_tool'] },
+]
+
+const FALLBACK_TOOLS = ['search_knowledge', 'get_platform_health', 'linear_issues']
+
+function selectToolsForQuery(userMessage: string): typeof ORCHESTRATOR_TOOLS {
+  const matched = new Set<string>()
+
+  for (const cat of TOOL_CATEGORIES) {
+    if (cat.keywords.test(userMessage)) {
+      for (const t of cat.tools) matched.add(t)
+    }
+  }
+
+  // Always include fallback if nothing matched
+  if (matched.size === 0) {
+    for (const t of FALLBACK_TOOLS) matched.add(t)
+  }
+
+  // Cap at 5 tools max
+  const selected = [...matched].slice(0, 5)
+
+  return ORCHESTRATOR_TOOLS.filter(t => selected.includes(t.function.name))
+}
+
 // ─── Metrics tracking ──────────────────────────────────────────────────────
 
 interface MetricsEntry {
@@ -36,7 +76,7 @@ interface MetricsEntry {
 const metricsBuffer: MetricsEntry[] = []
 const MAX_METRICS = 1000
 
-function recordMetrics(model: string, toolCalls: string[], toolRounds: number, totalTokens: number) {
+function recordMetrics(model: string, toolCalls: string[], toolRounds: number, totalTokens: number, toolsOffered: number) {
   metricsBuffer.push({ model, tool_calls: toolCalls, tool_rounds: toolRounds, total_tokens: totalTokens, timestamp: Date.now() })
   if (metricsBuffer.length > MAX_METRICS) metricsBuffer.splice(0, metricsBuffer.length - MAX_METRICS)
 }
@@ -81,22 +121,7 @@ function validateApiKey(req: Request, res: Response): boolean {
 
 // ─── System prompt injection ────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `Du er strategisk partner for WidgeTDC consulting intelligence platform (v1.0.0).
-
-KRITISK REGEL: Du SKAL kalde mindst ét tool FØR du svarer på ethvert spørgsmål.
-- Spørgsmål om data/viden → search_knowledge
-- Spørgsmål om projekt/status/tasks → linear_issues eller check_tasks
-- Spørgsmål om platform/health → get_platform_health
-- Komplekse analyser → reason_deeply
-- Specifikke graph queries → query_graph
-- Multi-step workflows → run_chain
-- Kvalitetstjek → verify_output
-Du svarer ALDRIG baseret på generel viden alene. Du henter ALTID reel platformdata først.
-
-PLATFORM: 448 MCP tools, 546K Neo4j nodes, 4 Railway services, 11 orchestrator tools.
-KPI: advancedPct (mål 20%), complexity avg (mål 3.0), embedding coverage (mål 100%).
-
-Svar på dansk medmindre brugeren skriver engelsk. Vær konkret og datadrevet.`
+const SYSTEM_PROMPT = `WidgeTDC intelligence platform. ALTID kald mindst ét tool før du svarer. Hent reel data — svar aldrig kun fra generel viden. Svar på dansk. Vær konkret og datadrevet.`
 
 // ─── Model registry ─────────────────────────────────────────────────────────
 
@@ -229,6 +254,11 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
     let toolRounds = 0
     const allToolNames: string[] = []
 
+    // Select only relevant tools based on user query (LIN-498)
+    const userMsg = (messages || []).filter((m: any) => m.role === 'user').pop()?.content || ''
+    const selectedTools = selectToolsForQuery(userMsg)
+    logger.debug({ selectedTools: selectedTools.map(t => t.function.name), query: userMsg.slice(0, 50) }, 'Dynamic tool selection')
+
     for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
       const result = await chatLLM({
         provider,
@@ -236,7 +266,7 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
         model: providerModel,
         temperature: temperature ?? 0.7,
         max_tokens: max_tokens ?? 4096,
-        tools: ORCHESTRATOR_TOOLS,
+        tools: selectedTools,
       })
 
       // Accumulate usage
@@ -300,8 +330,8 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
       }
     }
 
-    logger.info({ model, provider, toolRounds, tools: allToolNames, duration_ms: Date.now() - t0 }, 'OpenAI compat complete (orchestrated)')
-    recordMetrics(model || 'gemini-flash', allToolNames, toolRounds, totalUsage.total_tokens)
+    logger.info({ model, provider, toolRounds, tools: allToolNames, toolsOffered: selectedTools.length, duration_ms: Date.now() - t0 }, 'OpenAI compat complete (orchestrated)')
+    recordMetrics(model || 'gemini-flash', allToolNames, toolRounds, totalUsage.total_tokens, selectedTools.length)
 
     // ─── Return response (streaming or non-streaming) ─────────────────
     if (stream) {

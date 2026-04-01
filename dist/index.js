@@ -14061,9 +14061,33 @@ Error: ${execution.error}` : "");
 // src/routes/openai-compat.ts
 import { v4 as uuid9 } from "uuid";
 var MAX_TOOL_ROUNDS = 2;
+var TOOL_CATEGORIES = [
+  { keywords: /\b(health|status|uptime|service|railway|deploy|online)\b/i, tools: ["get_platform_health"] },
+  { keywords: /\b(linear|issue|task|sprint|backlog|blocker|LIN-\d+|projekt|project)\b/i, tools: ["linear_issues", "linear_issue_detail"] },
+  { keywords: /\b(søg|search|find|pattern|knowledge|viden|consulting|document|artifact)\b/i, tools: ["search_knowledge", "search_documents"] },
+  { keywords: /\b(analy|strateg|reason|deep|complex|evaluat|plan|why|how does|architect|OODA)\b/i, tools: ["reason_deeply", "search_knowledge"] },
+  { keywords: /\b(graph|cypher|node|relation|neo4j|count|match)\b/i, tools: ["query_graph"] },
+  { keywords: /\b(chain|workflow|sequential|parallel|debate|multi.step|pipeline)\b/i, tools: ["run_chain"] },
+  { keywords: /\b(verify|check|quality|audit|compliance|valid)\b/i, tools: ["verify_output"] },
+  { keywords: /\b(mcp|tool|call|endpoint|api)\b/i, tools: ["call_mcp_tool"] }
+];
+var FALLBACK_TOOLS = ["search_knowledge", "get_platform_health", "linear_issues"];
+function selectToolsForQuery(userMessage) {
+  const matched = /* @__PURE__ */ new Set();
+  for (const cat of TOOL_CATEGORIES) {
+    if (cat.keywords.test(userMessage)) {
+      for (const t of cat.tools) matched.add(t);
+    }
+  }
+  if (matched.size === 0) {
+    for (const t of FALLBACK_TOOLS) matched.add(t);
+  }
+  const selected = [...matched].slice(0, 5);
+  return ORCHESTRATOR_TOOLS.filter((t) => selected.includes(t.function.name));
+}
 var metricsBuffer = [];
 var MAX_METRICS = 1e3;
-function recordMetrics(model, toolCalls, toolRounds, totalTokens) {
+function recordMetrics(model, toolCalls, toolRounds, totalTokens, toolsOffered) {
   metricsBuffer.push({ model, tool_calls: toolCalls, tool_rounds: toolRounds, total_tokens: totalTokens, timestamp: Date.now() });
   if (metricsBuffer.length > MAX_METRICS) metricsBuffer.splice(0, metricsBuffer.length - MAX_METRICS);
 }
@@ -14095,22 +14119,7 @@ function validateApiKey(req, res) {
   }
   return true;
 }
-var SYSTEM_PROMPT = `Du er strategisk partner for WidgeTDC consulting intelligence platform (v1.0.0).
-
-KRITISK REGEL: Du SKAL kalde mindst \xE9t tool F\xD8R du svarer p\xE5 ethvert sp\xF8rgsm\xE5l.
-- Sp\xF8rgsm\xE5l om data/viden \u2192 search_knowledge
-- Sp\xF8rgsm\xE5l om projekt/status/tasks \u2192 linear_issues eller check_tasks
-- Sp\xF8rgsm\xE5l om platform/health \u2192 get_platform_health
-- Komplekse analyser \u2192 reason_deeply
-- Specifikke graph queries \u2192 query_graph
-- Multi-step workflows \u2192 run_chain
-- Kvalitetstjek \u2192 verify_output
-Du svarer ALDRIG baseret p\xE5 generel viden alene. Du henter ALTID reel platformdata f\xF8rst.
-
-PLATFORM: 448 MCP tools, 546K Neo4j nodes, 4 Railway services, 11 orchestrator tools.
-KPI: advancedPct (m\xE5l 20%), complexity avg (m\xE5l 3.0), embedding coverage (m\xE5l 100%).
-
-Svar p\xE5 dansk medmindre brugeren skriver engelsk. V\xE6r konkret og datadrevet.`;
+var SYSTEM_PROMPT = `WidgeTDC intelligence platform. ALTID kald mindst \xE9t tool f\xF8r du svarer. Hent reel data \u2014 svar aldrig kun fra generel viden. Svar p\xE5 dansk. V\xE6r konkret og datadrevet.`;
 var MODELS = [
   { id: "claude-sonnet", provider: "claude", displayName: "Claude Sonnet 4" },
   { id: "claude-opus", provider: "claude", displayName: "Claude Opus 4" },
@@ -14206,6 +14215,9 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     let totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
     let toolRounds = 0;
     const allToolNames = [];
+    const userMsg = (messages || []).filter((m) => m.role === "user").pop()?.content || "";
+    const selectedTools = selectToolsForQuery(userMsg);
+    logger.debug({ selectedTools: selectedTools.map((t) => t.function.name), query: userMsg.slice(0, 50) }, "Dynamic tool selection");
     for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
       const result = await chatLLM({
         provider,
@@ -14213,7 +14225,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
         model: providerModel,
         temperature: temperature ?? 0.7,
         max_tokens: max_tokens ?? 4096,
-        tools: ORCHESTRATOR_TOOLS
+        tools: selectedTools
       });
       if (result.usage) {
         totalUsage.prompt_tokens += result.usage.prompt_tokens;
@@ -14259,8 +14271,8 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
         totalUsage.total_tokens += summaryResult.usage.total_tokens;
       }
     }
-    logger.info({ model, provider, toolRounds, tools: allToolNames, duration_ms: Date.now() - t0 }, "OpenAI compat complete (orchestrated)");
-    recordMetrics(model || "gemini-flash", allToolNames, toolRounds, totalUsage.total_tokens);
+    logger.info({ model, provider, toolRounds, tools: allToolNames, toolsOffered: selectedTools.length, duration_ms: Date.now() - t0 }, "OpenAI compat complete (orchestrated)");
+    recordMetrics(model || "gemini-flash", allToolNames, toolRounds, totalUsage.total_tokens, selectedTools.length);
     if (stream) {
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
