@@ -7,7 +7,9 @@ description: Appends contextual follow-up suggestions as clickable chips to assi
 
 import re
 from typing import Optional, List, Tuple
+from datetime import datetime
 from pydantic import BaseModel, Field
+import aiohttp
 
 
 class Pipeline:
@@ -18,12 +20,12 @@ class Pipeline:
         MAX_SUGGESTIONS: int = Field(
             default=3, description="Maximum number of suggestions to show"
         )
-        BACKEND_URL: str = Field(
-            default="https://backend-production-d3da.up.railway.app",
-            description="Backend MCP URL",
+        ORCHESTRATOR_URL: str = Field(
+            default="https://orchestrator-production-c27e.up.railway.app",
+            description="Orchestrator URL for flywheel metrics",
         )
-        BACKEND_API_KEY: str = Field(
-            default="", description="Backend API key for MCP calls"
+        ORCHESTRATOR_API_KEY: str = Field(
+            default="", description="Orchestrator API key for metrics"
         )
 
     def __init__(self):
@@ -189,6 +191,34 @@ class Pipeline:
             suffix = self._format_suggestions(suggestions)
             messages[-1]["content"] = content + suffix
             body["messages"] = messages
+
+            # Emit suggestion metrics (fire-and-forget)
+            try:
+                metrics = {
+                    "pipeline": "followup_generator",
+                    "event": "suggestions_generated",
+                    "category": categories[0] if categories else "general",
+                    "suggestion_count": len(suggestions),
+                    "response_length": len(content),
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+                if self.valves.ORCHESTRATOR_URL and self.valves.ORCHESTRATOR_API_KEY:
+                    async with aiohttp.ClientSession() as s:
+                        await s.post(
+                            f"{self.valves.ORCHESTRATOR_URL.rstrip('/')}/api/audit/log",
+                            json={
+                                "actor": "followup_generator",
+                                "action": "suggestions_generated",
+                                "entity": "pipeline",
+                                "meta": metrics,
+                            },
+                            headers={
+                                "Authorization": f"Bearer {self.valves.ORCHESTRATOR_API_KEY}"
+                            },
+                            timeout=aiohttp.ClientTimeout(total=3),
+                        )
+            except Exception:
+                pass
 
         except Exception:
             # Zero degradation: pass through unmodified on any error

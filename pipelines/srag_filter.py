@@ -10,6 +10,7 @@ requirements: aiohttp
 
 from typing import List, Optional
 from pydantic import BaseModel
+from datetime import datetime
 import asyncio
 import aiohttp
 import json
@@ -34,6 +35,9 @@ class Pipeline:
         ENABLED: bool = True
         # Skip messages shorter than this
         MIN_QUERY_LENGTH: int = 10
+        # Orchestrator metrics endpoint
+        ORCHESTRATOR_URL: str = "https://orchestrator-production-c27e.up.railway.app"
+        ORCHESTRATOR_API_KEY: str = ""
 
     def __init__(self):
         self.type = "filter"
@@ -107,6 +111,8 @@ class Pipeline:
             "Authorization": f"Bearer {self.valves.BACKEND_API_KEY}",
         }
 
+        source = "kg_rag"
+
         # Try kg_rag.query first
         cards = await self._mcp_call(
             mcp_url,
@@ -119,6 +125,7 @@ class Pipeline:
 
         # Fallback to srag.query if no results
         if not cards:
+            source = "srag"
             cards = await self._mcp_call(
                 mcp_url,
                 headers,
@@ -130,6 +137,34 @@ class Pipeline:
 
         if not cards:
             return None
+
+        # Emit retrieval metrics (fire-and-forget)
+        try:
+            metrics = {
+                "pipeline": "srag_filter",
+                "event": "retrieval",
+                "cards_returned": len(cards),
+                "source": source,
+                "query_length": len(query),
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+            if self.valves.ORCHESTRATOR_URL and self.valves.ORCHESTRATOR_API_KEY:
+                async with aiohttp.ClientSession() as s:
+                    await s.post(
+                        f"{self.valves.ORCHESTRATOR_URL.rstrip('/')}/api/audit/log",
+                        json={
+                            "actor": "srag_filter",
+                            "action": "retrieval",
+                            "entity": "pipeline",
+                            "meta": metrics,
+                        },
+                        headers={
+                            "Authorization": f"Bearer {self.valves.ORCHESTRATOR_API_KEY}"
+                        },
+                        timeout=aiohttp.ClientTimeout(total=3),
+                    )
+        except Exception:
+            pass
 
         return self._format_knowledge_cards(cards)
 

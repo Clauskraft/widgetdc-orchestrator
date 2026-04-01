@@ -7,7 +7,9 @@ description: Formats [MI-xxxx], [KPI-xxxx], [FW-xxxx] references as clickable ci
 
 import re
 from typing import Optional
+from datetime import datetime
 from pydantic import BaseModel, Field
+import aiohttp
 
 
 class Pipeline:
@@ -19,13 +21,20 @@ class Pipeline:
             default="inline",
             description="Citation style: 'inline' (tooltip links) or 'footnote' (collected at bottom)",
         )
+        ORCHESTRATOR_URL: str = Field(
+            default="https://orchestrator-production-c27e.up.railway.app",
+            description="Orchestrator URL for flywheel metrics",
+        )
+        ORCHESTRATOR_API_KEY: str = Field(
+            default="", description="Orchestrator API key for metrics"
+        )
 
     def __init__(self):
         self.type = "filter"
         self.name = "Citation Formatter"
         self.valves = self.Valves()
         # Pattern matches [PREFIX-NUMBER] references
-        self._ref_pattern = re.compile(r"\[([A-Z]{2,5})-(\d{3,5})\]")
+        self._ref_pattern = re.compile(r"\[([A-Z]{2,5})-(\d{1,5})\]")
         # Prefix descriptions for tooltip text
         self._prefix_labels = {
             "MI": "Management Insight",
@@ -119,6 +128,9 @@ class Pipeline:
             if not self._ref_pattern.search(content):
                 return body
 
+            # Check which references exist before formatting
+            found_refs = list(self._ref_pattern.finditer(content))
+
             # Format based on style
             if self.valves.CITATION_STYLE == "footnote":
                 formatted = self._format_footnote(content)
@@ -128,6 +140,38 @@ class Pipeline:
             # Update the message content
             messages[-1]["content"] = formatted
             body["messages"] = messages
+
+            # Emit citation metrics (fire-and-forget)
+            try:
+                ref_type_counts = {}
+                for m in found_refs:
+                    prefix = m.group(1)
+                    ref_type_counts[prefix] = ref_type_counts.get(prefix, 0) + 1
+                metrics = {
+                    "pipeline": "citation_formatter",
+                    "event": "citations_formatted",
+                    "citation_count": len(found_refs),
+                    "ref_types": ref_type_counts,
+                    "style": self.valves.CITATION_STYLE,
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+                if self.valves.ORCHESTRATOR_URL and self.valves.ORCHESTRATOR_API_KEY:
+                    async with aiohttp.ClientSession() as s:
+                        await s.post(
+                            f"{self.valves.ORCHESTRATOR_URL.rstrip('/')}/api/audit/log",
+                            json={
+                                "actor": "citation_formatter",
+                                "action": "citations_formatted",
+                                "entity": "pipeline",
+                                "meta": metrics,
+                            },
+                            headers={
+                                "Authorization": f"Bearer {self.valves.ORCHESTRATOR_API_KEY}"
+                            },
+                            timeout=aiohttp.ClientTimeout(total=3),
+                        )
+            except Exception:
+                pass
 
         except Exception:
             # Zero degradation: pass through unmodified on any error
