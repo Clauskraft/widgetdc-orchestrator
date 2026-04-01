@@ -13399,7 +13399,20 @@ openclawRouter.all("/proxy/*", async (req, res) => {
 
 // src/routes/dashboard.ts
 var dashboardRouter = Router8();
+var CACHE_KEY = "orchestrator:dashboard-cache";
+var CACHE_TTL = 15;
 dashboardRouter.get("/data", async (_req, res) => {
+  const redis2 = getRedis();
+  if (redis2) {
+    try {
+      const cached = await redis2.get(CACHE_KEY);
+      if (cached) {
+        res.setHeader("X-Cache", "HIT");
+        return res.json(JSON.parse(cached));
+      }
+    } catch {
+    }
+  }
   const agents = AgentRegistry.all().map((a) => ({
     agent_id: a.handshake.agent_id,
     display_name: a.handshake.display_name,
@@ -13424,7 +13437,7 @@ dashboardRouter.get("/data", async (_req, res) => {
     } catch {
     }
   }
-  res.json({
+  const payload = {
     agents,
     wsStats,
     chains,
@@ -13442,7 +13455,13 @@ dashboardRouter.get("/data", async (_req, res) => {
       nodeEnv: config.nodeEnv
     },
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
-  });
+  };
+  if (redis2) {
+    redis2.set(CACHE_KEY, JSON.stringify(payload), "EX", CACHE_TTL).catch(() => {
+    });
+  }
+  res.setHeader("X-Cache", "MISS");
+  res.json(payload);
 });
 
 // src/routes/llm.ts

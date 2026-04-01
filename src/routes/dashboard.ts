@@ -1,5 +1,7 @@
 /**
  * routes/dashboard.ts — JSON feed for Command Center SPA
+ *
+ * Redis-cached (15s TTL) to avoid serializing 450+ agents on every poll.
  */
 import { Router } from 'express'
 import { AgentRegistry } from '../agent-registry.js'
@@ -10,10 +12,26 @@ import { isRlmAvailable, getRlmHealth } from '../cognitive-proxy.js'
 import { getOpenClawHealth, getOpenClawSkills } from './openclaw.js'
 import { config } from '../config.js'
 import { buildRoutingDashboardData } from '../routing-engine.js'
+import { getRedis } from '../redis.js'
 
 export const dashboardRouter = Router()
 
+const CACHE_KEY = 'orchestrator:dashboard-cache'
+const CACHE_TTL = 15 // seconds
+
 dashboardRouter.get('/data', async (_req, res) => {
+  // Serve from Redis cache if fresh
+  const redis = getRedis()
+  if (redis) {
+    try {
+      const cached = await redis.get(CACHE_KEY)
+      if (cached) {
+        res.setHeader('X-Cache', 'HIT')
+        return res.json(JSON.parse(cached))
+      }
+    } catch { /* cache miss, rebuild */ }
+  }
+
   const agents = AgentRegistry.all().map(a => ({
     agent_id: a.handshake.agent_id,
     display_name: a.handshake.display_name,
@@ -38,7 +56,7 @@ dashboardRouter.get('/data', async (_req, res) => {
     try { rlmHealth = await getRlmHealth() } catch { /* ignore */ }
   }
 
-  res.json({
+  const payload = {
     agents,
     wsStats,
     chains,
@@ -56,5 +74,13 @@ dashboardRouter.get('/data', async (_req, res) => {
       nodeEnv: config.nodeEnv,
     },
     timestamp: new Date().toISOString(),
-  })
+  }
+
+  // Cache in Redis (fire-and-forget)
+  if (redis) {
+    redis.set(CACHE_KEY, JSON.stringify(payload), 'EX', CACHE_TTL).catch(() => {})
+  }
+
+  res.setHeader('X-Cache', 'MISS')
+  res.json(payload)
 })

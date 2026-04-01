@@ -59,6 +59,13 @@ src/
   audit.ts              Audit trail middleware
   sse.ts                Server-sent events
   validation.ts         TypeBox compiled validators
+  logger.ts             Pino logger
+  chat-store.ts         Persistent chat message storage
+  context-compress.ts   Context compression utilities
+  dual-rag.ts           Dual RAG (SRAG + KG-RAG) pipeline
+  graph-self-correct.ts Graph self-healing agent
+  slack.ts              Slack webhook integration
+  tool-executor.ts      MCP tool execution engine
   routes/
     agents.ts           CRUD + heartbeat
     tools.ts            MCP tool proxy with ACL
@@ -67,13 +74,17 @@ src/
     cron.ts             Cron CRUD + trigger
     chat.ts             REST chat + WS stats
     llm.ts              LLM chat + providers
-    dashboard.ts        Dashboard data API
+    dashboard.ts        Dashboard data API (Redis-cached, 15s TTL)
     audit.ts            Audit log query
     openclaw.ts         OpenClaw gateway proxy
+    knowledge.ts        Knowledge graph endpoints
+    monitor.ts          Platform monitoring endpoints
+    openai-compat.ts    OpenAI-compatible /v1 API
+    s1-s4.ts            S1-S4 research pipeline endpoints
 frontend/
   index.html            Command Center SPA (single file, vanilla JS)
 dist/                   Pre-built bundle (committed, Railway runs directly)
-test-e2e.mjs            50 comprehensive e2e tests
+test-e2e.mjs            72 comprehensive e2e tests
 build.mjs               esbuild bundler
 ```
 
@@ -81,7 +92,7 @@ build.mjs               esbuild bundler
 
 ```bash
 npm run build              # esbuild bundle → dist/
-node test-e2e.mjs          # 50 e2e tests against production
+node test-e2e.mjs          # 72 e2e tests against production
 railway up -s orchestrator # Deploy to Railway
 ```
 
