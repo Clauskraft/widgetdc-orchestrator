@@ -14,6 +14,7 @@ import { callCognitive, isRlmAvailable } from './cognitive-proxy.js'
 import { callMcpTool } from './mcp-caller.js'
 import { executeChain } from './chain-engine.js'
 import { verifyChainOutput } from './verification-gate.js'
+import { runInvestigation } from './investigate-chain.js'
 import { logger } from './logger.js'
 import { v4 as uuid } from 'uuid'
 
@@ -174,6 +175,20 @@ export const ORCHESTRATOR_TOOLS = [
           },
         },
         required: ['name', 'mode', 'steps'],
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'investigate',
+      description: 'Run a multi-agent deep investigation on a topic. Returns a comprehensive analysis artifact with graph data, compliance, strategy, and reasoning.',
+      parameters: {
+        type: 'object',
+        properties: {
+          topic: { type: 'string', description: 'The topic to investigate deeply' },
+        },
+        required: ['topic'],
       },
     },
   },
@@ -474,6 +489,24 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       })
       if (result.status !== 'success') return `Linear issue lookup failed: ${result.error_message}`
       return JSON.stringify(result.result, null, 2).slice(0, 800)
+    }
+
+    case 'investigate': {
+      const topic = args.topic as string
+      if (!topic) return 'Error: topic is required'
+      try {
+        const result = await runInvestigation(topic)
+        const summary = `Investigation "${topic}" ${result.execution.status} — ${result.execution.steps_completed}/${result.execution.steps_total} steps, ${result.execution.duration_ms}ms`
+        const artifactInfo = result.artifact_url
+          ? `\nArtifact: ${result.artifact_url}\nMarkdown: ${result.artifact_markdown_url}`
+          : '\nArtifact: creation skipped (Redis unavailable or error)'
+        const output = result.execution.final_output
+          ? `\n\nSynthesis:\n${typeof result.execution.final_output === 'string' ? result.execution.final_output : JSON.stringify(result.execution.final_output, null, 2).slice(0, 600)}`
+          : ''
+        return summary + artifactInfo + output
+      } catch (err) {
+        return `Investigation failed: ${err}`
+      }
     }
 
     case 'run_chain': {

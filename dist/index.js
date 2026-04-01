@@ -10654,6 +10654,214 @@ async function runChecksParallel(checks, chainOutput) {
   );
 }
 
+// src/investigate-chain.ts
+function buildInvestigateChain(topic) {
+  return {
+    chain_id: `investigate-${Date.now().toString(36)}`,
+    name: `Investigate: ${topic}`,
+    description: `Multi-agent deep investigation of "${topic}"`,
+    mode: "sequential",
+    steps: [
+      // Step 1: Graph exploration
+      {
+        id: "graph-explore",
+        agent_id: "graph-steward",
+        tool_name: "graph.read_cypher",
+        arguments: {
+          query: `MATCH (n) WHERE toLower(n.title) CONTAINS toLower($topic) OR toLower(coalesce(n.name,'')) CONTAINS toLower($topic) OR toLower(coalesce(n.description,'')) CONTAINS toLower($topic) WITH n LIMIT 20 OPTIONAL MATCH (n)-[r]-(m) RETURN labels(n)[0] AS type, coalesce(n.title, n.name, n.id) AS name, collect(DISTINCT {rel: type(r), target: coalesce(m.title, m.name, labels(m)[0])}) AS connections LIMIT 20`,
+          params: { topic }
+        },
+        timeout_ms: 2e4
+      },
+      // Step 2: Compliance analysis
+      {
+        id: "compliance-analysis",
+        agent_id: "regulatory-navigator",
+        tool_name: "srag.query",
+        arguments: {
+          query: `Compliance and regulatory framework analysis for: ${topic}. Include relevant Danish/EU regulations, governance requirements, and risk considerations. Previous graph findings: {{prev}}`
+        },
+        timeout_ms: 3e4
+      },
+      // Step 3: Strategic recommendations
+      {
+        id: "strategic-recommendations",
+        agent_id: "consulting-partner",
+        tool_name: "kg_rag.query",
+        arguments: {
+          question: `Strategic consulting analysis for: ${topic}. Provide actionable recommendations, patterns, and best practices. Previous compliance findings: {{prev}}`,
+          max_evidence: 15
+        },
+        timeout_ms: 3e4
+      },
+      // Step 4: Deep reasoning synthesis
+      {
+        id: "deep-reasoning",
+        agent_id: "orchestrator",
+        cognitive_action: "reason",
+        prompt: `Synthesize a comprehensive deep analysis of "${topic}" based on all previous findings:
+
+{{prev}}
+
+Provide:
+1. Key findings from graph exploration
+2. Compliance implications
+3. Strategic recommendations
+4. Risk assessment
+5. Suggested next actions`,
+        timeout_ms: 45e3
+      },
+      // Step 5: Artifact assembly — handled post-chain
+      // We use a lightweight step that signals assembly
+      {
+        id: "signal-assembly",
+        agent_id: "orchestrator",
+        tool_name: "graph.health",
+        arguments: {},
+        timeout_ms: 1e4
+      }
+    ]
+  };
+}
+function assembleArtifactBlocks(topic, execution) {
+  const blocks = [];
+  const results = execution.results;
+  const graphResult = results.find((r) => r.step_id === "graph-explore");
+  if (graphResult && graphResult.status === "success") {
+    blocks.push({
+      type: "cypher",
+      label: "Graph Exploration",
+      content: {
+        query: `MATCH (n) WHERE toLower(n.title) CONTAINS toLower("${topic}") ... (see full chain)`
+      }
+    });
+    blocks.push({
+      type: "text",
+      label: "Graph Results",
+      content: {
+        body: typeof graphResult.output === "string" ? graphResult.output : JSON.stringify(graphResult.output, null, 2)
+      }
+    });
+  }
+  const complianceResult = results.find((r) => r.step_id === "compliance-analysis");
+  if (complianceResult && complianceResult.status === "success") {
+    blocks.push({
+      type: "text",
+      label: "Compliance & Regulatory Analysis",
+      content: {
+        body: typeof complianceResult.output === "string" ? complianceResult.output : JSON.stringify(complianceResult.output, null, 2)
+      }
+    });
+  }
+  const strategyResult = results.find((r) => r.step_id === "strategic-recommendations");
+  if (strategyResult && strategyResult.status === "success") {
+    blocks.push({
+      type: "text",
+      label: "Strategic Recommendations",
+      content: {
+        body: typeof strategyResult.output === "string" ? strategyResult.output : JSON.stringify(strategyResult.output, null, 2)
+      }
+    });
+  }
+  const reasoningResult = results.find((r) => r.step_id === "deep-reasoning");
+  if (reasoningResult && reasoningResult.status === "success") {
+    blocks.push({
+      type: "text",
+      label: "Deep Reasoning Synthesis",
+      content: {
+        body: typeof reasoningResult.output === "string" ? reasoningResult.output : JSON.stringify(reasoningResult.output, null, 2)
+      }
+    });
+  }
+  blocks.push({
+    type: "kpi_card",
+    label: "Investigation Metrics",
+    content: {
+      label: "Steps Completed",
+      value: `${execution.steps_completed}/${execution.steps_total}`,
+      trend: execution.status === "completed" ? "up" : "down"
+    }
+  });
+  if (execution.duration_ms) {
+    blocks.push({
+      type: "kpi_card",
+      content: {
+        label: "Duration",
+        value: `${(execution.duration_ms / 1e3).toFixed(1)}s`
+      }
+    });
+  }
+  const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${config.port}`;
+  blocks.push({
+    type: "deep_link",
+    label: "Access Links",
+    content: {
+      label: "View in Command Center",
+      uri: `${baseUrl}/#chains`
+    }
+  });
+  blocks.push({
+    type: "deep_link",
+    content: {
+      label: "Open in Obsidian",
+      uri: `obsidian://widgetdc?action=investigate&topic=${encodeURIComponent(topic)}`
+    }
+  });
+  return blocks;
+}
+async function createArtifact(topic, blocks, execution) {
+  const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${config.port}`;
+  const apiKey = process.env.ORCHESTRATOR_API_KEY ?? "";
+  try {
+    const resp = await fetch(`${baseUrl}/api/artifacts`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        title: `Investigation: ${topic}`,
+        source: "investigate-chain",
+        blocks,
+        tags: ["investigation", "multi-agent", topic.toLowerCase().replace(/\s+/g, "-")],
+        graph_refs: execution.results.filter((r) => r.step_id === "graph-explore" && r.status === "success").map((r) => `neo4j:investigate:${topic}`),
+        created_by: "investigate-chain"
+      })
+    });
+    if (!resp.ok) {
+      logger.warn({ status: resp.status }, "Failed to create investigation artifact");
+      return null;
+    }
+    const data = await resp.json();
+    if (data.success && data.artifact) {
+      const id = data.artifact.$id;
+      return {
+        artifactId: id,
+        artifactUrl: `${baseUrl}/api/artifacts/${encodeURIComponent(id)}`
+      };
+    }
+    return null;
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Artifact creation failed for investigation");
+    return null;
+  }
+}
+async function runInvestigation(topic) {
+  const chainDef = buildInvestigateChain(topic);
+  logger.info({ topic, chain_id: chainDef.chain_id }, "Starting investigation chain");
+  const execution = await executeChain(chainDef);
+  const blocks = assembleArtifactBlocks(topic, execution);
+  const artifact = await createArtifact(topic, blocks, execution);
+  const result = { execution };
+  if (artifact) {
+    result.artifact_id = artifact.artifactId;
+    result.artifact_url = artifact.artifactUrl;
+    result.artifact_markdown_url = `${artifact.artifactUrl}.md`;
+    logger.info({ artifact_id: artifact.artifactId, topic }, "Investigation artifact created");
+  }
+  return result;
+}
+
 // src/tool-executor.ts
 import { v4 as uuid5 } from "uuid";
 var ORCHESTRATOR_TOOLS = [
@@ -10811,6 +11019,20 @@ var ORCHESTRATOR_TOOLS = [
           }
         },
         required: ["name", "mode", "steps"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "investigate",
+      description: "Run a multi-agent deep investigation on a topic. Returns a comprehensive analysis artifact with graph data, compliance, strategy, and reasoning.",
+      parameters: {
+        type: "object",
+        properties: {
+          topic: { type: "string", description: "The topic to investigate deeply" }
+        },
+        required: ["topic"]
       }
     }
   },
@@ -11054,6 +11276,24 @@ ${result.merged_context}` : "No results found for this query.";
       });
       if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
       return JSON.stringify(result.result, null, 2).slice(0, 800);
+    }
+    case "investigate": {
+      const topic = args.topic;
+      if (!topic) return "Error: topic is required";
+      try {
+        const result = await runInvestigation(topic);
+        const summary = `Investigation "${topic}" ${result.execution.status} \u2014 ${result.execution.steps_completed}/${result.execution.steps_total} steps, ${result.execution.duration_ms}ms`;
+        const artifactInfo = result.artifact_url ? `
+Artifact: ${result.artifact_url}
+Markdown: ${result.artifact_markdown_url}` : "\nArtifact: creation skipped (Redis unavailable or error)";
+        const output = result.execution.final_output ? `
+
+Synthesis:
+${typeof result.execution.final_output === "string" ? result.execution.final_output : JSON.stringify(result.execution.final_output, null, 2).slice(0, 600)}` : "";
+        return summary + artifactInfo + output;
+      } catch (err) {
+        return `Investigation failed: ${err}`;
+      }
     }
     case "run_chain": {
       const steps = args.steps ?? [];
@@ -15215,7 +15455,7 @@ var intentRules = [
     keywords: ["review", "pr", "pull request", "code review"],
     skill: "/code-review:code-review",
     explanation: "Brug /code-review:code-review til PR code review med inline kommentarer.",
-    alternatives: ["/octo:review", "/octo:staged-review"],
+    alternatives: ["/wocto:review", "/octo:staged-review"],
     buildPrompt: (d) => {
       const prMatch = d.match(/#?(\d{2,6})/);
       return prMatch ? `/code-review:code-review ${prMatch[1]}` : `/code-review:code-review "${d}"`;
@@ -15225,15 +15465,15 @@ var intentRules = [
     keywords: ["feature", "implementer", "implement", "byg", "build", "tilf\xF8j", "add", "create"],
     skill: "/agent-chain",
     explanation: "Brug /agent-chain til at auto-klassificere og orkestrere den rette agent-sekvens.",
-    alternatives: ["/octo:factory", "/octo:embrace"],
+    alternatives: ["/wocto:factory", "/octo:embrace"],
     buildPrompt: (d) => `/agent-chain ${d}`
   },
   {
     keywords: ["sikkerhed", "security", "audit", "owasp", "vulnerability", "s\xE5rbarhed"],
-    skill: "/octo:security",
-    explanation: "Brug /octo:security til OWASP compliance og s\xE5rbarhedsscanning.",
-    alternatives: ["/security-hardener"],
-    buildPrompt: (d) => `/octo:security scope="${d}"`
+    skill: "/wocto:security",
+    explanation: "Brug /wocto:security til OWASP compliance og s\xE5rbarhedsscanning (WidgeTDC-beriget).",
+    alternatives: ["/security-hardener", "/octo:security"],
+    buildPrompt: (d) => `/wocto:security scope="${d}"`
   },
   {
     keywords: ["deploy", "deployment", "release", "version", "tag"],
@@ -15251,10 +15491,10 @@ var intentRules = [
   },
   {
     keywords: ["test", "tdd", "unit test", "integration test"],
-    skill: "/octo:tdd",
-    explanation: "Brug /octo:tdd til test-driven development med red-green-refactor.",
-    alternatives: ["/qa-guardian"],
-    buildPrompt: (d) => `/octo:tdd "${d}"`
+    skill: "/wocto:tdd",
+    explanation: "Brug /wocto:tdd til test-driven development med WidgeTDC governance.",
+    alternatives: ["/qa-guardian", "/octo:tdd"],
+    buildPrompt: (d) => `/wocto:tdd "${d}"`
   },
   {
     keywords: ["compliance", "gdpr", "nis2", "regulering", "regulation"],
@@ -15279,10 +15519,10 @@ var intentRules = [
   },
   {
     keywords: ["plan", "strategi", "strategy", "roadmap"],
-    skill: "/octo:plan",
-    explanation: "Brug /octo:plan til at bygge strategiske eksekveringsplaner.",
-    alternatives: ["/octo:embrace", "/project-manager-widgetdc"],
-    buildPrompt: (d) => `/octo:plan "${d}"`
+    skill: "/wocto:plan",
+    explanation: "Brug /wocto:plan til at bygge strategiske eksekveringsplaner (WidgeTDC-beriget).",
+    alternatives: ["/octo:embrace", "/project-manager-widgetdc", "/octo:plan"],
+    buildPrompt: (d) => `/wocto:plan "${d}"`
   },
   {
     keywords: ["ui", "ux", "design", "palette", "typography", "style guide"],
@@ -15324,10 +15564,10 @@ function classifyIntent(description) {
     };
   }
   return {
-    skill: "/octo:octo",
-    prompt: `/octo:octo "${description}"`,
-    explanation: "Ingen specifik skill matchede \u2014 /octo:octo router automatisk til den bedste skill.",
-    alternatives: ["/agent-chain"]
+    skill: "/wocto",
+    prompt: `/wocto "${description}"`,
+    explanation: "Ingen specifik skill matchede \u2014 /wocto router automatisk til den bedste skill (WidgeTDC-beriget).",
+    alternatives: ["/octo:octo", "/agent-chain"]
   };
 }
 promptGeneratorRouter.post("/", (req, res) => {
@@ -15363,7 +15603,7 @@ promptGeneratorRouter.get("/skills", (_req, res) => {
     data: {
       skills,
       total: skills.length,
-      fallback: "/octo:octo"
+      fallback: "/wocto"
     }
   });
 });
