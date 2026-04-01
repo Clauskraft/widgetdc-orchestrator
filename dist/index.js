@@ -12841,16 +12841,17 @@ cognitiveRouter.post("/:action", async (req, res) => {
     });
     return;
   }
-  if (!body.prompt && !body.message) {
+  const promptText = body.prompt ?? body.message ?? body.task ?? body.instruction;
+  if (!promptText) {
     res.status(400).json({
       success: false,
-      error: { code: "VALIDATION_ERROR", message: "Required: prompt or message", status_code: 400 }
+      error: { code: "VALIDATION_ERROR", message: "Required: prompt, message, task, or instruction", status_code: 400 }
     });
     return;
   }
   try {
     const result = await callCognitive(action, {
-      prompt: body.prompt ?? body.message,
+      prompt: promptText,
       context: body.context,
       agent_id: body.agent_id,
       depth: body.depth,
