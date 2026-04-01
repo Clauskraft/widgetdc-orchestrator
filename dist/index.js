@@ -14035,7 +14035,7 @@ Error: ${execution.error}` : "");
 
 // src/routes/openai-compat.ts
 import { v4 as uuid9 } from "uuid";
-var MAX_TOOL_ROUNDS = 3;
+var MAX_TOOL_ROUNDS = 2;
 var metricsBuffer = [];
 var MAX_METRICS = 1e3;
 function recordMetrics(model, toolCalls, toolRounds, totalTokens) {

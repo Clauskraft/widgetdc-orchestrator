@@ -21,7 +21,7 @@ import { logger } from '../logger.js'
 import { config } from '../config.js'
 import { v4 as uuid } from 'uuid'
 
-const MAX_TOOL_ROUNDS = 3
+const MAX_TOOL_ROUNDS = 2
 
 // ─── Metrics tracking ──────────────────────────────────────────────────────
 
