@@ -13940,6 +13940,12 @@ Error: ${execution.error}` : "");
 // src/routes/openai-compat.ts
 import { v4 as uuid9 } from "uuid";
 var MAX_TOOL_ROUNDS = 3;
+var metricsBuffer = [];
+var MAX_METRICS = 1e3;
+function recordMetrics(model, toolCalls, toolRounds, totalTokens) {
+  metricsBuffer.push({ model, tool_calls: toolCalls, tool_rounds: toolRounds, total_tokens: totalTokens, timestamp: Date.now() });
+  if (metricsBuffer.length > MAX_METRICS) metricsBuffer.splice(0, metricsBuffer.length - MAX_METRICS);
+}
 var openaiCompatRouter = Router13();
 var rateLimitMap = /* @__PURE__ */ new Map();
 var RATE_LIMIT_WINDOW_MS = 6e4;
@@ -13968,20 +13974,22 @@ function validateApiKey(req, res) {
   }
   return true;
 }
-var SYSTEM_PROMPT = `Du er strategisk partner for WidgeTDC consulting intelligence platform (v2.4.0).
+var SYSTEM_PROMPT = `Du er strategisk partner for WidgeTDC consulting intelligence platform (v1.0.0).
 
-PLATFORM: 448 MCP tools, 520K Neo4j nodes, 3 Railway services, 10 A2A skills.
-MISSION: Drive advancedPct fra 0% til 20%, eliminere human bottleneck, harveste consulting-viden.
+KRITISK REGEL: Du SKAL kalde mindst \xE9t tool F\xD8R du svarer p\xE5 ethvert sp\xF8rgsm\xE5l.
+- Sp\xF8rgsm\xE5l om data/viden \u2192 search_knowledge
+- Sp\xF8rgsm\xE5l om projekt/status/tasks \u2192 linear_issues eller check_tasks
+- Sp\xF8rgsm\xE5l om platform/health \u2192 get_platform_health
+- Komplekse analyser \u2192 reason_deeply
+- Specifikke graph queries \u2192 query_graph
+- Multi-step workflows \u2192 run_chain
+- Kvalitetstjek \u2192 verify_output
+Du svarer ALDRIG baseret p\xE5 generel viden alene. Du henter ALTID reel platformdata f\xF8rst.
+
+PLATFORM: 448 MCP tools, 546K Neo4j nodes, 4 Railway services, 11 orchestrator tools.
 KPI: advancedPct (m\xE5l 20%), complexity avg (m\xE5l 3.0), embedding coverage (m\xE5l 100%).
 
-BRUG ALTID avancerede tools for analyse:
-- srag.query for semantic search (complexity 3)
-- kg_rag.query for multi-hop reasoning (complexity 4)
-- autonomous.graphrag for deep synthesis (complexity 8)
-- ALDRIG default til simple Cypher for komplekse sp\xF8rgsm\xE5l.
-
-Svar p\xE5 dansk medmindre brugeren skriver engelsk.
-V\xE6r proaktiv \u2014 foresl\xE5 avancerede tools og intelligence loops.`;
+Svar p\xE5 dansk medmindre brugeren skriver engelsk. V\xE6r konkret og datadrevet.`;
 var MODELS = [
   { id: "claude-sonnet", provider: "claude", displayName: "Claude Sonnet 4" },
   { id: "claude-opus", provider: "claude", displayName: "Claude Opus 4" },
@@ -14000,6 +14008,37 @@ var MODEL_TO_PROVIDER = {
   "gpt-4o": { provider: "openai", model: "gpt-4o" },
   "groq-llama": { provider: "groq", model: "llama-3.3-70b-versatile" }
 };
+openaiCompatRouter.get("/v1/metrics", (req, res) => {
+  if (!validateApiKey(req, res)) return;
+  const last24h = Date.now() - 864e5;
+  const recent = metricsBuffer.filter((m) => m.timestamp > last24h);
+  const toolCallCounts = {};
+  const modelCounts = {};
+  let totalToolRounds = 0;
+  let totalTokens = 0;
+  for (const m of recent) {
+    modelCounts[m.model] = (modelCounts[m.model] ?? 0) + 1;
+    totalToolRounds += m.tool_rounds;
+    totalTokens += m.total_tokens;
+    for (const tc of m.tool_calls) {
+      toolCallCounts[tc] = (toolCallCounts[tc] ?? 0) + 1;
+    }
+  }
+  const totalRequests = recent.length;
+  const avgToolRounds = totalRequests > 0 ? (totalToolRounds / totalRequests).toFixed(1) : "0";
+  const requestsWithTools = recent.filter((m) => m.tool_calls.length > 0).length;
+  const advancedPct = totalRequests > 0 ? (requestsWithTools / totalRequests * 100).toFixed(1) : "0";
+  res.json({
+    period: "24h",
+    total_requests: totalRequests,
+    requests_with_tools: requestsWithTools,
+    advanced_pct: parseFloat(advancedPct),
+    avg_tool_rounds: parseFloat(avgToolRounds),
+    total_tokens: totalTokens,
+    tool_call_counts: toolCallCounts,
+    model_counts: modelCounts
+  });
+});
 openaiCompatRouter.get("/v1/models", (req, res) => {
   if (!validateApiKey(req, res)) return;
   const models = MODELS.map((m) => ({
@@ -14037,6 +14076,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     let finalContent = "";
     let totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
     let toolRounds = 0;
+    const allToolNames = [];
     for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
       const result = await chatLLM({
         provider,
@@ -14053,7 +14093,9 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
       }
       if (result.tool_calls && result.tool_calls.length > 0 && round < MAX_TOOL_ROUNDS) {
         toolRounds++;
-        logger.info({ round, tools: result.tool_calls.map((tc) => tc.function.name) }, "Tool calls requested");
+        const toolNames = result.tool_calls.map((tc) => tc.function.name);
+        allToolNames.push(...toolNames);
+        logger.info({ round, tools: toolNames }, "Tool calls requested");
         loopMessages.push({
           role: "assistant",
           content: result.content || "",
@@ -14072,7 +14114,8 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
       finalContent = result.content;
       break;
     }
-    logger.info({ model, provider, toolRounds, duration_ms: Date.now() - t0 }, "OpenAI compat complete (orchestrated)");
+    logger.info({ model, provider, toolRounds, tools: allToolNames, duration_ms: Date.now() - t0 }, "OpenAI compat complete (orchestrated)");
+    recordMetrics(model || "gemini-flash", allToolNames, toolRounds, totalUsage.total_tokens);
     if (stream) {
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");

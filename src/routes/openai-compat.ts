@@ -23,6 +23,24 @@ import { v4 as uuid } from 'uuid'
 
 const MAX_TOOL_ROUNDS = 3
 
+// ─── Metrics tracking ──────────────────────────────────────────────────────
+
+interface MetricsEntry {
+  model: string
+  tool_calls: string[]
+  tool_rounds: number
+  total_tokens: number
+  timestamp: number
+}
+
+const metricsBuffer: MetricsEntry[] = []
+const MAX_METRICS = 1000
+
+function recordMetrics(model: string, toolCalls: string[], toolRounds: number, totalTokens: number) {
+  metricsBuffer.push({ model, tool_calls: toolCalls, tool_rounds: toolRounds, total_tokens: totalTokens, timestamp: Date.now() })
+  if (metricsBuffer.length > MAX_METRICS) metricsBuffer.splice(0, metricsBuffer.length - MAX_METRICS)
+}
+
 export const openaiCompatRouter = Router()
 
 // ─── Rate limiting (in-memory, per-IP) ─────────────────────────────────────
@@ -63,20 +81,22 @@ function validateApiKey(req: Request, res: Response): boolean {
 
 // ─── System prompt injection ────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `Du er strategisk partner for WidgeTDC consulting intelligence platform (v2.4.0).
+const SYSTEM_PROMPT = `Du er strategisk partner for WidgeTDC consulting intelligence platform (v1.0.0).
 
-PLATFORM: 448 MCP tools, 520K Neo4j nodes, 3 Railway services, 10 A2A skills.
-MISSION: Drive advancedPct fra 0% til 20%, eliminere human bottleneck, harveste consulting-viden.
+KRITISK REGEL: Du SKAL kalde mindst ét tool FØR du svarer på ethvert spørgsmål.
+- Spørgsmål om data/viden → search_knowledge
+- Spørgsmål om projekt/status/tasks → linear_issues eller check_tasks
+- Spørgsmål om platform/health → get_platform_health
+- Komplekse analyser → reason_deeply
+- Specifikke graph queries → query_graph
+- Multi-step workflows → run_chain
+- Kvalitetstjek → verify_output
+Du svarer ALDRIG baseret på generel viden alene. Du henter ALTID reel platformdata først.
+
+PLATFORM: 448 MCP tools, 546K Neo4j nodes, 4 Railway services, 11 orchestrator tools.
 KPI: advancedPct (mål 20%), complexity avg (mål 3.0), embedding coverage (mål 100%).
 
-BRUG ALTID avancerede tools for analyse:
-- srag.query for semantic search (complexity 3)
-- kg_rag.query for multi-hop reasoning (complexity 4)
-- autonomous.graphrag for deep synthesis (complexity 8)
-- ALDRIG default til simple Cypher for komplekse spørgsmål.
-
-Svar på dansk medmindre brugeren skriver engelsk.
-Vær proaktiv — foreslå avancerede tools og intelligence loops.`
+Svar på dansk medmindre brugeren skriver engelsk. Vær konkret og datadrevet.`
 
 // ─── Model registry ─────────────────────────────────────────────────────────
 
@@ -105,6 +125,45 @@ const MODEL_TO_PROVIDER: Record<string, { provider: string; model?: string }> = 
   'gpt-4o': { provider: 'openai', model: 'gpt-4o' },
   'groq-llama': { provider: 'groq', model: 'llama-3.3-70b-versatile' },
 }
+
+// ─── GET /v1/metrics — Tool call analytics ─────────────────────────────────
+
+openaiCompatRouter.get('/v1/metrics', (req: Request, res: Response) => {
+  if (!validateApiKey(req, res)) return
+
+  const last24h = Date.now() - 86_400_000
+  const recent = metricsBuffer.filter(m => m.timestamp > last24h)
+
+  const toolCallCounts: Record<string, number> = {}
+  const modelCounts: Record<string, number> = {}
+  let totalToolRounds = 0
+  let totalTokens = 0
+
+  for (const m of recent) {
+    modelCounts[m.model] = (modelCounts[m.model] ?? 0) + 1
+    totalToolRounds += m.tool_rounds
+    totalTokens += m.total_tokens
+    for (const tc of m.tool_calls) {
+      toolCallCounts[tc] = (toolCallCounts[tc] ?? 0) + 1
+    }
+  }
+
+  const totalRequests = recent.length
+  const avgToolRounds = totalRequests > 0 ? (totalToolRounds / totalRequests).toFixed(1) : '0'
+  const requestsWithTools = recent.filter(m => m.tool_calls.length > 0).length
+  const advancedPct = totalRequests > 0 ? ((requestsWithTools / totalRequests) * 100).toFixed(1) : '0'
+
+  res.json({
+    period: '24h',
+    total_requests: totalRequests,
+    requests_with_tools: requestsWithTools,
+    advanced_pct: parseFloat(advancedPct),
+    avg_tool_rounds: parseFloat(avgToolRounds),
+    total_tokens: totalTokens,
+    tool_call_counts: toolCallCounts,
+    model_counts: modelCounts,
+  })
+})
 
 // ─── GET /v1/models ─────────────────────────────────────────────────────────
 
@@ -159,6 +218,7 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
     let finalContent = ''
     let totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
     let toolRounds = 0
+    const allToolNames: string[] = []
 
     for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
       const result = await chatLLM({
@@ -180,7 +240,9 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
       // Check if LLM wants to call tools
       if (result.tool_calls && result.tool_calls.length > 0 && round < MAX_TOOL_ROUNDS) {
         toolRounds++
-        logger.info({ round, tools: result.tool_calls.map(tc => tc.function.name) }, 'Tool calls requested')
+        const toolNames = result.tool_calls.map(tc => tc.function.name)
+        allToolNames.push(...toolNames)
+        logger.info({ round, tools: toolNames }, 'Tool calls requested')
 
         // Add assistant message with tool_calls
         loopMessages.push({
@@ -210,7 +272,8 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
       break
     }
 
-    logger.info({ model, provider, toolRounds, duration_ms: Date.now() - t0 }, 'OpenAI compat complete (orchestrated)')
+    logger.info({ model, provider, toolRounds, tools: allToolNames, duration_ms: Date.now() - t0 }, 'OpenAI compat complete (orchestrated)')
+    recordMetrics(model || 'gemini-flash', allToolNames, toolRounds, totalUsage.total_tokens)
 
     // ─── Return response (streaming or non-streaming) ─────────────────
     if (stream) {
