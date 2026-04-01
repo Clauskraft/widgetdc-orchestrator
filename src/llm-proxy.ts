@@ -55,7 +55,7 @@ function getProviders(): Record<string, ProviderConfig> {
   if (config.dashscopeApiKey) {
     providers.qwen = {
       name: 'Qwen',
-      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
       apiKey: config.dashscopeApiKey,
       defaultModel: 'qwen-plus',
       type: 'openai-compat',
