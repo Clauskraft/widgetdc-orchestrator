@@ -37,6 +37,8 @@ import { auditRouter } from './routes/audit.js'
 import { knowledgeRouter } from './routes/knowledge.js'
 import { adoptionRouter } from './routes/adoption.js'
 import { artifactRouter } from './routes/artifacts.js'
+import { notebookRouter } from './routes/notebooks.js'
+import { drillRouter } from './routes/drill.js'
 import { monitorRouter } from './routes/monitor.js'
 import { s1s4Router } from './routes/s1-s4.js'
 import { auditMiddleware } from './audit.js'
@@ -108,6 +110,8 @@ app.use('/api/audit', requireApiKey, auditRouter)
 app.use('/api/knowledge', requireApiKey, knowledgeRouter)
 app.use('/api/adoption', requireApiKey, adoptionRouter)
 app.use('/api/artifacts', requireApiKey, artifactRouter)
+app.use('/api/notebooks', requireApiKey, notebookRouter)
+app.use('/api/drill', requireApiKey, drillRouter)
 app.use('/api/llm', requireApiKey, llmRouter)
 app.use('/monitor', requireApiKey, monitorRouter)
 app.use('/api/s1-s4', requireApiKey, s1s4Router)

@@ -1,20 +1,19 @@
 import { createRequire } from 'module'; const require = createRequire(import.meta.url);
 var __defProp = Object.defineProperty;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __esm = (fn, res) => function __init() {
+  return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+};
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// src/index.ts
-import "dotenv/config";
-import express from "express";
-import cors from "cors";
-import helmet from "helmet";
-import { createServer } from "http";
-import path from "path";
-import { fileURLToPath } from "url";
-
 // src/config.ts
+var config_exports = {};
+__export(config_exports, {
+  config: () => config
+});
 import "dotenv/config";
 function required(key) {
   const val = process.env[key];
@@ -24,43 +23,60 @@ function required(key) {
 function optional(key, fallback) {
   return process.env[key] ?? fallback;
 }
-var config = {
-  port: parseInt(optional("PORT", "4000"), 10),
-  nodeEnv: optional("NODE_ENV", "production"),
-  // WidgeTDC Backend (Railway monolith)
-  backendUrl: optional("BACKEND_URL", "https://backend-production-d3da.up.railway.app"),
-  backendApiKey: required("BACKEND_API_KEY"),
-  // LLM providers (for direct LLM chat proxy)
-  deepseekApiKey: optional("DEEPSEEK_API_KEY", ""),
-  dashscopeApiKey: optional("DASHSCOPE_API_KEY", ""),
-  // Qwen
-  geminiApiKey: optional("GEMINI_API_KEY", ""),
-  openaiApiKey: optional("OPENAI_API_KEY", ""),
-  anthropicApiKey: optional("ANTHROPIC_API_KEY", ""),
-  groqApiKey: optional("GROQ_API_KEY", ""),
-  // RLM Engine (optional — cognitive reasoning proxy)
-  rlmUrl: optional("RLM_URL", "https://rlm-engine-production.up.railway.app"),
-  // Redis (optional — for agent registry persistence across restarts)
-  redisUrl: optional("REDIS_URL", ""),
-  // Orchestrator API key (required for /agents/register and /tools/call)
-  orchestratorApiKey: optional("ORCHESTRATOR_API_KEY", ""),
-  // OpenClaw gateway (optional — for terminal/agent spawning)
-  openclawUrl: optional("OPENCLAW_URL", ""),
-  openclawToken: optional("OPENCLAW_GATEWAY_TOKEN", ""),
-  // LibreChat (optional — for agent visibility + health)
-  libreChatUrl: optional("LIBRECHAT_URL", ""),
-  // Orchestrator identity
-  orchestratorId: optional("ORCHESTRATOR_ID", "widgetdc-orchestrator-v1"),
-  // WebSocket heartbeat interval (ms)
-  wsHeartbeatMs: parseInt(optional("WS_HEARTBEAT_MS", "30000"), 10),
-  // MCP tool call timeout (ms)
-  mcpTimeoutMs: parseInt(optional("MCP_TIMEOUT_MS", "60000"), 10),
-  // Rate limiting: max concurrent tool calls per agent
-  maxConcurrentPerAgent: parseInt(optional("MAX_CONCURRENT_PER_AGENT", "5"), 10),
-  agentOpenAccess: optional("AGENT_OPEN_ACCESS", "true") === "true"
-};
+var config;
+var init_config = __esm({
+  "src/config.ts"() {
+    "use strict";
+    config = {
+      port: parseInt(optional("PORT", "4000"), 10),
+      nodeEnv: optional("NODE_ENV", "production"),
+      // WidgeTDC Backend (Railway monolith)
+      backendUrl: optional("BACKEND_URL", "https://backend-production-d3da.up.railway.app"),
+      backendApiKey: required("BACKEND_API_KEY"),
+      // LLM providers (for direct LLM chat proxy)
+      deepseekApiKey: optional("DEEPSEEK_API_KEY", ""),
+      dashscopeApiKey: optional("DASHSCOPE_API_KEY", ""),
+      // Qwen
+      geminiApiKey: optional("GEMINI_API_KEY", ""),
+      openaiApiKey: optional("OPENAI_API_KEY", ""),
+      anthropicApiKey: optional("ANTHROPIC_API_KEY", ""),
+      groqApiKey: optional("GROQ_API_KEY", ""),
+      // RLM Engine (optional — cognitive reasoning proxy)
+      rlmUrl: optional("RLM_URL", "https://rlm-engine-production.up.railway.app"),
+      // Redis (optional — for agent registry persistence across restarts)
+      redisUrl: optional("REDIS_URL", ""),
+      // Orchestrator API key (required for /agents/register and /tools/call)
+      orchestratorApiKey: optional("ORCHESTRATOR_API_KEY", ""),
+      // OpenClaw gateway (optional — for terminal/agent spawning)
+      openclawUrl: optional("OPENCLAW_URL", ""),
+      openclawToken: optional("OPENCLAW_GATEWAY_TOKEN", ""),
+      // LibreChat (optional — for agent visibility + health)
+      libreChatUrl: optional("LIBRECHAT_URL", ""),
+      // Orchestrator identity
+      orchestratorId: optional("ORCHESTRATOR_ID", "widgetdc-orchestrator-v1"),
+      // WebSocket heartbeat interval (ms)
+      wsHeartbeatMs: parseInt(optional("WS_HEARTBEAT_MS", "30000"), 10),
+      // MCP tool call timeout (ms)
+      mcpTimeoutMs: parseInt(optional("MCP_TIMEOUT_MS", "60000"), 10),
+      // Rate limiting: max concurrent tool calls per agent
+      maxConcurrentPerAgent: parseInt(optional("MAX_CONCURRENT_PER_AGENT", "5"), 10),
+      agentOpenAccess: optional("AGENT_OPEN_ACCESS", "true") === "true"
+    };
+  }
+});
+
+// src/index.ts
+init_config();
+import "dotenv/config";
+import express from "express";
+import cors from "cors";
+import helmet from "helmet";
+import { createServer } from "http";
+import path from "path";
+import { fileURLToPath } from "url";
 
 // src/logger.ts
+init_config();
 import pino from "pino";
 var logger = pino({
   level: config.nodeEnv === "production" ? "info" : "debug",
@@ -78,6 +94,7 @@ function childLogger(correlationId) {
 
 // src/chat-broadcaster.ts
 import { WebSocketServer, WebSocket } from "ws";
+init_config();
 
 // src/sse.ts
 var clients = [];
@@ -599,6 +616,7 @@ var AgentRegistry = {
 };
 
 // src/slack.ts
+init_config();
 function isSlackEnabled() {
   return Boolean(config.backendUrl) && Boolean(config.backendApiKey);
 }
@@ -9694,6 +9712,7 @@ agentsRouter.post("/:id/heartbeat", (req, res) => {
 import { Router as Router2 } from "express";
 
 // src/mcp-caller.ts
+init_config();
 var MAX_RETRIES = 2;
 var RETRY_DELAY_MS = 1e3;
 async function callMcpTool(opts) {
@@ -9877,6 +9896,9 @@ async function aggregateSseStream(res, callId, log) {
   }
 }
 
+// src/routes/tools.ts
+init_config();
+
 // src/dual-rag.ts
 import { v4 as uuid } from "uuid";
 async function dualChannelRAG(query, options) {
@@ -9968,6 +9990,7 @@ LIMIT 15`;
 }
 
 // src/cognitive-proxy.ts
+init_config();
 var COGNITIVE_ROUTES = {
   reason: "/reason",
   analyze: "/cognitive/analyze",
@@ -10655,6 +10678,7 @@ async function runChecksParallel(checks, chainOutput) {
 }
 
 // src/investigate-chain.ts
+init_config();
 function buildInvestigateChain(topic) {
   return {
     chain_id: `investigate-${Date.now().toString(36)}`,
@@ -11351,6 +11375,50 @@ Error: ${execution.error}` : "");
         return `Chain execution failed: ${err}`;
       }
     }
+    case "create_notebook": {
+      const topic = args.topic;
+      if (!topic) return "Error: topic is required";
+      const customCells = args.cells;
+      const cells = customCells && customCells.length > 0 ? customCells : [
+        { type: "query", id: "q1", query: `MATCH (n) WHERE toLower(coalesce(n.title,'')) CONTAINS toLower('${topic.replace(/'/g, "\\'")}') OR toLower(coalesce(n.name,'')) CONTAINS toLower('${topic.replace(/'/g, "\\'")}') RETURN labels(n)[0] AS type, coalesce(n.title, n.name) AS name, n.status AS status LIMIT 20` },
+        { type: "query", id: "q2", query: `What are the key insights and patterns related to ${topic}?` },
+        { type: "insight", id: "i1", prompt: `Analyze the findings about "${topic}" and provide strategic consulting insights, key patterns, and recommendations.` },
+        { type: "data", id: "d1", source_cell_id: "q1", visualization: "table" },
+        { type: "action", id: "a1", recommendation: `Review the analysis of "${topic}" and determine next steps for the consulting engagement.` }
+      ];
+      try {
+        const { config: appConfig } = await Promise.resolve().then(() => (init_config(), config_exports));
+        const baseUrl = appConfig.nodeEnv === "production" ? "https://orchestrator-production-c27e.up.railway.app" : `http://localhost:${appConfig.port}`;
+        const resp = await fetch(`${baseUrl}/api/notebooks/execute`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${appConfig.orchestratorApiKey}`
+          },
+          body: JSON.stringify({ title: `Notebook: ${topic}`, cells, created_by: "chat-orchestrator" })
+        });
+        const data = await resp.json();
+        if (!data.success) return `Notebook creation failed: ${data.error}`;
+        const nb = data.notebook;
+        const cellSummaries = nb.cells.map((c) => {
+          if (c.type === "query") return `[Query] ${c.query.slice(0, 60)}... \u2192 ${c.result ? "OK" : "no result"}`;
+          if (c.type === "insight") return `[Insight] ${(c.content ?? "").slice(0, 100)}...`;
+          if (c.type === "data") return `[Data] from ${c.source_cell_id}: ${c.result ? "OK" : "no data"}`;
+          if (c.type === "action") return `[Action] ${c.recommendation.slice(0, 80)}`;
+          return `[${c.type}]`;
+        }).join("\n");
+        return `Notebook created: "${nb.title}"
+ID: ${nb.$id}
+Cells: ${nb.cells.length}
+
+${cellSummaries}
+
+View: /api/notebooks/${encodeURIComponent(nb.$id)}
+Markdown: /api/notebooks/${encodeURIComponent(nb.$id)}.md`;
+      } catch (err) {
+        return `Notebook creation failed: ${err}`;
+      }
+    }
     case "verify_output": {
       const content = args.content;
       const checks = args.checks ?? [
@@ -11543,8 +11611,10 @@ toolsRouter.get("/catalog", async (_req, res) => {
 
 // src/routes/chat.ts
 import { Router as Router3 } from "express";
+init_config();
 
 // src/llm-proxy.ts
+init_config();
 function getProviders() {
   const providers = {};
   if (config.deepseekApiKey) {
@@ -13494,6 +13564,7 @@ cronRouter.delete("/:id", (req, res) => {
 import { Router as Router8 } from "express";
 
 // src/routes/openclaw.ts
+init_config();
 import { Router as Router7 } from "express";
 var openclawRouter = Router7();
 var healthStatus = {
@@ -13668,6 +13739,7 @@ openclawRouter.all("/proxy/*", async (req, res) => {
 });
 
 // src/routes/dashboard.ts
+init_config();
 var dashboardRouter = Router8();
 var CACHE_KEY = "orchestrator:dashboard-cache";
 var CACHE_TTL = 15;
@@ -13930,6 +14002,7 @@ auditRouter.get("/log", async (req, res) => {
 });
 
 // src/routes/knowledge.ts
+init_config();
 import { Router as Router11 } from "express";
 var knowledgeRouter = Router11();
 var FEED_CACHE_KEY = "orchestrator:knowledge-feed";
@@ -14748,6 +14821,7 @@ async function renderNotebookMarkdown(_req, res, id) {
 // src/routes/drill.ts
 import { Router as Router15 } from "express";
 import { randomUUID as randomUUID3 } from "crypto";
+init_config();
 var drillRouter = Router15();
 var DRILL_PREFIX = "orchestrator:drill:";
 var SESSION_TTL = 3600;
@@ -15492,6 +15566,7 @@ s1s4Router.post("/trigger", async (req, res) => {
 });
 
 // src/auth.ts
+init_config();
 function requireApiKey(req, res, next) {
   if (!config.orchestratorApiKey) {
     next();
@@ -15679,6 +15754,7 @@ async function runFullHarvest() {
 
 // src/routes/openai-compat.ts
 import { Router as Router18 } from "express";
+init_config();
 import { v4 as uuid10 } from "uuid";
 var MAX_TOOL_ROUNDS = 2;
 var TOOL_CATEGORIES = [
@@ -15689,7 +15765,8 @@ var TOOL_CATEGORIES = [
   { keywords: /\b(graph|cypher|node|relation|neo4j|count|match)\b/i, tools: ["query_graph"] },
   { keywords: /\b(chain|workflow|sequential|parallel|debate|multi.step|pipeline)\b/i, tools: ["run_chain"] },
   { keywords: /\b(verify|check|quality|audit|compliance|valid)\b/i, tools: ["verify_output"] },
-  { keywords: /\b(mcp|tool|call|endpoint|api)\b/i, tools: ["call_mcp_tool"] }
+  { keywords: /\b(mcp|tool|call|endpoint|api)\b/i, tools: ["call_mcp_tool"] },
+  { keywords: /\b(notebook|celle|cells|query.*insight|interactive.*analysis|structured.*analysis)\b/i, tools: ["create_notebook"] }
 ];
 var FALLBACK_TOOLS = ["search_knowledge", "get_platform_health", "linear_issues"];
 function selectToolsForQuery(userMessage) {

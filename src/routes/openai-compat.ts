@@ -39,6 +39,7 @@ const TOOL_CATEGORIES: ToolCategory[] = [
   { keywords: /\b(chain|workflow|sequential|parallel|debate|multi.step|pipeline)\b/i, tools: ['run_chain'] },
   { keywords: /\b(verify|check|quality|audit|compliance|valid)\b/i, tools: ['verify_output'] },
   { keywords: /\b(mcp|tool|call|endpoint|api)\b/i, tools: ['call_mcp_tool'] },
+  { keywords: /\b(notebook|celle|cells|query.*insight|interactive.*analysis|structured.*analysis)\b/i, tools: ['create_notebook'] },
 ]
 
 const FALLBACK_TOOLS = ['search_knowledge', 'get_platform_health', 'linear_issues']

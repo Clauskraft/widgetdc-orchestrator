@@ -195,6 +195,36 @@ export const ORCHESTRATOR_TOOLS = [
   {
     type: 'function' as const,
     function: {
+      name: 'create_notebook',
+      description: 'Create an interactive consulting notebook with query, insight, data, and action cells. Executes all cells and returns a full notebook with results. Great for structured analysis on any topic.',
+      parameters: {
+        type: 'object',
+        properties: {
+          topic: { type: 'string', description: 'The topic to build a notebook around' },
+          cells: {
+            type: 'array',
+            description: 'Optional: custom cells array. If omitted, auto-generates cells from topic.',
+            items: {
+              type: 'object',
+              properties: {
+                type: { type: 'string', enum: ['query', 'insight', 'data', 'action'] },
+                id: { type: 'string' },
+                query: { type: 'string' },
+                prompt: { type: 'string' },
+                source_cell_id: { type: 'string' },
+                visualization: { type: 'string', enum: ['table', 'chart'] },
+                recommendation: { type: 'string' },
+              },
+            },
+          },
+        },
+        required: ['topic'],
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
       name: 'verify_output',
       description: 'Run verification checks on a piece of content or data. Checks quality, accuracy, and compliance. Use after getting results from other tools to validate them before presenting to user.',
       parameters: {
@@ -532,6 +562,54 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
         return summary + output + (execution.error ? `\nError: ${execution.error}` : '')
       } catch (err) {
         return `Chain execution failed: ${err}`
+      }
+    }
+
+    case 'create_notebook': {
+      const topic = args.topic as string
+      if (!topic) return 'Error: topic is required'
+
+      // Build cells: auto-generate from topic if not provided
+      const customCells = args.cells as any[] | undefined
+      const cells = customCells && customCells.length > 0
+        ? customCells
+        : [
+            { type: 'query', id: 'q1', query: `MATCH (n) WHERE toLower(coalesce(n.title,'')) CONTAINS toLower('${topic.replace(/'/g, "\\'")}') OR toLower(coalesce(n.name,'')) CONTAINS toLower('${topic.replace(/'/g, "\\'")}') RETURN labels(n)[0] AS type, coalesce(n.title, n.name) AS name, n.status AS status LIMIT 20` },
+            { type: 'query', id: 'q2', query: `What are the key insights and patterns related to ${topic}?` },
+            { type: 'insight', id: 'i1', prompt: `Analyze the findings about "${topic}" and provide strategic consulting insights, key patterns, and recommendations.` },
+            { type: 'data', id: 'd1', source_cell_id: 'q1', visualization: 'table' },
+            { type: 'action', id: 'a1', recommendation: `Review the analysis of "${topic}" and determine next steps for the consulting engagement.` },
+          ]
+
+      try {
+        // Call the notebook execute endpoint internally
+        const { config: appConfig } = await import('./config.js')
+        const baseUrl = appConfig.nodeEnv === 'production'
+          ? 'https://orchestrator-production-c27e.up.railway.app'
+          : `http://localhost:${appConfig.port}`
+        const resp = await fetch(`${baseUrl}/api/notebooks/execute`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${appConfig.orchestratorApiKey}`,
+          },
+          body: JSON.stringify({ title: `Notebook: ${topic}`, cells, created_by: 'chat-orchestrator' }),
+        })
+        const data = await resp.json() as { success: boolean; notebook?: { $id: string; title: string; cells: any[] }; error?: string }
+        if (!data.success) return `Notebook creation failed: ${data.error}`
+
+        const nb = data.notebook!
+        const cellSummaries = nb.cells.map((c: any) => {
+          if (c.type === 'query') return `[Query] ${c.query.slice(0, 60)}... → ${c.result ? 'OK' : 'no result'}`
+          if (c.type === 'insight') return `[Insight] ${(c.content ?? '').slice(0, 100)}...`
+          if (c.type === 'data') return `[Data] from ${c.source_cell_id}: ${c.result ? 'OK' : 'no data'}`
+          if (c.type === 'action') return `[Action] ${c.recommendation.slice(0, 80)}`
+          return `[${c.type}]`
+        }).join('\n')
+
+        return `Notebook created: "${nb.title}"\nID: ${nb.$id}\nCells: ${nb.cells.length}\n\n${cellSummaries}\n\nView: /api/notebooks/${encodeURIComponent(nb.$id)}\nMarkdown: /api/notebooks/${encodeURIComponent(nb.$id)}.md`
+      } catch (err) {
+        return `Notebook creation failed: ${err}`
       }
     }
 
