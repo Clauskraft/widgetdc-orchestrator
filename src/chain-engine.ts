@@ -38,11 +38,17 @@ export interface ChainStep {
   timeout_ms?: number
 }
 
+/** Funnel stage names matching the LIN-165 synthesis funnel model */
+export const FUNNEL_STAGES = [
+  'signal', 'pattern', 'block', 'assembly', 'arbitration', 'decision', 'artifact',
+] as const
+export type FunnelStage = typeof FUNNEL_STAGES[number]
+
 export interface ChainDefinition {
   chain_id?: string
   name: string
   description?: string
-  mode: 'sequential' | 'parallel' | 'debate' | 'loop' | 'adaptive'
+  mode: 'sequential' | 'parallel' | 'debate' | 'loop' | 'adaptive' | 'funnel'
   steps: ChainStep[]
   /** For loops: max iterations before forced exit */
   max_iterations?: number
@@ -54,6 +60,10 @@ export interface ChainDefinition {
   query?: string
   /** For debate/GVU: minimum confidence threshold (0-1) */
   confidence_threshold?: number
+  /** For funnel: which stage to start at (defaults to 'signal') */
+  funnel_entry?: FunnelStage
+  /** For funnel: pre-loaded context for entry stage */
+  funnel_context?: Record<string, unknown>
 }
 
 export interface ChainExecution {
@@ -306,6 +316,118 @@ async function runAdaptive(
   return { results, chosen_topology: topology }
 }
 
+// ─── Funnel Pipeline (LIN-533) ─────────────────────────────────────────────
+// 7-stage synthesis funnel: Signal → Pattern → Block → Assembly → Arbitration → Decision → Artifact
+// Each stage persists intermediate state in Redis for resume capability.
+
+interface FunnelState {
+  execution_id: string
+  current_stage: FunnelStage
+  stage_outputs: Partial<Record<FunnelStage, unknown>>
+  started_at: string
+  last_updated: string
+}
+
+const FUNNEL_REDIS_PREFIX = 'orchestrator:funnel:'
+
+async function persistFunnelState(state: FunnelState): Promise<void> {
+  const redis = getRedis()
+  if (!redis) return
+  await redis.set(
+    `${FUNNEL_REDIS_PREFIX}${state.execution_id}`,
+    JSON.stringify(state),
+    'EX', 86400 * 7, // 7 day TTL
+  ).catch(() => {})
+}
+
+async function loadFunnelState(executionId: string): Promise<FunnelState | null> {
+  const redis = getRedis()
+  if (!redis) return null
+  try {
+    const raw = await redis.get(`${FUNNEL_REDIS_PREFIX}${executionId}`)
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Map funnel stages to their step in the chain.
+ * If fewer steps than 7 are provided, stages without a step are skipped.
+ * Steps are mapped by index to FUNNEL_STAGES order.
+ */
+async function runFunnel(
+  steps: ChainStep[],
+  entryStage: FunnelStage = 'signal',
+  preloadedContext?: Record<string, unknown>,
+  executionId?: string,
+): Promise<{ results: StepResult[]; funnel_state: FunnelState }> {
+  const execId = executionId ?? uuid()
+  const entryIndex = FUNNEL_STAGES.indexOf(entryStage)
+
+  // Try to resume from existing state
+  let state = await loadFunnelState(execId)
+  if (!state) {
+    state = {
+      execution_id: execId,
+      current_stage: entryStage,
+      stage_outputs: {},
+      started_at: new Date().toISOString(),
+      last_updated: new Date().toISOString(),
+    }
+    // Inject preloaded context as previous stage output
+    if (preloadedContext && entryIndex > 0) {
+      const prevStage = FUNNEL_STAGES[entryIndex - 1]
+      state.stage_outputs[prevStage] = preloadedContext
+    }
+  }
+
+  const results: StepResult[] = []
+
+  for (let i = entryIndex; i < FUNNEL_STAGES.length; i++) {
+    const stage = FUNNEL_STAGES[i]
+    const step = steps[i]
+
+    // Skip stages without a defined step
+    if (!step) {
+      logger.info({ stage, index: i }, 'Funnel: no step defined for stage, skipping')
+      continue
+    }
+
+    // Get output from previous stage as input
+    const prevStage = i > 0 ? FUNNEL_STAGES[i - 1] : null
+    const previousOutput = prevStage ? state.stage_outputs[prevStage] : (preloadedContext ?? null)
+
+    state.current_stage = stage
+    state.last_updated = new Date().toISOString()
+    await persistFunnelState(state)
+
+    logger.info({ stage, step_index: i, execution_id: execId }, 'Funnel: executing stage')
+
+    // Tag step with funnel stage ID
+    const taggedStep = { ...step, id: step.id ?? `funnel-${stage}` }
+    const result = await executeStep(taggedStep, previousOutput)
+
+    // Annotate result with stage info
+    ;(result as any).funnel_stage = stage
+    ;(result as any).stage_index = i
+    results.push(result)
+
+    // Persist stage output
+    state.stage_outputs[stage] = result.output
+    state.last_updated = new Date().toISOString()
+    await persistFunnelState(state)
+
+    // Stop on error — state is saved for resume
+    if (result.status === 'error') {
+      logger.warn({ stage, error: result.output }, 'Funnel: stage failed, state saved for resume')
+      break
+    }
+  }
+
+  return { results, funnel_state: state }
+}
+
 // ─── GVU (Generator-Verifier-Updater) Debate ────────────────────────────────
 
 async function runDebateGVU(
@@ -456,6 +578,17 @@ export async function executeChain(def: ChainDefinition): Promise<ChainExecution
         const adaptive = await runAdaptive(resolvedSteps, def.query, def.judge_agent, def.confidence_threshold)
         results = adaptive.results
         ;(execution as any).chosen_topology = adaptive.chosen_topology
+        break
+      }
+      case 'funnel': {
+        const funnelResult = await runFunnel(
+          resolvedSteps,
+          def.funnel_entry,
+          def.funnel_context,
+          executionId,
+        )
+        results = funnelResult.results
+        ;(execution as any).funnel_state = funnelResult.funnel_state
         break
       }
       default:

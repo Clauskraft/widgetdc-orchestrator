@@ -86,3 +86,33 @@ export function notifyChatMessage(from: string, to: string, message: string): vo
     channel: '#ops-alerts',
   })
 }
+
+export function notifyAdoptionDigest(digest: {
+  period: string
+  conversations: number
+  pipelines: number
+  artifacts: number
+  agents: number
+  toolCalls: number
+  chains: number
+  featuresPct: number
+  trend: 'up' | 'down' | 'flat'
+}): void {
+  const trendEmoji = digest.trend === 'up' ? ':chart_with_upwards_trend:' : digest.trend === 'down' ? ':chart_with_downwards_trend:' : ':bar_chart:'
+
+  postToSlack({
+    text: [
+      `${trendEmoji} *Weekly Adoption Report* (${digest.period})`,
+      '',
+      `*Conversations:* ${digest.conversations} | *Pipelines:* ${digest.pipelines} | *Artifacts:* ${digest.artifacts}`,
+      `*Active Agents:* ${digest.agents} | *Tool Calls:* ${digest.toolCalls} | *Chains:* ${digest.chains}`,
+      `*Feature Adoption:* ${digest.featuresPct}%`,
+      '',
+      `Trend: ${digest.trend === 'up' ? 'Growing' : digest.trend === 'down' ? 'Declining' : 'Stable'}`,
+    ].join('\n'),
+    level: 'info',
+    title: `Weekly Adoption Digest — ${digest.period}`,
+    source: 'orchestrator',
+    channel: '#ops-status',
+  })
+}

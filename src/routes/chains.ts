@@ -2,7 +2,7 @@
  * routes/chains.ts — Agent chain/swarm execution endpoints.
  */
 import { Router, Request, Response } from 'express'
-import { executeChain, getExecution, listExecutions, type ChainDefinition } from '../chain-engine.js'
+import { executeChain, getExecution, listExecutions, FUNNEL_STAGES, type ChainDefinition, type FunnelStage } from '../chain-engine.js'
 import { logger } from '../logger.js'
 
 export const chainsRouter = Router()
@@ -13,16 +13,45 @@ export const chainsRouter = Router()
 chainsRouter.post('/execute', async (req: Request, res: Response) => {
   const body = req.body as ChainDefinition
 
+  const validModes = ['sequential', 'parallel', 'loop', 'debate', 'adaptive', 'funnel']
+
   if (!body.name || !body.mode || !Array.isArray(body.steps) || body.steps.length === 0) {
     res.status(400).json({
       success: false,
       error: {
         code: 'VALIDATION_ERROR',
-        message: 'Required: name, mode (sequential|parallel|loop|debate|adaptive), steps[] (non-empty)',
+        message: `Required: name, mode (${validModes.join('|')}), steps[] (non-empty)`,
         status_code: 400,
       },
     })
     return
+  }
+
+  if (!validModes.includes(body.mode)) {
+    res.status(400).json({
+      success: false,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: `Invalid mode '${body.mode}'. Valid: ${validModes.join(', ')}`,
+        status_code: 400,
+      },
+    })
+    return
+  }
+
+  // Validate funnel-specific params
+  if (body.mode === 'funnel' && body.funnel_entry) {
+    if (!FUNNEL_STAGES.includes(body.funnel_entry as FunnelStage)) {
+      res.status(400).json({
+        success: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: `Invalid funnel_entry '${body.funnel_entry}'. Valid stages: ${FUNNEL_STAGES.join(', ')}`,
+          status_code: 400,
+        },
+      })
+      return
+    }
   }
 
   // Validate steps

@@ -675,6 +675,24 @@ ${message.slice(0, 500)}`,
     channel: "#ops-alerts"
   });
 }
+function notifyAdoptionDigest(digest) {
+  const trendEmoji2 = digest.trend === "up" ? ":chart_with_upwards_trend:" : digest.trend === "down" ? ":chart_with_downwards_trend:" : ":bar_chart:";
+  postToSlack({
+    text: [
+      `${trendEmoji2} *Weekly Adoption Report* (${digest.period})`,
+      "",
+      `*Conversations:* ${digest.conversations} | *Pipelines:* ${digest.pipelines} | *Artifacts:* ${digest.artifacts}`,
+      `*Active Agents:* ${digest.agents} | *Tool Calls:* ${digest.toolCalls} | *Chains:* ${digest.chains}`,
+      `*Feature Adoption:* ${digest.featuresPct}%`,
+      "",
+      `Trend: ${digest.trend === "up" ? "Growing" : digest.trend === "down" ? "Declining" : "Stable"}`
+    ].join("\n"),
+    level: "info",
+    title: `Weekly Adoption Digest \u2014 ${digest.period}`,
+    source: "orchestrator",
+    channel: "#ops-status"
+  });
+}
 
 // node_modules/@sinclair/typebox/build/esm/value/guard/guard.mjs
 function IsAsyncIterator(value) {
@@ -10299,6 +10317,15 @@ function buildRoutingDashboardData(recentExecutions) {
 }
 
 // src/chain-engine.ts
+var FUNNEL_STAGES = [
+  "signal",
+  "pattern",
+  "block",
+  "assembly",
+  "arbitration",
+  "decision",
+  "artifact"
+];
 var executions = /* @__PURE__ */ new Map();
 function persistExecution(exec) {
   executions.set(exec.execution_id, exec);
@@ -10450,6 +10477,75 @@ async function runAdaptive(steps, query, judgeAgent, confidenceThreshold = 0.6) 
   });
   return { results, chosen_topology: topology };
 }
+var FUNNEL_REDIS_PREFIX = "orchestrator:funnel:";
+async function persistFunnelState(state) {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  await redis2.set(
+    `${FUNNEL_REDIS_PREFIX}${state.execution_id}`,
+    JSON.stringify(state),
+    "EX",
+    86400 * 7
+    // 7 day TTL
+  ).catch(() => {
+  });
+}
+async function loadFunnelState(executionId) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${FUNNEL_REDIS_PREFIX}${executionId}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+async function runFunnel(steps, entryStage = "signal", preloadedContext, executionId) {
+  const execId = executionId ?? uuid3();
+  const entryIndex = FUNNEL_STAGES.indexOf(entryStage);
+  let state = await loadFunnelState(execId);
+  if (!state) {
+    state = {
+      execution_id: execId,
+      current_stage: entryStage,
+      stage_outputs: {},
+      started_at: (/* @__PURE__ */ new Date()).toISOString(),
+      last_updated: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    if (preloadedContext && entryIndex > 0) {
+      const prevStage = FUNNEL_STAGES[entryIndex - 1];
+      state.stage_outputs[prevStage] = preloadedContext;
+    }
+  }
+  const results = [];
+  for (let i = entryIndex; i < FUNNEL_STAGES.length; i++) {
+    const stage = FUNNEL_STAGES[i];
+    const step = steps[i];
+    if (!step) {
+      logger.info({ stage, index: i }, "Funnel: no step defined for stage, skipping");
+      continue;
+    }
+    const prevStage = i > 0 ? FUNNEL_STAGES[i - 1] : null;
+    const previousOutput = prevStage ? state.stage_outputs[prevStage] : preloadedContext ?? null;
+    state.current_stage = stage;
+    state.last_updated = (/* @__PURE__ */ new Date()).toISOString();
+    await persistFunnelState(state);
+    logger.info({ stage, step_index: i, execution_id: execId }, "Funnel: executing stage");
+    const taggedStep = { ...step, id: step.id ?? `funnel-${stage}` };
+    const result = await executeStep(taggedStep, previousOutput);
+    result.funnel_stage = stage;
+    result.stage_index = i;
+    results.push(result);
+    state.stage_outputs[stage] = result.output;
+    state.last_updated = (/* @__PURE__ */ new Date()).toISOString();
+    await persistFunnelState(state);
+    if (result.status === "error") {
+      logger.warn({ stage, error: result.output }, "Funnel: stage failed, state saved for resume");
+      break;
+    }
+  }
+  return { results, funnel_state: state };
+}
 async function runDebateGVU(steps, judgeAgent, confidenceThreshold = 0.6) {
   const debateResults = await runParallel(steps);
   if (!judgeAgent) return debateResults;
@@ -10558,6 +10654,17 @@ async function executeChain(def) {
         const adaptive = await runAdaptive(resolvedSteps, def.query, def.judge_agent, def.confidence_threshold);
         results = adaptive.results;
         execution.chosen_topology = adaptive.chosen_topology;
+        break;
+      }
+      case "funnel": {
+        const funnelResult = await runFunnel(
+          resolvedSteps,
+          def.funnel_entry,
+          def.funnel_context,
+          executionId
+        );
+        results = funnelResult.results;
+        execution.funnel_state = funnelResult.funnel_state;
         break;
       }
       default:
@@ -12616,16 +12723,41 @@ import { Router as Router4 } from "express";
 var chainsRouter = Router4();
 chainsRouter.post("/execute", async (req, res) => {
   const body = req.body;
+  const validModes = ["sequential", "parallel", "loop", "debate", "adaptive", "funnel"];
   if (!body.name || !body.mode || !Array.isArray(body.steps) || body.steps.length === 0) {
     res.status(400).json({
       success: false,
       error: {
         code: "VALIDATION_ERROR",
-        message: "Required: name, mode (sequential|parallel|loop|debate|adaptive), steps[] (non-empty)",
+        message: `Required: name, mode (${validModes.join("|")}), steps[] (non-empty)`,
         status_code: 400
       }
     });
     return;
+  }
+  if (!validModes.includes(body.mode)) {
+    res.status(400).json({
+      success: false,
+      error: {
+        code: "VALIDATION_ERROR",
+        message: `Invalid mode '${body.mode}'. Valid: ${validModes.join(", ")}`,
+        status_code: 400
+      }
+    });
+    return;
+  }
+  if (body.mode === "funnel" && body.funnel_entry) {
+    if (!FUNNEL_STAGES.includes(body.funnel_entry)) {
+      res.status(400).json({
+        success: false,
+        error: {
+          code: "VALIDATION_ERROR",
+          message: `Invalid funnel_entry '${body.funnel_entry}'. Valid stages: ${FUNNEL_STAGES.join(", ")}`,
+          status_code: 400
+        }
+      });
+      return;
+    }
   }
   for (const step of body.steps) {
     if (!step.agent_id) {
@@ -12743,7 +12875,7 @@ cognitiveRouter.get("/health", async (_req, res) => {
 });
 
 // src/routes/cron.ts
-import { Router as Router6 } from "express";
+import { Router as Router7 } from "express";
 
 // src/cron-scheduler.ts
 import cron from "node-cron";
@@ -12973,6 +13105,260 @@ async function runSelfCorrect() {
   return report;
 }
 
+// src/routes/adoption.ts
+import { Router as Router6 } from "express";
+import { v4 as uuid7 } from "uuid";
+var adoptionRouter = Router6();
+var REDIS_KEY3 = "orchestrator:adoption-metrics";
+var REDIS_TRENDS_KEY = "orchestrator:adoption-trends";
+var DEFAULT_METRICS = {
+  features_done: 14,
+  features_total: 54,
+  features_pct: 25.9,
+  milestones: {
+    M0: { status: "complete", tasks: 3, done: 3 },
+    M1: { status: "complete", tasks: 8, done: 8 },
+    M2: { status: "in_progress", tasks: 6, done: 6 },
+    M3: { status: "in_progress", tasks: 6, done: 0 },
+    M4: { status: "pending", tasks: 31, done: 0 }
+  },
+  assistants: 5,
+  pipelines: 3,
+  obsidian_views: 3
+};
+adoptionRouter.get("/metrics", async (_req, res) => {
+  const redis2 = getRedis();
+  if (redis2) {
+    try {
+      const cached = await redis2.get(REDIS_KEY3);
+      if (cached) {
+        res.json(JSON.parse(cached));
+        return;
+      }
+    } catch (err) {
+      logger.warn({ err: String(err) }, "Redis read failed for adoption metrics");
+    }
+  }
+  const metrics = {
+    ...DEFAULT_METRICS,
+    generated_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  if (redis2) {
+    try {
+      await redis2.set(REDIS_KEY3, JSON.stringify(metrics));
+    } catch (err) {
+      logger.warn({ err: String(err) }, "Redis write failed for adoption metrics");
+    }
+  }
+  res.json(metrics);
+});
+adoptionRouter.put("/metrics", async (req, res) => {
+  const redis2 = getRedis();
+  const body = req.body;
+  let current = { ...DEFAULT_METRICS, generated_at: (/* @__PURE__ */ new Date()).toISOString() };
+  if (redis2) {
+    try {
+      const cached = await redis2.get(REDIS_KEY3);
+      if (cached) current = JSON.parse(cached);
+    } catch (err) {
+      logger.warn({ err: String(err) }, "Redis read failed during adoption metrics update");
+    }
+  }
+  if (typeof body.features_done === "number") current.features_done = body.features_done;
+  if (typeof body.features_total === "number") current.features_total = body.features_total;
+  if (typeof body.assistants === "number") current.assistants = body.assistants;
+  if (typeof body.pipelines === "number") current.pipelines = body.pipelines;
+  if (typeof body.obsidian_views === "number") current.obsidian_views = body.obsidian_views;
+  if (body.milestones && typeof body.milestones === "object") {
+    current.milestones = { ...current.milestones, ...body.milestones };
+  }
+  current.features_pct = current.features_total > 0 ? Math.round(current.features_done / current.features_total * 1e3) / 10 : 0;
+  current.generated_at = (/* @__PURE__ */ new Date()).toISOString();
+  if (redis2) {
+    try {
+      await redis2.set(REDIS_KEY3, JSON.stringify(current));
+    } catch (err) {
+      logger.warn({ err: String(err) }, "Redis write failed for adoption metrics update");
+      res.status(500).json({ success: false, error: "Failed to persist metrics" });
+      return;
+    }
+  }
+  res.json({ success: true, metrics: current });
+});
+async function captureAdoptionSnapshot() {
+  const redis2 = getRedis();
+  const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  const [conversationsResult, artifactsResult, toolCallsResult] = await Promise.allSettled([
+    // Count conversations from last 24h via graph
+    callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: "MATCH (c:Conversation) WHERE c.createdAt > datetime() - duration('P1D') RETURN count(c) AS count"
+      },
+      callId: uuid7(),
+      timeoutMs: 1e4
+    }),
+    // Count artifacts from last 24h
+    callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: "MATCH (a:AnalysisArtifact) WHERE a.createdAt > datetime() - duration('P1D') RETURN count(a) AS count"
+      },
+      callId: uuid7(),
+      timeoutMs: 1e4
+    }),
+    // Count tool calls from audit trail
+    callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: "MATCH (e:AuditEvent) WHERE e.timestamp > datetime() - duration('P1D') AND e.action = 'tool_call' RETURN count(e) AS count"
+      },
+      callId: uuid7(),
+      timeoutMs: 1e4
+    })
+  ]);
+  const extractCount = (r) => {
+    if (r.status !== "fulfilled") return 0;
+    const result = r.value?.result;
+    if (Array.isArray(result) && result[0]?.count != null) return Number(result[0].count);
+    if (result?.count != null) return Number(result.count);
+    return 0;
+  };
+  let current = { ...DEFAULT_METRICS, generated_at: (/* @__PURE__ */ new Date()).toISOString() };
+  if (redis2) {
+    try {
+      const cached = await redis2.get(REDIS_KEY3);
+      if (cached) current = JSON.parse(cached);
+    } catch {
+    }
+  }
+  let pipelineExecs = 0;
+  let chainExecs = 0;
+  let uniqueAgents = 0;
+  if (redis2) {
+    try {
+      const chainData = await redis2.hgetall("orchestrator:chains");
+      const oneDayAgo = Date.now() - 864e5;
+      for (const val of Object.values(chainData)) {
+        try {
+          const exec = JSON.parse(val);
+          if (new Date(exec.started_at).getTime() > oneDayAgo) {
+            chainExecs++;
+            if (exec.name?.toLowerCase().includes("pipeline") || exec.name?.toLowerCase().includes("knowledge")) {
+              pipelineExecs++;
+            }
+          }
+        } catch {
+        }
+      }
+      const agentData = await redis2.hgetall("orchestrator:agents");
+      const activeAgents = /* @__PURE__ */ new Set();
+      for (const val of Object.values(agentData)) {
+        try {
+          const agent = JSON.parse(val);
+          if (new Date(agent.lastSeenAt).getTime() > oneDayAgo) {
+            activeAgents.add(agent.agent_id ?? agent.handshake?.agent_id);
+          }
+        } catch {
+        }
+      }
+      uniqueAgents = activeAgents.size;
+    } catch (err) {
+      logger.warn({ err: String(err) }, "Failed to collect Redis adoption metrics");
+    }
+  }
+  const snapshot = {
+    date: today,
+    captured_at: (/* @__PURE__ */ new Date()).toISOString(),
+    conversations_24h: extractCount(conversationsResult),
+    pipeline_executions_24h: pipelineExecs,
+    artifact_creations_24h: extractCount(artifactsResult),
+    unique_agents_24h: uniqueAgents,
+    total_tool_calls_24h: extractCount(toolCallsResult),
+    chain_executions_24h: chainExecs,
+    features_done: current.features_done,
+    features_pct: current.features_pct
+  };
+  if (redis2) {
+    try {
+      const score = new Date(today).getTime();
+      await redis2.zadd(REDIS_TRENDS_KEY, score, JSON.stringify(snapshot));
+      const totalEntries = await redis2.zcard(REDIS_TRENDS_KEY);
+      if (totalEntries > 90) {
+        await redis2.zremrangebyrank(REDIS_TRENDS_KEY, 0, totalEntries - 91);
+      }
+      logger.info({ date: today, snapshot }, "Adoption snapshot captured");
+    } catch (err) {
+      logger.warn({ err: String(err) }, "Failed to persist adoption snapshot");
+    }
+  }
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (m:AdoptionMetric {date: $date})
+SET m.conversations_24h = $conversations,
+    m.pipeline_executions_24h = $pipelines,
+    m.artifact_creations_24h = $artifacts,
+    m.unique_agents_24h = $agents,
+    m.total_tool_calls_24h = $toolCalls,
+    m.chain_executions_24h = $chains,
+    m.features_done = $featuresDone,
+    m.features_pct = $featuresPct,
+    m.captured_at = datetime()`,
+        params: {
+          date: today,
+          conversations: snapshot.conversations_24h,
+          pipelines: snapshot.pipeline_executions_24h,
+          artifacts: snapshot.artifact_creations_24h,
+          agents: snapshot.unique_agents_24h,
+          toolCalls: snapshot.total_tool_calls_24h,
+          chains: snapshot.chain_executions_24h,
+          featuresDone: snapshot.features_done,
+          featuresPct: snapshot.features_pct
+        }
+      },
+      callId: uuid7(),
+      timeoutMs: 1e4
+    });
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Failed to write adoption snapshot to Neo4j");
+  }
+  return snapshot;
+}
+adoptionRouter.post("/snapshot", async (_req, res) => {
+  try {
+    const snapshot = await captureAdoptionSnapshot();
+    res.json({ success: true, data: snapshot });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Adoption snapshot capture failed");
+    res.status(500).json({
+      success: false,
+      error: { code: "SNAPSHOT_ERROR", message: String(err), status_code: 500 }
+    });
+  }
+});
+adoptionRouter.get("/trends", async (req, res) => {
+  const redis2 = getRedis();
+  const days = Math.min(parseInt(String(req.query.days ?? "30"), 10) || 30, 90);
+  if (!redis2) {
+    res.json({ success: true, data: { trends: [], days, source: "none" } });
+    return;
+  }
+  try {
+    const cutoff = Date.now() - days * 864e5;
+    const raw = await redis2.zrangebyscore(REDIS_TRENDS_KEY, cutoff, "+inf");
+    const trends = raw.map((r) => JSON.parse(r));
+    res.json({ success: true, data: { trends, days, total: trends.length } });
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Failed to read adoption trends");
+    res.status(500).json({
+      success: false,
+      error: { code: "TRENDS_ERROR", message: String(err), status_code: 500 }
+    });
+  }
+});
+
 // src/cron-scheduler.ts
 var jobs = /* @__PURE__ */ new Map();
 var cronTasks = /* @__PURE__ */ new Map();
@@ -13010,6 +13396,70 @@ async function runCronJob(jobId) {
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   });
   try {
+    if (job.id === "adoption-metrics-daily") {
+      try {
+        const snapshot = await captureAdoptionSnapshot();
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = "completed";
+        job.run_count++;
+        persistCronJobs();
+        broadcastMessage({
+          from: "Orchestrator",
+          to: "All",
+          source: "orchestrator",
+          type: "Message",
+          message: `Adoption snapshot: ${snapshot.conversations_24h} conversations, ${snapshot.pipeline_executions_24h} pipelines, ${snapshot.artifact_creations_24h} artifacts, ${snapshot.unique_agents_24h} agents active`,
+          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        });
+        broadcastSSE("adoption-snapshot", snapshot);
+      } catch (err) {
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = "failed";
+        job.run_count++;
+        persistCronJobs();
+        logger.error({ id: job.id, err: String(err) }, "Adoption snapshot failed");
+      }
+      return;
+    }
+    if (job.id === "adoption-weekly-digest") {
+      try {
+        const redis2 = getRedis();
+        if (redis2) {
+          const weekAgo = Date.now() - 7 * 864e5;
+          const raw = await redis2.zrangebyscore("orchestrator:adoption-trends", weekAgo, "+inf");
+          const snapshots = raw.map((r) => JSON.parse(r));
+          if (snapshots.length > 0) {
+            const sum = (fn) => snapshots.reduce((a, s) => a + fn(s), 0);
+            const latest = snapshots[snapshots.length - 1];
+            const earliest = snapshots[0];
+            const trend = latest.features_pct > earliest.features_pct ? "up" : latest.features_pct < earliest.features_pct ? "down" : "flat";
+            const period = `${earliest.date} \u2192 ${latest.date}`;
+            notifyAdoptionDigest({
+              period,
+              conversations: sum((s) => s.conversations_24h),
+              pipelines: sum((s) => s.pipeline_executions_24h),
+              artifacts: sum((s) => s.artifact_creations_24h),
+              agents: Math.max(...snapshots.map((s) => s.unique_agents_24h)),
+              toolCalls: sum((s) => s.total_tool_calls_24h),
+              chains: sum((s) => s.chain_executions_24h),
+              featuresPct: latest.features_pct,
+              trend
+            });
+          }
+        }
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = "completed";
+        job.run_count++;
+        persistCronJobs();
+      } catch (err) {
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = "failed";
+        job.run_count++;
+        persistCronJobs();
+        logger.error({ id: job.id, err: String(err) }, "Adoption weekly digest failed");
+      }
+      return;
+    }
     if (job.id === "graph-self-correct") {
       const report = await runSelfCorrect();
       job.last_run = (/* @__PURE__ */ new Date()).toISOString();
@@ -13293,6 +13743,30 @@ function registerDefaultLoops() {
     }
   });
   registerCronJob({
+    id: "adoption-metrics-daily",
+    name: "Adoption Metrics Daily Snapshot",
+    schedule: "0 7 * * *",
+    // 07:00 UTC daily
+    enabled: true,
+    chain: {
+      name: "Adoption Metrics Snapshot",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
+    }
+  });
+  registerCronJob({
+    id: "adoption-weekly-digest",
+    name: "Adoption Weekly Slack Digest",
+    schedule: "0 8 * * 1",
+    // Monday 08:00 UTC
+    enabled: true,
+    chain: {
+      name: "Adoption Weekly Digest",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
+    }
+  });
+  registerCronJob({
     id: "intel-knowledge-synthesis",
     name: "Intelligence: Knowledge Synthesis",
     schedule: "*/30 * * * *",
@@ -13495,7 +13969,7 @@ function registerDefaultLoops() {
 }
 
 // src/routes/cron.ts
-var cronRouter = Router6();
+var cronRouter = Router7();
 cronRouter.get("/", (_req, res) => {
   const jobs2 = listCronJobs();
   res.json({ success: true, data: { jobs: jobs2, total: jobs2.length } });
@@ -13561,12 +14035,12 @@ cronRouter.delete("/:id", (req, res) => {
 });
 
 // src/routes/dashboard.ts
-import { Router as Router8 } from "express";
+import { Router as Router9 } from "express";
 
 // src/routes/openclaw.ts
 init_config();
-import { Router as Router7 } from "express";
-var openclawRouter = Router7();
+import { Router as Router8 } from "express";
+var openclawRouter = Router8();
 var healthStatus = {
   healthy: false,
   checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -13740,7 +14214,7 @@ openclawRouter.all("/proxy/*", async (req, res) => {
 
 // src/routes/dashboard.ts
 init_config();
-var dashboardRouter = Router8();
+var dashboardRouter = Router9();
 var CACHE_KEY = "orchestrator:dashboard-cache";
 var CACHE_TTL = 15;
 dashboardRouter.get("/data", async (_req, res) => {
@@ -13782,6 +14256,15 @@ dashboardRouter.get("/data", async (_req, res) => {
     } catch {
     }
   }
+  let adoptionTrends = [];
+  if (redis2) {
+    try {
+      const weekAgo = Date.now() - 7 * 864e5;
+      const raw = await redis2.zrangebyscore("orchestrator:adoption-trends", weekAgo, "+inf");
+      adoptionTrends = raw.map((r) => JSON.parse(r));
+    } catch {
+    }
+  }
   const payload = {
     agents,
     wsStats,
@@ -13790,6 +14273,7 @@ dashboardRouter.get("/data", async (_req, res) => {
     cronJobs,
     rlmAvailable,
     rlmHealth,
+    adoptionTrends,
     openclaw: {
       health: getOpenClawHealth(),
       skills: getOpenClawSkills()
@@ -13814,8 +14298,8 @@ dashboardRouter.get("/data", async (_req, res) => {
 });
 
 // src/routes/llm.ts
-import { Router as Router9 } from "express";
-var llmRouter = Router9();
+import { Router as Router10 } from "express";
+var llmRouter = Router10();
 llmRouter.get("/providers", (_req, res) => {
   res.json({ success: true, data: { providers: listProviders() } });
 });
@@ -13906,10 +14390,10 @@ llmRouter.post("/conversation", async (req, res) => {
 });
 
 // src/routes/audit.ts
-import { Router as Router10 } from "express";
+import { Router as Router11 } from "express";
 
 // src/audit.ts
-var REDIS_KEY3 = "orchestrator:audit";
+var REDIS_KEY4 = "orchestrator:audit";
 var MAX_ENTRIES = 1e3;
 var TTL_SECONDS2 = 30 * 24 * 3600;
 var memoryAudit = [];
@@ -13918,9 +14402,9 @@ async function logAudit(entry) {
     if (isRedisEnabled()) {
       const redis2 = getRedis();
       if (redis2) {
-        await redis2.lpush(REDIS_KEY3, JSON.stringify(entry));
-        await redis2.ltrim(REDIS_KEY3, 0, MAX_ENTRIES - 1);
-        await redis2.expire(REDIS_KEY3, TTL_SECONDS2);
+        await redis2.lpush(REDIS_KEY4, JSON.stringify(entry));
+        await redis2.ltrim(REDIS_KEY4, 0, MAX_ENTRIES - 1);
+        await redis2.expire(REDIS_KEY4, TTL_SECONDS2);
         return;
       }
     }
@@ -13935,7 +14419,7 @@ async function getAuditLog(limit = 100, offset = 0) {
     if (isRedisEnabled()) {
       const redis2 = getRedis();
       if (redis2) {
-        const raw = await redis2.lrange(REDIS_KEY3, offset, offset + limit - 1);
+        const raw = await redis2.lrange(REDIS_KEY4, offset, offset + limit - 1);
         return raw.map((r) => JSON.parse(r));
       }
     }
@@ -13986,7 +14470,7 @@ function auditMiddleware(req, res, next) {
 }
 
 // src/routes/audit.ts
-var auditRouter = Router10();
+var auditRouter = Router11();
 auditRouter.get("/log", async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 100, 500);
   const offset = parseInt(req.query.offset) || 0;
@@ -14003,8 +14487,8 @@ auditRouter.get("/log", async (req, res) => {
 
 // src/routes/knowledge.ts
 init_config();
-import { Router as Router11 } from "express";
-var knowledgeRouter = Router11();
+import { Router as Router12 } from "express";
+var knowledgeRouter = Router12();
 var FEED_CACHE_KEY = "orchestrator:knowledge-feed";
 var BRIEFING_CACHE_KEY = "orchestrator:knowledge-briefing-prompt";
 var FEED_TTL_SECONDS = 86400;
@@ -14158,85 +14642,6 @@ knowledgeRouter.get("/briefing", async (_req, res) => {
     logger.warn({ err: String(err) }, "Redis read failed for knowledge briefing");
     res.status(500).json({ error: "Failed to read briefing from cache" });
   }
-});
-
-// src/routes/adoption.ts
-import { Router as Router12 } from "express";
-var adoptionRouter = Router12();
-var REDIS_KEY4 = "orchestrator:adoption-metrics";
-var DEFAULT_METRICS = {
-  features_done: 14,
-  features_total: 54,
-  features_pct: 25.9,
-  milestones: {
-    M0: { status: "complete", tasks: 3, done: 3 },
-    M1: { status: "complete", tasks: 8, done: 8 },
-    M2: { status: "in_progress", tasks: 6, done: 6 },
-    M3: { status: "in_progress", tasks: 6, done: 0 },
-    M4: { status: "pending", tasks: 31, done: 0 }
-  },
-  assistants: 5,
-  pipelines: 3,
-  obsidian_views: 3
-};
-adoptionRouter.get("/metrics", async (_req, res) => {
-  const redis2 = getRedis();
-  if (redis2) {
-    try {
-      const cached = await redis2.get(REDIS_KEY4);
-      if (cached) {
-        res.json(JSON.parse(cached));
-        return;
-      }
-    } catch (err) {
-      logger.warn({ err: String(err) }, "Redis read failed for adoption metrics");
-    }
-  }
-  const metrics = {
-    ...DEFAULT_METRICS,
-    generated_at: (/* @__PURE__ */ new Date()).toISOString()
-  };
-  if (redis2) {
-    try {
-      await redis2.set(REDIS_KEY4, JSON.stringify(metrics));
-    } catch (err) {
-      logger.warn({ err: String(err) }, "Redis write failed for adoption metrics");
-    }
-  }
-  res.json(metrics);
-});
-adoptionRouter.put("/metrics", async (req, res) => {
-  const redis2 = getRedis();
-  const body = req.body;
-  let current = { ...DEFAULT_METRICS, generated_at: (/* @__PURE__ */ new Date()).toISOString() };
-  if (redis2) {
-    try {
-      const cached = await redis2.get(REDIS_KEY4);
-      if (cached) current = JSON.parse(cached);
-    } catch (err) {
-      logger.warn({ err: String(err) }, "Redis read failed during adoption metrics update");
-    }
-  }
-  if (typeof body.features_done === "number") current.features_done = body.features_done;
-  if (typeof body.features_total === "number") current.features_total = body.features_total;
-  if (typeof body.assistants === "number") current.assistants = body.assistants;
-  if (typeof body.pipelines === "number") current.pipelines = body.pipelines;
-  if (typeof body.obsidian_views === "number") current.obsidian_views = body.obsidian_views;
-  if (body.milestones && typeof body.milestones === "object") {
-    current.milestones = { ...current.milestones, ...body.milestones };
-  }
-  current.features_pct = current.features_total > 0 ? Math.round(current.features_done / current.features_total * 1e3) / 10 : 0;
-  current.generated_at = (/* @__PURE__ */ new Date()).toISOString();
-  if (redis2) {
-    try {
-      await redis2.set(REDIS_KEY4, JSON.stringify(current));
-    } catch (err) {
-      logger.warn({ err: String(err) }, "Redis write failed for adoption metrics update");
-      res.status(500).json({ success: false, error: "Failed to persist metrics" });
-      return;
-    }
-  }
-  res.json({ success: true, metrics: current });
 });
 
 // src/routes/artifacts.ts
@@ -14566,7 +14971,7 @@ async function renderHtml(_req, res, id) {
 // src/routes/notebooks.ts
 import { Router as Router14 } from "express";
 import { randomUUID as randomUUID2 } from "crypto";
-import { v4 as uuid7 } from "uuid";
+import { v4 as uuid8 } from "uuid";
 var notebookRouter = Router14();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
@@ -14606,7 +15011,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query, params: {} },
-        callId: uuid7(),
+        callId: uuid8(),
         timeoutMs: 15e3
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -14614,7 +15019,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "kg_rag.query",
         args: { question: query, max_evidence: 10 },
-        callId: uuid7(),
+        callId: uuid8(),
         timeoutMs: 2e4
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -15282,13 +15687,13 @@ ${compressed}`,
 }
 
 // src/routes/monitor.ts
-import { v4 as uuid8 } from "uuid";
+import { v4 as uuid9 } from "uuid";
 var monitorRouter = Router16();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid8(),
+    callId: uuid9(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];
@@ -15606,9 +16011,9 @@ async function listPlans() {
 }
 
 // src/harvest-pipeline.ts
-import { v4 as uuid9 } from "uuid";
+import { v4 as uuid10 } from "uuid";
 async function extract(domain) {
-  const callId = `harvest-extract-${uuid9().substring(0, 8)}`;
+  const callId = `harvest-extract-${uuid10().substring(0, 8)}`;
   try {
     const result = await callMcpTool({
       toolName: "srag.query",
@@ -15634,7 +16039,7 @@ function generalize(items, domain) {
     if (content.length > 2e3 || name.toLowerCase().includes("framework")) tier = "framework";
     else if (content.length > 500 || name.toLowerCase().includes("template")) tier = "template";
     return {
-      id: `harvest-${uuid9().substring(0, 12)}`,
+      id: `harvest-${uuid10().substring(0, 12)}`,
       name,
       tier,
       description: content.substring(0, 300),
@@ -15651,7 +16056,7 @@ function generalize(items, domain) {
 }
 async function store(components) {
   if (components.length === 0) return 0;
-  const callId = `harvest-store-${uuid9().substring(0, 8)}`;
+  const callId = `harvest-store-${uuid10().substring(0, 8)}`;
   const labelMap = {
     framework: "Framework",
     template: "Template",
@@ -15703,7 +16108,7 @@ async function verify(components) {
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: `${comp.tier} for ${comp.industries[0]}: ${comp.name}` },
-        callId: `harvest-verify-${uuid9().substring(0, 8)}`,
+        callId: `harvest-verify-${uuid10().substring(0, 8)}`,
         timeoutMs: 15e3
       });
       const resultStr = JSON.stringify(result).toLowerCase();
@@ -15755,7 +16160,7 @@ async function runFullHarvest() {
 // src/routes/openai-compat.ts
 import { Router as Router18 } from "express";
 init_config();
-import { v4 as uuid10 } from "uuid";
+import { v4 as uuid11 } from "uuid";
 var MAX_TOOL_ROUNDS = 2;
 var MAX_TOOL_ROUNDS_ASSISTANT = 4;
 var TOOL_CATEGORIES = [
@@ -15965,7 +16370,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     return;
   }
   const { model, messages, stream, temperature, max_tokens } = req.body;
-  const requestId = `chatcmpl-${uuid10().substring(0, 12)}`;
+  const requestId = `chatcmpl-${uuid11().substring(0, 12)}`;
   const assistant = ASSISTANT_MAP.get(model);
   const resolvedModel = assistant ? assistant.baseModel : model;
   const mapping = MODEL_TO_PROVIDER[resolvedModel] || MODEL_TO_PROVIDER["gemini-flash"];

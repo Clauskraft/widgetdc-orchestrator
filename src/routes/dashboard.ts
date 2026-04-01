@@ -62,6 +62,16 @@ dashboardRouter.get('/data', async (_req, res) => {
     } catch { /* timeout or error — skip */ }
   }
 
+  // Adoption trends (last 7 days from Redis sorted set)
+  let adoptionTrends: unknown[] = []
+  if (redis) {
+    try {
+      const weekAgo = Date.now() - 7 * 86400000
+      const raw = await redis.zrangebyscore('orchestrator:adoption-trends', weekAgo, '+inf')
+      adoptionTrends = raw.map(r => JSON.parse(r))
+    } catch { /* skip */ }
+  }
+
   const payload = {
     agents,
     wsStats,
@@ -70,6 +80,7 @@ dashboardRouter.get('/data', async (_req, res) => {
     cronJobs,
     rlmAvailable,
     rlmHealth,
+    adoptionTrends,
     openclaw: {
       health: getOpenClawHealth(),
       skills: getOpenClawSkills(),

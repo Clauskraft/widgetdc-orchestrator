@@ -11,6 +11,8 @@ import { getRedis } from './redis.js'
 import { broadcastMessage } from './chat-broadcaster.js'
 import { broadcastSSE } from './sse.js'
 import { runSelfCorrect } from './graph-self-correct.js'
+import { captureAdoptionSnapshot, type AdoptionSnapshot } from './routes/adoption.js'
+import { notifyAdoptionDigest } from './slack.js'
 
 interface CronJob {
   id: string
@@ -76,6 +78,83 @@ export async function runCronJob(jobId: string): Promise<void> {
   })
 
   try {
+    // Special handler for adoption metrics snapshot
+    if (job.id === 'adoption-metrics-daily') {
+      try {
+        const snapshot = await captureAdoptionSnapshot()
+        job.last_run = new Date().toISOString()
+        job.last_status = 'completed'
+        job.run_count++
+        persistCronJobs()
+
+        broadcastMessage({
+          from: 'Orchestrator',
+          to: 'All',
+          source: 'orchestrator',
+          type: 'Message',
+          message: `Adoption snapshot: ${snapshot.conversations_24h} conversations, ${snapshot.pipeline_executions_24h} pipelines, ${snapshot.artifact_creations_24h} artifacts, ${snapshot.unique_agents_24h} agents active`,
+          timestamp: new Date().toISOString(),
+        })
+        broadcastSSE('adoption-snapshot', snapshot)
+      } catch (err) {
+        job.last_run = new Date().toISOString()
+        job.last_status = 'failed'
+        job.run_count++
+        persistCronJobs()
+        logger.error({ id: job.id, err: String(err) }, 'Adoption snapshot failed')
+      }
+      return
+    }
+
+    // Special handler for weekly adoption digest
+    if (job.id === 'adoption-weekly-digest') {
+      try {
+        const redis = getRedis()
+        if (redis) {
+          const weekAgo = Date.now() - 7 * 86400000
+          const raw = await redis.zrangebyscore('orchestrator:adoption-trends', weekAgo, '+inf')
+          const snapshots: AdoptionSnapshot[] = raw.map(r => JSON.parse(r))
+
+          if (snapshots.length > 0) {
+            const sum = (fn: (s: AdoptionSnapshot) => number) => snapshots.reduce((a, s) => a + fn(s), 0)
+            const latest = snapshots[snapshots.length - 1]
+            const earliest = snapshots[0]
+
+            // Determine trend from features_pct change
+            const trend = latest.features_pct > earliest.features_pct ? 'up' as const
+              : latest.features_pct < earliest.features_pct ? 'down' as const
+              : 'flat' as const
+
+            const period = `${earliest.date} → ${latest.date}`
+
+            notifyAdoptionDigest({
+              period,
+              conversations: sum(s => s.conversations_24h),
+              pipelines: sum(s => s.pipeline_executions_24h),
+              artifacts: sum(s => s.artifact_creations_24h),
+              agents: Math.max(...snapshots.map(s => s.unique_agents_24h)),
+              toolCalls: sum(s => s.total_tool_calls_24h),
+              chains: sum(s => s.chain_executions_24h),
+              featuresPct: latest.features_pct,
+              trend,
+            })
+          }
+        }
+
+        job.last_run = new Date().toISOString()
+        job.last_status = 'completed'
+        job.run_count++
+        persistCronJobs()
+      } catch (err) {
+        job.last_run = new Date().toISOString()
+        job.last_status = 'failed'
+        job.run_count++
+        persistCronJobs()
+        logger.error({ id: job.id, err: String(err) }, 'Adoption weekly digest failed')
+      }
+      return
+    }
+
     // Special handler for self-correcting graph agent
     if (job.id === 'graph-self-correct') {
       const report = await runSelfCorrect()
@@ -427,6 +506,36 @@ export function registerDefaultLoops(): void {
           },
         },
       ],
+    },
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // ADOPTION MEASUREMENT (LIN-537) — Daily snapshot + weekly Slack digest
+  // Tracks: conversations, pipelines, artifacts, agents, tool calls, chains
+  // Data stored in Redis sorted set + Neo4j AdoptionMetric nodes
+  // ═══════════════════════════════════════════════════════════════════════
+
+  registerCronJob({
+    id: 'adoption-metrics-daily',
+    name: 'Adoption Metrics Daily Snapshot',
+    schedule: '0 7 * * *', // 07:00 UTC daily
+    enabled: true,
+    chain: {
+      name: 'Adoption Metrics Snapshot',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
+  registerCronJob({
+    id: 'adoption-weekly-digest',
+    name: 'Adoption Weekly Slack Digest',
+    schedule: '0 8 * * 1', // Monday 08:00 UTC
+    enabled: true,
+    chain: {
+      name: 'Adoption Weekly Digest',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
     },
   })
 
