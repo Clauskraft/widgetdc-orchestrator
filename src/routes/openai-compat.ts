@@ -262,6 +262,11 @@ openaiCompatRouter.get('/v1/metrics', (req: Request, res: Response) => {
 
 openaiCompatRouter.get('/v1/models', (req: Request, res: Response) => {
   if (!validateApiKey(req, res)) return
+  const ip = req.ip ?? req.socket.remoteAddress ?? 'unknown'
+  if (!checkRateLimit(ip)) {
+    res.status(429).json({ error: { message: 'Rate limit exceeded', type: 'rate_limit_error', code: 'rate_limit' } })
+    return
+  }
 
   const models = MODELS.map(m => {
     const assistant = ASSISTANT_MAP.get(m.id)
