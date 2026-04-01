@@ -16,9 +16,6 @@
  */
 import { Router, Request, Response } from 'express'
 import { chatLLM, type LLMMessage } from '../llm-proxy.js'
-import { callMcpTool } from '../mcp-caller.js'
-import { dualChannelRAG } from '../dual-rag.js'
-import { callCognitive, isRlmAvailable } from '../cognitive-proxy.js'
 import { ORCHESTRATOR_TOOLS, executeToolCalls } from '../tool-executor.js'
 import { logger } from '../logger.js'
 import { config } from '../config.js'
@@ -27,6 +24,42 @@ import { v4 as uuid } from 'uuid'
 const MAX_TOOL_ROUNDS = 3
 
 export const openaiCompatRouter = Router()
+
+// ─── Rate limiting (in-memory, per-IP) ─────────────────────────────────────
+
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>()
+const RATE_LIMIT_WINDOW_MS = 60_000
+const RATE_LIMIT_MAX = 30 // 30 req/min per IP
+
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now()
+  const entry = rateLimitMap.get(ip)
+  if (!entry || now > entry.resetAt) {
+    rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS })
+    return true
+  }
+  entry.count++
+  return entry.count <= RATE_LIMIT_MAX
+}
+
+// ─── API key validation middleware ──────────────────────────────────────────
+
+function validateApiKey(req: Request, res: Response): boolean {
+  // Open WebUI sends OPENAI_API_KEY as Bearer token
+  const auth = req.headers.authorization
+  if (!auth) {
+    res.status(401).json({ error: { message: 'Missing Authorization header', type: 'auth_error', code: 'unauthorized' } })
+    return false
+  }
+  const token = auth.replace('Bearer ', '')
+  // Accept orchestrator key OR backend key
+  const validKeys = [config.orchestratorApiKey, config.backendApiKey].filter(Boolean)
+  if (validKeys.length > 0 && !validKeys.includes(token)) {
+    res.status(401).json({ error: { message: 'Invalid API key', type: 'auth_error', code: 'unauthorized' } })
+    return false
+  }
+  return true
+}
 
 // ─── System prompt injection ────────────────────────────────────────────────
 
@@ -44,87 +77,6 @@ BRUG ALTID avancerede tools for analyse:
 
 Svar på dansk medmindre brugeren skriver engelsk.
 Vær proaktiv — foreslå avancerede tools og intelligence loops.`
-
-// ─── Orchestrated context retrieval ─────────────────────────────────────────
-
-/**
- * Retrieve platform context via dual-RAG + optional RLM reasoning.
- * This is the core orchestration: every chat message goes through
- * the intelligence stack before the LLM sees it.
- */
-async function getOrchestratedContext(userMessage: string, requestId: string): Promise<string> {
-  const parts: string[] = []
-
-  try {
-    // 1. Dual-channel RAG: SRAG vector search + Neo4j graph traversal (parallel)
-    const ragResult = await dualChannelRAG(userMessage, { maxResults: 8 })
-
-    if (ragResult.merged_context.length > 0) {
-      parts.push(`=== PLATFORM KNOWLEDGE (${ragResult.srag_count} semantic + ${ragResult.cypher_count} graph results, ${ragResult.duration_ms}ms) ===`)
-      parts.push(ragResult.merged_context)
-    }
-
-    logger.info({ requestId, srag: ragResult.srag_count, cypher: ragResult.cypher_count, ms: ragResult.duration_ms }, 'Dual-RAG retrieval')
-  } catch (err) {
-    logger.warn({ requestId, err: String(err) }, 'Dual-RAG failed — continuing without context')
-  }
-
-  // 2. RLM deep reasoning for complex queries (if available and query seems complex)
-  const isComplex = userMessage.length > 100
-    || /\b(analy|strateg|compar|evaluat|why|how does|explain|plan|recommend|architect)\b/i.test(userMessage)
-
-  if (isComplex && isRlmAvailable()) {
-    try {
-      const rlmResult = await callCognitive('reason', {
-        prompt: userMessage,
-        context: { source: 'open-webui-chat', request_id: requestId },
-        agent_id: 'chat-orchestrator',
-        depth: 1,
-      }, 30000)
-
-      if (rlmResult) {
-        const rlmText = typeof rlmResult === 'string' ? rlmResult : JSON.stringify(rlmResult, null, 2)
-        if (rlmText.length > 20) {
-          parts.push(`=== RLM DEEP REASONING ===`)
-          parts.push(rlmText.slice(0, 2000))
-        }
-      }
-
-      logger.info({ requestId, complex: true }, 'RLM reasoning complete')
-    } catch (err) {
-      logger.warn({ requestId, err: String(err) }, 'RLM reasoning failed — continuing without')
-    }
-  }
-
-  // 3. Active Linear context for project-related queries
-  if (/\b(linear|task|issue|sprint|backlog|status|next step|blocker|plan)\b/i.test(userMessage)) {
-    try {
-      const linearResult = await callMcpTool({
-        toolName: 'graph.read_cypher',
-        args: {
-          query: `MATCH (n) WHERE (n:Task OR n:L3Task) AND n.status IN ['In Progress', 'Todo', 'Backlog']
-                  RETURN n.title AS title, n.status AS status, coalesce(n.identifier, n.id) AS id
-                  ORDER BY n.updatedAt DESC LIMIT 10`,
-        },
-        callId: uuid(),
-        timeoutMs: 10000,
-      })
-
-      if (linearResult.status === 'success' && linearResult.result) {
-        const rows = Array.isArray(linearResult.result) ? linearResult.result
-          : (linearResult.result as any)?.results ?? []
-        if (rows.length > 0) {
-          parts.push(`=== ACTIVE TASKS (from graph) ===`)
-          parts.push(rows.map((r: any) => `- [${r.id ?? '?'}] ${r.title} (${r.status})`).join('\n'))
-        }
-      }
-    } catch (err) {
-      logger.warn({ requestId, err: String(err) }, 'Task context failed')
-    }
-  }
-
-  return parts.join('\n\n')
-}
 
 // ─── Model registry ─────────────────────────────────────────────────────────
 
@@ -156,7 +108,9 @@ const MODEL_TO_PROVIDER: Record<string, { provider: string; model?: string }> = 
 
 // ─── GET /v1/models ─────────────────────────────────────────────────────────
 
-openaiCompatRouter.get('/v1/models', (_req: Request, res: Response) => {
+openaiCompatRouter.get('/v1/models', (req: Request, res: Response) => {
+  if (!validateApiKey(req, res)) return
+
   const models = MODELS.map(m => ({
     id: m.id,
     object: 'model',
@@ -173,6 +127,14 @@ openaiCompatRouter.get('/v1/models', (_req: Request, res: Response) => {
 // ─── POST /v1/chat/completions ──────────────────────────────────────────────
 
 openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Response) => {
+  if (!validateApiKey(req, res)) return
+
+  const clientIp = req.ip || req.socket.remoteAddress || 'unknown'
+  if (!checkRateLimit(clientIp)) {
+    res.status(429).json({ error: { message: 'Rate limit exceeded (30 req/min)', type: 'rate_limit', code: 'rate_limited' } })
+    return
+  }
+
   const { model, messages, stream, temperature, max_tokens } = req.body
   const requestId = `chatcmpl-${uuid().substring(0, 12)}`
 
@@ -181,47 +143,15 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
   const provider = mapping.provider
   const providerModel = mapping.model
 
-  // Extract last user message for orchestration
-  const userMessages = (messages || []).filter((m: any) => m.role === 'user')
-  const lastUserMessage = userMessages.length > 0
-    ? userMessages[userMessages.length - 1].content
-    : ''
-
-  // ─── ORCHESTRATION: Retrieve platform context before LLM call ──────
-  let orchestratedContext = ''
-  if (lastUserMessage.length > 2) {
-    try {
-      orchestratedContext = await getOrchestratedContext(lastUserMessage, requestId)
-    } catch (err) {
-      logger.warn({ requestId, err: String(err) }, 'Orchestration failed — falling back to plain chat')
-    }
-  }
-
-  // Build system prompt with orchestrated context
-  const enrichedSystemPrompt = orchestratedContext.length > 0
-    ? `${SYSTEM_PROMPT}\n\n${orchestratedContext}\n\nBrug ovenstående platformdata til at give et præcist, datadrevet svar. Citér kilder når muligt.`
-    : SYSTEM_PROMPT
-
   // Inject system prompt if not present
   const llmMessages: LLMMessage[] = [...(messages || [])]
   const hasSystem = llmMessages.some(m => m.role === 'system')
   if (!hasSystem) {
-    llmMessages.unshift({ role: 'system', content: enrichedSystemPrompt })
-  } else {
-    // Append orchestrated context to existing system prompt
-    if (orchestratedContext.length > 0) {
-      const sysIdx = llmMessages.findIndex(m => m.role === 'system')
-      if (sysIdx >= 0) {
-        llmMessages[sysIdx] = {
-          ...llmMessages[sysIdx],
-          content: `${llmMessages[sysIdx].content}\n\n${orchestratedContext}`,
-        }
-      }
-    }
+    llmMessages.unshift({ role: 'system', content: SYSTEM_PROMPT })
   }
 
   const t0 = Date.now()
-  logger.info({ model, provider, stream, messageCount: llmMessages.length, contextLen: orchestratedContext.length }, 'OpenAI compat request (orchestrated)')
+  logger.info({ model, provider, stream, messageCount: llmMessages.length, ip: clientIp }, 'OpenAI compat request')
 
   try {
     // ─── TOOL-CALL LOOP: LLM may request tools, orchestrator executes ──

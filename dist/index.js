@@ -13475,8 +13475,91 @@ async function runFullHarvest() {
 // src/routes/openai-compat.ts
 import { Router as Router13 } from "express";
 
-// src/tool-executor.ts
+// src/verification-gate.ts
 import { v4 as uuid7 } from "uuid";
+async function verifyChainOutput(chainOutput, config2) {
+  const maxRetries = config2.max_retries ?? 3;
+  const start = Date.now();
+  let retries = 0;
+  let lastResult = null;
+  while (retries <= maxRetries) {
+    const checkResults = await runChecksParallel(config2.checks, chainOutput);
+    const tripwireTripped = config2.tripwire_check ? checkResults.some((c) => c.name === config2.tripwire_check && c.status !== "pass") : false;
+    const allPassed = checkResults.every((c) => c.status === "pass");
+    lastResult = {
+      passed: allPassed && !tripwireTripped,
+      checks: checkResults,
+      retries_attempted: retries,
+      total_duration_ms: Date.now() - start,
+      aborted_by_tripwire: tripwireTripped
+    };
+    if (allPassed) {
+      logger.info({ retries, checks: checkResults.length }, "Verification gate: PASSED");
+      return lastResult;
+    }
+    if (tripwireTripped) {
+      logger.warn({ tripwire: config2.tripwire_check }, "Verification gate: TRIPWIRE ABORT");
+      return lastResult;
+    }
+    retries++;
+    if (retries <= maxRetries) {
+      logger.info({ retry: retries, maxRetries, failed: checkResults.filter((c) => c.status !== "pass").map((c) => c.name) }, "Verification gate: retrying");
+      await new Promise((r) => setTimeout(r, 1e3 * retries));
+    }
+  }
+  logger.warn({ retries: maxRetries }, "Verification gate: FAILED after max retries");
+  return lastResult;
+}
+async function runChecksParallel(checks, chainOutput) {
+  const results = await Promise.allSettled(
+    checks.map(async (check) => {
+      const start = Date.now();
+      try {
+        const args = { ...check.arguments };
+        for (const [k, v] of Object.entries(args)) {
+          if (v === "{{output}}") args[k] = chainOutput;
+        }
+        const result = await callMcpTool({
+          toolName: check.tool_name,
+          args,
+          callId: `verify-${uuid7().substring(0, 8)}`,
+          timeoutMs: 15e3
+        });
+        let passed = true;
+        if (check.validate) {
+          passed = check.validate(result);
+        } else if (check.expected_key) {
+          const actual = result?.[check.expected_key];
+          passed = actual === check.expected_value;
+        }
+        return {
+          name: check.name,
+          status: passed ? "pass" : "fail",
+          output: result,
+          duration_ms: Date.now() - start
+        };
+      } catch (err) {
+        return {
+          name: check.name,
+          status: "error",
+          output: String(err),
+          duration_ms: Date.now() - start
+        };
+      }
+    })
+  );
+  return results.map(
+    (r, i) => r.status === "fulfilled" ? r.value : {
+      name: checks[i].name,
+      status: "error",
+      output: String(r.reason),
+      duration_ms: 0
+    }
+  );
+}
+
+// src/tool-executor.ts
+import { v4 as uuid8 } from "uuid";
 var ORCHESTRATOR_TOOLS = [
   {
     type: "function",
@@ -13606,6 +13689,59 @@ var ORCHESTRATOR_TOOLS = [
         required: ["identifier"]
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "run_chain",
+      description: "Execute a multi-step agent chain. Supports sequential (A\u2192B\u2192C), parallel (A+B+C), debate (two agents argue, third judges), and loop modes. Use for complex workflows that need multiple tool calls coordinated together.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Chain name/description" },
+          mode: { type: "string", enum: ["sequential", "parallel", "debate", "loop"], description: "Execution mode" },
+          steps: {
+            type: "array",
+            description: "Chain steps \u2014 each has tool_name or cognitive_action + arguments",
+            items: {
+              type: "object",
+              properties: {
+                agent_id: { type: "string", description: "Agent identifier" },
+                tool_name: { type: "string", description: "MCP tool to call" },
+                cognitive_action: { type: "string", description: "RLM action: reason, analyze, plan" },
+                prompt: { type: "string", description: "Prompt or arguments" }
+              }
+            }
+          }
+        },
+        required: ["name", "mode", "steps"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "verify_output",
+      description: "Run verification checks on a piece of content or data. Checks quality, accuracy, and compliance. Use after getting results from other tools to validate them before presenting to user.",
+      parameters: {
+        type: "object",
+        properties: {
+          content: { type: "string", description: "Content to verify" },
+          checks: {
+            type: "array",
+            description: "Verification checks to run",
+            items: {
+              type: "object",
+              properties: {
+                name: { type: "string", description: "Check name" },
+                tool_name: { type: "string", description: "MCP tool for verification" }
+              }
+            }
+          }
+        },
+        required: ["content"]
+      }
+    }
   }
 ];
 async function executeToolCalls(toolCalls) {
@@ -13651,7 +13787,7 @@ ${result.merged_context}` : "No results found for this query.";
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: args.cypher, params: args.params ?? {} },
-        callId: uuid7(),
+        callId: uuid8(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
@@ -13672,7 +13808,7 @@ ${result.merged_context}` : "No results found for this query.";
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher },
-        callId: uuid7(),
+        callId: uuid8(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Task query failed: ${result.error_message}`;
@@ -13684,7 +13820,7 @@ ${result.merged_context}` : "No results found for this query.";
       const result = await callMcpTool({
         toolName: args.tool_name,
         args: args.payload ?? {},
-        callId: uuid7(),
+        callId: uuid8(),
         timeoutMs: 3e4
       });
       if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
@@ -13692,8 +13828,8 @@ ${result.merged_context}` : "No results found for this query.";
     }
     case "get_platform_health": {
       const [backendHealth, graphHealth] = await Promise.allSettled([
-        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid7(), timeoutMs: 1e4 }),
-        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid7(), timeoutMs: 1e4 })
+        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid8(), timeoutMs: 1e4 }),
+        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid8(), timeoutMs: 1e4 })
       ]);
       const parts = [];
       if (backendHealth.status === "fulfilled" && backendHealth.value.status === "success") {
@@ -13709,7 +13845,7 @@ ${result.merged_context}` : "No results found for this query.";
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: args.query },
-        callId: uuid7(),
+        callId: uuid8(),
         timeoutMs: 2e4
       });
       if (result.status !== "success") return `Document search failed: ${result.error_message}`;
@@ -13727,7 +13863,7 @@ ${result.merged_context}` : "No results found for this query.";
       const result = await callMcpTool({
         toolName: "linear.issues",
         args: payload,
-        callId: uuid7(),
+        callId: uuid8(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
@@ -13743,11 +13879,58 @@ ${result.merged_context}` : "No results found for this query.";
       const result = await callMcpTool({
         toolName: "linear.issue_get",
         args: { identifier },
-        callId: uuid7(),
+        callId: uuid8(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
       return JSON.stringify(result.result, null, 2).slice(0, 4e3);
+    }
+    case "run_chain": {
+      const steps = args.steps ?? [];
+      const chainDef = {
+        name: args.name,
+        mode: args.mode ?? "sequential",
+        steps: steps.map((s, i) => ({
+          id: `step-${i}`,
+          agent_id: s.agent_id ?? "chat-orchestrator",
+          tool_name: s.tool_name,
+          cognitive_action: s.cognitive_action,
+          prompt: s.prompt,
+          arguments: s.arguments ?? (s.prompt ? { query: s.prompt } : {})
+        }))
+      };
+      try {
+        const execution = await executeChain(chainDef);
+        const summary = `Chain "${execution.name}" (${execution.mode}): ${execution.status} \u2014 ${execution.steps_completed}/${execution.steps_total} steps, ${execution.duration_ms}ms`;
+        const output = execution.final_output ? `
+
+Result: ${typeof execution.final_output === "string" ? execution.final_output : JSON.stringify(execution.final_output, null, 2).slice(0, 2e3)}` : "";
+        return summary + output + (execution.error ? `
+Error: ${execution.error}` : "");
+      } catch (err) {
+        return `Chain execution failed: ${err}`;
+      }
+    }
+    case "verify_output": {
+      const content = args.content;
+      const checks = args.checks ?? [
+        { name: "graph_health", tool_name: "graph.health", arguments: {} }
+      ];
+      try {
+        const result = await verifyChainOutput(
+          { content },
+          {
+            checks: checks.map((c) => ({
+              name: c.name ?? "check",
+              tool_name: c.tool_name ?? "graph.health",
+              arguments: c.arguments ?? {}
+            }))
+          }
+        );
+        return JSON.stringify(result, null, 2).slice(0, 2e3);
+      } catch (err) {
+        return `Verification failed: ${err}`;
+      }
     }
     default:
       return `Unknown tool: ${name}`;
@@ -13755,9 +13938,36 @@ ${result.merged_context}` : "No results found for this query.";
 }
 
 // src/routes/openai-compat.ts
-import { v4 as uuid8 } from "uuid";
+import { v4 as uuid9 } from "uuid";
 var MAX_TOOL_ROUNDS = 3;
 var openaiCompatRouter = Router13();
+var rateLimitMap = /* @__PURE__ */ new Map();
+var RATE_LIMIT_WINDOW_MS = 6e4;
+var RATE_LIMIT_MAX = 30;
+function checkRateLimit(ip) {
+  const now = Date.now();
+  const entry = rateLimitMap.get(ip);
+  if (!entry || now > entry.resetAt) {
+    rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    return true;
+  }
+  entry.count++;
+  return entry.count <= RATE_LIMIT_MAX;
+}
+function validateApiKey(req, res) {
+  const auth = req.headers.authorization;
+  if (!auth) {
+    res.status(401).json({ error: { message: "Missing Authorization header", type: "auth_error", code: "unauthorized" } });
+    return false;
+  }
+  const token = auth.replace("Bearer ", "");
+  const validKeys = [config.orchestratorApiKey, config.backendApiKey].filter(Boolean);
+  if (validKeys.length > 0 && !validKeys.includes(token)) {
+    res.status(401).json({ error: { message: "Invalid API key", type: "auth_error", code: "unauthorized" } });
+    return false;
+  }
+  return true;
+}
 var SYSTEM_PROMPT = `Du er strategisk partner for WidgeTDC consulting intelligence platform (v2.4.0).
 
 PLATFORM: 448 MCP tools, 520K Neo4j nodes, 3 Railway services, 10 A2A skills.
@@ -13772,64 +13982,6 @@ BRUG ALTID avancerede tools for analyse:
 
 Svar p\xE5 dansk medmindre brugeren skriver engelsk.
 V\xE6r proaktiv \u2014 foresl\xE5 avancerede tools og intelligence loops.`;
-async function getOrchestratedContext(userMessage, requestId) {
-  const parts = [];
-  try {
-    const ragResult = await dualChannelRAG(userMessage, { maxResults: 8 });
-    if (ragResult.merged_context.length > 0) {
-      parts.push(`=== PLATFORM KNOWLEDGE (${ragResult.srag_count} semantic + ${ragResult.cypher_count} graph results, ${ragResult.duration_ms}ms) ===`);
-      parts.push(ragResult.merged_context);
-    }
-    logger.info({ requestId, srag: ragResult.srag_count, cypher: ragResult.cypher_count, ms: ragResult.duration_ms }, "Dual-RAG retrieval");
-  } catch (err) {
-    logger.warn({ requestId, err: String(err) }, "Dual-RAG failed \u2014 continuing without context");
-  }
-  const isComplex = userMessage.length > 100 || /\b(analy|strateg|compar|evaluat|why|how does|explain|plan|recommend|architect)\b/i.test(userMessage);
-  if (isComplex && isRlmAvailable()) {
-    try {
-      const rlmResult = await callCognitive("reason", {
-        prompt: userMessage,
-        context: { source: "open-webui-chat", request_id: requestId },
-        agent_id: "chat-orchestrator",
-        depth: 1
-      }, 3e4);
-      if (rlmResult) {
-        const rlmText = typeof rlmResult === "string" ? rlmResult : JSON.stringify(rlmResult, null, 2);
-        if (rlmText.length > 20) {
-          parts.push(`=== RLM DEEP REASONING ===`);
-          parts.push(rlmText.slice(0, 2e3));
-        }
-      }
-      logger.info({ requestId, complex: true }, "RLM reasoning complete");
-    } catch (err) {
-      logger.warn({ requestId, err: String(err) }, "RLM reasoning failed \u2014 continuing without");
-    }
-  }
-  if (/\b(linear|task|issue|sprint|backlog|status|next step|blocker|plan)\b/i.test(userMessage)) {
-    try {
-      const linearResult = await callMcpTool({
-        toolName: "graph.read_cypher",
-        args: {
-          query: `MATCH (n) WHERE (n:Task OR n:L3Task) AND n.status IN ['In Progress', 'Todo', 'Backlog']
-                  RETURN n.title AS title, n.status AS status, coalesce(n.identifier, n.id) AS id
-                  ORDER BY n.updatedAt DESC LIMIT 10`
-        },
-        callId: uuid8(),
-        timeoutMs: 1e4
-      });
-      if (linearResult.status === "success" && linearResult.result) {
-        const rows = Array.isArray(linearResult.result) ? linearResult.result : linearResult.result?.results ?? [];
-        if (rows.length > 0) {
-          parts.push(`=== ACTIVE TASKS (from graph) ===`);
-          parts.push(rows.map((r) => `- [${r.id ?? "?"}] ${r.title} (${r.status})`).join("\n"));
-        }
-      }
-    } catch (err) {
-      logger.warn({ requestId, err: String(err) }, "Task context failed");
-    }
-  }
-  return parts.join("\n\n");
-}
 var MODELS = [
   { id: "claude-sonnet", provider: "claude", displayName: "Claude Sonnet 4" },
   { id: "claude-opus", provider: "claude", displayName: "Claude Opus 4" },
@@ -13848,7 +14000,8 @@ var MODEL_TO_PROVIDER = {
   "gpt-4o": { provider: "openai", model: "gpt-4o" },
   "groq-llama": { provider: "groq", model: "llama-3.3-70b-versatile" }
 };
-openaiCompatRouter.get("/v1/models", (_req, res) => {
+openaiCompatRouter.get("/v1/models", (req, res) => {
+  if (!validateApiKey(req, res)) return;
   const models = MODELS.map((m) => ({
     id: m.id,
     object: "model",
@@ -13861,45 +14014,24 @@ openaiCompatRouter.get("/v1/models", (_req, res) => {
   res.json({ object: "list", data: models });
 });
 openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
+  if (!validateApiKey(req, res)) return;
+  const clientIp = req.ip || req.socket.remoteAddress || "unknown";
+  if (!checkRateLimit(clientIp)) {
+    res.status(429).json({ error: { message: "Rate limit exceeded (30 req/min)", type: "rate_limit", code: "rate_limited" } });
+    return;
+  }
   const { model, messages, stream, temperature, max_tokens } = req.body;
-  const requestId = `chatcmpl-${uuid8().substring(0, 12)}`;
+  const requestId = `chatcmpl-${uuid9().substring(0, 12)}`;
   const mapping = MODEL_TO_PROVIDER[model] || MODEL_TO_PROVIDER["gemini-flash"];
   const provider = mapping.provider;
   const providerModel = mapping.model;
-  const userMessages = (messages || []).filter((m) => m.role === "user");
-  const lastUserMessage = userMessages.length > 0 ? userMessages[userMessages.length - 1].content : "";
-  let orchestratedContext = "";
-  if (lastUserMessage.length > 2) {
-    try {
-      orchestratedContext = await getOrchestratedContext(lastUserMessage, requestId);
-    } catch (err) {
-      logger.warn({ requestId, err: String(err) }, "Orchestration failed \u2014 falling back to plain chat");
-    }
-  }
-  const enrichedSystemPrompt = orchestratedContext.length > 0 ? `${SYSTEM_PROMPT}
-
-${orchestratedContext}
-
-Brug ovenst\xE5ende platformdata til at give et pr\xE6cist, datadrevet svar. Cit\xE9r kilder n\xE5r muligt.` : SYSTEM_PROMPT;
   const llmMessages = [...messages || []];
   const hasSystem = llmMessages.some((m) => m.role === "system");
   if (!hasSystem) {
-    llmMessages.unshift({ role: "system", content: enrichedSystemPrompt });
-  } else {
-    if (orchestratedContext.length > 0) {
-      const sysIdx = llmMessages.findIndex((m) => m.role === "system");
-      if (sysIdx >= 0) {
-        llmMessages[sysIdx] = {
-          ...llmMessages[sysIdx],
-          content: `${llmMessages[sysIdx].content}
-
-${orchestratedContext}`
-        };
-      }
-    }
+    llmMessages.unshift({ role: "system", content: SYSTEM_PROMPT });
   }
   const t0 = Date.now();
-  logger.info({ model, provider, stream, messageCount: llmMessages.length, contextLen: orchestratedContext.length }, "OpenAI compat request (orchestrated)");
+  logger.info({ model, provider, stream, messageCount: llmMessages.length, ip: clientIp }, "OpenAI compat request");
   try {
     let loopMessages = [...llmMessages];
     let finalContent = "";

@@ -12,6 +12,8 @@
 import { dualChannelRAG } from './dual-rag.js'
 import { callCognitive, isRlmAvailable } from './cognitive-proxy.js'
 import { callMcpTool } from './mcp-caller.js'
+import { executeChain } from './chain-engine.js'
+import { verifyChainOutput } from './verification-gate.js'
 import { logger } from './logger.js'
 import { v4 as uuid } from 'uuid'
 
@@ -144,6 +146,59 @@ export const ORCHESTRATOR_TOOLS = [
           identifier: { type: 'string', description: 'Issue identifier (e.g., LIN-493)' },
         },
         required: ['identifier'],
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'run_chain',
+      description: 'Execute a multi-step agent chain. Supports sequential (A→B→C), parallel (A+B+C), debate (two agents argue, third judges), and loop modes. Use for complex workflows that need multiple tool calls coordinated together.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Chain name/description' },
+          mode: { type: 'string', enum: ['sequential', 'parallel', 'debate', 'loop'], description: 'Execution mode' },
+          steps: {
+            type: 'array',
+            description: 'Chain steps — each has tool_name or cognitive_action + arguments',
+            items: {
+              type: 'object',
+              properties: {
+                agent_id: { type: 'string', description: 'Agent identifier' },
+                tool_name: { type: 'string', description: 'MCP tool to call' },
+                cognitive_action: { type: 'string', description: 'RLM action: reason, analyze, plan' },
+                prompt: { type: 'string', description: 'Prompt or arguments' },
+              },
+            },
+          },
+        },
+        required: ['name', 'mode', 'steps'],
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'verify_output',
+      description: 'Run verification checks on a piece of content or data. Checks quality, accuracy, and compliance. Use after getting results from other tools to validate them before presenting to user.',
+      parameters: {
+        type: 'object',
+        properties: {
+          content: { type: 'string', description: 'Content to verify' },
+          checks: {
+            type: 'array',
+            description: 'Verification checks to run',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', description: 'Check name' },
+                tool_name: { type: 'string', description: 'MCP tool for verification' },
+              },
+            },
+          },
+        },
+        required: ['content'],
       },
     },
   },
@@ -327,6 +382,54 @@ async function executeOne(tc: ToolCall): Promise<string> {
       })
       if (result.status !== 'success') return `Linear issue lookup failed: ${result.error_message}`
       return JSON.stringify(result.result, null, 2).slice(0, 4000)
+    }
+
+    case 'run_chain': {
+      const steps = (args.steps as any[]) ?? []
+      const chainDef = {
+        name: args.name as string,
+        mode: (args.mode as 'sequential' | 'parallel' | 'debate' | 'loop') ?? 'sequential',
+        steps: steps.map((s: any, i: number) => ({
+          id: `step-${i}`,
+          agent_id: s.agent_id ?? 'chat-orchestrator',
+          tool_name: s.tool_name,
+          cognitive_action: s.cognitive_action,
+          prompt: s.prompt,
+          arguments: s.arguments ?? (s.prompt ? { query: s.prompt } : {}),
+        })),
+      }
+      try {
+        const execution = await executeChain(chainDef)
+        const summary = `Chain "${execution.name}" (${execution.mode}): ${execution.status} — ${execution.steps_completed}/${execution.steps_total} steps, ${execution.duration_ms}ms`
+        const output = execution.final_output
+          ? `\n\nResult: ${typeof execution.final_output === 'string' ? execution.final_output : JSON.stringify(execution.final_output, null, 2).slice(0, 2000)}`
+          : ''
+        return summary + output + (execution.error ? `\nError: ${execution.error}` : '')
+      } catch (err) {
+        return `Chain execution failed: ${err}`
+      }
+    }
+
+    case 'verify_output': {
+      const content = args.content as string
+      const checks = (args.checks as any[]) ?? [
+        { name: 'graph_health', tool_name: 'graph.health', arguments: {} },
+      ]
+      try {
+        const result = await verifyChainOutput(
+          { content },
+          {
+            checks: checks.map((c: any) => ({
+              name: c.name ?? 'check',
+              tool_name: c.tool_name ?? 'graph.health',
+              arguments: c.arguments ?? {},
+            })),
+          }
+        )
+        return JSON.stringify(result, null, 2).slice(0, 2000)
+      } catch (err) {
+        return `Verification failed: ${err}`
+      }
     }
 
     default:
