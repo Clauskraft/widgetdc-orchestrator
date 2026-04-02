@@ -13548,14 +13548,16 @@ var COMPETITOR_TARGETS = [
     name: "Glean",
     slug: "glean",
     urls: [
-      "https://developers.glean.com/docs/overview"
+      "https://developers.glean.com/docs/overview",
+      "https://www.glean.com/product"
     ]
   },
   {
     name: "LangGraph",
     slug: "langgraph",
     urls: [
-      "https://langchain-ai.github.io/langgraph/"
+      "https://langchain-ai.github.io/langgraph/concepts/",
+      "https://langchain-ai.github.io/langgraph/how-tos/"
     ]
   },
   {
