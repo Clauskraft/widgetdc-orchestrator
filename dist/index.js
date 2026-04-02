@@ -13566,35 +13566,74 @@ var COMPETITOR_TARGETS = [
     ]
   }
 ];
+async function fetchPageText(url) {
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": "WidgeTDC-Research/1.0 (competitive analysis; public docs only)",
+      "Accept": "text/html,application/json,text/plain"
+    },
+    signal: AbortSignal.timeout(15e3),
+    redirect: "follow"
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  const contentType = res.headers.get("content-type") ?? "";
+  const raw = await res.text();
+  if (contentType.includes("html")) {
+    return raw.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "").replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "").replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, "").replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, "").replace(/<header[^>]*>[\s\S]*?<\/header>/gi, "").replace(/<[^>]+>/g, " ").replace(/\s{2,}/g, " ").replace(/&[a-z]+;/gi, " ").trim().slice(0, 15e3);
+  }
+  return raw.slice(0, 15e3);
+}
+var EXTRACTION_PROMPT = `You are a competitive intelligence analyst. Given web page content from a competitor, extract specific technical capabilities they offer.
+
+Rules:
+- List ONLY capabilities explicitly mentioned in the content
+- Each capability must be a specific, concrete feature (not marketing fluff)
+- Focus on: APIs, agent/orchestration features, AI/LLM capabilities, security, knowledge management, integrations
+- Return as a bulleted list, one capability per line, starting with "- "
+- Maximum 20 capabilities per page
+- If the page has no relevant technical content, return "NO_CAPABILITIES_FOUND"
+
+Competitor: {competitor}
+URL: {url}
+Page content:
+{content}`;
 async function extractCapabilities(target) {
   const capabilities = [];
   for (const url of target.urls) {
     try {
-      const result = await callMcpTool({
-        toolName: "srag.query",
-        args: {
-          query: `Analyze competitor "${target.name}" capabilities from their public documentation at ${url}. List specific technical capabilities, API features, agent features, orchestration features, and AI features. Be specific and factual.`
-        },
-        callId: uuid8(),
-        timeoutMs: 3e4
+      logger.info({ competitor: target.name, url }, "Fetching competitor page");
+      const pageText = await fetchPageText(url);
+      if (pageText.length < 100) {
+        logger.warn({ competitor: target.name, url, length: pageText.length }, "Page too short \u2014 skipping");
+        continue;
+      }
+      const prompt = EXTRACTION_PROMPT.replace("{competitor}", target.name).replace("{url}", url).replace("{content}", pageText.slice(0, 12e3));
+      const llmResult = await chatLLM({
+        provider: "deepseek",
+        // cheap + fast for extraction
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.3,
+        max_tokens: 1500
       });
-      if (result.status === "success" && result.result) {
-        const text = typeof result.result === "string" ? result.result : JSON.stringify(result.result);
-        const lines = text.split("\n").filter((l) => l.trim().startsWith("-") || l.trim().startsWith("*"));
-        for (const line of lines.slice(0, 20)) {
-          const cap = line.replace(/^[\s\-\*]+/, "").trim();
-          if (cap.length > 10 && cap.length < 200) {
-            capabilities.push({
-              $id: `capability:${target.slug}:${uuid8().slice(0, 8)}`,
-              competitor: target.name,
-              capability: cap,
-              category: categorizeCapability(cap),
-              evidence_url: url,
-              extracted_at: (/* @__PURE__ */ new Date()).toISOString()
-            });
-          }
+      if (!llmResult.content || llmResult.content.includes("NO_CAPABILITIES_FOUND")) {
+        logger.info({ competitor: target.name, url }, "No capabilities found on page");
+        continue;
+      }
+      const lines = llmResult.content.split("\n").filter((l) => l.trim().startsWith("-") || l.trim().startsWith("*"));
+      for (const line of lines.slice(0, 20)) {
+        const cap = line.replace(/^[\s\-\*]+/, "").trim();
+        if (cap.length > 10 && cap.length < 200) {
+          capabilities.push({
+            $id: `capability:${target.slug}:${uuid8().slice(0, 8)}`,
+            competitor: target.name,
+            capability: cap,
+            category: categorizeCapability(cap),
+            evidence_url: url,
+            extracted_at: (/* @__PURE__ */ new Date()).toISOString()
+          });
         }
       }
+      logger.info({ competitor: target.name, url, capabilities: lines.length }, "Extracted capabilities from page");
     } catch (err) {
       logger.warn({ competitor: target.name, url, err: String(err) }, "Capability extraction failed for URL");
     }

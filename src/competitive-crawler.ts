@@ -14,6 +14,7 @@
 import { v4 as uuid } from 'uuid'
 import { getRedis } from './redis.js'
 import { callMcpTool } from './mcp-caller.js'
+import { chatLLM } from './llm-proxy.js'
 import { logger } from './logger.js'
 import { broadcastSSE } from './sse.js'
 
@@ -89,46 +90,115 @@ export const COMPETITOR_TARGETS: CompetitorTarget[] = [
   },
 ]
 
-// ─── Capability Extractor ───────────────────────────────────────────────────
+// ─── Web Fetcher ────────────────────────────────────────────────────────────
 
 /**
- * Fetch a URL and extract capabilities using SRAG query for analysis.
- * Falls back gracefully if URL is unreachable.
+ * Fetch a URL and return plain text content (HTML stripped).
+ * Respects robots.txt spirit: identifies as WidgeTDC research bot, no auth bypass.
+ */
+async function fetchPageText(url: string): Promise<string> {
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'WidgeTDC-Research/1.0 (competitive analysis; public docs only)',
+      'Accept': 'text/html,application/json,text/plain',
+    },
+    signal: AbortSignal.timeout(15000),
+    redirect: 'follow',
+  })
+
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`)
+
+  const contentType = res.headers.get('content-type') ?? ''
+  const raw = await res.text()
+
+  // Strip HTML tags, scripts, styles — keep text content
+  if (contentType.includes('html')) {
+    return raw
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+      .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, '')
+      .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, '')
+      .replace(/<header[^>]*>[\s\S]*?<\/header>/gi, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .replace(/&[a-z]+;/gi, ' ')
+      .trim()
+      .slice(0, 15000) // Cap at 15K chars for LLM context
+  }
+
+  return raw.slice(0, 15000)
+}
+
+// ─── Capability Extractor ───────────────────────────────────────────────────
+
+const EXTRACTION_PROMPT = `You are a competitive intelligence analyst. Given web page content from a competitor, extract specific technical capabilities they offer.
+
+Rules:
+- List ONLY capabilities explicitly mentioned in the content
+- Each capability must be a specific, concrete feature (not marketing fluff)
+- Focus on: APIs, agent/orchestration features, AI/LLM capabilities, security, knowledge management, integrations
+- Return as a bulleted list, one capability per line, starting with "- "
+- Maximum 20 capabilities per page
+- If the page has no relevant technical content, return "NO_CAPABILITIES_FOUND"
+
+Competitor: {competitor}
+URL: {url}
+Page content:
+{content}`
+
+/**
+ * Fetch actual web pages and extract capabilities using LLM analysis.
+ * Pipeline: HTTP fetch → strip HTML → LLM extraction → parse bullets.
  */
 async function extractCapabilities(target: CompetitorTarget): Promise<ExtractedCapability[]> {
   const capabilities: ExtractedCapability[] = []
 
   for (const url of target.urls) {
     try {
-      // Use SRAG to analyze competitor capabilities based on URL reference
-      const result = await callMcpTool({
-        toolName: 'srag.query',
-        args: {
-          query: `Analyze competitor "${target.name}" capabilities from their public documentation at ${url}. List specific technical capabilities, API features, agent features, orchestration features, and AI features. Be specific and factual.`,
-        },
-        callId: uuid(),
-        timeoutMs: 30000,
+      // Step 1: Fetch the actual web page
+      logger.info({ competitor: target.name, url }, 'Fetching competitor page')
+      const pageText = await fetchPageText(url)
+
+      if (pageText.length < 100) {
+        logger.warn({ competitor: target.name, url, length: pageText.length }, 'Page too short — skipping')
+        continue
+      }
+
+      // Step 2: Use LLM to extract capabilities from real page content
+      const prompt = EXTRACTION_PROMPT
+        .replace('{competitor}', target.name)
+        .replace('{url}', url)
+        .replace('{content}', pageText.slice(0, 12000))
+
+      const llmResult = await chatLLM({
+        provider: 'deepseek', // cheap + fast for extraction
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.3,
+        max_tokens: 1500,
       })
 
-      if (result.status === 'success' && result.result) {
-        const text = typeof result.result === 'string' ? result.result : JSON.stringify(result.result)
+      if (!llmResult.content || llmResult.content.includes('NO_CAPABILITIES_FOUND')) {
+        logger.info({ competitor: target.name, url }, 'No capabilities found on page')
+        continue
+      }
 
-        // Parse capabilities from SRAG response (line-based extraction)
-        const lines = text.split('\n').filter((l: string) => l.trim().startsWith('-') || l.trim().startsWith('*'))
-        for (const line of lines.slice(0, 20)) {
-          const cap = line.replace(/^[\s\-\*]+/, '').trim()
-          if (cap.length > 10 && cap.length < 200) {
-            capabilities.push({
-              $id: `capability:${target.slug}:${uuid().slice(0, 8)}`,
-              competitor: target.name,
-              capability: cap,
-              category: categorizeCapability(cap),
-              evidence_url: url,
-              extracted_at: new Date().toISOString(),
-            })
-          }
+      // Step 3: Parse bullet-point capabilities from LLM response
+      const lines = llmResult.content.split('\n').filter((l: string) => l.trim().startsWith('-') || l.trim().startsWith('*'))
+      for (const line of lines.slice(0, 20)) {
+        const cap = line.replace(/^[\s\-\*]+/, '').trim()
+        if (cap.length > 10 && cap.length < 200) {
+          capabilities.push({
+            $id: `capability:${target.slug}:${uuid().slice(0, 8)}`,
+            competitor: target.name,
+            capability: cap,
+            category: categorizeCapability(cap),
+            evidence_url: url,
+            extracted_at: new Date().toISOString(),
+          })
         }
       }
+
+      logger.info({ competitor: target.name, url, capabilities: lines.length }, 'Extracted capabilities from page')
     } catch (err) {
       logger.warn({ competitor: target.name, url, err: String(err) }, 'Capability extraction failed for URL')
     }
