@@ -11348,6 +11348,9 @@ function toOpenAPIPaths() {
   }
   return paths;
 }
+function getTool(name) {
+  return TOOL_REGISTRY.find((t) => t.name === name);
+}
 
 // src/tool-executor.ts
 var ORCHESTRATOR_TOOLS = toOpenAITools();
@@ -11441,6 +11444,39 @@ function buildToolFallback(toolName, error) {
       return `Linear query failed (${short}). Linear data may be temporarily unavailable.`;
     default:
       return `Tool "${toolName}" failed: ${short}`;
+  }
+}
+async function executeToolUnified(toolName, args, opts) {
+  const callId = opts?.call_id ?? uuid5();
+  const t0 = Date.now();
+  try {
+    const rawResult = await executeToolByName(toolName, args);
+    const duration = Date.now() - t0;
+    const shouldFold = opts?.fold !== false;
+    const folded = shouldFold ? foldToolResult(rawResult, toolName) : rawResult;
+    return {
+      call_id: callId,
+      tool_name: toolName,
+      status: "success",
+      result: folded,
+      duration_ms: duration,
+      completed_at: (/* @__PURE__ */ new Date()).toISOString(),
+      was_folded: shouldFold && folded !== rawResult,
+      source_protocol: opts?.source_protocol ?? "unknown"
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      call_id: callId,
+      tool_name: toolName,
+      status: "error",
+      result: null,
+      error_message: msg,
+      duration_ms: Date.now() - t0,
+      completed_at: (/* @__PURE__ */ new Date()).toISOString(),
+      was_folded: false,
+      source_protocol: opts?.source_protocol ?? "unknown"
+    };
   }
 }
 async function executeToolByName(name, args) {
@@ -18552,6 +18588,60 @@ mcpGatewayRouter.delete("/", (_req, res) => {
   res.status(200).json({ jsonrpc: "2.0", result: { message: "Session terminated" } });
 });
 
+// src/routes/tool-gateway.ts
+import { Router as Router25 } from "express";
+import { v4 as uuid16 } from "uuid";
+var toolGatewayRouter = Router25();
+toolGatewayRouter.post("/:name", async (req, res) => {
+  const { name } = req.params;
+  const tool = getTool(name);
+  if (!tool) {
+    res.status(404).json({
+      success: false,
+      error: {
+        code: "TOOL_NOT_FOUND",
+        message: `Tool '${name}' not found. Use GET /api/tools to list available tools.`,
+        available: TOOL_REGISTRY.map((t) => t.name),
+        status_code: 404
+      }
+    });
+    return;
+  }
+  const callId = req.body?.call_id ?? uuid16();
+  const args = req.body ?? {};
+  logger.info({ tool: name, call_id: callId }, "REST tool gateway call");
+  const result = await executeToolUnified(name, args, {
+    call_id: callId,
+    source_protocol: "openapi",
+    fold: req.query.fold !== "false"
+  });
+  const httpStatus = result.status === "success" ? 200 : result.status === "timeout" ? 504 : 500;
+  res.status(httpStatus).json({
+    success: result.status === "success",
+    data: result
+  });
+});
+toolGatewayRouter.get("/", (_req, res) => {
+  const tools = TOOL_REGISTRY.map((t) => ({
+    name: t.name,
+    namespace: t.namespace,
+    category: t.category,
+    description: t.description,
+    tags: t.tags,
+    available_via: t.availableVia,
+    timeout_ms: t.timeoutMs,
+    endpoint: `/api/tools/${t.name}`
+  }));
+  res.json({
+    success: true,
+    data: {
+      tools,
+      total: tools.length,
+      registry_version: "1.0.0"
+    }
+  });
+});
+
 // src/agent-seeds.ts
 var AGENT_SEEDS = [
   {
@@ -18877,6 +18967,7 @@ app.use("/api/loose-ends", requireApiKey, looseEndsRouter);
 app.use("/api/decisions", requireApiKey, decisionsRouter);
 app.use("/monitor", requireApiKey, monitorRouter);
 app.use("/api/s1-s4", requireApiKey, s1s4Router);
+app.use("/api/tools", requireApiKey, toolGatewayRouter);
 app.use("/api/prompt-generator", promptGeneratorRouter);
 app.use(openapiRouter);
 app.use("/mcp", requireApiKey, mcpGatewayRouter);

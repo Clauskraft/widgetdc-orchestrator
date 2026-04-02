@@ -384,6 +384,64 @@ function buildToolFallback(toolName: string, error: string): string {
   }
 }
 
+// ─── Unified Execution (Triple-Protocol ABI — LIN-564) ─────────────────────
+
+export interface ExecutionResult {
+  call_id: string
+  tool_name: string
+  status: 'success' | 'error' | 'timeout'
+  result: unknown
+  error_message?: string
+  duration_ms: number
+  completed_at: string
+  was_folded: boolean
+  source_protocol: string
+}
+
+/**
+ * Execute a tool by name with structured result envelope.
+ * Used by REST /api/tools/:name endpoint and MCP gateway.
+ */
+export async function executeToolUnified(
+  toolName: string,
+  args: Record<string, unknown>,
+  opts?: { call_id?: string; source_protocol?: string; fold?: boolean },
+): Promise<ExecutionResult> {
+  const callId = opts?.call_id ?? uuid()
+  const t0 = Date.now()
+
+  try {
+    const rawResult = await executeToolByName(toolName, args)
+    const duration = Date.now() - t0
+    const shouldFold = opts?.fold !== false
+    const folded = shouldFold ? foldToolResult(rawResult, toolName) : rawResult
+
+    return {
+      call_id: callId,
+      tool_name: toolName,
+      status: 'success',
+      result: folded,
+      duration_ms: duration,
+      completed_at: new Date().toISOString(),
+      was_folded: shouldFold && folded !== rawResult,
+      source_protocol: opts?.source_protocol ?? 'unknown',
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return {
+      call_id: callId,
+      tool_name: toolName,
+      status: 'error',
+      result: null,
+      error_message: msg,
+      duration_ms: Date.now() - t0,
+      completed_at: new Date().toISOString(),
+      was_folded: false,
+      source_protocol: opts?.source_protocol ?? 'unknown',
+    }
+  }
+}
+
 async function executeToolByName(name: string, args: Record<string, unknown>): Promise<string> {
   switch (name) {
     case 'search_knowledge': {

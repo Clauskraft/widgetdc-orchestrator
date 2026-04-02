@@ -59,6 +59,7 @@ import { openaiCompatRouter } from './routes/openai-compat.js'
 import { promptGeneratorRouter } from './routes/prompt-generator.js'
 import { openapiRouter } from './openapi.js'
 import { mcpGatewayRouter } from './routes/mcp-gateway.js'
+import { toolGatewayRouter } from './routes/tool-gateway.js'
 import { seedAgents } from './agent-seeds.js'
 import { hydrateMessages } from './chat-store.js'
 
@@ -149,6 +150,9 @@ app.use('/api/loose-ends', requireApiKey, looseEndsRouter)
 app.use('/api/decisions', requireApiKey, decisionsRouter)
 app.use('/monitor', requireApiKey, monitorRouter)
 app.use('/api/s1-s4', requireApiKey, s1s4Router)
+
+// Tool Gateway — REST access to ALL orchestrator tools (Triple-Protocol ABI)
+app.use('/api/tools', requireApiKey, toolGatewayRouter)
 
 // Prompt Generator (no auth — utility endpoint)
 app.use('/api/prompt-generator', promptGeneratorRouter)
