@@ -124,7 +124,7 @@ export async function callCognitive(
   } catch (err) {
     clearTimeout(timer)
     if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error(`RLM ${action} timed out after ${timeoutMs ?? 60000}ms`)
+      throw new Error(`RLM ${action} timed out after ${timeoutMs ?? 120000}ms`)
     }
     throw err
   }
