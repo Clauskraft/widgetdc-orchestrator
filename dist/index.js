@@ -19671,6 +19671,274 @@ foldRouter.get("/usage", async (req, res) => {
   }
 });
 
+// src/routes/graph-hygiene.ts
+import { Router as Router29 } from "express";
+
+// src/graph-hygiene.ts
+import { v4 as uuid19 } from "uuid";
+async function graphRead3(cypher) {
+  const result = await callMcpTool({
+    toolName: "graph.read_cypher",
+    args: { query: cypher },
+    callId: uuid19(),
+    timeoutMs: 3e4
+  });
+  if (result.status !== "success") return [];
+  const data = result.result;
+  return data?.results || data || [];
+}
+async function graphWrite2(cypher, params) {
+  const result = await callMcpTool({
+    toolName: "graph.write_cypher",
+    args: { query: cypher, ...params ? { params } : {} },
+    callId: uuid19(),
+    timeoutMs: 6e4
+  });
+  return result.status === "success";
+}
+async function fixFrameworkDomainRels() {
+  const before = await graphRead3(`
+    MATCH (f:Framework)
+    WHERE NOT (f)-[:IN_DOMAIN]->(:Domain)
+    RETURN count(f) AS count
+  `);
+  const missingCount = before[0]?.count ?? before.length ?? 0;
+  if (missingCount === 0) {
+    return { operation: "framework_domain_rels", severity: "P0", before: 0, after: 0, fixed: 0, details: "No missing IN_DOMAIN rels" };
+  }
+  await graphWrite2(`
+    MATCH (f:Framework)-[:BELONGS_TO_DOMAIN]->(d:Domain)
+    WHERE NOT (f)-[:IN_DOMAIN]->(d)
+    MERGE (f)-[:IN_DOMAIN]->(d)
+  `);
+  await graphWrite2(`
+    MATCH (f:Framework) WHERE f.domain IS NOT NULL AND NOT (f)-[:IN_DOMAIN]->(:Domain)
+    MATCH (d:Domain) WHERE d.name = f.domain OR d.slug = f.domain
+    MERGE (f)-[:IN_DOMAIN]->(d)
+  `);
+  const after = await graphRead3(`
+    MATCH (f:Framework)
+    WHERE NOT (f)-[:IN_DOMAIN]->(:Domain)
+    RETURN count(f) AS count
+  `);
+  const remaining = after[0]?.count ?? after.length ?? 0;
+  const fixed = (typeof missingCount === "number" ? missingCount : 0) - (typeof remaining === "number" ? remaining : 0);
+  return {
+    operation: "framework_domain_rels",
+    severity: "P0",
+    before: typeof missingCount === "number" ? missingCount : 0,
+    after: typeof remaining === "number" ? remaining : 0,
+    fixed: Math.max(0, fixed),
+    details: `Created IN_DOMAIN rels for ${Math.max(0, fixed)} frameworks (${remaining} still unlinked \u2014 may lack Domain node)`
+  };
+}
+var DOMAIN_CONSOLIDATION = {
+  "Legal & Compliance": ["Legal", "Legal & Regulatory", "Compliance"],
+  "Digital Transformation": ["Digital", "Digital Strategy", "Digitalization"],
+  "Strategy & Advisory": ["Strategy", "Strategic Advisory", "Business Strategy", "Corporate Strategy"],
+  "Technology & Architecture": ["Technology", "IT Architecture", "Enterprise Architecture"],
+  "Data & Analytics": ["Data", "Analytics", "Data Science", "Business Intelligence"],
+  "Cybersecurity": ["Security", "Information Security", "Cyber"],
+  "Cloud & Infrastructure": ["Cloud", "Infrastructure", "Cloud Computing"],
+  "Finance & Risk": ["Finance", "Risk", "Financial Services", "Risk Management"],
+  "Public Sector": ["Government", "Public Administration", "Gov Tech"],
+  "Operations & Delivery": ["Operations", "Delivery", "Service Delivery"]
+};
+async function consolidateDomains() {
+  const beforeResult = await graphRead3(`MATCH (d:Domain) RETURN count(d) AS count`);
+  const domainsBefore = beforeResult[0]?.count ?? 0;
+  let totalMerged = 0;
+  for (const [canonical, variants] of Object.entries(DOMAIN_CONSOLIDATION)) {
+    for (const variant of variants) {
+      if (variant === canonical) continue;
+      const exists = await graphRead3(`MATCH (d:Domain {name: '${variant}'}) RETURN count(d) AS count`);
+      if ((exists[0]?.count ?? 0) === 0) continue;
+      const ok = await graphWrite2(`
+        MATCH (variant:Domain {name: $variant})
+        MATCH (canonical:Domain {name: $canonical})
+        WHERE variant <> canonical
+        WITH variant, canonical
+        OPTIONAL MATCH (variant)<-[r]-()
+        WITH variant, canonical, collect(r) AS rels
+        UNWIND rels AS rel
+        WITH variant, canonical, rel, startNode(rel) AS source, type(rel) AS relType
+        CALL apoc.create.relationship(source, relType, {}, canonical) YIELD rel AS newRel
+        DELETE rel
+        RETURN count(newRel) AS migrated
+      `, { variant, canonical });
+      if (!ok) {
+        for (const relType of ["IN_DOMAIN", "BELONGS_TO_DOMAIN", "COVERS", "RELATES_TO"]) {
+          await graphWrite2(`
+            MATCH (source)-[r:${relType}]->(variant:Domain {name: $variant})
+            MATCH (canonical:Domain {name: $canonical})
+            WHERE variant <> canonical
+            MERGE (source)-[:${relType}]->(canonical)
+            DELETE r
+          `, { variant, canonical });
+          await graphWrite2(`
+            MATCH (variant:Domain {name: $variant})-[r:${relType}]->(target)
+            MATCH (canonical:Domain {name: $canonical})
+            WHERE variant <> canonical
+            MERGE (canonical)-[:${relType}]->(target)
+            DELETE r
+          `, { variant, canonical });
+        }
+      }
+      await graphWrite2(`
+        MATCH (d:Domain {name: $variant})
+        WHERE NOT (d)-[]-()
+        DELETE d
+      `, { variant });
+      totalMerged++;
+      logger.info({ variant, canonical }, "Domain consolidated");
+    }
+  }
+  const afterResult = await graphRead3(`MATCH (d:Domain) RETURN count(d) AS count`);
+  const domainsAfter = afterResult[0]?.count ?? 0;
+  return {
+    operation: "domain_consolidation",
+    severity: "P1",
+    before: typeof domainsBefore === "number" ? domainsBefore : 0,
+    after: typeof domainsAfter === "number" ? domainsAfter : 0,
+    fixed: totalMerged,
+    details: `Consolidated ${totalMerged} variant domains. ${domainsAfter} domains remaining.`
+  };
+}
+async function purgeGraphBloat() {
+  const orphanCount = await graphRead3(`
+    MATCH (d:RLMDecision)
+    WHERE NOT (d)-[:DECIDED_BY|AFFECTS|IMPLEMENTS|REFERENCES]-()
+    RETURN count(d) AS count
+  `);
+  const orphans = orphanCount[0]?.count ?? 0;
+  let totalDeleted = 0;
+  if (typeof orphans === "number" && orphans > 0) {
+    for (let i = 0; i < Math.ceil(orphans / 1e3); i++) {
+      const ok = await graphWrite2(`
+        MATCH (d:RLMDecision)
+        WHERE NOT (d)-[:DECIDED_BY|AFFECTS|IMPLEMENTS|REFERENCES]-()
+        WITH d LIMIT 1000
+        DETACH DELETE d
+        RETURN count(*) AS deleted
+      `);
+      if (!ok) break;
+      totalDeleted += 1e3;
+    }
+    totalDeleted = Math.min(totalDeleted, orphans);
+  }
+  const saCountResult = await graphRead3(`
+    MATCH ()-[r:SHOULD_AWARE_OF]->()
+    RETURN count(r) AS count
+  `);
+  const saCount = saCountResult[0]?.count ?? 0;
+  let saDeleted = 0;
+  if (typeof saCount === "number" && saCount > 1e5) {
+    await graphWrite2(`
+      MATCH (a)-[r:SHOULD_AWARE_OF]->(l:Lesson)
+      WHERE l.timestamp < datetime() - duration('P30D')
+      WITH r LIMIT 50000
+      DELETE r
+    `);
+    await graphWrite2(`
+      MATCH (a)-[r:SHOULD_AWARE_OF]->(l:Lesson)
+      WHERE l.violation = 'CONTRACT_VIOLATION'
+      AND l.correction CONTAINS 'All JSON must include $id'
+      WITH r LIMIT 50000
+      DELETE r
+    `);
+    const saAfter = await graphRead3(`MATCH ()-[r:SHOULD_AWARE_OF]->() RETURN count(r) AS count`);
+    saDeleted = (typeof saCount === "number" ? saCount : 0) - (typeof saAfter[0]?.count === "number" ? saAfter[0].count : 0);
+  }
+  return {
+    operation: "graph_bloat_purge",
+    severity: "P2",
+    before: (typeof orphans === "number" ? orphans : 0) + (typeof saCount === "number" ? saCount : 0),
+    after: 0,
+    fixed: totalDeleted + Math.max(0, saDeleted),
+    details: `Deleted ${totalDeleted} orphan RLMDecision, pruned ${Math.max(0, saDeleted)} stale SHOULD_AWARE_OF rels`
+  };
+}
+async function runGraphHygiene() {
+  const t0 = Date.now();
+  const operations = [];
+  logger.info("Starting graph hygiene run (LIN-574)");
+  try {
+    operations.push(await fixFrameworkDomainRels());
+  } catch (err) {
+    logger.error({ err: String(err) }, "P0 framework_domain_rels failed");
+    operations.push({ operation: "framework_domain_rels", severity: "P0", before: 0, after: 0, fixed: 0, details: `Error: ${String(err).slice(0, 200)}` });
+  }
+  try {
+    operations.push(await consolidateDomains());
+  } catch (err) {
+    logger.error({ err: String(err) }, "P1 domain_consolidation failed");
+    operations.push({ operation: "domain_consolidation", severity: "P1", before: 0, after: 0, fixed: 0, details: `Error: ${String(err).slice(0, 200)}` });
+  }
+  try {
+    operations.push(await purgeGraphBloat());
+  } catch (err) {
+    logger.error({ err: String(err) }, "P2 graph_bloat_purge failed");
+    operations.push({ operation: "graph_bloat_purge", severity: "P2", before: 0, after: 0, fixed: 0, details: `Error: ${String(err).slice(0, 200)}` });
+  }
+  const report = {
+    $id: `hygiene-report:${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}`,
+    started_at: new Date(t0).toISOString(),
+    completed_at: (/* @__PURE__ */ new Date()).toISOString(),
+    duration_ms: Date.now() - t0,
+    operations,
+    total_fixed: operations.reduce((sum, op) => sum + op.fixed, 0)
+  };
+  broadcastSSE("graph-hygiene", report);
+  logger.info({ total_fixed: report.total_fixed, duration_ms: report.duration_ms }, "Graph hygiene complete");
+  return report;
+}
+
+// src/routes/graph-hygiene.ts
+var graphHygieneRouter = Router29();
+var hygieneInProgress = false;
+graphHygieneRouter.post("/run", async (_req, res) => {
+  if (hygieneInProgress) {
+    res.status(429).json({
+      success: false,
+      error: { code: "HYGIENE_IN_PROGRESS", message: "A hygiene run is already in progress.", status_code: 429 }
+    });
+    return;
+  }
+  hygieneInProgress = true;
+  try {
+    const report = await runGraphHygiene();
+    res.json({ success: true, data: report });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Graph hygiene run failed");
+    res.status(500).json({ success: false, error: { code: "HYGIENE_FAILED", message: "Graph hygiene failed. Check server logs.", status_code: 500 } });
+  } finally {
+    hygieneInProgress = false;
+  }
+});
+graphHygieneRouter.post("/fix/:op", async (req, res) => {
+  const op = req.params.op;
+  const ops = {
+    framework_domain_rels: fixFrameworkDomainRels,
+    domain_consolidation: consolidateDomains,
+    graph_bloat_purge: purgeGraphBloat
+  };
+  const fn = ops[op];
+  if (!fn) {
+    res.status(400).json({
+      success: false,
+      error: { code: "INVALID_OPERATION", message: `Valid ops: ${Object.keys(ops).join(", ")}`, status_code: 400 }
+    });
+    return;
+  }
+  try {
+    const result = await fn();
+    res.json({ success: true, data: result });
+  } catch (err) {
+    logger.error({ err: String(err), op }, "Graph hygiene operation failed");
+    res.status(500).json({ success: false, error: { code: "OPERATION_FAILED", message: "Operation failed. Check server logs.", status_code: 500 } });
+  }
+});
+
 // src/index.ts
 var __dirname = path.dirname(fileURLToPath(import.meta.url));
 var app = express();
@@ -19750,6 +20018,7 @@ app.use("/api/s1-s4", requireApiKey, s1s4Router);
 app.use("/api/failures", requireApiKey, failuresRouter);
 app.use("/api/competitive", requireApiKey, competitiveRouter);
 app.use("/api/fold", requireApiKey, foldRouter);
+app.use("/api/graph-hygiene", requireApiKey, graphHygieneRouter);
 app.use("/api/tools", requireApiKey, toolGatewayRouter);
 app.use("/api/prompt-generator", promptGeneratorRouter);
 app.use(openapiRouter);

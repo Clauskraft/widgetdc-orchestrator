@@ -65,6 +65,7 @@ import { hydrateMessages } from './chat-store.js'
 import { failuresRouter } from './routes/failures.js'
 import { competitiveRouter } from './routes/competitive.js'
 import { foldRouter } from './routes/fold.js'
+import { graphHygieneRouter } from './routes/graph-hygiene.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -160,6 +161,8 @@ app.use('/api/failures', requireApiKey, failuresRouter)
 app.use('/api/competitive', requireApiKey, competitiveRouter)
 // LIN-568: CaaS Mercury Folding API
 app.use('/api/fold', requireApiKey, foldRouter)
+// LIN-574: Knowledge Graph Hygiene
+app.use('/api/graph-hygiene', requireApiKey, graphHygieneRouter)
 
 // Tool Gateway — REST access to ALL orchestrator tools (Triple-Protocol ABI)
 app.use('/api/tools', requireApiKey, toolGatewayRouter)
