@@ -11,6 +11,8 @@ import { getRedis } from './redis.js'
 import { broadcastMessage } from './chat-broadcaster.js'
 import { broadcastSSE } from './sse.js'
 import { runSelfCorrect } from './graph-self-correct.js'
+import { runFailureHarvest } from './failure-harvester.js'
+import { runCompetitiveCrawl } from './competitive-crawler.js'
 import { captureAdoptionSnapshot, type AdoptionSnapshot } from './routes/adoption.js'
 import { runLooseEndScan } from './routes/loose-ends.js'
 import { notifyAdoptionDigest } from './slack.js'
@@ -180,6 +182,60 @@ export async function runCronJob(jobId: string): Promise<void> {
         job.run_count++
         persistCronJobs()
         logger.error({ id: job.id, err: String(err) }, 'Loose-end scan failed')
+      }
+      return
+    }
+
+    // Special handler for Red Queen failure harvester (LIN-567)
+    if (job.id === 'failure-harvester') {
+      try {
+        const summary = await runFailureHarvest(24)
+        job.last_run = new Date().toISOString()
+        job.last_status = summary.total_failures > 0 ? `${summary.total_failures} failures` : 'clean'
+        job.run_count++
+        persistCronJobs()
+
+        broadcastMessage({
+          from: 'Orchestrator',
+          to: 'All',
+          source: 'orchestrator',
+          type: 'Message',
+          message: `Red Queen harvest: ${summary.total_failures} failures (${Object.entries(summary.by_category).filter(([,v]) => v > 0).map(([k,v]) => `${k}:${v}`).join(', ') || 'none'})`,
+          timestamp: new Date().toISOString(),
+        })
+      } catch (err) {
+        job.last_run = new Date().toISOString()
+        job.last_status = 'failed'
+        job.run_count++
+        persistCronJobs()
+        logger.error({ id: job.id, err: String(err) }, 'Failure harvest cron failed')
+      }
+      return
+    }
+
+    // Special handler for competitive phagocytosis crawl (LIN-566)
+    if (job.id === 'competitive-crawl') {
+      try {
+        const report = await runCompetitiveCrawl()
+        job.last_run = new Date().toISOString()
+        job.last_status = `${report.total_capabilities_found} caps, ${report.gaps.length} gaps`
+        job.run_count++
+        persistCronJobs()
+
+        broadcastMessage({
+          from: 'Orchestrator',
+          to: 'All',
+          source: 'orchestrator',
+          type: 'Message',
+          message: `Phagocytosis: ${report.total_capabilities_found} capabilities from ${Object.keys(report.by_competitor).length} competitors, ${report.gaps.length} gaps identified`,
+          timestamp: new Date().toISOString(),
+        })
+      } catch (err) {
+        job.last_run = new Date().toISOString()
+        job.last_status = 'failed'
+        job.run_count++
+        persistCronJobs()
+        logger.error({ id: job.id, err: String(err) }, 'Competitive crawl cron failed')
       }
       return
     }
@@ -535,6 +591,40 @@ export function registerDefaultLoops(): void {
           },
         },
       ],
+    },
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // RED QUEEN — Failure Harvester (LIN-567)
+  // Scans Redis for failed chains, categorizes, persists to Neo4j
+  // ═══════════════════════════════════════════════════════════════════════
+
+  registerCronJob({
+    id: 'failure-harvester',
+    name: 'Red Queen Failure Harvester',
+    schedule: '0 */4 * * *', // Every 4 hours
+    enabled: true,
+    chain: {
+      name: 'Failure Harvest',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // COMPETITIVE PHAGOCYTOSIS — Weekly crawl (LIN-566)
+  // Crawls 5 competitors' public docs, extracts capabilities, gaps
+  // ═══════════════════════════════════════════════════════════════════════
+
+  registerCronJob({
+    id: 'competitive-crawl',
+    name: 'Competitive Phagocytosis Crawl',
+    schedule: '0 3 * * 1', // Monday 03:00 UTC
+    enabled: true,
+    chain: {
+      name: 'Competitive Crawl',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
     },
   })
 

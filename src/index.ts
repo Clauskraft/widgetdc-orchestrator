@@ -62,6 +62,9 @@ import { mcpGatewayRouter } from './routes/mcp-gateway.js'
 import { toolGatewayRouter } from './routes/tool-gateway.js'
 import { seedAgents } from './agent-seeds.js'
 import { hydrateMessages } from './chat-store.js'
+import { failuresRouter } from './routes/failures.js'
+import { competitiveRouter } from './routes/competitive.js'
+import { foldRouter } from './routes/fold.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -151,6 +154,13 @@ app.use('/api/decisions', requireApiKey, decisionsRouter)
 app.use('/monitor', requireApiKey, monitorRouter)
 app.use('/api/s1-s4', requireApiKey, s1s4Router)
 
+// LIN-567: Red Queen Failure Harvester
+app.use('/api/failures', requireApiKey, failuresRouter)
+// LIN-566: Competitive Phagocytosis MVP
+app.use('/api/competitive', requireApiKey, competitiveRouter)
+// LIN-568: CaaS Mercury Folding API
+app.use('/api/fold', requireApiKey, foldRouter)
+
 // Tool Gateway — REST access to ALL orchestrator tools (Triple-Protocol ABI)
 app.use('/api/tools', requireApiKey, toolGatewayRouter)
 
@@ -201,7 +211,7 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'healthy',
     service: 'widgetdc-orchestrator',
-    version: '2.1.0',
+    version: '2.2.0',
     uptime_seconds: Math.floor(process.uptime()),
     agents_registered: AgentRegistry.all().length,
     ws_connections: getConnectionStats().total,

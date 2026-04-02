@@ -9919,72 +9919,220 @@ init_config();
 
 // src/dual-rag.ts
 import { v4 as uuid } from "uuid";
+var POLLUTION_PATTERNS = [
+  /you are (?:a |an )?(?:helpful |expert |professional )/i,
+  /^(?:system|assistant|human):/im,
+  /\b(?:claude|chatgpt|gpt-4|openai)\s+(?:is|can|should|will)\b/i,
+  /\bdo not (?:hallucinate|make up|fabricate)\b/i,
+  /\byour (?:task|role|job|purpose) is to\b/i,
+  /\brespond (?:in|with|using) (?:json|markdown|the following)\b/i,
+  /\banswer (?:only|strictly|exclusively) (?:in|with|based)\b/i,
+  /\b(?:ignore|disregard) (?:previous|all|any) (?:instructions|prompts)\b/i,
+  /\byou (?:must|should|will) (?:always|never|only)\b/i,
+  /\bas an ai (?:language )?model\b/i
+];
+function isPolluted(text) {
+  if (!text || text.length < 20) return false;
+  let matchCount = 0;
+  for (const pattern of POLLUTION_PATTERNS) {
+    if (pattern.test(text)) matchCount++;
+    if (matchCount >= 2) return true;
+  }
+  return false;
+}
+function classifyQuery(query) {
+  const q = query.toLowerCase();
+  if (/\b(?:how many|count|list all|list the|total|statistics|stats)\b/.test(q)) {
+    return "structured";
+  }
+  if (/\b(?:match|where|return|node|relationship|label)\b/.test(q)) {
+    return "structured";
+  }
+  if (/\b(?:compare|versus|difference|between|trade-?off|pros and cons)\b/.test(q)) {
+    return "multi_hop";
+  }
+  if (/\b(?:strategy|roadmap|architecture|impact|implication|recommend)\b/.test(q)) {
+    return "multi_hop";
+  }
+  if (/\b(?:why|how does|what if|should we|evaluate|assess|analyze)\b/.test(q)) {
+    return "multi_hop";
+  }
+  if (q.split(/\s+/).length > 12) {
+    return "multi_hop";
+  }
+  return "simple";
+}
+async function callGraphRAG(query, maxResults) {
+  const result = await callMcpTool({
+    toolName: "autonomous.graphrag",
+    args: { question: query, max_evidence: maxResults },
+    callId: uuid(),
+    timeoutMs: 6e4
+    // graphrag is slower but higher quality
+  });
+  if (result.status !== "success") {
+    logger.warn({ error: result.error_message }, "autonomous.graphrag failed");
+    return [];
+  }
+  const data = result.result;
+  const evidence = data?.evidence ?? data?.results ?? data?.chunks ?? [];
+  const answer = data?.answer ?? data?.synthesis ?? "";
+  const confidence = data?.confidence ?? 0.8;
+  const results = [];
+  if (answer && typeof answer === "string" && answer.length > 20) {
+    results.push({
+      source: "graphrag",
+      content: answer,
+      score: confidence,
+      metadata: { type: "synthesis", evidence_count: evidence.length }
+    });
+  }
+  if (Array.isArray(evidence)) {
+    for (const item of evidence.slice(0, maxResults - 1)) {
+      const content = item.content || item.text || item.chunk || (typeof item === "string" ? item : JSON.stringify(item).slice(0, 500));
+      results.push({
+        source: "graphrag",
+        content: typeof content === "string" ? content : String(content),
+        score: item.score ?? item.relevance ?? 0.75,
+        metadata: { title: item.title, node_type: item.label || item.type }
+      });
+    }
+  }
+  return results;
+}
+async function callSRAG(query, maxResults) {
+  const result = await callMcpTool({
+    toolName: "srag.query",
+    args: { query },
+    callId: uuid(),
+    timeoutMs: 45e3
+  });
+  if (result.status !== "success") return [];
+  const sragData = result.result;
+  const items = Array.isArray(sragData) ? sragData : sragData?.results ? sragData.results : sragData?.chunks ? sragData.chunks : [];
+  const results = [];
+  for (const item of items.slice(0, maxResults)) {
+    results.push({
+      source: "srag",
+      content: item.content || item.text || item.chunk || JSON.stringify(item).slice(0, 500),
+      score: item.score || item.similarity || 0.5,
+      metadata: { title: item.title, tags: item.tags }
+    });
+  }
+  return results;
+}
+async function callCypher(query, maxResults, depth) {
+  const result = await callMcpTool({
+    toolName: "graph.read_cypher",
+    args: { query: buildCypherQuery(query, depth) },
+    callId: uuid(),
+    timeoutMs: 2e4
+  });
+  if (result.status !== "success") return [];
+  const cypherData = result.result;
+  const rows = cypherData?.results || cypherData || [];
+  if (!Array.isArray(rows)) return [];
+  const results = [];
+  for (const row of rows.slice(0, maxResults)) {
+    const content = Object.values(row).map(
+      (v) => typeof v === "string" ? v : JSON.stringify(v)
+    ).join(" | ");
+    results.push({
+      source: "cypher",
+      content: content.slice(0, 500),
+      score: 0.7,
+      metadata: row
+    });
+  }
+  return results;
+}
 async function dualChannelRAG(query, options) {
   const t0 = Date.now();
   const maxResults = options?.maxResults ?? 10;
   const depth = options?.cypherDepth ?? 2;
-  const [sragResult, cypherResult] = await Promise.allSettled([
-    callMcpTool({
-      toolName: "srag.query",
-      args: { query },
-      callId: uuid(),
-      timeoutMs: 45e3
-    }),
-    callMcpTool({
-      toolName: "graph.read_cypher",
-      args: {
-        query: buildCypherQuery(query, depth)
-      },
-      callId: uuid(),
-      timeoutMs: 2e4
-    })
-  ]);
-  const results = [];
-  if (sragResult.status === "fulfilled" && sragResult.value.status === "success") {
-    const sragData = sragResult.value.result;
-    const items = Array.isArray(sragData) ? sragData : sragData?.results ? sragData.results : sragData?.chunks ? sragData.chunks : [];
-    for (const item of items.slice(0, maxResults)) {
-      results.push({
-        source: "srag",
-        content: item.content || item.text || item.chunk || JSON.stringify(item).slice(0, 500),
-        score: item.score || item.similarity || 0.5,
-        metadata: { title: item.title, tags: item.tags }
-      });
+  const complexity = classifyQuery(query);
+  logger.info({ query: query.slice(0, 80), complexity }, "Hybrid RAG: routing query");
+  const channels = options?.forceChannels ?? getChannelsForComplexity(complexity);
+  const channelPromises = [];
+  const channelsUsed = [];
+  if (channels.includes("graphrag")) {
+    channelPromises.push(callGraphRAG(query, maxResults));
+    channelsUsed.push("graphrag");
+  }
+  if (channels.includes("srag")) {
+    channelPromises.push(callSRAG(query, maxResults));
+    channelsUsed.push("srag");
+  }
+  if (channels.includes("cypher")) {
+    channelPromises.push(callCypher(query, maxResults, depth));
+    channelsUsed.push("cypher");
+  }
+  const channelResults = await Promise.allSettled(channelPromises);
+  let allResults = [];
+  for (const cr of channelResults) {
+    if (cr.status === "fulfilled") {
+      allResults.push(...cr.value);
     }
   }
-  if (cypherResult.status === "fulfilled" && cypherResult.value.status === "success") {
-    const cypherData = cypherResult.value.result;
-    const rows = cypherData?.results || cypherData || [];
-    if (Array.isArray(rows)) {
-      for (const row of rows.slice(0, maxResults)) {
-        const content = Object.values(row).map(
-          (v) => typeof v === "string" ? v : JSON.stringify(v)
-        ).join(" | ");
-        results.push({
-          source: "cypher",
-          content: content.slice(0, 500),
-          score: 0.7,
-          // graph results are structurally relevant
-          metadata: row
-        });
-      }
-    }
+  if (allResults.filter((r) => r.source === "graphrag").length === 0 && !channels.includes("srag")) {
+    logger.info("Hybrid RAG: graphrag returned empty, falling back to srag");
+    const sragResults = await callSRAG(query, maxResults);
+    allResults.push(...sragResults);
+    channelsUsed.push("srag (fallback)");
   }
-  results.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
-  const merged = results.slice(0, maxResults).map(
-    (r, i) => `[${r.source.toUpperCase()} #${i + 1}] ${r.content}`
+  let pollutionFiltered = 0;
+  allResults = allResults.filter((r) => {
+    if (isPolluted(r.content)) {
+      pollutionFiltered++;
+      logger.debug({ source: r.source, preview: r.content.slice(0, 60) }, "Filtered polluted result");
+      return false;
+    }
+    return true;
+  });
+  allResults.sort((a, b) => {
+    if (a.source === "graphrag" && a.metadata?.type === "synthesis") return -1;
+    if (b.source === "graphrag" && b.metadata?.type === "synthesis") return 1;
+    return b.score - a.score;
+  });
+  const topResults = allResults.slice(0, maxResults);
+  const merged = topResults.map(
+    (r, i) => `[${r.source.toUpperCase()} #${i + 1}${r.score >= 0.8 ? " \u2605" : ""}] ${r.content}`
   ).join("\n\n");
-  const sragCount = results.filter((r) => r.source === "srag").length;
-  const cypherCount = results.filter((r) => r.source === "cypher").length;
-  logger.debug({ query: query.slice(0, 60), sragCount, cypherCount, ms: Date.now() - t0 }, "Dual-channel RAG");
+  const graphragCount = topResults.filter((r) => r.source === "graphrag").length;
+  const sragCount = topResults.filter((r) => r.source === "srag").length;
+  const cypherCount = topResults.filter((r) => r.source === "cypher").length;
+  const durationMs = Date.now() - t0;
+  logger.info({
+    query: query.slice(0, 60),
+    complexity,
+    graphragCount,
+    sragCount,
+    cypherCount,
+    pollutionFiltered,
+    ms: durationMs
+  }, "Hybrid RAG: complete");
   return {
     query,
-    results: results.slice(0, maxResults),
+    results: topResults,
     srag_count: sragCount,
     cypher_count: cypherCount,
+    graphrag_count: graphragCount,
     merged_context: merged,
-    duration_ms: Date.now() - t0
+    duration_ms: durationMs,
+    route_strategy: complexity,
+    channels_used: channelsUsed,
+    pollution_filtered: pollutionFiltered
   };
+}
+function getChannelsForComplexity(complexity) {
+  switch (complexity) {
+    case "simple":
+      return ["graphrag", "srag"];
+    case "multi_hop":
+      return ["graphrag", "cypher"];
+    case "structured":
+      return ["cypher", "graphrag"];
+  }
 }
 function buildCypherQuery(query, depth) {
   const stopWords = /* @__PURE__ */ new Set(["the", "and", "for", "with", "that", "this", "from", "are", "was", "how", "what", "which", "where", "when", "why", "can", "does", "will", "not", "all", "has", "have", "been", "our", "their", "its"]);
@@ -11416,9 +11564,11 @@ async function executeToolByName(name, args) {
       const result = await dualChannelRAG(args.query, {
         maxResults: args.max_results ?? 10
       });
-      return result.merged_context.length > 0 ? `Found ${result.srag_count} semantic + ${result.cypher_count} graph results (${result.duration_ms}ms):
+      if (result.merged_context.length === 0) return "No results found for this query.";
+      const header = `[${result.route_strategy}] ${result.graphrag_count} graphrag + ${result.srag_count} semantic + ${result.cypher_count} graph (${result.duration_ms}ms, channels: ${result.channels_used.join(",")}${result.pollution_filtered > 0 ? `, ${result.pollution_filtered} polluted filtered` : ""}):`;
+      return `${header}
 
-${result.merged_context}` : "No results found for this query.";
+${result.merged_context}`;
     }
     case "reason_deeply": {
       if (!isRlmAvailable()) return "RLM Engine is not available.";
@@ -13207,9 +13357,375 @@ async function runSelfCorrect() {
   return report;
 }
 
+// src/failure-harvester.ts
+import { v4 as uuid7 } from "uuid";
+function categorizeFailure(error) {
+  const lower = error.toLowerCase();
+  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) return "timeout";
+  if (lower.includes("502") || lower.includes("bad gateway") || lower.includes("econnrefused")) return "502";
+  if (lower.includes("401") || lower.includes("403") || lower.includes("unauthorized") || lower.includes("forbidden")) return "auth";
+  if (lower.includes("validation") || lower.includes("invalid") || lower.includes("required")) return "validation";
+  if (lower.includes("mcp") || lower.includes("tool_not_found") || lower.includes("tool call")) return "mcp_error";
+  return "unknown";
+}
+async function harvestFailures(windowHours = 24) {
+  const redis2 = getRedis();
+  if (!redis2) {
+    logger.warn("Failure harvester: Redis not available");
+    return [];
+  }
+  const events = [];
+  const cutoff = new Date(Date.now() - windowHours * 36e5).toISOString();
+  try {
+    let cursor = "0";
+    do {
+      const [nextCursor, fields] = await redis2.hscan("orchestrator:chains", cursor, "COUNT", 200);
+      cursor = nextCursor;
+      for (let i = 0; i < fields.length; i += 2) {
+        const execId = fields[i];
+        const json = fields[i + 1];
+        try {
+          const exec = JSON.parse(json);
+          if (exec.status !== "failed") continue;
+          if (exec.started_at < cutoff) continue;
+          const failedSteps = exec.results?.filter((r) => r.status === "error") ?? [];
+          const errorMsg = exec.error ?? failedSteps.map((s) => String(s.output)).join("; ") ?? "unknown";
+          events.push({
+            $id: `failure-event:${uuid7()}`,
+            execution_id: execId,
+            chain_name: exec.name,
+            category: categorizeFailure(errorMsg),
+            error_message: errorMsg.slice(0, 500),
+            affected_tool: failedSteps[0]?.action ?? null,
+            affected_agent: failedSteps[0]?.agent_id ?? null,
+            timestamp: exec.started_at
+          });
+        } catch {
+        }
+      }
+    } while (cursor !== "0");
+    logger.info({ harvested: events.length, window_hours: windowHours }, "Failure harvester scan complete");
+  } catch (err) {
+    logger.error({ err: String(err) }, "Failure harvester scan failed");
+  }
+  return events;
+}
+async function persistToGraph(events) {
+  let persisted = 0;
+  for (const evt of events) {
+    try {
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `
+            MERGE (f:FailureEvent {execution_id: $execution_id})
+            SET f.chain_name = $chain_name,
+                f.category = $category,
+                f.error_message = $error_message,
+                f.affected_tool = $affected_tool,
+                f.affected_agent = $affected_agent,
+                f.timestamp = datetime($timestamp),
+                f.harvested_at = datetime()
+          `,
+          params: {
+            execution_id: evt.execution_id,
+            chain_name: evt.chain_name,
+            category: evt.category,
+            error_message: evt.error_message,
+            affected_tool: evt.affected_tool ?? "",
+            affected_agent: evt.affected_agent ?? "",
+            timestamp: evt.timestamp
+          }
+        },
+        callId: uuid7(),
+        timeoutMs: 1e4
+      });
+      persisted++;
+    } catch (err) {
+      logger.warn({ err: String(err), execution_id: evt.execution_id }, "Failed to persist failure event");
+    }
+  }
+  if (persisted > 0) {
+    try {
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `
+            MATCH (f:FailureEvent) WHERE f.affected_tool <> ''
+            MATCH (t:Tool {name: f.affected_tool})
+            MERGE (f)-[:AFFECTED_TOOL]->(t)
+          `,
+          params: {}
+        },
+        callId: uuid7(),
+        timeoutMs: 1e4
+      });
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `
+            MATCH (f:FailureEvent) WHERE f.affected_agent <> ''
+            MATCH (a:Agent {id: f.affected_agent})
+            MERGE (f)-[:AFFECTED_AGENT]->(a)
+          `,
+          params: {}
+        },
+        callId: uuid7(),
+        timeoutMs: 1e4
+      });
+    } catch {
+    }
+  }
+  return persisted;
+}
+function buildFailureSummary(events, windowHours = 24) {
+  const byCategory = {
+    timeout: 0,
+    "502": 0,
+    auth: 0,
+    validation: 0,
+    mcp_error: 0,
+    unknown: 0
+  };
+  const toolCounts = /* @__PURE__ */ new Map();
+  const agentCounts = /* @__PURE__ */ new Map();
+  for (const evt of events) {
+    byCategory[evt.category]++;
+    if (evt.affected_tool) toolCounts.set(evt.affected_tool, (toolCounts.get(evt.affected_tool) ?? 0) + 1);
+    if (evt.affected_agent) agentCounts.set(evt.affected_agent, (agentCounts.get(evt.affected_agent) ?? 0) + 1);
+  }
+  const topTools = [...toolCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([tool, count]) => ({ tool, count }));
+  const topAgents = [...agentCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([agent, count]) => ({ agent, count }));
+  return {
+    $id: `failure-summary:${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}`,
+    total_failures: events.length,
+    by_category: byCategory,
+    top_tools: topTools,
+    top_agents: topAgents,
+    recent: events.slice(-20),
+    harvested_at: (/* @__PURE__ */ new Date()).toISOString(),
+    window_hours: windowHours
+  };
+}
+async function runFailureHarvest(windowHours = 24) {
+  const events = await harvestFailures(windowHours);
+  const persisted = await persistToGraph(events);
+  const summary = buildFailureSummary(events, windowHours);
+  const redis2 = getRedis();
+  if (redis2) {
+    await redis2.set("orchestrator:failure-summary", JSON.stringify(summary), "EX", 3600).catch(() => {
+    });
+  }
+  broadcastSSE("failure-harvest", summary);
+  logger.info({
+    total: events.length,
+    persisted,
+    categories: summary.by_category
+  }, "Failure harvest cycle complete");
+  return summary;
+}
+
+// src/competitive-crawler.ts
+import { v4 as uuid8 } from "uuid";
+var COMPETITOR_TARGETS = [
+  {
+    name: "Palantir AIP",
+    slug: "palantir",
+    urls: [
+      "https://www.palantir.com/docs/foundry/api/",
+      "https://www.palantir.com/platforms/aip/"
+    ]
+  },
+  {
+    name: "Dust.tt",
+    slug: "dust",
+    urls: [
+      "https://docs.dust.tt/",
+      "https://dust.tt/changelog"
+    ]
+  },
+  {
+    name: "Glean",
+    slug: "glean",
+    urls: [
+      "https://developers.glean.com/docs/overview"
+    ]
+  },
+  {
+    name: "LangGraph",
+    slug: "langgraph",
+    urls: [
+      "https://langchain-ai.github.io/langgraph/"
+    ]
+  },
+  {
+    name: "Copilot Studio",
+    slug: "copilot-studio",
+    urls: [
+      "https://learn.microsoft.com/en-us/microsoft-copilot-studio/fundamentals-what-is-copilot-studio"
+    ]
+  }
+];
+async function extractCapabilities(target) {
+  const capabilities = [];
+  for (const url of target.urls) {
+    try {
+      const result = await callMcpTool({
+        toolName: "srag.query",
+        args: {
+          query: `Analyze competitor "${target.name}" capabilities from their public documentation at ${url}. List specific technical capabilities, API features, agent features, orchestration features, and AI features. Be specific and factual.`
+        },
+        callId: uuid8(),
+        timeoutMs: 3e4
+      });
+      if (result.status === "success" && result.result) {
+        const text = typeof result.result === "string" ? result.result : JSON.stringify(result.result);
+        const lines = text.split("\n").filter((l) => l.trim().startsWith("-") || l.trim().startsWith("*"));
+        for (const line of lines.slice(0, 20)) {
+          const cap = line.replace(/^[\s\-\*]+/, "").trim();
+          if (cap.length > 10 && cap.length < 200) {
+            capabilities.push({
+              $id: `capability:${target.slug}:${uuid8().slice(0, 8)}`,
+              competitor: target.name,
+              capability: cap,
+              category: categorizeCapability(cap),
+              evidence_url: url,
+              extracted_at: (/* @__PURE__ */ new Date()).toISOString()
+            });
+          }
+        }
+      }
+    } catch (err) {
+      logger.warn({ competitor: target.name, url, err: String(err) }, "Capability extraction failed for URL");
+    }
+  }
+  return capabilities;
+}
+function categorizeCapability(cap) {
+  const lower = cap.toLowerCase();
+  if (lower.includes("api") || lower.includes("endpoint") || lower.includes("rest") || lower.includes("graphql")) return "api";
+  if (lower.includes("agent") || lower.includes("orchestrat") || lower.includes("workflow")) return "orchestration";
+  if (lower.includes("rag") || lower.includes("search") || lower.includes("retrieval") || lower.includes("knowledge")) return "knowledge";
+  if (lower.includes("security") || lower.includes("auth") || lower.includes("compliance") || lower.includes("rbac")) return "security";
+  if (lower.includes("llm") || lower.includes("model") || lower.includes("ai") || lower.includes("inference")) return "ai";
+  if (lower.includes("deploy") || lower.includes("scale") || lower.includes("monitor")) return "platform";
+  return "general";
+}
+async function persistCapabilities(capabilities) {
+  let persisted = 0;
+  for (const cap of capabilities) {
+    try {
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `
+            MERGE (c:CompetitorCapability {competitor: $competitor, capability: $capability})
+            SET c.category = $category,
+                c.evidence_url = $evidence_url,
+                c.extracted_at = datetime($extracted_at),
+                c.updated_at = datetime()
+            MERGE (comp:Competitor {name: $competitor})
+            MERGE (comp)-[:HAS_CAPABILITY]->(c)
+          `,
+          params: {
+            competitor: cap.competitor,
+            capability: cap.capability,
+            category: cap.category,
+            evidence_url: cap.evidence_url,
+            extracted_at: cap.extracted_at
+          }
+        },
+        callId: uuid8(),
+        timeoutMs: 1e4
+      });
+      persisted++;
+    } catch (err) {
+      logger.warn({ err: String(err), competitor: cap.competitor }, "Failed to persist capability");
+    }
+  }
+  return persisted;
+}
+async function analyzeGaps(capabilities) {
+  const byCompetitor = {};
+  const capMap = /* @__PURE__ */ new Map();
+  for (const cap of capabilities) {
+    byCompetitor[cap.competitor] = (byCompetitor[cap.competitor] ?? 0) + 1;
+    const existing = capMap.get(cap.capability) ?? [];
+    existing.push(cap.competitor);
+    capMap.set(cap.capability, existing);
+  }
+  let widgetdcTools = [];
+  try {
+    const result = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: { query: "MATCH (t:Tool) RETURN t.name AS name LIMIT 200" },
+      callId: uuid8(),
+      timeoutMs: 1e4
+    });
+    if (result.status === "success") {
+      const data = result.result;
+      widgetdcTools = (data?.results ?? []).map((r) => r.name.toLowerCase());
+    }
+  } catch {
+  }
+  const gaps = [];
+  for (const [capability, competitors] of capMap.entries()) {
+    const hasIt = widgetdcTools.some(
+      (t) => capability.toLowerCase().includes(t) || t.includes(capability.toLowerCase().slice(0, 15))
+    );
+    if (!hasIt && competitors.length >= 2) {
+      gaps.push({
+        capability,
+        competitors_with: competitors,
+        widgetdc_has: false
+      });
+    }
+  }
+  const strengths = [
+    "Triple-Protocol ABI (REST + MCP + OpenAPI)",
+    "Mercury Folding (context compression)",
+    "Neo4j Knowledge Graph with 17 domains",
+    "Self-correcting graph agent",
+    "Multi-agent chain engine (5 modes)"
+  ];
+  return {
+    $id: `gap-report:${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}`,
+    total_capabilities_found: capabilities.length,
+    by_competitor: byCompetitor,
+    gaps: gaps.slice(0, 30),
+    strengths,
+    generated_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+async function runCompetitiveCrawl() {
+  logger.info("Starting competitive phagocytosis crawl");
+  const allCapabilities = [];
+  for (const target of COMPETITOR_TARGETS) {
+    const caps = await extractCapabilities(target);
+    allCapabilities.push(...caps);
+    logger.info({ competitor: target.name, capabilities: caps.length }, "Extracted capabilities");
+  }
+  const persisted = await persistCapabilities(allCapabilities);
+  const report = await analyzeGaps(allCapabilities);
+  const redis2 = getRedis();
+  if (redis2 && allCapabilities.length > 0) {
+    await redis2.set("orchestrator:competitive-report", JSON.stringify(report), "EX", 604800).catch(() => {
+    });
+  } else if (redis2 && allCapabilities.length === 0) {
+    logger.warn("Competitive crawl returned zero capabilities \u2014 not caching empty report");
+  }
+  broadcastSSE("competitive-report", report);
+  logger.info({
+    total_capabilities: allCapabilities.length,
+    persisted,
+    gaps: report.gaps.length
+  }, "Competitive phagocytosis crawl complete");
+  return report;
+}
+
 // src/routes/adoption.ts
 import { Router as Router6 } from "express";
-import { v4 as uuid7 } from "uuid";
+import { v4 as uuid9 } from "uuid";
 var adoptionRouter = Router6();
 var REDIS_KEY3 = "orchestrator:adoption-metrics";
 var REDIS_TRENDS_KEY = "orchestrator:adoption-trends";
@@ -13297,7 +13813,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (c:Conversation) WHERE c.createdAt > datetime() - duration('P1D') RETURN count(c) AS count"
       },
-      callId: uuid7(),
+      callId: uuid9(),
       timeoutMs: 1e4
     }),
     // Count artifacts from last 24h
@@ -13306,7 +13822,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (a:AnalysisArtifact) WHERE a.createdAt > datetime() - duration('P1D') RETURN count(a) AS count"
       },
-      callId: uuid7(),
+      callId: uuid9(),
       timeoutMs: 1e4
     }),
     // Count tool calls from audit trail
@@ -13315,7 +13831,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (e:AuditEvent) WHERE e.timestamp > datetime() - duration('P1D') AND e.action = 'tool_call' RETURN count(e) AS count"
       },
-      callId: uuid7(),
+      callId: uuid9(),
       timeoutMs: 1e4
     })
   ]);
@@ -13420,7 +13936,7 @@ SET m.conversations_24h = $conversations,
           featuresPct: snapshot.features_pct
         }
       },
-      callId: uuid7(),
+      callId: uuid9(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -13463,7 +13979,7 @@ adoptionRouter.get("/trends", async (req, res) => {
 
 // src/routes/loose-ends.ts
 import { Router as Router7 } from "express";
-import { v4 as uuid8 } from "uuid";
+import { v4 as uuid10 } from "uuid";
 var looseEndsRouter = Router7();
 var REDIS_KEY4 = "orchestrator:loose-ends:latest";
 var REDIS_HISTORY = "orchestrator:loose-ends:history";
@@ -13477,7 +13993,7 @@ AND NOT (b)<-[:COMPOSED_OF]-(:Assembly)
 RETURN b.id AS id, b.name AS name, b.domain AS domain, labels(b)[0] AS type
 LIMIT 25`,
     buildFinding: (records) => records.map((r) => ({
-      id: `orphan-${r.id ?? uuid8().slice(0, 8)}`,
+      id: `orphan-${r.id ?? uuid10().slice(0, 8)}`,
       severity: "warning",
       category: "orphan_block",
       title: `Orphan block: ${r.name ?? r.id}`,
@@ -13495,7 +14011,7 @@ AND NOT (a)<-[:BASED_ON]-(:Decision)
 RETURN a.id AS id, a.name AS name, a.composite AS score
 LIMIT 15`,
     buildFinding: (records) => records.map((r) => ({
-      id: `dangling-asm-${r.id ?? uuid8().slice(0, 8)}`,
+      id: `dangling-asm-${r.id ?? uuid10().slice(0, 8)}`,
       severity: "warning",
       category: "dangling_assembly",
       title: `Accepted assembly without decision: ${r.name ?? r.id}`,
@@ -13513,7 +14029,7 @@ AND NOT (d)-[:DERIVES_FROM]->()
 RETURN d.id AS id, d.title AS title, d.certified_at AS certified_at
 LIMIT 10`,
     buildFinding: (records) => records.map((r) => ({
-      id: `no-lineage-${r.id ?? uuid8().slice(0, 8)}`,
+      id: `no-lineage-${r.id ?? uuid10().slice(0, 8)}`,
       severity: "critical",
       category: "missing_lineage",
       title: `Decision without lineage: ${r.title ?? r.id}`,
@@ -13531,7 +14047,7 @@ AND NOT (n)-[]-()
 RETURN n.id AS id, labels(n)[0] AS type, n.domain AS domain, n.insight AS title
 LIMIT 20`,
     buildFinding: (records) => records.map((r) => ({
-      id: `disconnected-${r.id ?? uuid8().slice(0, 8)}`,
+      id: `disconnected-${r.id ?? uuid10().slice(0, 8)}`,
       severity: "info",
       category: "disconnected_node",
       title: `Disconnected ${r.type}: ${(r.title ?? r.id ?? "").toString().slice(0, 60)}`,
@@ -13549,7 +14065,7 @@ AND d.created_at < datetime() - duration('P7D')
 RETURN d.id AS id, d.title AS title, d.created_at AS created_at
 LIMIT 10`,
     buildFinding: (records) => records.map((r) => ({
-      id: `stale-decision-${r.id ?? uuid8().slice(0, 8)}`,
+      id: `stale-decision-${r.id ?? uuid10().slice(0, 8)}`,
       severity: "warning",
       category: "unresolved_decision",
       title: `Stale draft decision: ${r.title ?? r.id}`,
@@ -13560,7 +14076,7 @@ LIMIT 10`,
   }
 ];
 async function runLooseEndScan() {
-  const scanId = uuid8();
+  const scanId = uuid10();
   const t0 = Date.now();
   const findings = [];
   logger.info({ scan_id: scanId }, "Loose-end scan started");
@@ -13570,7 +14086,7 @@ async function runLooseEndScan() {
         const result = await callMcpTool({
           toolName: "graph.read_cypher",
           args: { query: dq.cypher },
-          callId: uuid8(),
+          callId: uuid10(),
           timeoutMs: 15e3
         });
         if (result.status !== "success") return [];
@@ -13631,7 +14147,7 @@ SET s.scanned_at = datetime(), s.duration_ms = $duration,
           total: summary.total
         }
       },
-      callId: uuid8(),
+      callId: uuid10(),
       timeoutMs: 1e4
     });
   } catch {
@@ -13825,6 +14341,54 @@ async function runCronJob(jobId) {
         job.run_count++;
         persistCronJobs();
         logger.error({ id: job.id, err: String(err) }, "Loose-end scan failed");
+      }
+      return;
+    }
+    if (job.id === "failure-harvester") {
+      try {
+        const summary = await runFailureHarvest(24);
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = summary.total_failures > 0 ? `${summary.total_failures} failures` : "clean";
+        job.run_count++;
+        persistCronJobs();
+        broadcastMessage({
+          from: "Orchestrator",
+          to: "All",
+          source: "orchestrator",
+          type: "Message",
+          message: `Red Queen harvest: ${summary.total_failures} failures (${Object.entries(summary.by_category).filter(([, v]) => v > 0).map(([k, v]) => `${k}:${v}`).join(", ") || "none"})`,
+          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        });
+      } catch (err) {
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = "failed";
+        job.run_count++;
+        persistCronJobs();
+        logger.error({ id: job.id, err: String(err) }, "Failure harvest cron failed");
+      }
+      return;
+    }
+    if (job.id === "competitive-crawl") {
+      try {
+        const report = await runCompetitiveCrawl();
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = `${report.total_capabilities_found} caps, ${report.gaps.length} gaps`;
+        job.run_count++;
+        persistCronJobs();
+        broadcastMessage({
+          from: "Orchestrator",
+          to: "All",
+          source: "orchestrator",
+          type: "Message",
+          message: `Phagocytosis: ${report.total_capabilities_found} capabilities from ${Object.keys(report.by_competitor).length} competitors, ${report.gaps.length} gaps identified`,
+          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        });
+      } catch (err) {
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = "failed";
+        job.run_count++;
+        persistCronJobs();
+        logger.error({ id: job.id, err: String(err) }, "Competitive crawl cron failed");
       }
       return;
     }
@@ -14108,6 +14672,30 @@ function registerDefaultLoops() {
           }
         }
       ]
+    }
+  });
+  registerCronJob({
+    id: "failure-harvester",
+    name: "Red Queen Failure Harvester",
+    schedule: "0 */4 * * *",
+    // Every 4 hours
+    enabled: true,
+    chain: {
+      name: "Failure Harvest",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
+    }
+  });
+  registerCronJob({
+    id: "competitive-crawl",
+    name: "Competitive Phagocytosis Crawl",
+    schedule: "0 3 * * 1",
+    // Monday 03:00 UTC
+    enabled: true,
+    chain: {
+      name: "Competitive Crawl",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
     }
   });
   registerCronJob({
@@ -15350,7 +15938,7 @@ async function renderHtml(_req, res, id) {
 // src/routes/notebooks.ts
 import { Router as Router15 } from "express";
 import { randomUUID as randomUUID2 } from "crypto";
-import { v4 as uuid9 } from "uuid";
+import { v4 as uuid11 } from "uuid";
 var notebookRouter = Router15();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
@@ -15390,7 +15978,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query, params: {} },
-        callId: uuid9(),
+        callId: uuid11(),
         timeoutMs: 15e3
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -15398,7 +15986,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "kg_rag.query",
         args: { question: query, max_evidence: 10 },
-        callId: uuid9(),
+        callId: uuid11(),
         timeoutMs: 2e4
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -16066,13 +16654,13 @@ ${compressed}`,
 }
 
 // src/routes/monitor.ts
-import { v4 as uuid10 } from "uuid";
+import { v4 as uuid12 } from "uuid";
 var monitorRouter = Router17();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid10(),
+    callId: uuid12(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];
@@ -16285,7 +16873,7 @@ monitorRouter.post("/compress", async (req, res) => {
 
 // src/routes/assembly.ts
 import { Router as Router18 } from "express";
-import { v4 as uuid11 } from "uuid";
+import { v4 as uuid13 } from "uuid";
 var assemblyRouter = Router18();
 var REDIS_PREFIX = "orchestrator:assembly:";
 var REDIS_INDEX = "orchestrator:assemblies:index";
@@ -16349,7 +16937,7 @@ ORDER BY b.domain, b.name LIMIT 50`;
     const graphResult = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params },
-      callId: uuid11(),
+      callId: uuid13(),
       timeoutMs: 15e3
     });
     if (graphResult.status === "success" && graphResult.result) {
@@ -16415,7 +17003,7 @@ Reply as JSON:
   const assemblies = [];
   const now = (/* @__PURE__ */ new Date()).toISOString();
   for (const candidate of analysis.candidates.slice(0, maxCandidates)) {
-    const assemblyId = `widgetdc:assembly:${uuid11()}`;
+    const assemblyId = `widgetdc:assembly:${uuid13()}`;
     const selectedBlocks = blocks.filter((b) => candidate.block_ids.includes(b.block_id));
     const conflictCount = candidate.conflicts?.length ?? 0;
     const coherence = Math.max(0, Math.min(1, candidate.coherence ?? 0.5));
@@ -16474,7 +17062,7 @@ MERGE (a)-[:COMPOSED_OF]->(b)`,
             blockIds: selectedBlocks.map((b) => b.block_id)
           }
         },
-        callId: uuid11(),
+        callId: uuid13(),
         timeoutMs: 1e4
       });
     } catch (err) {
@@ -16564,7 +17152,7 @@ assemblyRouter.put("/:id", async (req, res) => {
         query: "MATCH (a:Assembly {id: $id}) SET a.status = $status, a.updated_at = datetime()",
         params: { id: assembly.$id, status: assembly.status }
       },
-      callId: uuid11(),
+      callId: uuid13(),
       timeoutMs: 5e3
     });
   } catch {
@@ -16574,7 +17162,7 @@ assemblyRouter.put("/:id", async (req, res) => {
 
 // src/routes/decisions.ts
 import { Router as Router19 } from "express";
-import { v4 as uuid12 } from "uuid";
+import { v4 as uuid14 } from "uuid";
 var decisionsRouter = Router19();
 var REDIS_PREFIX2 = "orchestrator:decision:";
 var REDIS_INDEX2 = "orchestrator:decisions:index";
@@ -16627,7 +17215,7 @@ RETURN a.id AS asm_id, a.name AS asm_name, a.created_at AS asm_ts,
 ORDER BY b.name`,
         params: { assemblyId }
       },
-      callId: uuid12(),
+      callId: uuid14(),
       timeoutMs: 15e3
     });
     if (result.status === "success") {
@@ -16686,7 +17274,7 @@ decisionsRouter.post("/certify", async (req, res) => {
   const assemblyId = String(body.assembly_id);
   const title = String(body.title);
   const now = (/* @__PURE__ */ new Date()).toISOString();
-  const decisionId = `widgetdc:decision:${uuid12()}`;
+  const decisionId = `widgetdc:decision:${uuid14()}`;
   const lineageChain = await buildLineageChain(assemblyId);
   let rationale = String(body.rationale ?? "");
   let summary = String(body.summary ?? "");
@@ -16789,7 +17377,7 @@ CREATE (d)-[:CERTIFIED_BY_EVIDENCE]->(e)`,
           // Cap for query size
         }
       },
-      callId: uuid12(),
+      callId: uuid14(),
       timeoutMs: 15e3
     });
   } catch (err) {
@@ -16995,9 +17583,9 @@ async function listPlans() {
 }
 
 // src/harvest-pipeline.ts
-import { v4 as uuid13 } from "uuid";
+import { v4 as uuid15 } from "uuid";
 async function extract(domain) {
-  const callId = `harvest-extract-${uuid13().substring(0, 8)}`;
+  const callId = `harvest-extract-${uuid15().substring(0, 8)}`;
   try {
     const result = await callMcpTool({
       toolName: "srag.query",
@@ -17023,7 +17611,7 @@ function generalize(items, domain) {
     if (content.length > 2e3 || name.toLowerCase().includes("framework")) tier = "framework";
     else if (content.length > 500 || name.toLowerCase().includes("template")) tier = "template";
     return {
-      id: `harvest-${uuid13().substring(0, 12)}`,
+      id: `harvest-${uuid15().substring(0, 12)}`,
       name,
       tier,
       description: content.substring(0, 300),
@@ -17040,7 +17628,7 @@ function generalize(items, domain) {
 }
 async function store(components) {
   if (components.length === 0) return 0;
-  const callId = `harvest-store-${uuid13().substring(0, 8)}`;
+  const callId = `harvest-store-${uuid15().substring(0, 8)}`;
   const labelMap = {
     framework: "Framework",
     template: "Template",
@@ -17092,7 +17680,7 @@ async function verify(components) {
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: `${comp.tier} for ${comp.industries[0]}: ${comp.name}` },
-        callId: `harvest-verify-${uuid13().substring(0, 8)}`,
+        callId: `harvest-verify-${uuid15().substring(0, 8)}`,
         timeoutMs: 15e3
       });
       const resultStr = JSON.stringify(result).toLowerCase();
@@ -17144,7 +17732,7 @@ async function runFullHarvest() {
 // src/routes/openai-compat.ts
 import { Router as Router21 } from "express";
 init_config();
-import { v4 as uuid14 } from "uuid";
+import { v4 as uuid16 } from "uuid";
 var MAX_TOOL_ROUNDS = 2;
 var MAX_TOOL_ROUNDS_ASSISTANT = 4;
 var TOOL_CATEGORIES = [
@@ -17354,7 +17942,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     return;
   }
   const { model, messages, stream, temperature, max_tokens } = req.body;
-  const requestId = `chatcmpl-${uuid14().substring(0, 12)}`;
+  const requestId = `chatcmpl-${uuid16().substring(0, 12)}`;
   const assistant = ASSISTANT_MAP.get(model);
   const resolvedModel = assistant ? assistant.baseModel : model;
   const mapping = MODEL_TO_PROVIDER[resolvedModel] || MODEL_TO_PROVIDER["gemini-flash"];
@@ -18313,7 +18901,7 @@ openapiRouter.use("/docs", swaggerUi.serve, swaggerUi.setup(spec, {
 // src/routes/mcp-gateway.ts
 import { Router as Router24 } from "express";
 init_config();
-import { v4 as uuid15 } from "uuid";
+import { v4 as uuid17 } from "uuid";
 var mcpGatewayRouter = Router24();
 var backendToolsCache = [];
 var backendToolsCacheTime = 0;
@@ -18395,7 +18983,7 @@ async function handleToolsCall(id, params) {
   if (isOrchestratorTool) {
     try {
       const results = await executeToolCalls([{
-        id: uuid15(),
+        id: uuid17(),
         function: { name: toolName, arguments: JSON.stringify(args) }
       }]);
       const result = results[0];
@@ -18423,7 +19011,7 @@ async function handleToolsCall(id, params) {
     const mcpResult = await callMcpTool({
       toolName: backendName,
       args,
-      callId: uuid15(),
+      callId: uuid17(),
       timeoutMs: 3e4
     });
     if (mcpResult.status !== "success") {
@@ -18527,7 +19115,7 @@ mcpGatewayRouter.delete("/", (_req, res) => {
 
 // src/routes/tool-gateway.ts
 import { Router as Router25 } from "express";
-import { v4 as uuid16 } from "uuid";
+import { v4 as uuid18 } from "uuid";
 var toolGatewayRouter = Router25();
 toolGatewayRouter.post("/:name", async (req, res) => {
   const { name } = req.params;
@@ -18544,7 +19132,7 @@ toolGatewayRouter.post("/:name", async (req, res) => {
     });
     return;
   }
-  const callId = req.body?.call_id ?? uuid16();
+  const callId = req.body?.call_id ?? uuid18();
   const args = req.body ?? {};
   logger.info({ tool: name, call_id: callId }, "REST tool gateway call");
   const result = await executeToolUnified(name, args, {
@@ -18828,6 +19416,261 @@ function seedAgents() {
   logger.info({ seeded, cleaned }, "Agent seeds applied");
 }
 
+// src/routes/failures.ts
+import { Router as Router26 } from "express";
+var failuresRouter = Router26();
+failuresRouter.get("/summary", async (_req, res) => {
+  try {
+    const redis2 = getRedis();
+    if (redis2) {
+      const cached = await redis2.get("orchestrator:failure-summary");
+      if (cached) {
+        try {
+          res.json({ success: true, data: JSON.parse(cached), source: "cache" });
+          return;
+        } catch {
+        }
+      }
+    }
+    const summary = await runFailureHarvest(24);
+    res.json({ success: true, data: summary, source: "fresh" });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Failure summary endpoint failed");
+    res.status(500).json({ success: false, error: { code: "HARVEST_READ_ERROR", message: "Failed to read failure summary. Check server logs.", status_code: 500 } });
+  }
+});
+failuresRouter.post("/harvest", async (req, res) => {
+  const raw = req.body?.window_hours;
+  const windowHours = typeof raw === "number" && raw >= 1 && raw <= 720 ? raw : 24;
+  try {
+    const summary = await runFailureHarvest(windowHours);
+    res.json({ success: true, data: summary });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Manual failure harvest failed");
+    res.status(500).json({ success: false, error: { code: "HARVEST_FAILED", message: "Failure harvest failed. Check server logs.", status_code: 500 } });
+  }
+});
+
+// src/routes/competitive.ts
+import { Router as Router27 } from "express";
+var competitiveRouter = Router27();
+var crawlInProgress = false;
+var lastCrawlAt = 0;
+var CRAWL_COOLDOWN_MS = 36e5;
+competitiveRouter.get("/report", async (_req, res) => {
+  try {
+    const redis2 = getRedis();
+    if (redis2) {
+      const cached = await redis2.get("orchestrator:competitive-report");
+      if (cached) {
+        try {
+          res.json({ success: true, data: JSON.parse(cached), source: "cache" });
+          return;
+        } catch {
+        }
+      }
+    }
+    res.json({ success: true, data: null, message: "No report yet. Trigger crawl via POST /api/competitive/crawl" });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Competitive report endpoint failed");
+    res.status(500).json({ success: false, error: { code: "COMPETITIVE_READ_ERROR", message: "Failed to read competitive report. Check server logs.", status_code: 500 } });
+  }
+});
+competitiveRouter.post("/crawl", async (_req, res) => {
+  if (crawlInProgress) {
+    res.status(429).json({
+      success: false,
+      error: { code: "CRAWL_IN_PROGRESS", message: "A crawl is already running. Try again later.", status_code: 429 }
+    });
+    return;
+  }
+  const elapsed = Date.now() - lastCrawlAt;
+  if (elapsed < CRAWL_COOLDOWN_MS) {
+    const waitMin = Math.ceil((CRAWL_COOLDOWN_MS - elapsed) / 6e4);
+    res.status(429).json({
+      success: false,
+      error: { code: "CRAWL_COOLDOWN", message: `Cooldown active. Try again in ${waitMin} minutes.`, status_code: 429 }
+    });
+    return;
+  }
+  crawlInProgress = true;
+  try {
+    const report = await runCompetitiveCrawl();
+    lastCrawlAt = Date.now();
+    res.json({ success: true, data: report });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Manual competitive crawl failed");
+    res.status(500).json({ success: false, error: { code: "CRAWL_FAILED", message: "Crawl failed. Check server logs.", status_code: 500 } });
+  } finally {
+    crawlInProgress = false;
+  }
+});
+competitiveRouter.get("/targets", (_req, res) => {
+  res.json({
+    success: true,
+    data: COMPETITOR_TARGETS.map((t) => ({
+      name: t.name,
+      slug: t.slug,
+      url_count: t.urls.length
+    }))
+  });
+});
+
+// src/routes/fold.ts
+import { Router as Router28 } from "express";
+var foldRouter = Router28();
+var DAILY_LIMIT = 100;
+var REDIS_PREFIX3 = "caas:usage:";
+async function getUsageCount(apiKey) {
+  const redis2 = getRedis();
+  if (!redis2) return 0;
+  const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  const key = `${REDIS_PREFIX3}${today}:${apiKey}`;
+  const count = await redis2.get(key);
+  return parseInt(count ?? "0", 10);
+}
+async function incrementUsage(apiKey) {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  const key = `${REDIS_PREFIX3}${today}:${apiKey}`;
+  await redis2.incr(key);
+  await redis2.expire(key, 86400 * 2);
+}
+async function logUsage(apiKey, inputTokens, outputTokens, durationMs) {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  const event = JSON.stringify({
+    $id: `caas-usage:${Date.now()}`,
+    api_key: apiKey.slice(0, 8) + "...",
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    duration_ms: durationMs,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  });
+  await redis2.lpush("caas:usage-log", event).catch(() => {
+  });
+  await redis2.ltrim("caas:usage-log", 0, 9999).catch(() => {
+  });
+}
+foldRouter.post("/", async (req, res) => {
+  if (!isRlmAvailable()) {
+    res.status(503).json({
+      success: false,
+      error: { code: "RLM_UNAVAILABLE", message: "Mercury Folding backend not configured", status_code: 503 }
+    });
+    return;
+  }
+  if (!getRedis()) {
+    res.status(503).json({
+      success: false,
+      error: { code: "RATE_LIMIT_UNAVAILABLE", message: "Rate limiting backend (Redis) not available. Fold disabled.", status_code: 503 }
+    });
+    return;
+  }
+  const apiKey = req.headers["authorization"]?.replace("Bearer ", "") ?? req.headers["x-api-key"] ?? req.query["api_key"] ?? "anonymous";
+  const usage = await getUsageCount(apiKey);
+  if (usage >= DAILY_LIMIT) {
+    res.status(429).json({
+      success: false,
+      error: {
+        code: "RATE_LIMIT_EXCEEDED",
+        message: `Daily limit of ${DAILY_LIMIT} requests exceeded. Resets at midnight UTC.`,
+        status_code: 429,
+        usage: { today: usage, limit: DAILY_LIMIT }
+      }
+    });
+    return;
+  }
+  const body = req.body;
+  if (!body.text || typeof body.text !== "string") {
+    res.status(400).json({
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: "Required: text (string)", status_code: 400 }
+    });
+    return;
+  }
+  if (body.text.length > 1e5) {
+    res.status(400).json({
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: "text must be under 100,000 characters", status_code: 400 }
+    });
+    return;
+  }
+  const VALID_STRATEGIES = ["semantic", "extractive", "hybrid"];
+  const budget = typeof body.budget === "number" && body.budget >= 100 && body.budget <= 5e4 ? body.budget : 2e3;
+  const strategy = typeof body.strategy === "string" && VALID_STRATEGIES.includes(body.strategy) ? body.strategy : "semantic";
+  const t0 = Date.now();
+  try {
+    const result = await callCognitive("fold", {
+      prompt: body.query ?? "Compress and fold the following text while preserving key information",
+      context: {
+        text: body.text,
+        budget,
+        strategy
+      }
+    }, 3e4);
+    const durationMs = Date.now() - t0;
+    const inputTokens = Math.ceil(body.text.length / 4);
+    const resultStr = typeof result === "string" ? result : JSON.stringify(result);
+    const outputTokens = Math.ceil(resultStr.length / 4);
+    await incrementUsage(apiKey);
+    await logUsage(apiKey, inputTokens, outputTokens, durationMs);
+    res.json({
+      success: true,
+      data: {
+        $id: `fold-result:${Date.now()}`,
+        folded_text: result,
+        input_chars: body.text.length,
+        output_chars: resultStr.length,
+        compression_ratio: resultStr.length > 0 ? +(body.text.length / resultStr.length).toFixed(2) : 0,
+        tokens_saved_estimate: Math.max(0, inputTokens - outputTokens),
+        duration_ms: durationMs,
+        strategy
+      },
+      usage: {
+        today: usage + 1,
+        limit: DAILY_LIMIT,
+        remaining: DAILY_LIMIT - usage - 1
+      }
+    });
+  } catch (err) {
+    logger.error({ err: String(err) }, "CaaS fold request failed");
+    res.status(502).json({
+      success: false,
+      error: { code: "FOLD_FAILED", message: "Mercury Folding request failed. Check server logs.", status_code: 502 }
+    });
+  }
+});
+foldRouter.get("/usage", async (req, res) => {
+  const redis2 = getRedis();
+  if (!redis2) {
+    res.json({ success: true, data: { message: "Redis not available \u2014 no usage tracking" } });
+    return;
+  }
+  try {
+    const logLength = await redis2.llen("caas:usage-log");
+    const recent = await redis2.lrange("caas:usage-log", 0, 9);
+    const parsed = recent.map((r) => {
+      try {
+        return JSON.parse(r);
+      } catch {
+        return null;
+      }
+    }).filter(Boolean);
+    res.json({
+      success: true,
+      data: {
+        $id: `caas-usage-stats:${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}`,
+        total_requests_logged: logLength,
+        recent_requests: parsed
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { code: "USAGE_READ_ERROR", message: "Failed to read usage stats. Check server logs.", status_code: 500 } });
+  }
+});
+
 // src/index.ts
 var __dirname = path.dirname(fileURLToPath(import.meta.url));
 var app = express();
@@ -18904,6 +19747,9 @@ app.use("/api/loose-ends", requireApiKey, looseEndsRouter);
 app.use("/api/decisions", requireApiKey, decisionsRouter);
 app.use("/monitor", requireApiKey, monitorRouter);
 app.use("/api/s1-s4", requireApiKey, s1s4Router);
+app.use("/api/failures", requireApiKey, failuresRouter);
+app.use("/api/competitive", requireApiKey, competitiveRouter);
+app.use("/api/fold", requireApiKey, foldRouter);
 app.use("/api/tools", requireApiKey, toolGatewayRouter);
 app.use("/api/prompt-generator", promptGeneratorRouter);
 app.use(openapiRouter);
@@ -18938,7 +19784,7 @@ app.get("/health", (_req, res) => {
   res.json({
     status: "healthy",
     service: "widgetdc-orchestrator",
-    version: "2.1.0",
+    version: "2.2.0",
     uptime_seconds: Math.floor(process.uptime()),
     agents_registered: AgentRegistry.all().length,
     ws_connections: getConnectionStats().total,

@@ -449,9 +449,9 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       const result = await dualChannelRAG(args.query as string, {
         maxResults: (args.max_results as number) ?? 10,
       })
-      return result.merged_context.length > 0
-        ? `Found ${result.srag_count} semantic + ${result.cypher_count} graph results (${result.duration_ms}ms):\n\n${result.merged_context}`
-        : 'No results found for this query.'
+      if (result.merged_context.length === 0) return 'No results found for this query.'
+      const header = `[${result.route_strategy}] ${result.graphrag_count} graphrag + ${result.srag_count} semantic + ${result.cypher_count} graph (${result.duration_ms}ms, channels: ${result.channels_used.join(',')}${result.pollution_filtered > 0 ? `, ${result.pollution_filtered} polluted filtered` : ''}):`
+      return `${header}\n\n${result.merged_context}`
     }
 
     case 'reason_deeply': {
