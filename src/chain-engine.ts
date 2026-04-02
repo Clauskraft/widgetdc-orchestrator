@@ -151,6 +151,10 @@ async function executeStep(step: ChainStep, previousOutput: unknown): Promise<St
           args[k] = v.replace(/\{\{prev\}\}/g, prevStr)
         }
       }
+      // Coerce string context to dict (RLM/backend expects object, not string)
+      if (typeof args.context === 'string') {
+        args.context = { instruction: args.context }
+      }
       const result = await callMcpTool({
         toolName: step.tool_name,
         args,

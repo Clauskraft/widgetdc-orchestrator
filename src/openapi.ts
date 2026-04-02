@@ -16,7 +16,7 @@ function buildOpenAPISpec(): object {
     openapi: '3.0.3',
     info: {
       title: 'WidgeTDC Orchestrator — Universal AI Tool Gateway',
-      version: '2.5.0',
+      version: '2.0.0',
       description:
         'Central intelligence platform for WidgeTDC. Provides unified access to 450+ MCP tools, ' +
         'agent orchestration, knowledge graph, cognitive reasoning, chain execution, and more. ' +

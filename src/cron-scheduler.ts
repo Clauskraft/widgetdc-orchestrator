@@ -479,9 +479,9 @@ export function registerDefaultLoops(): void {
       steps: [
         {
           agent_id: 'orchestrator',
-          tool_name: 'llm.generate',
+          tool_name: 'srag.query',
           arguments: {
-            prompt: "Scan fleet health and identify CRITICAL domains for remediation. Use /api/intelligence/fleet-health."
+            query: "Scan fleet health: identify CRITICAL domains, agent failures, unhealthy services, and remediation priorities"
           },
         },
       ],
@@ -500,9 +500,9 @@ export function registerDefaultLoops(): void {
       steps: [
         {
           agent_id: 'orchestrator',
-          tool_name: 'llm.generate',
+          tool_name: 'srag.query',
           arguments: {
-            prompt: "1. Trigger FileSystemHarvester to index local data (D:/Intel, Downloads). 2. Query Neo4j for all :WatchDefinition nodes. 3. For each watch, use osint.search to find signals. 4. Cross-reference new signals with local IntelligenceAssets. 5. Format as IntelligenceObservation and score via /api/intelligence/observation/score."
+            query: "Intelligence watchtower: query WatchDefinition nodes, find new signals across public IT, vendors, tenders domains, cross-reference with existing IntelligenceAssets"
           },
         },
       ],
@@ -672,10 +672,9 @@ export function registerDefaultLoops(): void {
       steps: [
         {
           agent_id: 'orchestrator',
-          tool_name: 'autonomous.agentteam.coordinate',
+          tool_name: 'srag.query',
           arguments: {
-            task: 'Analyze platform optimization opportunities: review recent decisions, identify sub-optimal tool usage patterns, propose improvements',
-            context: { severity: 'P2', scope: 'platform-wide' },
+            query: 'Analyze platform optimization opportunities: review recent agent decisions, identify sub-optimal tool usage patterns, propose improvements for platform-wide efficiency',
           },
         },
         {
