@@ -18227,12 +18227,21 @@ async function getBackendTools() {
     });
     if (!r.ok) return backendToolsCache;
     const data = await r.json();
-    const tools = Array.isArray(data) ? data : Array.isArray(data?.tools) ? data.tools : [];
-    backendToolsCache = tools.map((t) => ({
-      name: `backend.${t.name ?? t.tool ?? ""}`,
-      description: String(t.description ?? ""),
-      inputSchema: t.inputSchema ?? t.input_schema ?? t.parameters ?? { type: "object", properties: {} }
-    }));
+    const rawTools = Array.isArray(data) ? data : Array.isArray(data?.tools) ? data.tools : Array.isArray(data?.data?.tools) ? data.data.tools : [];
+    backendToolsCache = rawTools.map((t) => {
+      if (typeof t === "string") {
+        return {
+          name: `backend.${t}`,
+          description: `Backend MCP tool: ${t}`,
+          inputSchema: { type: "object", properties: { payload: { type: "object", description: "Tool arguments" } } }
+        };
+      }
+      return {
+        name: `backend.${t.name ?? t.tool ?? ""}`,
+        description: String(t.description ?? `Backend MCP tool: ${t.name ?? t.tool}`),
+        inputSchema: t.inputSchema ?? t.input_schema ?? t.parameters ?? { type: "object", properties: {} }
+      };
+    }).filter((t) => t.name !== "backend.");
     backendToolsCacheTime = Date.now();
     logger.info({ count: backendToolsCache.length }, "MCP gateway: refreshed backend tools cache");
   } catch (err) {

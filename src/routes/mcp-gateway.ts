@@ -56,15 +56,26 @@ async function getBackendTools(): Promise<typeof backendToolsCache> {
     if (!r.ok) return backendToolsCache
 
     const data = await r.json() as any
-    const tools = Array.isArray(data) ? data
+    const rawTools = Array.isArray(data) ? data
       : Array.isArray(data?.tools) ? data.tools
+      : Array.isArray(data?.data?.tools) ? data.data.tools
       : []
 
-    backendToolsCache = tools.map((t: any) => ({
-      name: `backend.${t.name ?? t.tool ?? ''}`,
-      description: String(t.description ?? ''),
-      inputSchema: t.inputSchema ?? t.input_schema ?? t.parameters ?? { type: 'object', properties: {} },
-    }))
+    backendToolsCache = rawTools.map((t: any) => {
+      // Backend returns either strings ("graph.health") or objects ({name, description})
+      if (typeof t === 'string') {
+        return {
+          name: `backend.${t}`,
+          description: `Backend MCP tool: ${t}`,
+          inputSchema: { type: 'object', properties: { payload: { type: 'object', description: 'Tool arguments' } } },
+        }
+      }
+      return {
+        name: `backend.${t.name ?? t.tool ?? ''}`,
+        description: String(t.description ?? `Backend MCP tool: ${t.name ?? t.tool}`),
+        inputSchema: t.inputSchema ?? t.input_schema ?? t.parameters ?? { type: 'object', properties: {} },
+      }
+    }).filter((t: any) => t.name !== 'backend.')
     backendToolsCacheTime = Date.now()
     logger.info({ count: backendToolsCache.length }, 'MCP gateway: refreshed backend tools cache')
   } catch (err) {
