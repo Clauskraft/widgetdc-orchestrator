@@ -57,6 +57,8 @@ import { listPlans, type FSMState } from './state-machine.js'
 import { runHarvestPipeline, runFullHarvest } from './harvest-pipeline.js'
 import { openaiCompatRouter } from './routes/openai-compat.js'
 import { promptGeneratorRouter } from './routes/prompt-generator.js'
+import { openapiRouter } from './openapi.js'
+import { mcpGatewayRouter } from './routes/mcp-gateway.js'
 import { seedAgents } from './agent-seeds.js'
 import { hydrateMessages } from './chat-store.js'
 
@@ -124,6 +126,12 @@ app.use('/api/s1-s4', requireApiKey, s1s4Router)
 
 // Prompt Generator (no auth — utility endpoint)
 app.use('/api/prompt-generator', promptGeneratorRouter)
+
+// OpenAPI spec + Swagger UI (no auth — discovery endpoint)
+app.use(openapiRouter)
+
+// MCP Streamable HTTP gateway (auth required)
+app.use('/mcp', requireApiKey, mcpGatewayRouter)
 
 // OpenAI-compatible API (for Open WebUI)
 app.use(openaiCompatRouter)
