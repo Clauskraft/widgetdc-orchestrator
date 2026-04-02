@@ -7,6 +7,7 @@
  */
 import { Router } from 'express'
 import swaggerUi from 'swagger-ui-express'
+import { toOpenAPIPaths, TOOL_REGISTRY } from './tool-registry.js'
 
 // ─── Build OpenAPI spec inline (no JSDoc file scanning needed) ──────────────
 
@@ -571,6 +572,9 @@ function buildOpenAPISpec(): object {
           responses: { '200': { description: 'Monitor data' } },
         },
       },
+
+      // ─── Orchestrator Tools (auto-generated from canonical registry) ──────
+      ...toOpenAPIPaths(),
     },
     tags: [
       { name: 'Health', description: 'Service health and status' },

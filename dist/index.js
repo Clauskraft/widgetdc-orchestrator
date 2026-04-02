@@ -10363,6 +10363,9 @@ async function executeStep(step, previousOutput) {
           args[k] = v.replace(/\{\{prev\}\}/g, prevStr);
         }
       }
+      if (typeof args.context === "string") {
+        args.context = { instruction: args.context };
+      }
       const result = await callMcpTool({
         toolName: step.tool_name,
         args,
@@ -10995,234 +10998,359 @@ async function runInvestigation(topic) {
 
 // src/tool-executor.ts
 import { v4 as uuid5 } from "uuid";
-var ORCHESTRATOR_TOOLS = [
+
+// src/tool-registry.ts
+var TOOL_REGISTRY = [
   {
-    type: "function",
-    function: {
-      name: "search_knowledge",
-      description: "Search the WidgeTDC knowledge graph and semantic vector store. Use for ANY question about platform data, consulting knowledge, patterns, documents, or entities. Returns merged results from SRAG (semantic) and Neo4j (graph).",
-      parameters: {
-        type: "object",
-        properties: {
-          query: { type: "string", description: "Natural language search query" },
-          max_results: { type: "number", description: "Max results (default 10)" }
-        },
-        required: ["query"]
-      }
-    }
+    name: "search_knowledge",
+    namespace: "orchestrator",
+    description: "Search the WidgeTDC knowledge graph and semantic vector store. Use for ANY question about platform data, consulting knowledge, patterns, documents, or entities. Returns merged results from SRAG (semantic) and Neo4j (graph).",
+    category: "knowledge",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Natural language search query" },
+        max_results: { type: "number", description: "Max results (default 10)" }
+      },
+      required: ["query"]
+    },
+    outputDescription: "Merged SRAG + graph results with counts and duration",
+    handler: "orchestrator",
+    backendTool: "srag.query + graph.read_cypher",
+    timeoutMs: 2e4,
+    authRequired: true,
+    availableVia: ["openai", "openapi", "mcp"],
+    tags: ["rag", "search", "srag", "knowledge-graph"]
   },
   {
-    type: "function",
-    function: {
-      name: "reason_deeply",
-      description: "Send a complex question to the RLM reasoning engine for deep multi-step analysis. Use for strategy questions, architecture analysis, comparisons, evaluations, and planning. More powerful than search \u2014 actually reasons about the data.",
-      parameters: {
-        type: "object",
-        properties: {
-          question: { type: "string", description: "The complex question to reason about" },
-          mode: { type: "string", enum: ["reason", "analyze", "plan"], description: "Reasoning mode (default: reason)" }
-        },
-        required: ["question"]
-      }
-    }
+    name: "reason_deeply",
+    namespace: "orchestrator",
+    description: "Send a complex question to the RLM reasoning engine for deep multi-step analysis. Use for strategy questions, architecture analysis, comparisons, evaluations, and planning. More powerful than search \u2014 actually reasons about the data.",
+    category: "cognitive",
+    inputSchema: {
+      type: "object",
+      properties: {
+        question: { type: "string", description: "The complex question to reason about" },
+        mode: { type: "string", enum: ["reason", "analyze", "plan"], description: "Reasoning mode (default: reason)" }
+      },
+      required: ["question"]
+    },
+    outputDescription: "RLM reasoning result \u2014 text or structured JSON",
+    handler: "orchestrator",
+    backendTool: "rlm.reason",
+    timeoutMs: 45e3,
+    authRequired: true,
+    availableVia: ["openai", "openapi", "mcp"],
+    tags: ["reasoning", "rlm", "analysis", "planning"]
   },
   {
-    type: "function",
-    function: {
-      name: "query_graph",
-      description: "Execute a Cypher query against the Neo4j knowledge graph (520K nodes, 4M relationships). Use for structured data queries like counting nodes, finding relationships, listing entities, or checking status.",
-      parameters: {
-        type: "object",
-        properties: {
-          cypher: { type: "string", description: "Neo4j Cypher query (read-only, parameterized)" },
-          params: { type: "object", description: "Query parameters (optional)" }
-        },
-        required: ["cypher"]
-      }
-    }
+    name: "query_graph",
+    namespace: "orchestrator",
+    description: "Execute a Cypher query against the Neo4j knowledge graph (475K+ nodes, 3.8M+ relationships). Use for structured data queries like counting nodes, finding relationships, listing entities, or checking status.",
+    category: "graph",
+    inputSchema: {
+      type: "object",
+      properties: {
+        cypher: { type: "string", description: "Neo4j Cypher query (read-only, parameterized)" },
+        params: { type: "object", description: "Query parameters (optional)" }
+      },
+      required: ["cypher"]
+    },
+    outputDescription: "Array of graph query result rows (JSON)",
+    handler: "orchestrator",
+    backendTool: "graph.read_cypher",
+    timeoutMs: 15e3,
+    authRequired: true,
+    availableVia: ["openai", "openapi", "mcp"],
+    tags: ["neo4j", "cypher", "graph", "query"]
   },
   {
-    type: "function",
-    function: {
-      name: "check_tasks",
-      description: "Get active tasks, issues, and project status from the knowledge graph. Use when asked about project status, next steps, blockers, sprints, or Linear issues.",
-      parameters: {
-        type: "object",
-        properties: {
-          filter: { type: "string", enum: ["active", "blocked", "recent", "all"], description: "Task filter (default: active)" },
-          keyword: { type: "string", description: "Optional keyword to filter tasks" }
+    name: "check_tasks",
+    namespace: "orchestrator",
+    description: "Get active tasks, issues, and project status from the knowledge graph. Use when asked about project status, next steps, blockers, sprints, or Linear issues.",
+    category: "linear",
+    inputSchema: {
+      type: "object",
+      properties: {
+        filter: { type: "string", enum: ["active", "blocked", "recent", "all"], description: "Task filter (default: active)" },
+        keyword: { type: "string", description: "Optional keyword to filter tasks" }
+      }
+    },
+    outputDescription: "Formatted task list with IDs, titles, and status",
+    handler: "orchestrator",
+    backendTool: "graph.read_cypher",
+    timeoutMs: 1e4,
+    authRequired: true,
+    availableVia: ["openai", "openapi", "mcp"],
+    tags: ["tasks", "linear", "project-management"]
+  },
+  {
+    name: "call_mcp_tool",
+    namespace: "orchestrator",
+    description: "Call any of the 449+ MCP tools on the WidgeTDC backend. Use for specific platform operations like embedding, compliance checks, memory operations, agent coordination. Check tool name carefully.",
+    category: "mcp",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_name: { type: "string", description: "MCP tool name (e.g., srag.query, graph.health, audit.dashboard)" },
+        payload: { type: "object", description: "Tool payload arguments" }
+      },
+      required: ["tool_name"]
+    },
+    outputDescription: "Tool result (shape varies by tool)",
+    handler: "orchestrator",
+    backendTool: "(dynamic)",
+    timeoutMs: 3e4,
+    authRequired: true,
+    availableVia: ["openai", "openapi", "mcp"],
+    tags: ["mcp", "dynamic", "passthrough"]
+  },
+  {
+    name: "get_platform_health",
+    namespace: "orchestrator",
+    description: "Get current health status of all WidgeTDC platform services (backend, RLM engine, Neo4j graph, Redis). Use when asked about system status, uptime, or health.",
+    category: "monitor",
+    inputSchema: {
+      type: "object",
+      properties: {}
+    },
+    outputDescription: "Health status for Neo4j, graph stats (node/relationship counts)",
+    handler: "orchestrator",
+    backendTool: "graph.health + graph.stats",
+    timeoutMs: 1e4,
+    authRequired: true,
+    availableVia: ["openai", "openapi", "mcp"],
+    tags: ["health", "monitoring", "status"]
+  },
+  {
+    name: "search_documents",
+    namespace: "orchestrator",
+    description: "Search for specific documents, files, reports, or artifacts in the platform. Returns document metadata and content snippets.",
+    category: "knowledge",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Document search query" },
+        doc_type: { type: "string", description: "Optional filter: TDCDocument, ConsultingArtifact, Pattern, etc." }
+      },
+      required: ["query"]
+    },
+    outputDescription: "Document results with metadata and snippets",
+    handler: "orchestrator",
+    backendTool: "srag.query",
+    timeoutMs: 2e4,
+    authRequired: true,
+    availableVia: ["openai", "openapi", "mcp"],
+    tags: ["documents", "search", "srag"]
+  },
+  {
+    name: "linear_issues",
+    namespace: "orchestrator",
+    description: "Get issues from Linear project management. Use for project status, active tasks, sprint progress, blockers, or specific issue details (LIN-xxx). Returns real-time Linear data.",
+    category: "linear",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: 'Search query or issue identifier (e.g., "LIN-493" or "cloud chat platform")' },
+        status: { type: "string", enum: ["active", "done", "backlog", "all"], description: "Filter by status (default: active)" },
+        limit: { type: "number", description: "Max results (default 10)" }
+      }
+    },
+    outputDescription: "Formatted issue list with identifiers, titles, status, assignees",
+    handler: "orchestrator",
+    backendTool: "linear.issues",
+    timeoutMs: 15e3,
+    authRequired: true,
+    availableVia: ["openai", "openapi", "mcp"],
+    tags: ["linear", "issues", "project-management"]
+  },
+  {
+    name: "linear_issue_detail",
+    namespace: "orchestrator",
+    description: "Get detailed info about a specific Linear issue by identifier (e.g., LIN-493). Returns full description, comments, status, assignee, sub-issues.",
+    category: "linear",
+    inputSchema: {
+      type: "object",
+      properties: {
+        identifier: { type: "string", description: "Issue identifier (e.g., LIN-493)" }
+      },
+      required: ["identifier"]
+    },
+    outputDescription: "Full issue detail JSON",
+    handler: "orchestrator",
+    backendTool: "linear.issue_get",
+    timeoutMs: 15e3,
+    authRequired: true,
+    availableVia: ["openai", "openapi", "mcp"],
+    tags: ["linear", "issue-detail"]
+  },
+  {
+    name: "run_chain",
+    namespace: "orchestrator",
+    description: "Execute a multi-step agent chain. Supports sequential (A->B->C), parallel (A+B+C), debate (two agents argue, third judges), and loop modes. Use for complex workflows that need multiple tool calls coordinated together.",
+    category: "chains",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Chain name/description" },
+        mode: { type: "string", enum: ["sequential", "parallel", "debate", "loop"], description: "Execution mode" },
+        steps: {
+          type: "array",
+          description: "Chain steps \u2014 each has tool_name or cognitive_action + arguments",
+          items: {
+            type: "object",
+            properties: {
+              agent_id: { type: "string", description: "Agent identifier" },
+              tool_name: { type: "string", description: "MCP tool to call" },
+              cognitive_action: { type: "string", description: "RLM action: reason, analyze, plan" },
+              prompt: { type: "string", description: "Prompt or arguments" }
+            }
+          }
         }
-      }
-    }
+      },
+      required: ["name", "mode", "steps"]
+    },
+    outputDescription: "Chain execution result with status, steps completed, duration, final output",
+    handler: "orchestrator",
+    timeoutMs: 6e4,
+    authRequired: true,
+    availableVia: ["openai", "openapi", "mcp"],
+    tags: ["chains", "orchestration", "multi-agent"]
   },
   {
-    type: "function",
-    function: {
-      name: "call_mcp_tool",
-      description: "Call any of the 448 MCP tools on the WidgeTDC backend. Use for specific platform operations like embedding, compliance checks, memory operations, agent coordination, etc. Check tool name carefully.",
-      parameters: {
-        type: "object",
-        properties: {
-          tool_name: { type: "string", description: "MCP tool name (e.g., srag.query, graph.health, audit.dashboard)" },
-          payload: { type: "object", description: "Tool payload arguments" }
-        },
-        required: ["tool_name"]
-      }
-    }
+    name: "investigate",
+    namespace: "orchestrator",
+    description: "Run a multi-agent deep investigation on a topic. Returns a comprehensive analysis artifact with graph data, compliance, strategy, and reasoning.",
+    category: "cognitive",
+    inputSchema: {
+      type: "object",
+      properties: {
+        topic: { type: "string", description: "The topic to investigate deeply" }
+      },
+      required: ["topic"]
+    },
+    outputDescription: "Investigation result with artifact URL, synthesis, and step details",
+    handler: "orchestrator",
+    timeoutMs: 12e4,
+    authRequired: true,
+    availableVia: ["openai", "openapi", "mcp"],
+    tags: ["investigation", "deep-analysis", "multi-agent"]
   },
   {
-    type: "function",
-    function: {
-      name: "get_platform_health",
-      description: "Get current health status of all WidgeTDC platform services (backend, RLM engine, Neo4j graph, Redis). Use when asked about system status, uptime, or health.",
-      parameters: {
-        type: "object",
-        properties: {}
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "search_documents",
-      description: "Search for specific documents, files, reports, or artifacts in the platform. Returns document metadata and content snippets.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: { type: "string", description: "Document search query" },
-          doc_type: { type: "string", description: "Optional filter: TDCDocument, ConsultingArtifact, Pattern, etc." }
-        },
-        required: ["query"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "linear_issues",
-      description: "Get issues from Linear project management. Use for project status, active tasks, sprint progress, blockers, or specific issue details (LIN-xxx). Returns real-time Linear data.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: { type: "string", description: 'Search query or issue identifier (e.g., "LIN-493" or "cloud chat platform")' },
-          status: { type: "string", enum: ["active", "done", "backlog", "all"], description: "Filter by status (default: active)" },
-          limit: { type: "number", description: "Max results (default 10)" }
+    name: "create_notebook",
+    namespace: "orchestrator",
+    description: "Create an interactive consulting notebook with query, insight, data, and action cells. Executes all cells and returns a full notebook with results. Great for structured analysis on any topic.",
+    category: "knowledge",
+    inputSchema: {
+      type: "object",
+      properties: {
+        topic: { type: "string", description: "The topic to build a notebook around" },
+        cells: {
+          type: "array",
+          description: "Optional: custom cells array. If omitted, auto-generates cells from topic.",
+          items: {
+            type: "object",
+            properties: {
+              type: { type: "string", enum: ["query", "insight", "data", "action"] },
+              id: { type: "string" },
+              query: { type: "string" },
+              prompt: { type: "string" },
+              source_cell_id: { type: "string" },
+              visualization: { type: "string", enum: ["table", "chart"] },
+              recommendation: { type: "string" }
+            }
+          }
         }
-      }
-    }
+      },
+      required: ["topic"]
+    },
+    outputDescription: "Notebook with executed cells, results, and view URLs",
+    handler: "orchestrator",
+    timeoutMs: 6e4,
+    authRequired: true,
+    availableVia: ["openai", "openapi", "mcp"],
+    tags: ["notebook", "consulting", "analysis"]
   },
   {
-    type: "function",
-    function: {
-      name: "linear_issue_detail",
-      description: "Get detailed info about a specific Linear issue by identifier (e.g., LIN-493). Returns full description, comments, status, assignee, sub-issues.",
-      parameters: {
-        type: "object",
-        properties: {
-          identifier: { type: "string", description: "Issue identifier (e.g., LIN-493)" }
-        },
-        required: ["identifier"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "run_chain",
-      description: "Execute a multi-step agent chain. Supports sequential (A\u2192B\u2192C), parallel (A+B+C), debate (two agents argue, third judges), and loop modes. Use for complex workflows that need multiple tool calls coordinated together.",
-      parameters: {
-        type: "object",
-        properties: {
-          name: { type: "string", description: "Chain name/description" },
-          mode: { type: "string", enum: ["sequential", "parallel", "debate", "loop"], description: "Execution mode" },
-          steps: {
-            type: "array",
-            description: "Chain steps \u2014 each has tool_name or cognitive_action + arguments",
-            items: {
-              type: "object",
-              properties: {
-                agent_id: { type: "string", description: "Agent identifier" },
-                tool_name: { type: "string", description: "MCP tool to call" },
-                cognitive_action: { type: "string", description: "RLM action: reason, analyze, plan" },
-                prompt: { type: "string", description: "Prompt or arguments" }
-              }
+    name: "verify_output",
+    namespace: "orchestrator",
+    description: "Run verification checks on a piece of content or data. Checks quality, accuracy, and compliance. Use after getting results from other tools to validate them before presenting to user.",
+    category: "compliance",
+    inputSchema: {
+      type: "object",
+      properties: {
+        content: { type: "string", description: "Content to verify" },
+        checks: {
+          type: "array",
+          description: "Verification checks to run",
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string", description: "Check name" },
+              tool_name: { type: "string", description: "MCP tool for verification" }
             }
           }
-        },
-        required: ["name", "mode", "steps"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "investigate",
-      description: "Run a multi-agent deep investigation on a topic. Returns a comprehensive analysis artifact with graph data, compliance, strategy, and reasoning.",
-      parameters: {
-        type: "object",
-        properties: {
-          topic: { type: "string", description: "The topic to investigate deeply" }
-        },
-        required: ["topic"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "create_notebook",
-      description: "Create an interactive consulting notebook with query, insight, data, and action cells. Executes all cells and returns a full notebook with results. Great for structured analysis on any topic.",
-      parameters: {
-        type: "object",
-        properties: {
-          topic: { type: "string", description: "The topic to build a notebook around" },
-          cells: {
-            type: "array",
-            description: "Optional: custom cells array. If omitted, auto-generates cells from topic.",
-            items: {
-              type: "object",
-              properties: {
-                type: { type: "string", enum: ["query", "insight", "data", "action"] },
-                id: { type: "string" },
-                query: { type: "string" },
-                prompt: { type: "string" },
-                source_cell_id: { type: "string" },
-                visualization: { type: "string", enum: ["table", "chart"] },
-                recommendation: { type: "string" }
-              }
-            }
-          }
-        },
-        required: ["topic"]
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "verify_output",
-      description: "Run verification checks on a piece of content or data. Checks quality, accuracy, and compliance. Use after getting results from other tools to validate them before presenting to user.",
-      parameters: {
-        type: "object",
-        properties: {
-          content: { type: "string", description: "Content to verify" },
-          checks: {
-            type: "array",
-            description: "Verification checks to run",
-            items: {
-              type: "object",
-              properties: {
-                name: { type: "string", description: "Check name" },
-                tool_name: { type: "string", description: "MCP tool for verification" }
-              }
-            }
-          }
-        },
-        required: ["content"]
-      }
-    }
+        }
+      },
+      required: ["content"]
+    },
+    outputDescription: "Verification result with pass/fail per check",
+    handler: "orchestrator",
+    timeoutMs: 3e4,
+    authRequired: true,
+    availableVia: ["openai", "openapi", "mcp"],
+    tags: ["verification", "compliance", "quality"]
   }
 ];
+function toOpenAITools(filter) {
+  const tools = filter?.availableVia ? TOOL_REGISTRY.filter((t) => t.availableVia.includes(filter.availableVia)) : TOOL_REGISTRY;
+  return tools.map((t) => ({
+    type: "function",
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: t.inputSchema
+    }
+  }));
+}
+function toMCPTools() {
+  return TOOL_REGISTRY.filter((t) => t.availableVia.includes("mcp")).map((t) => ({
+    name: t.name,
+    description: t.description,
+    inputSchema: t.inputSchema
+  }));
+}
+function toOpenAPIPaths() {
+  const paths = {};
+  for (const tool of TOOL_REGISTRY.filter((t) => t.availableVia.includes("openapi"))) {
+    const operationId = tool.name.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+    paths[`/api/tools/${tool.name}`] = {
+      post: {
+        operationId: `tool_${operationId}`,
+        summary: tool.description.slice(0, 80),
+        description: tool.description,
+        tags: [tool.category.charAt(0).toUpperCase() + tool.category.slice(1)],
+        security: tool.authRequired ? [{ BearerAuth: [] }] : [],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: tool.inputSchema } }
+        },
+        responses: {
+          "200": {
+            description: tool.outputDescription ?? "Tool result",
+            content: { "application/json": { schema: { type: "object" } } }
+          },
+          "400": { description: "Validation error" },
+          "401": { description: "Unauthorized" }
+        }
+      }
+    };
+  }
+  return paths;
+}
+
+// src/tool-executor.ts
+var ORCHESTRATOR_TOOLS = toOpenAITools();
 var totalTokensSaved = 0;
 var totalFoldingCalls = 0;
 function getTokenSavings() {
@@ -13955,9 +14083,9 @@ function registerDefaultLoops() {
       steps: [
         {
           agent_id: "orchestrator",
-          tool_name: "llm.generate",
+          tool_name: "srag.query",
           arguments: {
-            prompt: "Scan fleet health and identify CRITICAL domains for remediation. Use /api/intelligence/fleet-health."
+            query: "Scan fleet health: identify CRITICAL domains, agent failures, unhealthy services, and remediation priorities"
           }
         }
       ]
@@ -13975,9 +14103,9 @@ function registerDefaultLoops() {
       steps: [
         {
           agent_id: "orchestrator",
-          tool_name: "llm.generate",
+          tool_name: "srag.query",
           arguments: {
-            prompt: "1. Trigger FileSystemHarvester to index local data (D:/Intel, Downloads). 2. Query Neo4j for all :WatchDefinition nodes. 3. For each watch, use osint.search to find signals. 4. Cross-reference new signals with local IntelligenceAssets. 5. Format as IntelligenceObservation and score via /api/intelligence/observation/score."
+            query: "Intelligence watchtower: query WatchDefinition nodes, find new signals across public IT, vendors, tenders domains, cross-reference with existing IntelligenceAssets"
           }
         }
       ]
@@ -14121,10 +14249,9 @@ function registerDefaultLoops() {
       steps: [
         {
           agent_id: "orchestrator",
-          tool_name: "autonomous.agentteam.coordinate",
+          tool_name: "srag.query",
           arguments: {
-            task: "Analyze platform optimization opportunities: review recent decisions, identify sub-optimal tool usage patterns, propose improvements",
-            context: { severity: "P2", scope: "platform-wide" }
+            query: "Analyze platform optimization opportunities: review recent agent decisions, identify sub-optimal tool usage patterns, propose improvements for platform-wide efficiency"
           }
         },
         {
@@ -18170,7 +18297,9 @@ function buildOpenAPISpec() {
           tags: ["Monitor"],
           responses: { "200": { description: "Monitor data" } }
         }
-      }
+      },
+      // ─── Orchestrator Tools (auto-generated from canonical registry) ──────
+      ...toOpenAPIPaths()
     },
     tags: [
       { name: "Health", description: "Service health and status" },
@@ -18250,11 +18379,7 @@ async function getBackendTools() {
   return backendToolsCache;
 }
 function getOrchestratorToolsMCP() {
-  return ORCHESTRATOR_TOOLS.map((t) => ({
-    name: t.function.name,
-    description: t.function.description,
-    inputSchema: t.function.parameters
-  }));
+  return toMCPTools();
 }
 async function handleInitialize(id) {
   return {
@@ -18293,7 +18418,7 @@ async function handleToolsCall(id, params) {
       error: { code: -32602, message: "Missing required parameter: name" }
     };
   }
-  const isOrchestratorTool = ORCHESTRATOR_TOOLS.some((t) => t.function.name === toolName);
+  const isOrchestratorTool = TOOL_REGISTRY.some((t) => t.name === toolName);
   if (isOrchestratorTool) {
     try {
       const results = await executeToolCalls([{

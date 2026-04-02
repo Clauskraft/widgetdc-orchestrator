@@ -14,6 +14,7 @@
  */
 import { Router, Request, Response } from 'express'
 import { ORCHESTRATOR_TOOLS, executeToolCalls } from '../tool-executor.js'
+import { toMCPTools, TOOL_REGISTRY } from '../tool-registry.js'
 import { callMcpTool } from '../mcp-caller.js'
 import { config } from '../config.js'
 import { logger } from '../logger.js'
@@ -85,14 +86,10 @@ async function getBackendTools(): Promise<typeof backendToolsCache> {
   return backendToolsCache
 }
 
-// ─── Convert orchestrator tools to MCP format ───────────────────────────────
+// ─── Convert orchestrator tools to MCP format (compiled from canonical registry) ─
 
 function getOrchestratorToolsMCP(): Array<{ name: string; description: string; inputSchema: object }> {
-  return ORCHESTRATOR_TOOLS.map(t => ({
-    name: t.function.name,
-    description: t.function.description,
-    inputSchema: t.function.parameters,
-  }))
+  return toMCPTools()
 }
 
 // ─── JSON-RPC handlers ─────────────────────────────────────────────────────
@@ -142,8 +139,8 @@ async function handleToolsCall(
     }
   }
 
-  // Check if it's an orchestrator tool
-  const isOrchestratorTool = ORCHESTRATOR_TOOLS.some(t => t.function.name === toolName)
+  // Check if it's an orchestrator tool (lookup from canonical registry)
+  const isOrchestratorTool = TOOL_REGISTRY.some(t => t.name === toolName)
 
   if (isOrchestratorTool) {
     try {

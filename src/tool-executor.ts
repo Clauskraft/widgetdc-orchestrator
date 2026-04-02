@@ -17,10 +17,14 @@ import { verifyChainOutput } from './verification-gate.js'
 import { runInvestigation } from './investigate-chain.js'
 import { logger } from './logger.js'
 import { v4 as uuid } from 'uuid'
+import { toOpenAITools } from './tool-registry.js'
 
-// ─── OpenAI-format tool definitions ─────────────────────────────────────────
+// ─── OpenAI-format tool definitions (compiled from canonical registry) ──────
 
-export const ORCHESTRATOR_TOOLS = [
+export const ORCHESTRATOR_TOOLS = toOpenAITools()
+
+// Legacy reference kept for backward compat — remove when all consumers use registry
+const _LEGACY_TOOLS = [
   {
     type: 'function' as const,
     function: {
@@ -248,6 +252,7 @@ export const ORCHESTRATOR_TOOLS = [
     },
   },
 ]
+void _LEGACY_TOOLS // suppress unused warning — will be removed in Phase 3
 
 // ─── Token tracking ─────────────────────────────────────────────────────────
 
