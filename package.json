@@ -1,6 +1,6 @@
 {
   "name": "widgetdc-orchestrator",
-  "version": "1.1.0-S1S4",
+  "version": "1.4.0",
   "description": "WidgeTDC Orchestrator — bridges AI agents to Railway MCP backend",
   "type": "module",
   "main": "dist/index.js",
