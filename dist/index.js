@@ -18686,11 +18686,36 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false
 }));
 app.use(cors({
-  origin: [
-    "https://consulting-production-b5d8.up.railway.app",
-    "https://orchestrator-production-c27e.up.railway.app",
-    /^https?:\/\/localhost(:\d+)?$/
-  ],
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    const trusted = [
+      "https://consulting-production-b5d8.up.railway.app",
+      "https://orchestrator-production-c27e.up.railway.app",
+      "https://open-webui-production-25cb.up.railway.app"
+    ];
+    if (trusted.includes(origin)) return callback(null, true);
+    if (/^https?:\/\/localhost(:\d+)?$/.test(origin)) return callback(null, true);
+    const aiPlatforms = [
+      /\.google\.com$/,
+      // AI Studio, Gemini
+      /\.googleapis\.com$/,
+      // Google APIs
+      /\.openai\.com$/,
+      // ChatGPT
+      /\.chatgpt\.com$/,
+      // ChatGPT new domain
+      /\.anthropic\.com$/,
+      // Claude
+      /\.railway\.app$/,
+      // Any Railway service
+      /\.vercel\.app$/,
+      // Vercel previews
+      /\.netlify\.app$/
+      // Netlify previews
+    ];
+    if (aiPlatforms.some((re) => re.test(origin))) return callback(null, true);
+    callback(null, true);
+  },
   credentials: true
 }));
 app.use(express.json({ limit: "2mb" }));

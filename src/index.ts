@@ -73,11 +73,37 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false,
 }))
 app.use(cors({
-  origin: [
-    'https://consulting-production-b5d8.up.railway.app',
-    'https://orchestrator-production-c27e.up.railway.app',
-    /^https?:\/\/localhost(:\d+)?$/,
-  ],
+  origin: (origin, callback) => {
+    // Allow requests with no origin (curl, MCP clients, server-to-server)
+    if (!origin) return callback(null, true)
+
+    // Always allow known WidgeTDC services
+    const trusted = [
+      'https://consulting-production-b5d8.up.railway.app',
+      'https://orchestrator-production-c27e.up.railway.app',
+      'https://open-webui-production-25cb.up.railway.app',
+    ]
+    if (trusted.includes(origin)) return callback(null, true)
+
+    // Allow localhost (any port)
+    if (/^https?:\/\/localhost(:\d+)?$/.test(origin)) return callback(null, true)
+
+    // Allow AI platform domains (ChatGPT, Google AI Studio, Gemini, etc.)
+    const aiPlatforms = [
+      /\.google\.com$/,        // AI Studio, Gemini
+      /\.googleapis\.com$/,    // Google APIs
+      /\.openai\.com$/,        // ChatGPT
+      /\.chatgpt\.com$/,       // ChatGPT new domain
+      /\.anthropic\.com$/,     // Claude
+      /\.railway\.app$/,       // Any Railway service
+      /\.vercel\.app$/,        // Vercel previews
+      /\.netlify\.app$/,       // Netlify previews
+    ]
+    if (aiPlatforms.some(re => re.test(origin))) return callback(null, true)
+
+    // All other origins: allow with auth (API key protects mutation endpoints)
+    callback(null, true)
+  },
   credentials: true,
 }))
 app.use(express.json({ limit: '2mb' }))
