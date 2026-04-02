@@ -445,6 +445,7 @@ export async function executeToolUnified(
 async function executeToolByName(name: string, args: Record<string, unknown>): Promise<string> {
   switch (name) {
     case 'search_knowledge': {
+      if (!args.query || typeof args.query !== 'string') return 'Error: query is required and must be a string'
       const result = await dualChannelRAG(args.query as string, {
         maxResults: (args.max_results as number) ?? 10,
       })
@@ -466,9 +467,16 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     }
 
     case 'query_graph': {
+      const cypher = args.cypher as string
+      if (!cypher || typeof cypher !== 'string') return 'Error: cypher query is required and must be a string'
+      // P0 FIX: Block destructive Cypher operations (write guard)
+      const WRITE_KEYWORDS = /\b(DELETE|DETACH|CREATE|MERGE|SET|REMOVE|DROP|CALL\s+dbms)\b/i
+      if (WRITE_KEYWORDS.test(cypher)) {
+        return 'Error: query_graph is read-only. Write operations (DELETE, CREATE, MERGE, SET, REMOVE, DROP) are not allowed.'
+      }
       const result = await callMcpTool({
         toolName: 'graph.read_cypher',
-        args: { query: args.cypher as string, params: args.params ?? {} },
+        args: { query: cypher, params: args.params ?? {} },
         callId: uuid(),
         timeoutMs: 15000,
       })

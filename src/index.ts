@@ -102,12 +102,12 @@ app.use(cors({
     ]
     if (aiPlatforms.some(re => re.test(origin))) return callback(null, true)
 
-    // All other origins: allow with auth (API key protects mutation endpoints)
-    callback(null, true)
+    // Unknown origins: reject (API key auth doesn't protect against CORS+credentials abuse)
+    callback(null, false)
   },
   credentials: true,
 }))
-app.use(express.json({ limit: '2mb' }))
+app.use(express.json({ limit: '100kb' }))
 app.use(express.urlencoded({ extended: false }))
 
 // Request logging
@@ -220,6 +220,18 @@ app.get('/health', (_req, res) => {
 // ─── SPA fallback — serve index.html for all non-API routes ──────────────────
 app.get('/', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'))
+})
+
+// ─── JSON parse error handler (P1 fix: return 400 not 500 for malformed JSON) ─
+app.use((err: Error & { type?: string }, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err.type === 'entity.parse.failed') {
+    res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_JSON', message: 'Request body contains invalid JSON', status_code: 400 },
+    })
+    return
+  }
+  next(err)
 })
 
 // ─── 404 handler ─────────────────────────────────────────────────────────────

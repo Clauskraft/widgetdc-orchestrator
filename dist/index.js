@@ -11482,6 +11482,7 @@ async function executeToolUnified(toolName, args, opts) {
 async function executeToolByName(name, args) {
   switch (name) {
     case "search_knowledge": {
+      if (!args.query || typeof args.query !== "string") return "Error: query is required and must be a string";
       const result = await dualChannelRAG(args.query, {
         maxResults: args.max_results ?? 10
       });
@@ -11501,9 +11502,15 @@ ${result.merged_context}` : "No results found for this query.";
       return typeof result === "string" ? result : JSON.stringify(result, null, 2);
     }
     case "query_graph": {
+      const cypher = args.cypher;
+      if (!cypher || typeof cypher !== "string") return "Error: cypher query is required and must be a string";
+      const WRITE_KEYWORDS = /\b(DELETE|DETACH|CREATE|MERGE|SET|REMOVE|DROP|CALL\s+dbms)\b/i;
+      if (WRITE_KEYWORDS.test(cypher)) {
+        return "Error: query_graph is read-only. Write operations (DELETE, CREATE, MERGE, SET, REMOVE, DROP) are not allowed.";
+      }
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
-        args: { query: args.cypher, params: args.params ?? {} },
+        args: { query: cypher, params: args.params ?? {} },
         callId: uuid5(),
         timeoutMs: 15e3
       });
@@ -18929,11 +18936,11 @@ app.use(cors({
       // Netlify previews
     ];
     if (aiPlatforms.some((re) => re.test(origin))) return callback(null, true);
-    callback(null, true);
+    callback(null, false);
   },
   credentials: true
 }));
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "100kb" }));
 app.use(express.urlencoded({ extended: false }));
 app.use((req, _res, next) => {
   logger.debug({ method: req.method, path: req.path }, "Request");
@@ -19018,6 +19025,16 @@ app.get("/health", (_req, res) => {
 });
 app.get("/", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
+});
+app.use((err, req, res, next) => {
+  if (err.type === "entity.parse.failed") {
+    res.status(400).json({
+      success: false,
+      error: { code: "INVALID_JSON", message: "Request body contains invalid JSON", status_code: 400 }
+    });
+    return;
+  }
+  next(err);
 });
 app.use((req, res) => {
   res.status(404).json({
