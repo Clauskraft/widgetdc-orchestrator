@@ -27,6 +27,14 @@ class Tools:
             default="",
             description="Orchestrator API key (Bearer token)",
         )
+        BACKEND_URL: str = Field(
+            default="https://backend-production-d3da.up.railway.app",
+            description="WidgeTDC Backend URL (for intent.resolve + proactive.queue)",
+        )
+        BACKEND_API_KEY: str = Field(
+            default="",
+            description="Backend API key",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -45,6 +53,71 @@ class Tools:
             else:
                 async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                     return await resp.json()
+
+    async def _mcp(self, tool: str, payload: dict = {}) -> dict:
+        """Internal: call backend MCP tool."""
+        url = f"{self.valves.BACKEND_URL}/api/mcp/route"
+        headers = {
+            "Authorization": f"Bearer {self.valves.BACKEND_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json={"tool": tool, "payload": payload}, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                return await resp.json()
+
+    async def intent_resolve(self, query: str, __user__: dict = {}) -> str:
+        """
+        Find the best tools for a natural language intent using Neo4j graph routing (LIN-576).
+        The graph learns from every tool execution — routing improves over time.
+        Call this when the user asks: what tool should I use, how do I do X, find a tool for Y.
+
+        :param query: Natural language description of what the user wants to do
+        """
+        try:
+            data = await self._mcp("intent.resolve", {"query": query})
+            result = data.get("result", {})
+
+            if isinstance(result, dict) and result.get("tools"):
+                tools = result["tools"]
+                lines = [f"## 🎯 Intent Resolution: '{query}'", f"**{len(tools)} matching tools** found\n"]
+                for t in tools[:8]:
+                    conf = t.get("confidence", 0)
+                    bar = "█" * int(conf * 10) + "░" * (10 - int(conf * 10))
+                    lines.append(f"- **`{t.get('name', '?')}`** [{bar}] {conf:.0%}")
+                    if t.get("description"):
+                        lines.append(f"  _{t['description'][:80]}_")
+                return "\n".join(lines)
+            return f"Ingen matching tools fundet for '{query}'."
+        except Exception as e:
+            return f"⚠️ Intent resolution ikke tilgængelig: {e}"
+
+    async def proactive_notifications(self, __user__: dict = {}) -> str:
+        """
+        Check the proactive notification queue (LIN-575).
+        Shows confidence-gated findings from platform crons — things the system
+        discovered before you asked. Anticipatory Intelligence.
+        """
+        try:
+            data = await self._mcp("proactive.queue", {})
+            result = data.get("result", {})
+
+            if isinstance(result, dict):
+                notifications = result.get("notifications", result.get("queue", []))
+                if not notifications:
+                    return "📭 Ingen proaktive notifikationer. Systemet har ikke fundet noget der kræver opmærksomhed."
+
+                lines = [f"## 🔔 Proactive Notifications", f"**{len(notifications)} findings**\n"]
+                for n in notifications[:10]:
+                    severity = n.get("severity", "info")
+                    emoji = {"critical": "🔴", "warning": "🟡", "info": "🔵"}.get(severity, "⚪")
+                    conf = n.get("confidence", 0)
+                    lines.append(f"{emoji} **{n.get('title', '?')}** (confidence: {conf:.0%})")
+                    if n.get("description"):
+                        lines.append(f"   _{n['description'][:100]}_")
+                return "\n".join(lines)
+            return str(result)[:500]
+        except Exception as e:
+            return f"⚠️ Proactive queue ikke tilgængelig: {e}"
 
     async def failure_analysis(self, __user__: dict = {}) -> str:
         """
