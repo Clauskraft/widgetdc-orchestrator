@@ -19696,13 +19696,19 @@ async function graphWrite2(cypher, params) {
   });
   return result.status === "success";
 }
+function neo4jInt2(val) {
+  if (val == null) return 0;
+  if (typeof val === "number") return val;
+  if (typeof val === "object" && "low" in val) return val.low;
+  return Number(val) || 0;
+}
 async function fixFrameworkDomainRels() {
   const before = await graphRead3(`
     MATCH (f:Framework)
     WHERE NOT (f)-[:IN_DOMAIN]->(:Domain)
     RETURN count(f) AS count
   `);
-  const missingCount = before[0]?.count ?? before.length ?? 0;
+  const missingCount = neo4jInt2(before[0]?.count);
   if (missingCount === 0) {
     return { operation: "framework_domain_rels", severity: "P0", before: 0, after: 0, fixed: 0, details: "No missing IN_DOMAIN rels" };
   }
@@ -19721,13 +19727,13 @@ async function fixFrameworkDomainRels() {
     WHERE NOT (f)-[:IN_DOMAIN]->(:Domain)
     RETURN count(f) AS count
   `);
-  const remaining = after[0]?.count ?? after.length ?? 0;
-  const fixed = (typeof missingCount === "number" ? missingCount : 0) - (typeof remaining === "number" ? remaining : 0);
+  const remaining = neo4jInt2(after[0]?.count);
+  const fixed = missingCount - remaining;
   return {
     operation: "framework_domain_rels",
     severity: "P0",
-    before: typeof missingCount === "number" ? missingCount : 0,
-    after: typeof remaining === "number" ? remaining : 0,
+    before: missingCount,
+    after: remaining,
     fixed: Math.max(0, fixed),
     details: `Created IN_DOMAIN rels for ${Math.max(0, fixed)} frameworks (${remaining} still unlinked \u2014 may lack Domain node)`
   };
@@ -19746,13 +19752,13 @@ var DOMAIN_CONSOLIDATION = {
 };
 async function consolidateDomains() {
   const beforeResult = await graphRead3(`MATCH (d:Domain) RETURN count(d) AS count`);
-  const domainsBefore = beforeResult[0]?.count ?? 0;
+  const domainsBefore = neo4jInt2(beforeResult[0]?.count);
   let totalMerged = 0;
   for (const [canonical, variants] of Object.entries(DOMAIN_CONSOLIDATION)) {
     for (const variant of variants) {
       if (variant === canonical) continue;
       const exists = await graphRead3(`MATCH (d:Domain {name: '${variant}'}) RETURN count(d) AS count`);
-      if ((exists[0]?.count ?? 0) === 0) continue;
+      if (neo4jInt2(exists[0]?.count) === 0) continue;
       const ok = await graphWrite2(`
         MATCH (variant:Domain {name: $variant})
         MATCH (canonical:Domain {name: $canonical})
@@ -19794,12 +19800,12 @@ async function consolidateDomains() {
     }
   }
   const afterResult = await graphRead3(`MATCH (d:Domain) RETURN count(d) AS count`);
-  const domainsAfter = afterResult[0]?.count ?? 0;
+  const domainsAfter = neo4jInt2(afterResult[0]?.count);
   return {
     operation: "domain_consolidation",
     severity: "P1",
-    before: typeof domainsBefore === "number" ? domainsBefore : 0,
-    after: typeof domainsAfter === "number" ? domainsAfter : 0,
+    before: domainsBefore,
+    after: domainsAfter,
     fixed: totalMerged,
     details: `Consolidated ${totalMerged} variant domains. ${domainsAfter} domains remaining.`
   };
@@ -19810,9 +19816,9 @@ async function purgeGraphBloat() {
     WHERE NOT (d)-[:DECIDED_BY|AFFECTS|IMPLEMENTS|REFERENCES]-()
     RETURN count(d) AS count
   `);
-  const orphans = orphanCount[0]?.count ?? 0;
+  const orphans = neo4jInt2(orphanCount[0]?.count);
   let totalDeleted = 0;
-  if (typeof orphans === "number" && orphans > 0) {
+  if (orphans > 0) {
     for (let i = 0; i < Math.ceil(orphans / 1e3); i++) {
       const ok = await graphWrite2(`
         MATCH (d:RLMDecision)
@@ -19830,9 +19836,9 @@ async function purgeGraphBloat() {
     MATCH ()-[r:SHOULD_AWARE_OF]->()
     RETURN count(r) AS count
   `);
-  const saCount = saCountResult[0]?.count ?? 0;
+  const saCount = neo4jInt2(saCountResult[0]?.count);
   let saDeleted = 0;
-  if (typeof saCount === "number" && saCount > 1e5) {
+  if (saCount > 1e5) {
     await graphWrite2(`
       MATCH (a)-[r:SHOULD_AWARE_OF]->(l:Lesson)
       WHERE l.timestamp < datetime() - duration('P30D')
@@ -19847,12 +19853,12 @@ async function purgeGraphBloat() {
       DELETE r
     `);
     const saAfter = await graphRead3(`MATCH ()-[r:SHOULD_AWARE_OF]->() RETURN count(r) AS count`);
-    saDeleted = (typeof saCount === "number" ? saCount : 0) - (typeof saAfter[0]?.count === "number" ? saAfter[0].count : 0);
+    saDeleted = saCount - neo4jInt2(saAfter[0]?.count);
   }
   return {
     operation: "graph_bloat_purge",
     severity: "P2",
-    before: (typeof orphans === "number" ? orphans : 0) + (typeof saCount === "number" ? saCount : 0),
+    before: orphans + saCount,
     after: 0,
     fixed: totalDeleted + Math.max(0, saDeleted),
     details: `Deleted ${totalDeleted} orphan RLMDecision, pruned ${Math.max(0, saDeleted)} stale SHOULD_AWARE_OF rels`

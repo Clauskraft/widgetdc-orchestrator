@@ -37,6 +37,14 @@ async function graphWrite(cypher: string, params?: Record<string, unknown>): Pro
   return result.status === 'success'
 }
 
+/** Neo4j integers come as {low, high} objects — normalize to JS number */
+function neo4jInt(val: unknown): number {
+  if (val == null) return 0
+  if (typeof val === 'number') return val
+  if (typeof val === 'object' && 'low' in (val as any)) return (val as any).low
+  return Number(val) || 0
+}
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export interface HygieneResult {
@@ -71,7 +79,7 @@ export async function fixFrameworkDomainRels(): Promise<HygieneResult> {
     WHERE NOT (f)-[:IN_DOMAIN]->(:Domain)
     RETURN count(f) AS count
   `)
-  const missingCount = before[0]?.count ?? before.length ?? 0
+  const missingCount = neo4jInt(before[0]?.count)
 
   if (missingCount === 0) {
     return { operation: 'framework_domain_rels', severity: 'P0', before: 0, after: 0, fixed: 0, details: 'No missing IN_DOMAIN rels' }
@@ -97,14 +105,14 @@ export async function fixFrameworkDomainRels(): Promise<HygieneResult> {
     WHERE NOT (f)-[:IN_DOMAIN]->(:Domain)
     RETURN count(f) AS count
   `)
-  const remaining = after[0]?.count ?? after.length ?? 0
-  const fixed = (typeof missingCount === 'number' ? missingCount : 0) - (typeof remaining === 'number' ? remaining : 0)
+  const remaining = neo4jInt(after[0]?.count)
+  const fixed = missingCount - remaining
 
   return {
     operation: 'framework_domain_rels',
     severity: 'P0',
-    before: typeof missingCount === 'number' ? missingCount : 0,
-    after: typeof remaining === 'number' ? remaining : 0,
+    before: missingCount,
+    after: remaining,
     fixed: Math.max(0, fixed),
     details: `Created IN_DOMAIN rels for ${Math.max(0, fixed)} frameworks (${remaining} still unlinked — may lack Domain node)`,
   }
@@ -132,7 +140,7 @@ const DOMAIN_CONSOLIDATION: Record<string, string[]> = {
 export async function consolidateDomains(): Promise<HygieneResult> {
   // Count total domains before
   const beforeResult = await graphRead(`MATCH (d:Domain) RETURN count(d) AS count`)
-  const domainsBefore = beforeResult[0]?.count ?? 0
+  const domainsBefore = neo4jInt(beforeResult[0]?.count)
   let totalMerged = 0
 
   for (const [canonical, variants] of Object.entries(DOMAIN_CONSOLIDATION)) {
@@ -142,7 +150,7 @@ export async function consolidateDomains(): Promise<HygieneResult> {
 
       // Check if variant domain exists
       const exists = await graphRead(`MATCH (d:Domain {name: '${variant}'}) RETURN count(d) AS count`)
-      if ((exists[0]?.count ?? 0) === 0) continue
+      if (neo4jInt(exists[0]?.count) === 0) continue
 
       // Re-point all relationships from variant to canonical
       const ok = await graphWrite(`
@@ -194,13 +202,13 @@ export async function consolidateDomains(): Promise<HygieneResult> {
   }
 
   const afterResult = await graphRead(`MATCH (d:Domain) RETURN count(d) AS count`)
-  const domainsAfter = afterResult[0]?.count ?? 0
+  const domainsAfter = neo4jInt(afterResult[0]?.count)
 
   return {
     operation: 'domain_consolidation',
     severity: 'P1',
-    before: typeof domainsBefore === 'number' ? domainsBefore : 0,
-    after: typeof domainsAfter === 'number' ? domainsAfter : 0,
+    before: domainsBefore,
+    after: domainsAfter,
     fixed: totalMerged,
     details: `Consolidated ${totalMerged} variant domains. ${domainsAfter} domains remaining.`,
   }
@@ -215,11 +223,11 @@ export async function purgeGraphBloat(): Promise<HygieneResult> {
     WHERE NOT (d)-[:DECIDED_BY|AFFECTS|IMPLEMENTS|REFERENCES]-()
     RETURN count(d) AS count
   `)
-  const orphans = orphanCount[0]?.count ?? 0
+  const orphans = neo4jInt(orphanCount[0]?.count)
 
   // Delete orphan RLMDecision in batches (avoid transaction timeout)
   let totalDeleted = 0
-  if (typeof orphans === 'number' && orphans > 0) {
+  if (orphans > 0) {
     // Delete in batches of 1000
     for (let i = 0; i < Math.ceil(orphans / 1000); i++) {
       const ok = await graphWrite(`
@@ -240,11 +248,11 @@ export async function purgeGraphBloat(): Promise<HygieneResult> {
     MATCH ()-[r:SHOULD_AWARE_OF]->()
     RETURN count(r) AS count
   `)
-  const saCount = saCountResult[0]?.count ?? 0
+  const saCount = neo4jInt(saCountResult[0]?.count)
 
   // Delete SHOULD_AWARE_OF from Lesson nodes older than 30 days (stale lessons)
   let saDeleted = 0
-  if (typeof saCount === 'number' && saCount > 100000) {
+  if (saCount > 100000) {
     await graphWrite(`
       MATCH (a)-[r:SHOULD_AWARE_OF]->(l:Lesson)
       WHERE l.timestamp < datetime() - duration('P30D')
@@ -262,13 +270,13 @@ export async function purgeGraphBloat(): Promise<HygieneResult> {
     `)
 
     const saAfter = await graphRead(`MATCH ()-[r:SHOULD_AWARE_OF]->() RETURN count(r) AS count`)
-    saDeleted = (typeof saCount === 'number' ? saCount : 0) - (typeof saAfter[0]?.count === 'number' ? saAfter[0].count : 0)
+    saDeleted = saCount - neo4jInt(saAfter[0]?.count)
   }
 
   return {
     operation: 'graph_bloat_purge',
     severity: 'P2',
-    before: (typeof orphans === 'number' ? orphans : 0) + (typeof saCount === 'number' ? saCount : 0),
+    before: orphans + saCount,
     after: 0,
     fixed: totalDeleted + Math.max(0, saDeleted),
     details: `Deleted ${totalDeleted} orphan RLMDecision, pruned ${Math.max(0, saDeleted)} stale SHOULD_AWARE_OF rels`,
