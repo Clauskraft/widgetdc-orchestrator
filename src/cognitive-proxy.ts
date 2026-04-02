@@ -54,7 +54,7 @@ export async function callCognitive(
 
   const url = `${config.rlmUrl}${path}`
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs ?? 60000)
+  const timer = setTimeout(() => controller.abort(), timeoutMs ?? 120000)
 
   try {
     logger.debug({ action, url, agent: params.agent_id }, 'Cognitive proxy call')

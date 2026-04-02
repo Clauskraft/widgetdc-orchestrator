@@ -10030,7 +10030,7 @@ async function callCognitive(action, params, timeoutMs) {
   }
   const url = `${config.rlmUrl}${path2}`;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs ?? 6e4);
+  const timer = setTimeout(() => controller.abort(), timeoutMs ?? 12e4);
   try {
     logger.debug({ action, url, agent: params.agent_id }, "Cognitive proxy call");
     const p = params;
