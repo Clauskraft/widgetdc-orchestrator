@@ -1,35 +1,28 @@
 /**
  * tool-registry.ts — Canonical Tool Registry (Triple-Protocol ABI)
  *
- * LIN-562: Single source of truth for ALL tool definitions.
- * Each tool is defined once here, then compiled to:
- *   - OpenAI function calling format (for chat/LLM)
- *   - OpenAPI 3.0 paths (for REST/Swagger)
- *   - MCP tool descriptors (for MCP clients)
+ * LIN-562 + LIN-571: Single source of truth for ALL tool definitions.
+ * Uses Zod schemas for type-safe input definitions + defineTool() builder.
  *
- * To add a new tool: add ONE entry here. All protocols update automatically.
+ * To add a new tool:
+ *   defineTool({ name, namespace, description, input: z.object({...}) })
+ *
+ * 4 required fields. Everything else is inferred or defaulted.
+ * All 3 protocols (OpenAI, OpenAPI, MCP) compile automatically.
  */
+import { z } from 'zod'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type ToolCategory =
-  | 'knowledge'
-  | 'graph'
-  | 'cognitive'
-  | 'chains'
-  | 'agents'
-  | 'assembly'
-  | 'decisions'
-  | 'adoption'
-  | 'linear'
-  | 'compliance'
-  | 'llm'
-  | 'monitor'
-  | 'mcp'
+  | 'knowledge' | 'graph' | 'cognitive' | 'chains' | 'agents'
+  | 'assembly' | 'decisions' | 'adoption' | 'linear' | 'compliance'
+  | 'llm' | 'monitor' | 'mcp'
 
 export interface CanonicalTool {
   name: string
   namespace: string
+  version: string
   description: string
   category: ToolCategory
   inputSchema: Record<string, unknown>
@@ -40,335 +33,298 @@ export interface CanonicalTool {
   authRequired: boolean
   availableVia: Array<'openai' | 'openapi' | 'mcp'>
   tags: string[]
+  deprecated?: { since: string; replacement?: string }
 }
 
-// ─── Registry ───────────────────────────────────────────────────────────────
+// ─── defineTool() builder — "easy as hell" ─────────────────────────────────
+
+type ZodShape = Record<string, z.ZodTypeAny>
+
+interface DefineToolOpts {
+  name: string
+  namespace: string
+  description: string
+  input: z.ZodObject<ZodShape>
+  version?: string
+  backendTool?: string
+  timeoutMs?: number
+  authRequired?: boolean
+  availableVia?: Array<'openai' | 'openapi' | 'mcp'>
+  outputDescription?: string
+  deprecated?: { since: string; replacement?: string }
+}
+
+function inferCategory(namespace: string): ToolCategory {
+  const map: Record<string, ToolCategory> = {
+    knowledge: 'knowledge', graph: 'graph', cognitive: 'cognitive',
+    chains: 'chains', agents: 'agents', assembly: 'assembly',
+    decisions: 'decisions', adoption: 'adoption', linear: 'linear',
+    compliance: 'compliance', llm: 'llm', monitor: 'monitor', mcp: 'mcp',
+  }
+  return map[namespace] ?? 'mcp'
+}
+
+function inferTags(name: string): string[] {
+  return name.split('_').filter(t => t.length > 2)
+}
+
+/** Convert Zod schema to JSON Schema (lightweight, Zod v4 compatible) */
+function zodToJsonSchemaSimple(schema: z.ZodObject<ZodShape>): Record<string, unknown> {
+  const shape = schema.shape
+  const properties: Record<string, unknown> = {}
+  const required: string[] = []
+
+  for (const [key, field] of Object.entries(shape)) {
+    const def = (field as any).def ?? (field as any)._def ?? field
+    const isOptional = def.type === 'optional' || def.typeName === 'ZodOptional'
+    const inner = isOptional ? (def.innerType ?? def.schema ?? def) : def
+
+    const prop: Record<string, unknown> = {}
+    const innerType = inner.type ?? inner.typeName ?? 'string'
+
+    if (innerType === 'string' || innerType === 'ZodString') prop.type = 'string'
+    else if (innerType === 'number' || innerType === 'ZodNumber') prop.type = 'number'
+    else if (innerType === 'boolean' || innerType === 'ZodBoolean') prop.type = 'boolean'
+    else if (innerType === 'array' || innerType === 'ZodArray') {
+      prop.type = 'array'
+      const itemType = inner.element ?? inner.items ?? inner.def?.element
+      if (itemType) {
+        prop.items = zodToJsonSchemaSimple(itemType)
+      } else {
+        prop.items = { type: 'object' }
+      }
+    } else if (innerType === 'object' || innerType === 'ZodObject') {
+      Object.assign(prop, zodToJsonSchemaSimple(inner as any))
+    } else if (innerType === 'enum' || innerType === 'ZodEnum') {
+      prop.type = 'string'
+      prop.enum = inner.values ?? inner.def?.values ?? inner.options
+    } else if (innerType === 'record' || innerType === 'ZodRecord') {
+      prop.type = 'object'
+    } else {
+      prop.type = 'string' // safe fallback
+    }
+
+    // Extract description from Zod metadata
+    const desc = (field as any).description ?? def.description ?? inner.description
+    if (desc) prop.description = desc
+
+    properties[key] = prop
+    if (!isOptional) required.push(key)
+  }
+
+  const result: Record<string, unknown> = { type: 'object', properties }
+  if (required.length > 0) result.required = required
+  return result
+}
+
+export function defineTool(opts: DefineToolOpts): CanonicalTool {
+  const inputSchema = zodToJsonSchemaSimple(opts.input)
+
+  return {
+    name: opts.name,
+    namespace: opts.namespace,
+    version: opts.version ?? '1.0',
+    description: opts.description,
+    category: inferCategory(opts.namespace),
+    inputSchema,
+    outputDescription: opts.outputDescription,
+    handler: opts.backendTool ? 'mcp-proxy' : 'orchestrator',
+    backendTool: opts.backendTool,
+    timeoutMs: opts.timeoutMs ?? 30000,
+    authRequired: opts.authRequired ?? true,
+    availableVia: opts.availableVia ?? ['openai', 'openapi', 'mcp'],
+    tags: inferTags(opts.name),
+    deprecated: opts.deprecated,
+  }
+}
+
+// ─── Tool Definitions (4 required fields each) ─────────────────────────────
 
 export const TOOL_REGISTRY: CanonicalTool[] = [
-  {
+  defineTool({
     name: 'search_knowledge',
-    namespace: 'orchestrator',
+    namespace: 'knowledge',
     description: 'Search the WidgeTDC knowledge graph and semantic vector store. Use for ANY question about platform data, consulting knowledge, patterns, documents, or entities. Returns merged results from SRAG (semantic) and Neo4j (graph).',
-    category: 'knowledge',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', description: 'Natural language search query' },
-        max_results: { type: 'number', description: 'Max results (default 10)' },
-      },
-      required: ['query'],
-    },
-    outputDescription: 'Merged SRAG + graph results with counts and duration',
-    handler: 'orchestrator',
+    input: z.object({
+      query: z.string().describe('Natural language search query'),
+      max_results: z.number().optional().describe('Max results (default 10)'),
+    }),
     backendTool: 'srag.query + graph.read_cypher',
     timeoutMs: 20000,
-    authRequired: true,
-    availableVia: ['openai', 'openapi', 'mcp'],
-    tags: ['rag', 'search', 'srag', 'knowledge-graph'],
-  },
-  {
+  }),
+
+  defineTool({
     name: 'reason_deeply',
-    namespace: 'orchestrator',
-    description: 'Send a complex question to the RLM reasoning engine for deep multi-step analysis. Use for strategy questions, architecture analysis, comparisons, evaluations, and planning. More powerful than search — actually reasons about the data.',
-    category: 'cognitive',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        question: { type: 'string', description: 'The complex question to reason about' },
-        mode: { type: 'string', enum: ['reason', 'analyze', 'plan'], description: 'Reasoning mode (default: reason)' },
-      },
-      required: ['question'],
-    },
-    outputDescription: 'RLM reasoning result — text or structured JSON',
-    handler: 'orchestrator',
+    namespace: 'cognitive',
+    description: 'Send a complex question to the RLM reasoning engine for deep multi-step analysis. Use for strategy questions, architecture analysis, comparisons, evaluations, and planning.',
+    input: z.object({
+      question: z.string().describe('The complex question to reason about'),
+      mode: z.enum(['reason', 'analyze', 'plan']).optional().describe('Reasoning mode (default: reason)'),
+    }),
     backendTool: 'rlm.reason',
     timeoutMs: 45000,
-    authRequired: true,
-    availableVia: ['openai', 'openapi', 'mcp'],
-    tags: ['reasoning', 'rlm', 'analysis', 'planning'],
-  },
-  {
+  }),
+
+  defineTool({
     name: 'query_graph',
-    namespace: 'orchestrator',
-    description: 'Execute a Cypher query against the Neo4j knowledge graph (475K+ nodes, 3.8M+ relationships). Use for structured data queries like counting nodes, finding relationships, listing entities, or checking status.',
-    category: 'graph',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        cypher: { type: 'string', description: 'Neo4j Cypher query (read-only, parameterized)' },
-        params: { type: 'object', description: 'Query parameters (optional)' },
-      },
-      required: ['cypher'],
-    },
-    outputDescription: 'Array of graph query result rows (JSON)',
-    handler: 'orchestrator',
+    namespace: 'graph',
+    description: 'Execute a Cypher query against the Neo4j knowledge graph (475K+ nodes, 3.8M+ relationships). Use for structured data queries like counting nodes, finding relationships, listing entities.',
+    input: z.object({
+      cypher: z.string().describe('Neo4j Cypher query (read-only, parameterized)'),
+      params: z.record(z.unknown()).optional().describe('Query parameters'),
+    }),
     backendTool: 'graph.read_cypher',
     timeoutMs: 15000,
-    authRequired: true,
-    availableVia: ['openai', 'openapi', 'mcp'],
-    tags: ['neo4j', 'cypher', 'graph', 'query'],
-  },
-  {
+  }),
+
+  defineTool({
     name: 'check_tasks',
-    namespace: 'orchestrator',
+    namespace: 'linear',
     description: 'Get active tasks, issues, and project status from the knowledge graph. Use when asked about project status, next steps, blockers, sprints, or Linear issues.',
-    category: 'linear',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        filter: { type: 'string', enum: ['active', 'blocked', 'recent', 'all'], description: 'Task filter (default: active)' },
-        keyword: { type: 'string', description: 'Optional keyword to filter tasks' },
-      },
-    },
-    outputDescription: 'Formatted task list with IDs, titles, and status',
-    handler: 'orchestrator',
+    input: z.object({
+      filter: z.enum(['active', 'blocked', 'recent', 'all']).optional().describe('Task filter (default: active)'),
+      keyword: z.string().optional().describe('Optional keyword to filter tasks'),
+    }),
     backendTool: 'graph.read_cypher',
     timeoutMs: 10000,
-    authRequired: true,
-    availableVia: ['openai', 'openapi', 'mcp'],
-    tags: ['tasks', 'linear', 'project-management'],
-  },
-  {
+  }),
+
+  defineTool({
     name: 'call_mcp_tool',
-    namespace: 'orchestrator',
-    description: 'Call any of the 449+ MCP tools on the WidgeTDC backend. Use for specific platform operations like embedding, compliance checks, memory operations, agent coordination. Check tool name carefully.',
-    category: 'mcp',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        tool_name: { type: 'string', description: 'MCP tool name (e.g., srag.query, graph.health, audit.dashboard)' },
-        payload: { type: 'object', description: 'Tool payload arguments' },
-      },
-      required: ['tool_name'],
-    },
-    outputDescription: 'Tool result (shape varies by tool)',
-    handler: 'orchestrator',
+    namespace: 'mcp',
+    description: 'Call any of the 449+ MCP tools on the WidgeTDC backend. Use for specific platform operations like embedding, compliance checks, memory operations, agent coordination.',
+    input: z.object({
+      tool_name: z.string().describe('MCP tool name (e.g., srag.query, graph.health, audit.dashboard)'),
+      payload: z.record(z.unknown()).optional().describe('Tool payload arguments'),
+    }),
     backendTool: '(dynamic)',
-    timeoutMs: 30000,
-    authRequired: true,
-    availableVia: ['openai', 'openapi', 'mcp'],
-    tags: ['mcp', 'dynamic', 'passthrough'],
-  },
-  {
+  }),
+
+  defineTool({
     name: 'get_platform_health',
-    namespace: 'orchestrator',
+    namespace: 'monitor',
     description: 'Get current health status of all WidgeTDC platform services (backend, RLM engine, Neo4j graph, Redis). Use when asked about system status, uptime, or health.',
-    category: 'monitor',
-    inputSchema: {
-      type: 'object',
-      properties: {},
-    },
-    outputDescription: 'Health status for Neo4j, graph stats (node/relationship counts)',
-    handler: 'orchestrator',
+    input: z.object({}),
     backendTool: 'graph.health + graph.stats',
     timeoutMs: 10000,
-    authRequired: true,
-    availableVia: ['openai', 'openapi', 'mcp'],
-    tags: ['health', 'monitoring', 'status'],
-  },
-  {
+  }),
+
+  defineTool({
     name: 'search_documents',
-    namespace: 'orchestrator',
+    namespace: 'knowledge',
     description: 'Search for specific documents, files, reports, or artifacts in the platform. Returns document metadata and content snippets.',
-    category: 'knowledge',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', description: 'Document search query' },
-        doc_type: { type: 'string', description: 'Optional filter: TDCDocument, ConsultingArtifact, Pattern, etc.' },
-      },
-      required: ['query'],
-    },
-    outputDescription: 'Document results with metadata and snippets',
-    handler: 'orchestrator',
+    input: z.object({
+      query: z.string().describe('Document search query'),
+      doc_type: z.string().optional().describe('Optional filter: TDCDocument, ConsultingArtifact, Pattern, etc.'),
+    }),
     backendTool: 'srag.query',
     timeoutMs: 20000,
-    authRequired: true,
-    availableVia: ['openai', 'openapi', 'mcp'],
-    tags: ['documents', 'search', 'srag'],
-  },
-  {
+  }),
+
+  defineTool({
     name: 'linear_issues',
-    namespace: 'orchestrator',
-    description: 'Get issues from Linear project management. Use for project status, active tasks, sprint progress, blockers, or specific issue details (LIN-xxx). Returns real-time Linear data.',
-    category: 'linear',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', description: 'Search query or issue identifier (e.g., "LIN-493" or "cloud chat platform")' },
-        status: { type: 'string', enum: ['active', 'done', 'backlog', 'all'], description: 'Filter by status (default: active)' },
-        limit: { type: 'number', description: 'Max results (default 10)' },
-      },
-    },
-    outputDescription: 'Formatted issue list with identifiers, titles, status, assignees',
-    handler: 'orchestrator',
+    namespace: 'linear',
+    description: 'Get issues from Linear project management. Use for project status, active tasks, sprint progress, blockers, or specific issue details (LIN-xxx).',
+    input: z.object({
+      query: z.string().optional().describe('Search query or issue identifier (e.g., "LIN-493")'),
+      status: z.enum(['active', 'done', 'backlog', 'all']).optional().describe('Filter by status (default: active)'),
+      limit: z.number().optional().describe('Max results (default 10)'),
+    }),
     backendTool: 'linear.issues',
     timeoutMs: 15000,
-    authRequired: true,
-    availableVia: ['openai', 'openapi', 'mcp'],
-    tags: ['linear', 'issues', 'project-management'],
-  },
-  {
+  }),
+
+  defineTool({
     name: 'linear_issue_detail',
-    namespace: 'orchestrator',
+    namespace: 'linear',
     description: 'Get detailed info about a specific Linear issue by identifier (e.g., LIN-493). Returns full description, comments, status, assignee, sub-issues.',
-    category: 'linear',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        identifier: { type: 'string', description: 'Issue identifier (e.g., LIN-493)' },
-      },
-      required: ['identifier'],
-    },
-    outputDescription: 'Full issue detail JSON',
-    handler: 'orchestrator',
+    input: z.object({
+      identifier: z.string().describe('Issue identifier (e.g., LIN-493)'),
+    }),
     backendTool: 'linear.issue_get',
     timeoutMs: 15000,
-    authRequired: true,
-    availableVia: ['openai', 'openapi', 'mcp'],
-    tags: ['linear', 'issue-detail'],
-  },
-  {
+  }),
+
+  defineTool({
     name: 'run_chain',
-    namespace: 'orchestrator',
-    description: 'Execute a multi-step agent chain. Supports sequential (A->B->C), parallel (A+B+C), debate (two agents argue, third judges), and loop modes. Use for complex workflows that need multiple tool calls coordinated together.',
-    category: 'chains',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        name: { type: 'string', description: 'Chain name/description' },
-        mode: { type: 'string', enum: ['sequential', 'parallel', 'debate', 'loop'], description: 'Execution mode' },
-        steps: {
-          type: 'array',
-          description: 'Chain steps — each has tool_name or cognitive_action + arguments',
-          items: {
-            type: 'object',
-            properties: {
-              agent_id: { type: 'string', description: 'Agent identifier' },
-              tool_name: { type: 'string', description: 'MCP tool to call' },
-              cognitive_action: { type: 'string', description: 'RLM action: reason, analyze, plan' },
-              prompt: { type: 'string', description: 'Prompt or arguments' },
-            },
-          },
-        },
-      },
-      required: ['name', 'mode', 'steps'],
-    },
-    outputDescription: 'Chain execution result with status, steps completed, duration, final output',
-    handler: 'orchestrator',
+    namespace: 'chains',
+    description: 'Execute a multi-step agent chain. Supports sequential, parallel, debate, and loop modes. Use for complex workflows needing coordinated tool calls.',
+    input: z.object({
+      name: z.string().describe('Chain name/description'),
+      mode: z.enum(['sequential', 'parallel', 'debate', 'loop']).describe('Execution mode'),
+      steps: z.array(z.object({
+        agent_id: z.string().describe('Agent identifier'),
+        tool_name: z.string().optional().describe('MCP tool to call'),
+        cognitive_action: z.string().optional().describe('RLM action: reason, analyze, plan'),
+        prompt: z.string().optional().describe('Prompt or arguments'),
+      })).describe('Chain steps'),
+    }),
     timeoutMs: 60000,
-    authRequired: true,
-    availableVia: ['openai', 'openapi', 'mcp'],
-    tags: ['chains', 'orchestration', 'multi-agent'],
-  },
-  {
+  }),
+
+  defineTool({
     name: 'investigate',
-    namespace: 'orchestrator',
+    namespace: 'cognitive',
     description: 'Run a multi-agent deep investigation on a topic. Returns a comprehensive analysis artifact with graph data, compliance, strategy, and reasoning.',
-    category: 'cognitive',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        topic: { type: 'string', description: 'The topic to investigate deeply' },
-      },
-      required: ['topic'],
-    },
-    outputDescription: 'Investigation result with artifact URL, synthesis, and step details',
-    handler: 'orchestrator',
+    input: z.object({
+      topic: z.string().describe('The topic to investigate deeply'),
+    }),
     timeoutMs: 120000,
-    authRequired: true,
-    availableVia: ['openai', 'openapi', 'mcp'],
-    tags: ['investigation', 'deep-analysis', 'multi-agent'],
-  },
-  {
+  }),
+
+  defineTool({
     name: 'create_notebook',
-    namespace: 'orchestrator',
-    description: 'Create an interactive consulting notebook with query, insight, data, and action cells. Executes all cells and returns a full notebook with results. Great for structured analysis on any topic.',
-    category: 'knowledge',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        topic: { type: 'string', description: 'The topic to build a notebook around' },
-        cells: {
-          type: 'array',
-          description: 'Optional: custom cells array. If omitted, auto-generates cells from topic.',
-          items: {
-            type: 'object',
-            properties: {
-              type: { type: 'string', enum: ['query', 'insight', 'data', 'action'] },
-              id: { type: 'string' },
-              query: { type: 'string' },
-              prompt: { type: 'string' },
-              source_cell_id: { type: 'string' },
-              visualization: { type: 'string', enum: ['table', 'chart'] },
-              recommendation: { type: 'string' },
-            },
-          },
-        },
-      },
-      required: ['topic'],
-    },
-    outputDescription: 'Notebook with executed cells, results, and view URLs',
-    handler: 'orchestrator',
+    namespace: 'knowledge',
+    description: 'Create an interactive consulting notebook with query, insight, data, and action cells. Executes all cells and returns a full notebook with results.',
+    input: z.object({
+      topic: z.string().describe('The topic to build a notebook around'),
+      cells: z.array(z.object({
+        type: z.enum(['query', 'insight', 'data', 'action']),
+        id: z.string().optional(),
+        query: z.string().optional(),
+        prompt: z.string().optional(),
+        source_cell_id: z.string().optional(),
+        visualization: z.enum(['table', 'chart']).optional(),
+        recommendation: z.string().optional(),
+      })).optional().describe('Custom cells. If omitted, auto-generates from topic.'),
+    }),
     timeoutMs: 60000,
-    authRequired: true,
-    availableVia: ['openai', 'openapi', 'mcp'],
-    tags: ['notebook', 'consulting', 'analysis'],
-  },
-  {
+  }),
+
+  defineTool({
     name: 'verify_output',
-    namespace: 'orchestrator',
-    description: 'Run verification checks on a piece of content or data. Checks quality, accuracy, and compliance. Use after getting results from other tools to validate them before presenting to user.',
-    category: 'compliance',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        content: { type: 'string', description: 'Content to verify' },
-        checks: {
-          type: 'array',
-          description: 'Verification checks to run',
-          items: {
-            type: 'object',
-            properties: {
-              name: { type: 'string', description: 'Check name' },
-              tool_name: { type: 'string', description: 'MCP tool for verification' },
-            },
-          },
-        },
-      },
-      required: ['content'],
-    },
-    outputDescription: 'Verification result with pass/fail per check',
-    handler: 'orchestrator',
-    timeoutMs: 30000,
-    authRequired: true,
-    availableVia: ['openai', 'openapi', 'mcp'],
-    tags: ['verification', 'compliance', 'quality'],
-  },
+    namespace: 'compliance',
+    description: 'Run verification checks on content or data. Checks quality, accuracy, and compliance. Use after other tools to validate results.',
+    input: z.object({
+      content: z.string().describe('Content to verify'),
+      checks: z.array(z.object({
+        name: z.string().describe('Check name'),
+        tool_name: z.string().describe('MCP tool for verification'),
+      })).optional().describe('Verification checks to run'),
+    }),
+  }),
 ]
 
 // ─── Protocol Compilers ─────────────────────────────────────────────────────
 
 /** Compile registry → OpenAI function calling format */
-export function toOpenAITools(filter?: { availableVia?: 'openai' }) {
-  const tools = filter?.availableVia
-    ? TOOL_REGISTRY.filter(t => t.availableVia.includes(filter.availableVia!))
-    : TOOL_REGISTRY
-
-  return tools.map(t => ({
-    type: 'function' as const,
-    function: {
-      name: t.name,
-      description: t.description,
-      parameters: t.inputSchema,
-    },
-  }))
+export function toOpenAITools() {
+  return TOOL_REGISTRY
+    .filter(t => t.availableVia.includes('openai') && !t.deprecated)
+    .map(t => ({
+      type: 'function' as const,
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: t.inputSchema,
+      },
+    }))
 }
 
 /** Compile registry → MCP tool descriptors */
 export function toMCPTools() {
   return TOOL_REGISTRY
-    .filter(t => t.availableVia.includes('mcp'))
+    .filter(t => t.availableVia.includes('mcp') && !t.deprecated)
     .map(t => ({
       name: t.name,
       description: t.description,
@@ -376,12 +332,12 @@ export function toMCPTools() {
     }))
 }
 
-/** Compile registry → OpenAPI 3.0 path entries for orchestrator tools */
+/** Compile registry → OpenAPI 3.0 path entries */
 export function toOpenAPIPaths(): Record<string, object> {
   const paths: Record<string, object> = {}
 
-  for (const tool of TOOL_REGISTRY.filter(t => t.availableVia.includes('openapi'))) {
-    const operationId = tool.name.replace(/_([a-z])/g, (_, c) => c.toUpperCase())
+  for (const tool of TOOL_REGISTRY.filter(t => t.availableVia.includes('openapi') && !t.deprecated)) {
+    const operationId = tool.name.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase())
     paths[`/api/tools/${tool.name}`] = {
       post: {
         operationId: `tool_${operationId}`,
@@ -408,17 +364,16 @@ export function toOpenAPIPaths(): Record<string, object> {
   return paths
 }
 
-/** Get a tool by name */
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
 export function getTool(name: string): CanonicalTool | undefined {
   return TOOL_REGISTRY.find(t => t.name === name)
 }
 
-/** Get tools by category */
 export function getToolsByCategory(category: ToolCategory): CanonicalTool[] {
   return TOOL_REGISTRY.filter(t => t.category === category)
 }
 
-/** Get all categories with counts */
 export function getCategories(): Array<{ category: ToolCategory; count: number }> {
   const counts = new Map<ToolCategory, number>()
   for (const t of TOOL_REGISTRY) {
