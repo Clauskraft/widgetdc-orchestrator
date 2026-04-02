@@ -17803,7 +17803,7 @@ function buildOpenAPISpec() {
     openapi: "3.0.3",
     info: {
       title: "WidgeTDC Orchestrator \u2014 Universal AI Tool Gateway",
-      version: "2.0.0",
+      version: "2.0.1",
       description: "Central intelligence platform for WidgeTDC. Provides unified access to 450+ MCP tools, agent orchestration, knowledge graph, cognitive reasoning, chain execution, and more. Use this API from ChatGPT Custom GPTs, Open WebUI, Gemini, or any OpenAPI-compatible client.",
       contact: { name: "WidgeTDC Platform", url: "https://orchestrator-production-c27e.up.railway.app" }
     },
@@ -18435,7 +18435,7 @@ async function handleInitialize(id) {
       },
       serverInfo: {
         name: "widgetdc-orchestrator",
-        version: "2.0.0"
+        version: "2.0.1"
       }
     }
   };
@@ -19008,7 +19008,7 @@ app.get("/health", (_req, res) => {
   res.json({
     status: "healthy",
     service: "widgetdc-orchestrator",
-    version: "2.0.0",
+    version: "2.0.1",
     uptime_seconds: Math.floor(process.uptime()),
     agents_registered: AgentRegistry.all().length,
     ws_connections: getConnectionStats().total,

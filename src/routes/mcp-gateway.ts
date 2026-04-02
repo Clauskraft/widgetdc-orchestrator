@@ -105,7 +105,7 @@ async function handleInitialize(id: string | number | null): Promise<JsonRpcResp
       },
       serverInfo: {
         name: 'widgetdc-orchestrator',
-        version: '2.0.0',
+        version: '2.0.1',
       },
     },
   }
