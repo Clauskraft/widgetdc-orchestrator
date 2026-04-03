@@ -1286,19 +1286,28 @@ function getEnforcementScore() {
   return { enforced, partial, gap, score };
 }
 function generateGraphCypher() {
-  return MANIFESTO_PRINCIPLES.map((p) => {
-    const escaped = (s) => s.replace(/'/g, "\\'").replace(/\n/g, " ");
-    return `MERGE (p:ManifestoPrinciple {number: ${p.number}})
-SET p.name = '${escaped(p.name)}',
-    p.description = '${escaped(p.description)}',
-    p.status = '${p.status}',
-    p.enforcement_layer = '${p.enforcement_layer}',
-    p.mechanism = '${escaped(p.mechanism)}',
-    p.mechanism_detail = '${escaped(p.mechanism_detail)}',
-    p.gap_remediation = '${escaped(p.gap_remediation ?? "")}',
+  return MANIFESTO_PRINCIPLES.map((p) => ({
+    query: `MERGE (p:ManifestoPrinciple {number: $number})
+SET p.name = $name,
+    p.description = $description,
+    p.status = $status,
+    p.enforcement_layer = $enforcement_layer,
+    p.mechanism = $mechanism,
+    p.mechanism_detail = $mechanism_detail,
+    p.gap_remediation = $gap_remediation,
     p.updatedAt = datetime()
-RETURN p;`;
-  }).join("\n\n");
+RETURN p`,
+    params: {
+      number: p.number,
+      name: p.name,
+      description: p.description,
+      status: p.status,
+      enforcement_layer: p.enforcement_layer,
+      mechanism: p.mechanism,
+      mechanism_detail: p.mechanism_detail,
+      gap_remediation: p.gap_remediation ?? ""
+    }
+  }));
 }
 var MANIFESTO_PRINCIPLES;
 var init_manifesto_governance = __esm({
