@@ -24735,11 +24735,142 @@ evolutionRouter.get("/history", async (req, res) => {
   }
 });
 
+// src/routes/memory.ts
+import { Router as Router36 } from "express";
+
+// src/working-memory.ts
+init_redis();
+init_logger();
+var PREFIX = "wm:";
+var DEFAULT_TTL = 86400;
+async function storeMemory(agentId, key, value, ttlSeconds = DEFAULT_TTL) {
+  const redis2 = getRedis();
+  const redisKey = `${PREFIX}${agentId}:${key}`;
+  const entry = {
+    key,
+    value,
+    agent_id: agentId,
+    created_at: (/* @__PURE__ */ new Date()).toISOString(),
+    ttl_seconds: ttlSeconds
+  };
+  if (redis2) {
+    try {
+      await redis2.set(redisKey, JSON.stringify(entry), "EX", ttlSeconds);
+    } catch (err) {
+      logger.warn({ agentId, key, err: String(err) }, "Working memory store failed");
+    }
+  }
+  return entry;
+}
+async function retrieveMemory(agentId, key) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${PREFIX}${agentId}:${key}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+async function listMemories(agentId) {
+  const redis2 = getRedis();
+  if (!redis2) return [];
+  try {
+    const keys = await redis2.keys(`${PREFIX}${agentId}:*`);
+    const entries = [];
+    for (const k of keys.slice(0, 100)) {
+      const raw = await redis2.get(k);
+      if (raw) entries.push(JSON.parse(raw));
+    }
+    return entries.sort((a, b) => b.created_at.localeCompare(a.created_at));
+  } catch {
+    return [];
+  }
+}
+async function deleteMemory(agentId, key) {
+  const redis2 = getRedis();
+  if (!redis2) return false;
+  try {
+    const result = await redis2.del(`${PREFIX}${agentId}:${key}`);
+    return result > 0;
+  } catch {
+    return false;
+  }
+}
+async function clearAgentMemory(agentId) {
+  const redis2 = getRedis();
+  if (!redis2) return 0;
+  try {
+    const keys = await redis2.keys(`${PREFIX}${agentId}:*`);
+    if (keys.length === 0) return 0;
+    return await redis2.del(...keys);
+  } catch {
+    return 0;
+  }
+}
+
+// src/routes/memory.ts
+init_logger();
+var memoryRouter = Router36();
+memoryRouter.post("/store", async (req, res) => {
+  const body = req.body;
+  const agentId = body.agent_id;
+  const key = body.key;
+  const value = body.value;
+  if (!agentId || typeof agentId !== "string") {
+    res.status(400).json({ success: false, error: { code: "VALIDATION_ERROR", message: "agent_id is required", status_code: 400 } });
+    return;
+  }
+  if (!key || typeof key !== "string") {
+    res.status(400).json({ success: false, error: { code: "VALIDATION_ERROR", message: "key is required", status_code: 400 } });
+    return;
+  }
+  if (value === void 0) {
+    res.status(400).json({ success: false, error: { code: "VALIDATION_ERROR", message: "value is required", status_code: 400 } });
+    return;
+  }
+  const ttl = typeof body.ttl_seconds === "number" ? body.ttl_seconds : void 0;
+  const entry = await storeMemory(agentId, key, value, ttl);
+  logger.info({ agentId, key }, "Working memory stored");
+  res.json({ success: true, data: entry });
+});
+memoryRouter.get("/:agent_id", async (req, res) => {
+  const agentId = decodeURIComponent(req.params.agent_id);
+  const entries = await listMemories(agentId);
+  res.json({ success: true, data: { agent_id: agentId, entries, count: entries.length } });
+});
+memoryRouter.get("/:agent_id/:key", async (req, res) => {
+  const agentId = decodeURIComponent(req.params.agent_id);
+  const key = decodeURIComponent(req.params.key);
+  const entry = await retrieveMemory(agentId, key);
+  if (!entry) {
+    res.status(404).json({ success: false, error: { code: "NOT_FOUND", message: `Memory '${key}' not found for agent '${agentId}'`, status_code: 404 } });
+    return;
+  }
+  res.json({ success: true, data: entry });
+});
+memoryRouter.delete("/:agent_id/:key", async (req, res) => {
+  const agentId = decodeURIComponent(req.params.agent_id);
+  const key = decodeURIComponent(req.params.key);
+  const deleted = await deleteMemory(agentId, key);
+  if (!deleted) {
+    res.status(404).json({ success: false, error: { code: "NOT_FOUND", message: `Memory '${key}' not found`, status_code: 404 } });
+    return;
+  }
+  res.json({ success: true, data: { deleted: true, agent_id: agentId, key } });
+});
+memoryRouter.delete("/:agent_id", async (req, res) => {
+  const agentId = decodeURIComponent(req.params.agent_id);
+  const count = await clearAgentMemory(agentId);
+  logger.info({ agentId, count }, "Working memory cleared");
+  res.json({ success: true, data: { cleared: count, agent_id: agentId } });
+});
+
 // src/routes/abi-docs.ts
 init_tool_registry();
-import { Router as Router36 } from "express";
+import { Router as Router37 } from "express";
 init_logger();
-var abiDocsRouter = Router36();
+var abiDocsRouter = Router37();
 abiDocsRouter.get("/docs", (_req, res) => {
   const namespace = _req.query.namespace ?? void 0;
   const category = _req.query.category ?? void 0;
@@ -24881,12 +25012,12 @@ var CURATED_EXAMPLES = {
 // src/routes/abi-health.ts
 init_tool_registry();
 init_logger();
-import { Router as Router37 } from "express";
+import { Router as Router38 } from "express";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 var __dirname = path.dirname(fileURLToPath(import.meta.url));
-var abiHealthRouter = Router37();
+var abiHealthRouter = Router38();
 function getSnapshotPath() {
   const testPath = path.resolve(__dirname, "..", "..", "test", "snapshots", "abi-snapshot.json");
   if (existsSync(testPath)) return testPath;
@@ -25075,8 +25206,8 @@ abiHealthRouter.post("/snapshot", (_req, res) => {
 
 // src/routes/abi-versioning.ts
 init_tool_registry();
-import { Router as Router38 } from "express";
-var abiVersioningRouter = Router38();
+import { Router as Router39 } from "express";
+var abiVersioningRouter = Router39();
 abiVersioningRouter.get("/versions", (_req, res) => {
   const tools = TOOL_REGISTRY.map((t) => ({
     name: t.name,
@@ -25269,6 +25400,7 @@ app.use("/api/intelligence", requireApiKey, intelligenceRouter);
 app.use("/api/governance", requireApiKey, governanceRouter);
 app.use("/api/osint", requireApiKey, osintRouter);
 app.use("/api/evolution", requireApiKey, evolutionRouter);
+app.use("/api/memory", requireApiKey, memoryRouter);
 app.use("/api/abi", requireApiKey, abiDocsRouter);
 app.use("/api/abi", requireApiKey, abiHealthRouter);
 app.use("/api/abi", requireApiKey, abiVersioningRouter);
