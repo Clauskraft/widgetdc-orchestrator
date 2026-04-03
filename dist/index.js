@@ -13512,7 +13512,14 @@ function zodToJsonSchemaSimple(schema) {
       prop.type = "array";
       const itemType = inner.element ?? inner.items ?? inner.def?.element;
       if (itemType) {
-        prop.items = zodToJsonSchemaSimple(itemType);
+        const itemDef = itemType.def ?? itemType._def ?? itemType;
+        const itemKind = itemDef.type ?? itemDef.typeName ?? "string";
+        if (itemKind === "string" || itemKind === "ZodString") prop.items = { type: "string" };
+        else if (itemKind === "number" || itemKind === "ZodNumber") prop.items = { type: "number" };
+        else if (itemKind === "boolean" || itemKind === "ZodBoolean") prop.items = { type: "boolean" };
+        else if (itemKind === "enum" || itemKind === "ZodEnum") prop.items = { type: "string", enum: itemDef.values ?? itemDef.def?.values };
+        else if (itemType.shape) prop.items = zodToJsonSchemaSimple(itemType);
+        else prop.items = { type: "object" };
       } else {
         prop.items = { type: "object" };
       }
