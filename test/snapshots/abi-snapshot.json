@@ -900,6 +900,122 @@
       "deprecated": false
     },
     {
+      "name": "adaptive_rag_query",
+      "namespace": "knowledge",
+      "version": "1.0",
+      "description": "Query the knowledge graph using adaptive RAG routing. Automatically selects the best retrieval strategy (simple/multi_hop/structured) based on Q-learning weights. Returns merged results with channel attribution. This is the CANONICAL RAG endpoint — all other RAG calls should delegate here.",
+      "category": "knowledge",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "The query to search for"
+          },
+          "max_results": {
+            "type": "number",
+            "description": "Maximum results to return (default: 10)"
+          },
+          "force_strategy": {
+            "type": "string",
+            "description": "Force a specific strategy: simple, multi_hop, structured (bypasses adaptive routing)"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 30000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "adaptive",
+        "rag",
+        "query"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "adaptive_rag_retrain",
+      "namespace": "intelligence",
+      "version": "1.0",
+      "description": "Trigger retraining of adaptive RAG routing weights. Analyzes recent query outcomes, recalculates per-strategy performance, and updates routing weights. Should run weekly or after significant query volume.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 60000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "adaptive",
+        "rag",
+        "retrain"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "adaptive_rag_reward",
+      "namespace": "intelligence",
+      "version": "1.0",
+      "description": "Send a Q-learning reward signal to update RAG routing. Call this after evaluating RAG result quality to reinforce good strategies and penalize poor ones.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "The original query"
+          },
+          "strategy": {
+            "type": "string",
+            "description": "Strategy used: simple, multi_hop, structured"
+          },
+          "reward": {
+            "type": "number",
+            "description": "Reward signal: -1.0 (terrible) to 1.0 (perfect)"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why this reward was given"
+          }
+        },
+        "required": [
+          "query",
+          "strategy",
+          "reward"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 10000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "adaptive",
+        "rag",
+        "reward"
+      ],
+      "deprecated": false
+    },
+    {
       "name": "graph_hygiene_run",
       "namespace": "monitor",
       "version": "1.0",
@@ -1022,7 +1138,7 @@
   ],
   "protocols": {
     "openai": {
-      "count": 25,
+      "count": 28,
       "tools": [
         "search_knowledge",
         "reason_deeply",
@@ -1046,13 +1162,16 @@
         "ingest_document",
         "build_communities",
         "adaptive_rag_dashboard",
+        "adaptive_rag_query",
+        "adaptive_rag_retrain",
+        "adaptive_rag_reward",
         "graph_hygiene_run",
         "critique_refine",
         "judge_response"
       ]
     },
     "mcp": {
-      "count": 25,
+      "count": 28,
       "tools": [
         "search_knowledge",
         "reason_deeply",
@@ -1076,13 +1195,16 @@
         "ingest_document",
         "build_communities",
         "adaptive_rag_dashboard",
+        "adaptive_rag_query",
+        "adaptive_rag_retrain",
+        "adaptive_rag_reward",
         "graph_hygiene_run",
         "critique_refine",
         "judge_response"
       ]
     },
     "openapi": {
-      "count": 25,
+      "count": 28,
       "paths": [
         "/api/tools/search_knowledge",
         "/api/tools/reason_deeply",
@@ -1106,6 +1228,9 @@
         "/api/tools/ingest_document",
         "/api/tools/build_communities",
         "/api/tools/adaptive_rag_dashboard",
+        "/api/tools/adaptive_rag_query",
+        "/api/tools/adaptive_rag_retrain",
+        "/api/tools/adaptive_rag_reward",
         "/api/tools/graph_hygiene_run",
         "/api/tools/critique_refine",
         "/api/tools/judge_response"
@@ -1113,7 +1238,7 @@
     }
   },
   "meta": {
-    "total_tools": 25,
+    "total_tools": 28,
     "namespaces": [
       "assembly",
       "chains",
@@ -1127,7 +1252,7 @@
       "monitor"
     ],
     "deprecated_count": 0,
-    "generated_at": "2026-04-03T19:15:53.212Z",
+    "generated_at": "2026-04-03T19:36:12.509Z",
     "abi_version": "1.0"
   }
 }

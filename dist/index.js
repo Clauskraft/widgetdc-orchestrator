@@ -3119,6 +3119,39 @@ var init_tool_registry = __esm({
         outputDescription: "Adaptive RAG weights, strategy stats, and compound metric"
       }),
       defineTool({
+        name: "adaptive_rag_query",
+        namespace: "knowledge",
+        description: "Query the knowledge graph using adaptive RAG routing. Automatically selects the best retrieval strategy (simple/multi_hop/structured) based on Q-learning weights. Returns merged results with channel attribution. This is the CANONICAL RAG endpoint \u2014 all other RAG calls should delegate here.",
+        input: z.object({
+          query: z.string().describe("The query to search for"),
+          max_results: z.number().optional().describe("Maximum results to return (default: 10)"),
+          force_strategy: z.string().optional().describe("Force a specific strategy: simple, multi_hop, structured (bypasses adaptive routing)")
+        }),
+        timeoutMs: 3e4,
+        outputDescription: "Merged RAG results with strategy used, channel attribution, and confidence"
+      }),
+      defineTool({
+        name: "adaptive_rag_retrain",
+        namespace: "intelligence",
+        description: "Trigger retraining of adaptive RAG routing weights. Analyzes recent query outcomes, recalculates per-strategy performance, and updates routing weights. Should run weekly or after significant query volume.",
+        input: z.object({}),
+        timeoutMs: 6e4,
+        outputDescription: "Retraining result with old/new weights, training samples used, and performance delta"
+      }),
+      defineTool({
+        name: "adaptive_rag_reward",
+        namespace: "intelligence",
+        description: "Send a Q-learning reward signal to update RAG routing. Call this after evaluating RAG result quality to reinforce good strategies and penalize poor ones.",
+        input: z.object({
+          query: z.string().describe("The original query"),
+          strategy: z.string().describe("Strategy used: simple, multi_hop, structured"),
+          reward: z.number().describe("Reward signal: -1.0 (terrible) to 1.0 (perfect)"),
+          reason: z.string().optional().describe("Why this reward was given")
+        }),
+        timeoutMs: 1e4,
+        outputDescription: "Confirmation of reward signal with updated weight preview"
+      }),
+      defineTool({
         name: "graph_hygiene_run",
         namespace: "monitor",
         description: "Run graph health check: 6 metrics (orphan ratio, avg rels, embedding coverage, domain count, stale nodes, pollution). Stores GraphHealthSnapshot and alerts on anomalies.",
@@ -15554,6 +15587,48 @@ ${summary.join("\n")}`;
       return `Evolution cycle ${result.status}: ${result.summary}`;
     }
     // ─── SNOUT Wave 2: Steal Smart ──────────────────────────────────────────
+    case "adaptive_rag_query": {
+      const query = args.query;
+      if (!query || query.length < 2) return "Error: query is required (min 2 chars)";
+      try {
+        const result = await dualChannelRAG(query, {
+          maxResults: args.max_results ?? 10
+        });
+        if (result.merged_context.length === 0) return `No results found for "${query}" (strategy: ${result.route_strategy}, ${result.duration_ms}ms)`;
+        const header = `[Adaptive RAG: ${result.route_strategy}] ${result.graphrag_count} graphrag + ${result.srag_count} semantic + ${result.cypher_count} graph (${result.duration_ms}ms, channels: ${result.channels_used.join(",")})`;
+        return `${header}
+
+${result.merged_context}`;
+      } catch (err) {
+        return `Adaptive RAG query failed: ${err}`;
+      }
+    }
+    case "adaptive_rag_retrain": {
+      try {
+        const { retrainRoutingWeights: retrainRoutingWeights2 } = await Promise.resolve().then(() => (init_adaptive_rag(), adaptive_rag_exports));
+        const result = await retrainRoutingWeights2();
+        return `Retrain complete (${result.training_samples} samples):
+  Compound metric: ${result.compound_metric.toFixed(3)}
+  Old weights: ${JSON.stringify(result.old_weights)}
+  New weights: ${JSON.stringify(result.new_weights)}`;
+      } catch (err) {
+        return `Retrain failed: ${err}`;
+      }
+    }
+    case "adaptive_rag_reward": {
+      const query = args.query;
+      const strategy = args.strategy;
+      const reward = args.reward;
+      if (!query || !strategy || typeof reward !== "number") return "Error: query, strategy, and reward (number) are required";
+      if (reward < -1 || reward > 1) return "Error: reward must be between -1.0 and 1.0";
+      try {
+        const { sendQLearningReward: sendQLearningReward2 } = await Promise.resolve().then(() => (init_adaptive_rag(), adaptive_rag_exports));
+        await sendQLearningReward2(query, strategy, reward);
+        return `Q-learning reward sent: strategy=${strategy}, reward=${reward}${args.reason ? `, reason: ${args.reason}` : ""}`;
+      } catch (err) {
+        return `Reward signal failed: ${err}`;
+      }
+    }
     case "critique_refine": {
       const query = args.query;
       if (!query || query.length < 5) return "Error: query is required (min 5 chars)";

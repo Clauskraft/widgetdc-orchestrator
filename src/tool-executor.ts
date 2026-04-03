@@ -904,6 +904,46 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     // ─── SNOUT Wave 2: Steal Smart ──────────────────────────────────────────
 
+    case 'adaptive_rag_query': {
+      const query = args.query as string
+      if (!query || query.length < 2) return 'Error: query is required (min 2 chars)'
+      try {
+        const result = await dualChannelRAG(query, {
+          maxResults: (args.max_results as number) ?? 10,
+        })
+        if (result.merged_context.length === 0) return `No results found for "${query}" (strategy: ${result.route_strategy}, ${result.duration_ms}ms)`
+        const header = `[Adaptive RAG: ${result.route_strategy}] ${result.graphrag_count} graphrag + ${result.srag_count} semantic + ${result.cypher_count} graph (${result.duration_ms}ms, channels: ${result.channels_used.join(',')})`
+        return `${header}\n\n${result.merged_context}`
+      } catch (err) {
+        return `Adaptive RAG query failed: ${err}`
+      }
+    }
+
+    case 'adaptive_rag_retrain': {
+      try {
+        const { retrainRoutingWeights } = await import('./adaptive-rag.js')
+        const result = await retrainRoutingWeights()
+        return `Retrain complete (${result.training_samples} samples):\n  Compound metric: ${result.compound_metric.toFixed(3)}\n  Old weights: ${JSON.stringify(result.old_weights)}\n  New weights: ${JSON.stringify(result.new_weights)}`
+      } catch (err) {
+        return `Retrain failed: ${err}`
+      }
+    }
+
+    case 'adaptive_rag_reward': {
+      const query = args.query as string
+      const strategy = args.strategy as string
+      const reward = args.reward as number
+      if (!query || !strategy || typeof reward !== 'number') return 'Error: query, strategy, and reward (number) are required'
+      if (reward < -1 || reward > 1) return 'Error: reward must be between -1.0 and 1.0'
+      try {
+        const { sendQLearningReward } = await import('./adaptive-rag.js')
+        await sendQLearningReward(query, strategy, reward)
+        return `Q-learning reward sent: strategy=${strategy}, reward=${reward}${args.reason ? `, reason: ${args.reason}` : ''}`
+      } catch (err) {
+        return `Reward signal failed: ${err}`
+      }
+    }
+
     case 'critique_refine': {
       const query = args.query as string
       if (!query || query.length < 5) return 'Error: query is required (min 5 chars)'

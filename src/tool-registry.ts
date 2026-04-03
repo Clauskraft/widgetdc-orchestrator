@@ -430,6 +430,42 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
   }),
 
   defineTool({
+    name: 'adaptive_rag_query',
+    namespace: 'knowledge',
+    description: 'Query the knowledge graph using adaptive RAG routing. Automatically selects the best retrieval strategy (simple/multi_hop/structured) based on Q-learning weights. Returns merged results with channel attribution. This is the CANONICAL RAG endpoint — all other RAG calls should delegate here.',
+    input: z.object({
+      query: z.string().describe('The query to search for'),
+      max_results: z.number().optional().describe('Maximum results to return (default: 10)'),
+      force_strategy: z.string().optional().describe('Force a specific strategy: simple, multi_hop, structured (bypasses adaptive routing)'),
+    }),
+    timeoutMs: 30000,
+    outputDescription: 'Merged RAG results with strategy used, channel attribution, and confidence',
+  }),
+
+  defineTool({
+    name: 'adaptive_rag_retrain',
+    namespace: 'intelligence',
+    description: 'Trigger retraining of adaptive RAG routing weights. Analyzes recent query outcomes, recalculates per-strategy performance, and updates routing weights. Should run weekly or after significant query volume.',
+    input: z.object({}),
+    timeoutMs: 60000,
+    outputDescription: 'Retraining result with old/new weights, training samples used, and performance delta',
+  }),
+
+  defineTool({
+    name: 'adaptive_rag_reward',
+    namespace: 'intelligence',
+    description: 'Send a Q-learning reward signal to update RAG routing. Call this after evaluating RAG result quality to reinforce good strategies and penalize poor ones.',
+    input: z.object({
+      query: z.string().describe('The original query'),
+      strategy: z.string().describe('Strategy used: simple, multi_hop, structured'),
+      reward: z.number().describe('Reward signal: -1.0 (terrible) to 1.0 (perfect)'),
+      reason: z.string().optional().describe('Why this reward was given'),
+    }),
+    timeoutMs: 10000,
+    outputDescription: 'Confirmation of reward signal with updated weight preview',
+  }),
+
+  defineTool({
     name: 'graph_hygiene_run',
     namespace: 'monitor',
     description: 'Run graph health check: 6 metrics (orphan ratio, avg rels, embedding coverage, domain count, stale nodes, pollution). Stores GraphHealthSnapshot and alerts on anomalies.',
