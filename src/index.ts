@@ -242,7 +242,7 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'healthy',
     service: 'widgetdc-orchestrator',
-    version: '3.1.0',
+    version: '3.2.0',
     uptime_seconds: Math.floor(process.uptime()),
     agents_registered: AgentRegistry.all().length,
     ws_connections: getConnectionStats().total,
