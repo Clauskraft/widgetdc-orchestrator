@@ -69,6 +69,7 @@ import { graphHygieneRouter } from './routes/graph-hygiene.js'
 import { deliverablesRouter } from './routes/deliverables.js'
 import { similarityRouter } from './routes/similarity.js'
 import { getWriteGateStats } from './write-gate.js'
+import { intelligenceRouter } from './routes/intelligence.js'
 import { governanceRouter } from './routes/governance.js'
 import { osintRouter } from './routes/osint.js'
 import { evolutionRouter } from './routes/evolution.js'
@@ -171,6 +172,7 @@ app.use('/api/fold', requireApiKey, foldRouter)
 app.use('/api/graph-hygiene', requireApiKey, graphHygieneRouter)
 app.use('/api/deliverables', requireApiKey, deliverablesRouter)
 app.use('/api/similarity', requireApiKey, similarityRouter)
+app.use('/api/intelligence', requireApiKey, intelligenceRouter)
 app.use('/api/governance', requireApiKey, governanceRouter)
 // LIN-480: OSINT Scanning Pipeline
 app.use('/api/osint', requireApiKey, osintRouter)

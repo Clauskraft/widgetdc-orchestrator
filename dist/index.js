@@ -16748,6 +16748,7 @@ SET s.orphan_ratio = $orphan_ratio,
 }
 
 // src/cron-scheduler.ts
+init_hierarchical_intelligence();
 var jobs = /* @__PURE__ */ new Map();
 var cronTasks = /* @__PURE__ */ new Map();
 var REDIS_CRON_KEY = "orchestrator:cron-jobs";
@@ -16944,6 +16945,30 @@ async function runCronJob(jobId) {
         job.run_count++;
         persistCronJobs();
         logger.error({ id: job.id, err: String(err) }, "Graph hygiene cron failed");
+      }
+      return;
+    }
+    if (job.id === "community-builder-weekly") {
+      try {
+        const result2 = await buildCommunitySummaries();
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = `${result2.communities_created} communities, ${result2.summaries_generated} summaries`;
+        job.run_count++;
+        persistCronJobs();
+        broadcastMessage({
+          from: "Orchestrator",
+          to: "All",
+          source: "orchestrator",
+          type: "Message",
+          message: `Hierarchical Intelligence: ${result2.communities_created} communities, ${result2.summaries_generated} summaries, ${result2.relationships_created} rels (${result2.method}, ${result2.duration_ms}ms)`,
+          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        });
+      } catch (err) {
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = "failed";
+        job.run_count++;
+        persistCronJobs();
+        logger.error({ id: job.id, err: String(err) }, "Community builder cron failed");
       }
       return;
     }
@@ -17195,6 +17220,18 @@ function registerDefaultLoops() {
           }
         }
       ]
+    }
+  });
+  registerCronJob({
+    id: "community-builder-weekly",
+    name: "Hierarchical Community Summaries",
+    schedule: "0 3 * * 0",
+    // Sunday 03:00 UTC
+    enabled: true,
+    chain: {
+      name: "Community Builder",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
     }
   });
   registerCronJob({

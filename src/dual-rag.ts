@@ -16,6 +16,8 @@ import { callMcpTool } from './mcp-caller.js'
 import { logger } from './logger.js'
 import { v4 as uuid } from 'uuid'
 import { isPolluted } from './write-gate.js'
+import { searchCommunitySummaries } from './hierarchical-intelligence.js'
+import { hookQualitySignal, hookAutoEnrichment } from './compound-hooks.js'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -221,6 +223,11 @@ export async function dualChannelRAG(query: string, options?: {
     channelPromises.push(callCypher(query, maxResults, depth))
     channelsUsed.push('cypher')
   }
+  // F3: 4th channel — community summaries for thematic/multi-hop queries
+  if (complexity === 'multi_hop') {
+    channelPromises.push(searchCommunitySummaries(query, 3) as Promise<RAGResult[]>)
+    channelsUsed.push('community')
+  }
 
   // Execute channels in parallel
   const channelResults = await Promise.allSettled(channelPromises)
@@ -281,7 +288,7 @@ export async function dualChannelRAG(query: string, options?: {
     ms: durationMs,
   }, 'Hybrid RAG: complete')
 
-  return {
+  const response: DualRAGResponse = {
     query,
     results: topResults,
     srag_count: sragCount,
@@ -293,6 +300,13 @@ export async function dualChannelRAG(query: string, options?: {
     channels_used: channelsUsed,
     pollution_filtered: pollutionFiltered,
   }
+
+  // F4: Quality signal hook (non-blocking)
+  const avgScore = topResults.length > 0
+    ? topResults.reduce((s, r) => s + r.score, 0) / topResults.length : 0
+  hookQualitySignal(query, complexity, channelsUsed, topResults.length, avgScore).catch(() => {})
+
+  return response
 }
 
 // ─── Channel Selection ──────────────────────────────────────────────────────

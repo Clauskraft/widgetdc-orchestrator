@@ -271,6 +271,33 @@ export async function runCronJob(jobId: string): Promise<void> {
       return
     }
 
+    // F3: Weekly community summary builder (hierarchical intelligence)
+    if (job.id === 'community-builder-weekly') {
+      try {
+        const result = await buildCommunitySummaries()
+        job.last_run = new Date().toISOString()
+        job.last_status = `${result.communities_created} communities, ${result.summaries_generated} summaries`
+        job.run_count++
+        persistCronJobs()
+
+        broadcastMessage({
+          from: 'Orchestrator',
+          to: 'All',
+          source: 'orchestrator',
+          type: 'Message',
+          message: `Hierarchical Intelligence: ${result.communities_created} communities, ${result.summaries_generated} summaries, ${result.relationships_created} rels (${result.method}, ${result.duration_ms}ms)`,
+          timestamp: new Date().toISOString(),
+        })
+      } catch (err) {
+        job.last_run = new Date().toISOString()
+        job.last_status = 'failed'
+        job.run_count++
+        persistCronJobs()
+        logger.error({ id: job.id, err: String(err) }, 'Community builder cron failed')
+      }
+      return
+    }
+
     // Special handler for self-correcting graph agent
     if (job.id === 'graph-self-correct') {
       const report = await runSelfCorrect()
@@ -592,6 +619,19 @@ export function registerDefaultLoops(): void {
   })
 
   // Self-correcting graph agent — detects and fixes inconsistencies every 2 hours
+  // F3: Weekly community summary builder (hierarchical intelligence)
+  registerCronJob({
+    id: 'community-builder-weekly',
+    name: 'Hierarchical Community Summaries',
+    schedule: '0 3 * * 0', // Sunday 03:00 UTC
+    enabled: true,
+    chain: {
+      name: 'Community Builder',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
   // F1: Daily graph hygiene — 6 health queries + snapshots + anomaly alerting
   registerCronJob({
     id: 'graph-hygiene-daily',
