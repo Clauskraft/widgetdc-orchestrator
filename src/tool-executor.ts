@@ -645,8 +645,8 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       const cells = customCells && customCells.length > 0
         ? customCells
         : [
-            { type: 'query', id: 'q1', query: `MATCH (n) WHERE toLower(coalesce(n.title,'')) CONTAINS toLower('${topic.replace(/'/g, "\\'")}') OR toLower(coalesce(n.name,'')) CONTAINS toLower('${topic.replace(/'/g, "\\'")}') RETURN labels(n)[0] AS type, coalesce(n.title, n.name) AS name, n.status AS status LIMIT 20` },
-            { type: 'query', id: 'q2', query: `What are the key insights and patterns related to ${topic}?` },
+            { type: 'query', id: 'q1', query: `MATCH (n) WHERE toLower(coalesce(n.title,'')) CONTAINS toLower($topic) OR toLower(coalesce(n.name,'')) CONTAINS toLower($topic) RETURN labels(n)[0] AS type, coalesce(n.title, n.name) AS name, n.status AS status LIMIT 20`, params: { topic } },
+            { type: 'query', id: 'q2', query: `What are the key insights and patterns related to this topic?`, params: { topic } },
             { type: 'insight', id: 'i1', prompt: `Analyze the findings about "${topic}" and provide strategic consulting insights, key patterns, and recommendations.` },
             { type: 'data', id: 'd1', source_cell_id: 'q1', visualization: 'table' },
             { type: 'action', id: 'a1', recommendation: `Review the analysis of "${topic}" and determine next steps for the consulting engagement.` },
@@ -703,6 +703,29 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
         return JSON.stringify(result, null, 2).slice(0, 800)
       } catch (err) {
         return `Verification failed: ${err}`
+      }
+    }
+
+    case 'generate_deliverable': {
+      const prompt = args.prompt as string
+      if (!prompt || prompt.length < 10) return 'Error: prompt is required (min 10 chars)'
+      const type = (args.type as string) ?? 'analysis'
+      if (!['analysis', 'roadmap', 'assessment'].includes(type)) return 'Error: type must be analysis, roadmap, or assessment'
+      try {
+        const { generateDeliverable } = await import('./deliverable-engine.js')
+        const rawMax = args.max_sections
+        const maxSections = (typeof rawMax === 'number' && Number.isInteger(rawMax)) ? rawMax : undefined
+        const result = await generateDeliverable({
+          prompt,
+          type: type as 'analysis' | 'roadmap' | 'assessment',
+          format: (args.format as 'pdf' | 'markdown') ?? 'markdown',
+          max_sections: maxSections,
+        })
+        const summary = `Deliverable "${result.title}" — ${result.status} (${result.metadata.sections_count} sections, ${result.metadata.total_citations} citations, ${result.metadata.generation_ms}ms)`
+        const preview = result.markdown.slice(0, 600)
+        return `${summary}\n\nID: ${result.$id}\nURL: /api/deliverables/${encodeURIComponent(result.$id)}\nMarkdown: /api/deliverables/${encodeURIComponent(result.$id)}/markdown\n\n${preview}...`
+      } catch (err) {
+        return `Deliverable generation failed: ${err}`
       }
     }
 

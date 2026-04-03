@@ -303,6 +303,20 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
       })).optional().describe('Verification checks to run'),
     }),
   }),
+
+  defineTool({
+    name: 'generate_deliverable',
+    namespace: 'assembly',
+    description: 'Generate a consulting deliverable (report, roadmap, or assessment) from a natural language prompt. Uses knowledge graph + RAG to produce a structured, citation-backed document. Returns markdown with optional PDF.',
+    input: z.object({
+      prompt: z.string().describe('What the deliverable should cover (min 10 chars)'),
+      type: z.enum(['analysis', 'roadmap', 'assessment']).describe('Deliverable type'),
+      format: z.enum(['pdf', 'markdown']).optional().describe('Output format (default: markdown)'),
+      max_sections: z.number().optional().describe('Max sections (2-8, default 5)'),
+    }),
+    timeoutMs: 120000,
+    outputDescription: 'Deliverable with sections, citations, confidence scores, and markdown content',
+  }),
 ]
 
 // ─── Protocol Compilers ─────────────────────────────────────────────────────

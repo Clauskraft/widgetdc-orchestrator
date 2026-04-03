@@ -65,8 +65,962 @@ var init_config = __esm({
   }
 });
 
+// src/logger.ts
+import pino from "pino";
+function childLogger(correlationId) {
+  return logger.child({ correlation_id: correlationId });
+}
+var logger;
+var init_logger = __esm({
+  "src/logger.ts"() {
+    "use strict";
+    init_config();
+    logger = pino({
+      level: config.nodeEnv === "production" ? "info" : "debug",
+      ...config.nodeEnv !== "production" && {
+        transport: {
+          target: "pino-pretty",
+          options: { colorize: true, translateTime: "SYS:HH:MM:ss", ignore: "pid,hostname" }
+        }
+      },
+      base: { service: "orchestrator", version: "1.0.0" }
+    });
+  }
+});
+
+// src/redis.ts
+import Redis from "ioredis";
+function getRedis() {
+  return redis;
+}
+function isRedisEnabled() {
+  return redis !== null;
+}
+async function initRedis() {
+  if (!redisUrl) {
+    logger.info("REDIS_URL not set \u2014 agent registry will be in-memory only (volatile)");
+    return;
+  }
+  try {
+    redis = new Redis(redisUrl, {
+      maxRetriesPerRequest: 3,
+      retryStrategy(times) {
+        if (times > 5) return null;
+        return Math.min(times * 200, 2e3);
+      },
+      lazyConnect: true
+    });
+    await redis.connect();
+    logger.info("Redis connected \u2014 agent registry persistence enabled");
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Redis connection failed \u2014 falling back to in-memory only");
+    redis = null;
+  }
+}
+var redisUrl, redis;
+var init_redis = __esm({
+  "src/redis.ts"() {
+    "use strict";
+    init_logger();
+    redisUrl = process.env["REDIS_URL"] ?? "";
+    redis = null;
+  }
+});
+
+// src/mcp-caller.ts
+async function callMcpTool(opts) {
+  const log = childLogger(opts.traceId ?? opts.callId);
+  const t0 = Date.now();
+  const timeoutMs = opts.timeoutMs ?? config.mcpTimeoutMs;
+  const url = `${config.backendUrl}/api/mcp/route`;
+  const body = JSON.stringify({ tool: opts.toolName, payload: opts.args });
+  log.debug({ tool: opts.toolName, url }, "MCP call start");
+  let lastError = null;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      log.debug({ attempt, tool: opts.toolName }, "Retrying after transient error");
+      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
+    }
+    const result = await callMcpToolOnce(opts, url, body, timeoutMs, log, t0);
+    if (result.status !== "error" || !result.error_message?.includes("503")) {
+      return result;
+    }
+    lastError = result.error_message;
+  }
+  return {
+    call_id: opts.callId,
+    status: "error",
+    result: null,
+    error_message: `Failed after ${MAX_RETRIES + 1} attempts: ${lastError}`,
+    error_code: "BACKEND_ERROR",
+    duration_ms: Date.now() - t0,
+    trace_id: opts.traceId ?? null,
+    completed_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+async function callMcpToolOnce(opts, url, body, timeoutMs, log, t0) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${config.backendApiKey}`,
+        "X-Trace-Id": opts.traceId ?? opts.callId,
+        "X-Call-Id": opts.callId
+      },
+      body,
+      signal: controller.signal
+    });
+    clearTimeout(timer);
+    const duration_ms = Date.now() - t0;
+    if (!res.ok) {
+      const errorText = await res.text().catch(() => `HTTP ${res.status}`);
+      log.warn({ status: res.status, tool: opts.toolName, duration_ms }, "MCP call HTTP error");
+      const errorCode = res.status === 401 || res.status === 403 ? "UNAUTHORIZED" : res.status === 404 ? "TOOL_NOT_FOUND" : res.status === 429 ? "RATE_LIMITED" : "BACKEND_ERROR";
+      return {
+        call_id: opts.callId,
+        status: errorCode === "UNAUTHORIZED" ? "unauthorized" : errorCode === "RATE_LIMITED" ? "rate_limited" : "error",
+        result: null,
+        error_message: errorText,
+        error_code: errorCode,
+        duration_ms,
+        trace_id: opts.traceId ?? null,
+        completed_at: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+    const contentType = res.headers.get("content-type") ?? "";
+    if (contentType.includes("text/event-stream")) {
+      const result = await aggregateSseStream(res, opts.callId, log);
+      const final_duration = Date.now() - t0;
+      log.info({ tool: opts.toolName, duration_ms: final_duration }, "MCP SSE call complete");
+      return {
+        call_id: opts.callId,
+        status: "success",
+        result,
+        error_message: null,
+        error_code: null,
+        duration_ms: final_duration,
+        trace_id: opts.traceId ?? null,
+        completed_at: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    } else {
+      const raw = await res.text();
+      let result;
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed !== null && typeof parsed === "object" && "result" in parsed) {
+          result = parsed.result;
+        } else if (parsed !== null && typeof parsed === "object" && "data" in parsed) {
+          log.warn({ tool: opts.toolName }, 'MCP response used "data" envelope instead of "result" \u2014 consider standardising');
+          result = parsed.data;
+        } else {
+          log.warn({ tool: opts.toolName, keys: Object.keys(parsed ?? {}) }, "MCP response had no standard envelope \u2014 passing through raw");
+          result = parsed;
+        }
+      } catch {
+        result = raw;
+      }
+      log.info({ tool: opts.toolName, duration_ms }, "MCP JSON call complete");
+      return {
+        call_id: opts.callId,
+        status: "success",
+        result,
+        error_message: null,
+        error_code: null,
+        duration_ms,
+        trace_id: opts.traceId ?? null,
+        completed_at: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+  } catch (err) {
+    clearTimeout(timer);
+    const duration_ms = Date.now() - t0;
+    if (err instanceof Error && err.name === "AbortError") {
+      log.warn({ tool: opts.toolName, timeout_ms: timeoutMs }, "MCP call timed out");
+      return {
+        call_id: opts.callId,
+        status: "timeout",
+        result: null,
+        error_message: `Call timed out after ${timeoutMs}ms`,
+        error_code: "TIMEOUT",
+        duration_ms,
+        trace_id: opts.traceId ?? null,
+        completed_at: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    log.error({ tool: opts.toolName, err: message }, "MCP call failed");
+    return {
+      call_id: opts.callId,
+      status: "error",
+      result: null,
+      error_message: message,
+      error_code: "BACKEND_ERROR",
+      duration_ms,
+      trace_id: opts.traceId ?? null,
+      completed_at: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }
+}
+async function aggregateSseStream(res, callId, log) {
+  const events = [];
+  let lastResult = null;
+  try {
+    if (!res.body) {
+      throw new Error("SSE response has no body");
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith(":")) continue;
+        if (trimmed.startsWith("data:")) {
+          const dataStr = trimmed.slice(5).trim();
+          if (dataStr === "[DONE]" || dataStr === "done") continue;
+          try {
+            const parsed = JSON.parse(dataStr);
+            events.push(parsed);
+            if (parsed?.result !== void 0) lastResult = parsed.result;
+            else if (parsed?.content !== void 0) lastResult = parsed.content;
+            else if (parsed?.type !== "ping" && parsed?.type !== "heartbeat") lastResult = parsed;
+          } catch {
+            if (dataStr.length > 0) lastResult = dataStr;
+          }
+        }
+      }
+    }
+    log.debug({ event_count: events.length, call_id: callId }, "SSE stream aggregated");
+    if (lastResult !== null && lastResult !== void 0) return lastResult;
+    if (events.length === 1) return events[0];
+    if (events.length > 1) return events;
+    return null;
+  } catch (err) {
+    log.warn({ err: String(err), call_id: callId }, "SSE stream parse error");
+    throw Object.assign(new Error(`SSE_PARSE_ERROR: ${err}`), { code: "SSE_PARSE_ERROR" });
+  }
+}
+var MAX_RETRIES, RETRY_DELAY_MS;
+var init_mcp_caller = __esm({
+  "src/mcp-caller.ts"() {
+    "use strict";
+    init_config();
+    init_logger();
+    MAX_RETRIES = 2;
+    RETRY_DELAY_MS = 1e3;
+  }
+});
+
+// src/dual-rag.ts
+import { v4 as uuid } from "uuid";
+function isPolluted(text) {
+  if (!text || text.length < 20) return false;
+  let matchCount = 0;
+  for (const pattern of POLLUTION_PATTERNS) {
+    if (pattern.test(text)) matchCount++;
+    if (matchCount >= 2) return true;
+  }
+  return false;
+}
+function classifyQuery(query) {
+  const q = query.toLowerCase();
+  if (/\b(?:how many|count|list all|list the|total|statistics|stats)\b/.test(q)) {
+    return "structured";
+  }
+  if (/\b(?:match|where|return|node|relationship|label)\b/.test(q)) {
+    return "structured";
+  }
+  if (/\b(?:compare|versus|difference|between|trade-?off|pros and cons)\b/.test(q)) {
+    return "multi_hop";
+  }
+  if (/\b(?:strategy|roadmap|architecture|impact|implication|recommend)\b/.test(q)) {
+    return "multi_hop";
+  }
+  if (/\b(?:why|how does|what if|should we|evaluate|assess|analyze)\b/.test(q)) {
+    return "multi_hop";
+  }
+  if (q.split(/\s+/).length > 12) {
+    return "multi_hop";
+  }
+  return "simple";
+}
+async function callGraphRAG(query, maxResults) {
+  const result = await callMcpTool({
+    toolName: "autonomous.graphrag",
+    args: { question: query, max_evidence: maxResults },
+    callId: uuid(),
+    timeoutMs: 6e4
+    // graphrag is slower but higher quality
+  });
+  if (result.status !== "success") {
+    logger.warn({ error: result.error_message }, "autonomous.graphrag failed");
+    return [];
+  }
+  const data = result.result;
+  const evidence = data?.evidence ?? data?.results ?? data?.chunks ?? [];
+  const answer = data?.answer ?? data?.synthesis ?? "";
+  const confidence = data?.confidence ?? 0.8;
+  const results = [];
+  if (answer && typeof answer === "string" && answer.length > 20) {
+    results.push({
+      source: "graphrag",
+      content: answer,
+      score: confidence,
+      metadata: { type: "synthesis", evidence_count: evidence.length }
+    });
+  }
+  if (Array.isArray(evidence)) {
+    for (const item of evidence.slice(0, maxResults - 1)) {
+      const content = item.content || item.text || item.chunk || (typeof item === "string" ? item : JSON.stringify(item).slice(0, 500));
+      results.push({
+        source: "graphrag",
+        content: typeof content === "string" ? content : String(content),
+        score: item.score ?? item.relevance ?? 0.75,
+        metadata: { title: item.title, node_type: item.label || item.type }
+      });
+    }
+  }
+  return results;
+}
+async function callSRAG(query, maxResults) {
+  const result = await callMcpTool({
+    toolName: "srag.query",
+    args: { query },
+    callId: uuid(),
+    timeoutMs: 45e3
+  });
+  if (result.status !== "success") return [];
+  const sragData = result.result;
+  const items = Array.isArray(sragData) ? sragData : sragData?.results ? sragData.results : sragData?.chunks ? sragData.chunks : [];
+  const results = [];
+  for (const item of items.slice(0, maxResults)) {
+    results.push({
+      source: "srag",
+      content: item.content || item.text || item.chunk || JSON.stringify(item).slice(0, 500),
+      score: item.score || item.similarity || 0.5,
+      metadata: { title: item.title, tags: item.tags }
+    });
+  }
+  return results;
+}
+async function callCypher(query, maxResults, depth) {
+  const result = await callMcpTool({
+    toolName: "graph.read_cypher",
+    args: { query: buildCypherQuery(query, depth) },
+    callId: uuid(),
+    timeoutMs: 2e4
+  });
+  if (result.status !== "success") return [];
+  const cypherData = result.result;
+  const rows = cypherData?.results || cypherData || [];
+  if (!Array.isArray(rows)) return [];
+  const results = [];
+  for (const row of rows.slice(0, maxResults)) {
+    const content = Object.values(row).map(
+      (v) => typeof v === "string" ? v : JSON.stringify(v)
+    ).join(" | ");
+    results.push({
+      source: "cypher",
+      content: content.slice(0, 500),
+      score: 0.7,
+      metadata: row
+    });
+  }
+  return results;
+}
+async function dualChannelRAG(query, options) {
+  const t0 = Date.now();
+  const maxResults = options?.maxResults ?? 10;
+  const depth = options?.cypherDepth ?? 2;
+  const complexity = classifyQuery(query);
+  logger.info({ query: query.slice(0, 80), complexity }, "Hybrid RAG: routing query");
+  const channels = options?.forceChannels ?? getChannelsForComplexity(complexity);
+  const channelPromises = [];
+  const channelsUsed = [];
+  if (channels.includes("graphrag")) {
+    channelPromises.push(callGraphRAG(query, maxResults));
+    channelsUsed.push("graphrag");
+  }
+  if (channels.includes("srag")) {
+    channelPromises.push(callSRAG(query, maxResults));
+    channelsUsed.push("srag");
+  }
+  if (channels.includes("cypher")) {
+    channelPromises.push(callCypher(query, maxResults, depth));
+    channelsUsed.push("cypher");
+  }
+  const channelResults = await Promise.allSettled(channelPromises);
+  let allResults = [];
+  for (const cr of channelResults) {
+    if (cr.status === "fulfilled") {
+      allResults.push(...cr.value);
+    }
+  }
+  if (allResults.filter((r) => r.source === "graphrag").length === 0 && !channels.includes("srag")) {
+    logger.info("Hybrid RAG: graphrag returned empty, falling back to srag");
+    const sragResults = await callSRAG(query, maxResults);
+    allResults.push(...sragResults);
+    channelsUsed.push("srag (fallback)");
+  }
+  let pollutionFiltered = 0;
+  allResults = allResults.filter((r) => {
+    if (isPolluted(r.content)) {
+      pollutionFiltered++;
+      logger.debug({ source: r.source, preview: r.content.slice(0, 60) }, "Filtered polluted result");
+      return false;
+    }
+    return true;
+  });
+  allResults.sort((a, b) => {
+    if (a.source === "graphrag" && a.metadata?.type === "synthesis") return -1;
+    if (b.source === "graphrag" && b.metadata?.type === "synthesis") return 1;
+    return b.score - a.score;
+  });
+  const topResults = allResults.slice(0, maxResults);
+  const merged = topResults.map(
+    (r, i) => `[${r.source.toUpperCase()} #${i + 1}${r.score >= 0.8 ? " \u2605" : ""}] ${r.content}`
+  ).join("\n\n");
+  const graphragCount = topResults.filter((r) => r.source === "graphrag").length;
+  const sragCount = topResults.filter((r) => r.source === "srag").length;
+  const cypherCount = topResults.filter((r) => r.source === "cypher").length;
+  const durationMs = Date.now() - t0;
+  logger.info({
+    query: query.slice(0, 60),
+    complexity,
+    graphragCount,
+    sragCount,
+    cypherCount,
+    pollutionFiltered,
+    ms: durationMs
+  }, "Hybrid RAG: complete");
+  return {
+    query,
+    results: topResults,
+    srag_count: sragCount,
+    cypher_count: cypherCount,
+    graphrag_count: graphragCount,
+    merged_context: merged,
+    duration_ms: durationMs,
+    route_strategy: complexity,
+    channels_used: channelsUsed,
+    pollution_filtered: pollutionFiltered
+  };
+}
+function getChannelsForComplexity(complexity) {
+  switch (complexity) {
+    case "simple":
+      return ["graphrag", "srag"];
+    case "multi_hop":
+      return ["graphrag", "cypher"];
+    case "structured":
+      return ["cypher", "graphrag"];
+  }
+}
+function buildCypherQuery(query, depth) {
+  const stopWords = /* @__PURE__ */ new Set(["the", "and", "for", "with", "that", "this", "from", "are", "was", "how", "what", "which", "where", "when", "why", "can", "does", "will", "not", "all", "has", "have", "been", "our", "their", "its"]);
+  const keywords = query.toLowerCase().replace(/[^a-zA-Z0-9æøåÆØÅ\s]/g, "").split(/\s+/).filter((w) => w.length >= 3 && !stopWords.has(w)).slice(0, 5);
+  if (keywords.length === 0) {
+    return "MATCH (n:StrategicInsight) RETURN n.title AS title, n.domain AS domain LIMIT 5";
+  }
+  const kwConditions = keywords.map(
+    (kw) => `toLower(coalesce(n.title, n.name, n.description, '')) CONTAINS '${kw}'`
+  ).join(" OR ");
+  return `MATCH (n) WHERE (n:StrategicInsight OR n:Pattern OR n:Lesson OR n:Knowledge OR n:Memory OR n:TDCDocument)
+AND (${kwConditions})
+WITH n, labels(n)[0] AS label
+OPTIONAL MATCH (n)-[r]-(m)
+RETURN label,
+       coalesce(n.title, n.name, n.filename) AS title,
+       substring(coalesce(n.description, n.content, n.value, ''), 0, 300) AS content,
+       type(r) AS rel,
+       labels(m)[0] AS connected_to
+LIMIT 15`;
+}
+var POLLUTION_PATTERNS;
+var init_dual_rag = __esm({
+  "src/dual-rag.ts"() {
+    "use strict";
+    init_mcp_caller();
+    init_logger();
+    POLLUTION_PATTERNS = [
+      /you are (?:a |an )?(?:helpful |expert |professional )/i,
+      /^(?:system|assistant|human):/im,
+      /\b(?:claude|chatgpt|gpt-4|openai)\s+(?:is|can|should|will)\b/i,
+      /\bdo not (?:hallucinate|make up|fabricate)\b/i,
+      /\byour (?:task|role|job|purpose) is to\b/i,
+      /\brespond (?:in|with|using) (?:json|markdown|the following)\b/i,
+      /\banswer (?:only|strictly|exclusively) (?:in|with|based)\b/i,
+      /\b(?:ignore|disregard) (?:previous|all|any) (?:instructions|prompts)\b/i,
+      /\byou (?:must|should|will) (?:always|never|only)\b/i,
+      /\bas an ai (?:language )?model\b/i
+    ];
+  }
+});
+
+// src/cognitive-proxy.ts
+function isRlmAvailable() {
+  return config.rlmUrl.length > 0;
+}
+async function callCognitive(action, params, timeoutMs) {
+  if (!config.rlmUrl) {
+    throw new Error("RLM Engine not configured (set RLM_URL)");
+  }
+  const path2 = COGNITIVE_ROUTES[action];
+  if (!path2) {
+    throw new Error(`Unknown cognitive action: ${action}. Valid: ${Object.keys(COGNITIVE_ROUTES).join(", ")}`);
+  }
+  const url = `${config.rlmUrl}${path2}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs ?? 12e4);
+  try {
+    logger.debug({ action, url, agent: params.agent_id }, "Cognitive proxy call");
+    const p = params;
+    let body;
+    if (action === "analyze") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "string" ? p.context : p.context || params.prompt,
+        analysis_dimensions: p.analysis_dimensions || ["general"],
+        agent_id: params.agent_id
+      };
+    } else if (action === "reason") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
+        agent_id: params.agent_id,
+        depth: params.depth ?? 0
+      };
+    } else if (action === "plan") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
+        constraints: p.constraints || [],
+        agent_id: params.agent_id
+      };
+    } else if (action === "fold") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
+        agent_id: params.agent_id
+      };
+    } else {
+      body = {
+        prompt: params.prompt,
+        task: p.task || params.prompt,
+        context: p.context || params.prompt,
+        agent_id: params.agent_id,
+        depth: params.depth ?? 0,
+        mode: params.mode ?? "standard"
+      };
+    }
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    clearTimeout(timer);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => `HTTP ${res.status}`);
+      throw new Error(`RLM ${action} failed: ${errText}`);
+    }
+    const data = await res.json();
+    return data.result ?? data.answer ?? data.reasoning ?? data.plan ?? data;
+  } catch (err) {
+    clearTimeout(timer);
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`RLM ${action} timed out after ${timeoutMs ?? 12e4}ms`);
+    }
+    throw err;
+  }
+}
+async function getRlmHealth() {
+  if (!config.rlmUrl) return null;
+  try {
+    const res = await fetch(`${config.rlmUrl}/health`, { signal: AbortSignal.timeout(5e3) });
+    if (!res.ok) return { status: "unhealthy", http_status: res.status };
+    return await res.json();
+  } catch {
+    return { status: "unreachable" };
+  }
+}
+var COGNITIVE_ROUTES;
+var init_cognitive_proxy = __esm({
+  "src/cognitive-proxy.ts"() {
+    "use strict";
+    init_config();
+    init_logger();
+    COGNITIVE_ROUTES = {
+      reason: "/reason",
+      analyze: "/cognitive/analyze",
+      plan: "/cognitive/plan",
+      learn: "/cognitive/learn",
+      fold: "/cognitive/fold",
+      enrich: "/cognitive/enrich"
+    };
+  }
+});
+
+// src/deliverable-engine.ts
+var deliverable_engine_exports = {};
+__export(deliverable_engine_exports, {
+  generateDeliverable: () => generateDeliverable,
+  getDeliverable: () => getDeliverable,
+  listDeliverables: () => listDeliverables
+});
+import { v4 as uuid5 } from "uuid";
+async function persist(d) {
+  deliverableCache.set(d.$id, d);
+  if (deliverableCache.size > CACHE_MAX_SIZE) {
+    const toEvict = deliverableCache.size - CACHE_MAX_SIZE;
+    const oldest = Array.from(deliverableCache.entries()).sort((a, b) => a[1].created_at.localeCompare(b[1].created_at));
+    oldest.slice(0, toEvict).forEach(([key]) => deliverableCache.delete(key));
+  }
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    await redis2.set(`${REDIS_PREFIX}${d.$id}`, JSON.stringify(d), "EX", TTL_SECONDS2);
+    await redis2.sadd(REDIS_INDEX, d.$id);
+  } catch {
+  }
+}
+async function getDeliverable(id) {
+  if (deliverableCache.has(id)) return deliverableCache.get(id);
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${REDIS_PREFIX}${id}`);
+    if (raw) {
+      const d = JSON.parse(raw);
+      deliverableCache.set(id, d);
+      return d;
+    }
+  } catch {
+  }
+  return null;
+}
+async function listDeliverables(limit = 20) {
+  const redis2 = getRedis();
+  if (!redis2) return Array.from(deliverableCache.values()).slice(0, limit);
+  try {
+    const ids = await redis2.smembers(REDIS_INDEX);
+    const results = [];
+    for (const id of ids.slice(0, limit)) {
+      const d = await getDeliverable(id);
+      if (d) results.push(d);
+    }
+    return results.sort((a, b) => b.created_at.localeCompare(a.created_at));
+  } catch {
+    return Array.from(deliverableCache.values()).slice(0, limit);
+  }
+}
+async function generateDeliverable(req) {
+  if (activeGenerations >= MAX_CONCURRENT) {
+    throw new Error(`Too many concurrent generations (${activeGenerations}/${MAX_CONCURRENT}). Try again later.`);
+  }
+  activeGenerations++;
+  const t0 = Date.now();
+  const deliverableId = `widgetdc:deliverable:${uuid5()}`;
+  const format = req.format ?? "markdown";
+  const maxSections = Math.min(Math.max(req.max_sections ?? 5, 2), 8);
+  const deliverable = {
+    $id: deliverableId,
+    $schema: "widgetdc:deliverable:v1",
+    prompt: req.prompt,
+    type: req.type,
+    format,
+    title: "",
+    sections: [],
+    metadata: {
+      total_citations: 0,
+      avg_confidence: 0,
+      generation_ms: 0,
+      sections_count: 0,
+      token_estimate: 0,
+      graphrag_results: 0
+    },
+    markdown: "",
+    status: "generating",
+    created_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  await persist(deliverable);
+  try {
+    logger.info({ id: deliverableId, type: req.type, prompt: req.prompt.slice(0, 80) }, "Deliverable: Step 1 \u2014 Planning");
+    const plan = await planSections(req.prompt, req.type, maxSections);
+    deliverable.title = plan.title;
+    logger.info({ id: deliverableId, sections: plan.sections.length }, "Deliverable: Step 2 \u2014 Retrieving");
+    const evidence = await retrieveEvidence(plan.sections);
+    logger.info({ id: deliverableId }, "Deliverable: Step 3 \u2014 Writing sections");
+    const sections = await writeSections(plan.sections, evidence, req.type);
+    deliverable.sections = sections;
+    logger.info({ id: deliverableId }, "Deliverable: Step 4 \u2014 Assembling");
+    deliverable.markdown = assembleSections(deliverable.title, sections, req.type);
+    if (format === "pdf") {
+      logger.info({ id: deliverableId }, "Deliverable: Step 5 \u2014 Rendering PDF");
+      await renderPDF(deliverable);
+    }
+    const totalCitations = sections.reduce((n, s) => n + s.citations.length, 0);
+    if (totalCitations < 3) {
+      try {
+        const broadRag = await dualChannelRAG(req.prompt, { maxResults: 5 });
+        if (broadRag.results.length > 0) {
+          const extraCitations = broadRag.results.slice(0, 3 - totalCitations).map((r) => ({
+            source: r.source,
+            title: r.content.slice(0, 80),
+            relevance: r.score
+          }));
+          const targetSection = sections.reduce((min, s) => s.citations.length < min.citations.length ? s : min);
+          targetSection.citations.push(...extraCitations);
+        }
+      } catch {
+      }
+    }
+    const allCitations = sections.flatMap((s) => s.citations);
+    const confidenceMap = { high: 1, medium: 0.66, low: 0.33 };
+    const avgConf = sections.length > 0 ? sections.reduce((sum, s) => sum + confidenceMap[s.confidence], 0) / sections.length : 0;
+    deliverable.metadata = {
+      total_citations: allCitations.length,
+      avg_confidence: Math.round(avgConf * 100) / 100,
+      generation_ms: Date.now() - t0,
+      sections_count: sections.length,
+      token_estimate: Math.ceil(deliverable.markdown.length / 4),
+      graphrag_results: evidence.reduce((sum, e) => sum + e.results.length, 0)
+    };
+    deliverable.status = "completed";
+    deliverable.completed_at = (/* @__PURE__ */ new Date()).toISOString();
+    logger.info({
+      id: deliverableId,
+      sections: sections.length,
+      citations: allCitations.length,
+      ms: deliverable.metadata.generation_ms
+    }, "Deliverable: Complete");
+  } catch (err) {
+    deliverable.status = "failed";
+    deliverable.error = err instanceof Error ? err.message : String(err);
+    deliverable.completed_at = (/* @__PURE__ */ new Date()).toISOString();
+    deliverable.metadata.generation_ms = Date.now() - t0;
+    logger.error({ id: deliverableId, error: deliverable.error }, "Deliverable: Failed");
+  } finally {
+    activeGenerations--;
+    await persist(deliverable);
+  }
+  return deliverable;
+}
+async function planSections(prompt, type, maxSections) {
+  const systemPrompt = `You are a consulting deliverable planner. Given a client prompt, generate a structured outline for a ${type} report.
+
+${TYPE_PROMPTS[type]}
+
+Generate exactly ${maxSections} sections. Each section needs a title, a knowledge-graph search query to find relevant data, and a purpose statement.
+
+Reply as JSON:
+{"title": "Report Title", "sections": [{"title": "Section Title", "query": "search query for knowledge graph", "purpose": "what this section should cover"}]}`;
+  try {
+    const result = await callCognitive("analyze", {
+      prompt: `${systemPrompt}
+
+Client prompt: "${prompt}"`,
+      context: { type, maxSections },
+      agent_id: "deliverable-planner"
+    }, 3e4);
+    const text = String(result ?? "");
+    const match = text.match(/\{[\s\S]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      return {
+        title: parsed.title ?? `${type.charAt(0).toUpperCase() + type.slice(1)}: ${prompt.slice(0, 60)}`,
+        sections: (parsed.sections ?? []).slice(0, maxSections)
+      };
+    }
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Deliverable planner failed, using fallback");
+  }
+  const fallbackSections = [
+    { title: "Executive Summary", query: prompt, purpose: "High-level overview" },
+    { title: "Analysis", query: prompt, purpose: "Detailed analysis of the topic" },
+    { title: "Findings", query: `key findings ${prompt}`, purpose: "Key findings and insights" },
+    { title: "Recommendations", query: `recommendations ${prompt}`, purpose: "Actionable recommendations" }
+  ];
+  return {
+    title: `${type.charAt(0).toUpperCase() + type.slice(1)}: ${prompt.slice(0, 60)}`,
+    sections: fallbackSections.slice(0, maxSections)
+  };
+}
+async function retrieveEvidence(sections) {
+  const bundles = await Promise.allSettled(
+    sections.map(async (section) => {
+      const rag = await dualChannelRAG(section.query, { maxResults: 5 });
+      return {
+        section_title: section.title,
+        results: rag.results.map((r) => ({
+          source: r.source,
+          content: r.content,
+          score: r.score
+        }))
+      };
+    })
+  );
+  return bundles.map((b, i) => {
+    if (b.status === "fulfilled") return b.value;
+    return { section_title: sections[i].title, results: [] };
+  });
+}
+async function writeSections(plans, evidence, type) {
+  const results = await Promise.allSettled(
+    plans.map((plan, i) => writeOneSection(plan, evidence[i], type))
+  );
+  return results.map((r, i) => {
+    if (r.status === "fulfilled") return r.value;
+    return {
+      title: plans[i].title,
+      markdown: `[Section generation failed: ${r.reason}]`,
+      citations: [],
+      confidence: "low"
+    };
+  });
+}
+async function writeOneSection(plan, ev, type) {
+  const hasEvidence = ev && ev.results.length > 0;
+  const evidenceText = hasEvidence ? ev.results.map((r, j) => `[Source ${j + 1} (${r.source}, score: ${r.score.toFixed(2)})] ${r.content}`).join("\n\n") : "[No evidence found \u2014 mark claims as unverified]";
+  const sectionPrompt = `Write the "${plan.title}" section of a consulting ${type} report.
+
+PURPOSE: ${plan.purpose}
+
+EVIDENCE FROM KNOWLEDGE GRAPH:
+${evidenceText}
+
+RULES:
+- Write 2-4 paragraphs of professional consulting prose
+- Reference evidence with [Source N] inline citations
+- If evidence is insufficient, note "[insufficient data]" for unverified claims
+- Use bullet points for key findings and recommendations
+- Be specific and actionable, not generic
+- Danish regulatory context is relevant when applicable
+
+Output ONLY the section content in markdown (no title header \u2014 it will be added).`;
+  try {
+    const result = await callCognitive("analyze", {
+      prompt: sectionPrompt,
+      context: { section: plan.title, type, evidence_count: ev?.results.length ?? 0 },
+      agent_id: "deliverable-writer"
+    }, 3e4);
+    const content = String(result ?? "").trim();
+    const citations = hasEvidence ? ev.results.map((r) => ({
+      source: r.source,
+      title: r.content.slice(0, 80),
+      relevance: r.score
+    })) : [];
+    const avgScore = hasEvidence ? ev.results.reduce((s, r) => s + r.score, 0) / ev.results.length : 0;
+    const confidence = avgScore >= 0.7 ? "high" : avgScore >= 0.4 ? "medium" : "low";
+    return {
+      title: plan.title,
+      markdown: content || `[Section generation failed \u2014 insufficient data for "${plan.title}"]`,
+      citations,
+      confidence
+    };
+  } catch (err) {
+    return {
+      title: plan.title,
+      markdown: `[Section generation failed: ${err instanceof Error ? err.message : String(err)}]`,
+      citations: [],
+      confidence: "low"
+    };
+  }
+}
+function assembleSections(title, sections, type) {
+  const confidenceEmoji = { high: "\u25CF", medium: "\u25D0", low: "\u25CB" };
+  const now = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  let md = `# ${title}
+
+`;
+  md += `**Type:** ${type} | **Date:** ${now} | **Generated by:** WidgeTDC Deliverable Engine v1.0
+
+`;
+  md += `---
+
+`;
+  for (const section of sections) {
+    md += `## ${section.title}
+
+`;
+    md += `${section.markdown}
+
+`;
+    if (section.citations.length > 0) {
+      md += `> **Sources** ${confidenceEmoji[section.confidence]} (confidence: ${section.confidence}): `;
+      md += section.citations.map((c, i) => `[${i + 1}] ${c.title}`).join(" | ");
+      md += `
+
+`;
+    }
+  }
+  md += `---
+
+`;
+  md += `*This deliverable was automatically generated by WidgeTDC from ${sections.reduce((n, s) => n + s.citations.length, 0)} knowledge graph sources. `;
+  md += `Claims marked [insufficient data] require manual verification.*
+`;
+  return md;
+}
+async function renderPDF(deliverable) {
+  try {
+    const result = await callMcpTool({
+      toolName: "docgen.word.create",
+      args: {
+        title: deliverable.title,
+        content: deliverable.markdown,
+        template: deliverable.type
+      },
+      callId: uuid5(),
+      timeoutMs: 45e3
+    });
+    if (result.status === "success" && result.result) {
+      deliverable.doc_url = result.result?.url ?? result.result?.path;
+      logger.info({ id: deliverable.$id }, "Deliverable: DOCX rendered via docgen.word.create");
+    }
+  } catch {
+    logger.info("docgen.word.create not available \u2014 delivering markdown");
+    deliverable.format = "markdown";
+  }
+}
+var REDIS_PREFIX, REDIS_INDEX, TTL_SECONDS2, deliverableCache, CACHE_MAX_SIZE, activeGenerations, MAX_CONCURRENT, TYPE_PROMPTS;
+var init_deliverable_engine = __esm({
+  "src/deliverable-engine.ts"() {
+    "use strict";
+    init_mcp_caller();
+    init_cognitive_proxy();
+    init_dual_rag();
+    init_redis();
+    init_logger();
+    REDIS_PREFIX = "orchestrator:deliverable:";
+    REDIS_INDEX = "orchestrator:deliverables:index";
+    TTL_SECONDS2 = 604800;
+    deliverableCache = /* @__PURE__ */ new Map();
+    CACHE_MAX_SIZE = 100;
+    activeGenerations = 0;
+    MAX_CONCURRENT = 3;
+    TYPE_PROMPTS = {
+      analysis: "Structure as: Executive Summary, Current State Analysis, Key Findings, Gap Analysis, Strategic Implications, Recommendations.",
+      roadmap: "Structure as: Executive Summary, Vision & Objectives, Phase 1 (Quick Wins), Phase 2 (Foundation), Phase 3 (Scale), Implementation Timeline, Risk Mitigation.",
+      assessment: "Structure as: Executive Summary, Assessment Scope, Maturity Analysis, Compliance Status, Gap Identification, Remediation Plan, Next Steps."
+    };
+  }
+});
+
 // src/index.ts
 init_config();
+init_logger();
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -75,28 +1029,13 @@ import { createServer } from "http";
 import path from "path";
 import { fileURLToPath } from "url";
 
-// src/logger.ts
-init_config();
-import pino from "pino";
-var logger = pino({
-  level: config.nodeEnv === "production" ? "info" : "debug",
-  ...config.nodeEnv !== "production" && {
-    transport: {
-      target: "pino-pretty",
-      options: { colorize: true, translateTime: "SYS:HH:MM:ss", ignore: "pid,hostname" }
-    }
-  },
-  base: { service: "orchestrator", version: "1.0.0" }
-});
-function childLogger(correlationId) {
-  return logger.child({ correlation_id: correlationId });
-}
-
 // src/chat-broadcaster.ts
-import { WebSocketServer, WebSocket } from "ws";
+init_logger();
 init_config();
+import { WebSocketServer, WebSocket } from "ws";
 
 // src/sse.ts
+init_logger();
 var clients = [];
 function handleSSE(req, res) {
   res.setHeader("Content-Type", "text/event-stream");
@@ -138,39 +1077,9 @@ function getSSEClientCount() {
   return clients.length;
 }
 
-// src/redis.ts
-import Redis from "ioredis";
-var redisUrl = process.env["REDIS_URL"] ?? "";
-var redis = null;
-function getRedis() {
-  return redis;
-}
-function isRedisEnabled() {
-  return redis !== null;
-}
-async function initRedis() {
-  if (!redisUrl) {
-    logger.info("REDIS_URL not set \u2014 agent registry will be in-memory only (volatile)");
-    return;
-  }
-  try {
-    redis = new Redis(redisUrl, {
-      maxRetriesPerRequest: 3,
-      retryStrategy(times) {
-        if (times > 5) return null;
-        return Math.min(times * 200, 2e3);
-      },
-      lazyConnect: true
-    });
-    await redis.connect();
-    logger.info("Redis connected \u2014 agent registry persistence enabled");
-  } catch (err) {
-    logger.warn({ err: String(err) }, "Redis connection failed \u2014 falling back to in-memory only");
-    redis = null;
-  }
-}
-
 // src/chat-store.ts
+init_redis();
+init_logger();
 var REDIS_KEY = "orchestrator:messages";
 var REDIS_THREADS_KEY = "orchestrator:threads";
 var REDIS_PINS_KEY = "orchestrator:pinned";
@@ -469,10 +1378,15 @@ function getConnectionStats() {
   };
 }
 
+// src/index.ts
+init_redis();
+
 // src/routes/agents.ts
 import { Router } from "express";
 
 // src/agent-registry.ts
+init_logger();
+init_redis();
 var REDIS_KEY2 = "orchestrator:agents";
 var registry = /* @__PURE__ */ new Map();
 function persistToRedis(agentId, entry) {
@@ -617,6 +1531,7 @@ var AgentRegistry = {
 
 // src/slack.ts
 init_config();
+init_logger();
 function isSlackEnabled() {
   return Boolean(config.backendUrl) && Boolean(config.backendApiKey);
 }
@@ -9728,535 +10643,22 @@ agentsRouter.post("/:id/heartbeat", (req, res) => {
 
 // src/routes/tools.ts
 import { Router as Router2 } from "express";
-
-// src/mcp-caller.ts
+init_mcp_caller();
 init_config();
-var MAX_RETRIES = 2;
-var RETRY_DELAY_MS = 1e3;
-async function callMcpTool(opts) {
-  const log = childLogger(opts.traceId ?? opts.callId);
-  const t0 = Date.now();
-  const timeoutMs = opts.timeoutMs ?? config.mcpTimeoutMs;
-  const url = `${config.backendUrl}/api/mcp/route`;
-  const body = JSON.stringify({ tool: opts.toolName, payload: opts.args });
-  log.debug({ tool: opts.toolName, url }, "MCP call start");
-  let lastError = null;
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    if (attempt > 0) {
-      log.debug({ attempt, tool: opts.toolName }, "Retrying after transient error");
-      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
-    }
-    const result = await callMcpToolOnce(opts, url, body, timeoutMs, log, t0);
-    if (result.status !== "error" || !result.error_message?.includes("503")) {
-      return result;
-    }
-    lastError = result.error_message;
-  }
-  return {
-    call_id: opts.callId,
-    status: "error",
-    result: null,
-    error_message: `Failed after ${MAX_RETRIES + 1} attempts: ${lastError}`,
-    error_code: "BACKEND_ERROR",
-    duration_ms: Date.now() - t0,
-    trace_id: opts.traceId ?? null,
-    completed_at: (/* @__PURE__ */ new Date()).toISOString()
-  };
-}
-async function callMcpToolOnce(opts, url, body, timeoutMs, log, t0) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${config.backendApiKey}`,
-        "X-Trace-Id": opts.traceId ?? opts.callId,
-        "X-Call-Id": opts.callId
-      },
-      body,
-      signal: controller.signal
-    });
-    clearTimeout(timer);
-    const duration_ms = Date.now() - t0;
-    if (!res.ok) {
-      const errorText = await res.text().catch(() => `HTTP ${res.status}`);
-      log.warn({ status: res.status, tool: opts.toolName, duration_ms }, "MCP call HTTP error");
-      const errorCode = res.status === 401 || res.status === 403 ? "UNAUTHORIZED" : res.status === 404 ? "TOOL_NOT_FOUND" : res.status === 429 ? "RATE_LIMITED" : "BACKEND_ERROR";
-      return {
-        call_id: opts.callId,
-        status: errorCode === "UNAUTHORIZED" ? "unauthorized" : errorCode === "RATE_LIMITED" ? "rate_limited" : "error",
-        result: null,
-        error_message: errorText,
-        error_code: errorCode,
-        duration_ms,
-        trace_id: opts.traceId ?? null,
-        completed_at: (/* @__PURE__ */ new Date()).toISOString()
-      };
-    }
-    const contentType = res.headers.get("content-type") ?? "";
-    if (contentType.includes("text/event-stream")) {
-      const result = await aggregateSseStream(res, opts.callId, log);
-      const final_duration = Date.now() - t0;
-      log.info({ tool: opts.toolName, duration_ms: final_duration }, "MCP SSE call complete");
-      return {
-        call_id: opts.callId,
-        status: "success",
-        result,
-        error_message: null,
-        error_code: null,
-        duration_ms: final_duration,
-        trace_id: opts.traceId ?? null,
-        completed_at: (/* @__PURE__ */ new Date()).toISOString()
-      };
-    } else {
-      const raw = await res.text();
-      let result;
-      try {
-        const parsed = JSON.parse(raw);
-        if (parsed !== null && typeof parsed === "object" && "result" in parsed) {
-          result = parsed.result;
-        } else if (parsed !== null && typeof parsed === "object" && "data" in parsed) {
-          log.warn({ tool: opts.toolName }, 'MCP response used "data" envelope instead of "result" \u2014 consider standardising');
-          result = parsed.data;
-        } else {
-          log.warn({ tool: opts.toolName, keys: Object.keys(parsed ?? {}) }, "MCP response had no standard envelope \u2014 passing through raw");
-          result = parsed;
-        }
-      } catch {
-        result = raw;
-      }
-      log.info({ tool: opts.toolName, duration_ms }, "MCP JSON call complete");
-      return {
-        call_id: opts.callId,
-        status: "success",
-        result,
-        error_message: null,
-        error_code: null,
-        duration_ms,
-        trace_id: opts.traceId ?? null,
-        completed_at: (/* @__PURE__ */ new Date()).toISOString()
-      };
-    }
-  } catch (err) {
-    clearTimeout(timer);
-    const duration_ms = Date.now() - t0;
-    if (err instanceof Error && err.name === "AbortError") {
-      log.warn({ tool: opts.toolName, timeout_ms: timeoutMs }, "MCP call timed out");
-      return {
-        call_id: opts.callId,
-        status: "timeout",
-        result: null,
-        error_message: `Call timed out after ${timeoutMs}ms`,
-        error_code: "TIMEOUT",
-        duration_ms,
-        trace_id: opts.traceId ?? null,
-        completed_at: (/* @__PURE__ */ new Date()).toISOString()
-      };
-    }
-    const message = err instanceof Error ? err.message : String(err);
-    log.error({ tool: opts.toolName, err: message }, "MCP call failed");
-    return {
-      call_id: opts.callId,
-      status: "error",
-      result: null,
-      error_message: message,
-      error_code: "BACKEND_ERROR",
-      duration_ms,
-      trace_id: opts.traceId ?? null,
-      completed_at: (/* @__PURE__ */ new Date()).toISOString()
-    };
-  }
-}
-async function aggregateSseStream(res, callId, log) {
-  const events = [];
-  let lastResult = null;
-  try {
-    if (!res.body) {
-      throw new Error("SSE response has no body");
-    }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith(":")) continue;
-        if (trimmed.startsWith("data:")) {
-          const dataStr = trimmed.slice(5).trim();
-          if (dataStr === "[DONE]" || dataStr === "done") continue;
-          try {
-            const parsed = JSON.parse(dataStr);
-            events.push(parsed);
-            if (parsed?.result !== void 0) lastResult = parsed.result;
-            else if (parsed?.content !== void 0) lastResult = parsed.content;
-            else if (parsed?.type !== "ping" && parsed?.type !== "heartbeat") lastResult = parsed;
-          } catch {
-            if (dataStr.length > 0) lastResult = dataStr;
-          }
-        }
-      }
-    }
-    log.debug({ event_count: events.length, call_id: callId }, "SSE stream aggregated");
-    if (lastResult !== null && lastResult !== void 0) return lastResult;
-    if (events.length === 1) return events[0];
-    if (events.length > 1) return events;
-    return null;
-  } catch (err) {
-    log.warn({ err: String(err), call_id: callId }, "SSE stream parse error");
-    throw Object.assign(new Error(`SSE_PARSE_ERROR: ${err}`), { code: "SSE_PARSE_ERROR" });
-  }
-}
+init_logger();
+init_redis();
 
-// src/routes/tools.ts
-init_config();
-
-// src/dual-rag.ts
-import { v4 as uuid } from "uuid";
-var POLLUTION_PATTERNS = [
-  /you are (?:a |an )?(?:helpful |expert |professional )/i,
-  /^(?:system|assistant|human):/im,
-  /\b(?:claude|chatgpt|gpt-4|openai)\s+(?:is|can|should|will)\b/i,
-  /\bdo not (?:hallucinate|make up|fabricate)\b/i,
-  /\byour (?:task|role|job|purpose) is to\b/i,
-  /\brespond (?:in|with|using) (?:json|markdown|the following)\b/i,
-  /\banswer (?:only|strictly|exclusively) (?:in|with|based)\b/i,
-  /\b(?:ignore|disregard) (?:previous|all|any) (?:instructions|prompts)\b/i,
-  /\byou (?:must|should|will) (?:always|never|only)\b/i,
-  /\bas an ai (?:language )?model\b/i
-];
-function isPolluted(text) {
-  if (!text || text.length < 20) return false;
-  let matchCount = 0;
-  for (const pattern of POLLUTION_PATTERNS) {
-    if (pattern.test(text)) matchCount++;
-    if (matchCount >= 2) return true;
-  }
-  return false;
-}
-function classifyQuery(query) {
-  const q = query.toLowerCase();
-  if (/\b(?:how many|count|list all|list the|total|statistics|stats)\b/.test(q)) {
-    return "structured";
-  }
-  if (/\b(?:match|where|return|node|relationship|label)\b/.test(q)) {
-    return "structured";
-  }
-  if (/\b(?:compare|versus|difference|between|trade-?off|pros and cons)\b/.test(q)) {
-    return "multi_hop";
-  }
-  if (/\b(?:strategy|roadmap|architecture|impact|implication|recommend)\b/.test(q)) {
-    return "multi_hop";
-  }
-  if (/\b(?:why|how does|what if|should we|evaluate|assess|analyze)\b/.test(q)) {
-    return "multi_hop";
-  }
-  if (q.split(/\s+/).length > 12) {
-    return "multi_hop";
-  }
-  return "simple";
-}
-async function callGraphRAG(query, maxResults) {
-  const result = await callMcpTool({
-    toolName: "autonomous.graphrag",
-    args: { question: query, max_evidence: maxResults },
-    callId: uuid(),
-    timeoutMs: 6e4
-    // graphrag is slower but higher quality
-  });
-  if (result.status !== "success") {
-    logger.warn({ error: result.error_message }, "autonomous.graphrag failed");
-    return [];
-  }
-  const data = result.result;
-  const evidence = data?.evidence ?? data?.results ?? data?.chunks ?? [];
-  const answer = data?.answer ?? data?.synthesis ?? "";
-  const confidence = data?.confidence ?? 0.8;
-  const results = [];
-  if (answer && typeof answer === "string" && answer.length > 20) {
-    results.push({
-      source: "graphrag",
-      content: answer,
-      score: confidence,
-      metadata: { type: "synthesis", evidence_count: evidence.length }
-    });
-  }
-  if (Array.isArray(evidence)) {
-    for (const item of evidence.slice(0, maxResults - 1)) {
-      const content = item.content || item.text || item.chunk || (typeof item === "string" ? item : JSON.stringify(item).slice(0, 500));
-      results.push({
-        source: "graphrag",
-        content: typeof content === "string" ? content : String(content),
-        score: item.score ?? item.relevance ?? 0.75,
-        metadata: { title: item.title, node_type: item.label || item.type }
-      });
-    }
-  }
-  return results;
-}
-async function callSRAG(query, maxResults) {
-  const result = await callMcpTool({
-    toolName: "srag.query",
-    args: { query },
-    callId: uuid(),
-    timeoutMs: 45e3
-  });
-  if (result.status !== "success") return [];
-  const sragData = result.result;
-  const items = Array.isArray(sragData) ? sragData : sragData?.results ? sragData.results : sragData?.chunks ? sragData.chunks : [];
-  const results = [];
-  for (const item of items.slice(0, maxResults)) {
-    results.push({
-      source: "srag",
-      content: item.content || item.text || item.chunk || JSON.stringify(item).slice(0, 500),
-      score: item.score || item.similarity || 0.5,
-      metadata: { title: item.title, tags: item.tags }
-    });
-  }
-  return results;
-}
-async function callCypher(query, maxResults, depth) {
-  const result = await callMcpTool({
-    toolName: "graph.read_cypher",
-    args: { query: buildCypherQuery(query, depth) },
-    callId: uuid(),
-    timeoutMs: 2e4
-  });
-  if (result.status !== "success") return [];
-  const cypherData = result.result;
-  const rows = cypherData?.results || cypherData || [];
-  if (!Array.isArray(rows)) return [];
-  const results = [];
-  for (const row of rows.slice(0, maxResults)) {
-    const content = Object.values(row).map(
-      (v) => typeof v === "string" ? v : JSON.stringify(v)
-    ).join(" | ");
-    results.push({
-      source: "cypher",
-      content: content.slice(0, 500),
-      score: 0.7,
-      metadata: row
-    });
-  }
-  return results;
-}
-async function dualChannelRAG(query, options) {
-  const t0 = Date.now();
-  const maxResults = options?.maxResults ?? 10;
-  const depth = options?.cypherDepth ?? 2;
-  const complexity = classifyQuery(query);
-  logger.info({ query: query.slice(0, 80), complexity }, "Hybrid RAG: routing query");
-  const channels = options?.forceChannels ?? getChannelsForComplexity(complexity);
-  const channelPromises = [];
-  const channelsUsed = [];
-  if (channels.includes("graphrag")) {
-    channelPromises.push(callGraphRAG(query, maxResults));
-    channelsUsed.push("graphrag");
-  }
-  if (channels.includes("srag")) {
-    channelPromises.push(callSRAG(query, maxResults));
-    channelsUsed.push("srag");
-  }
-  if (channels.includes("cypher")) {
-    channelPromises.push(callCypher(query, maxResults, depth));
-    channelsUsed.push("cypher");
-  }
-  const channelResults = await Promise.allSettled(channelPromises);
-  let allResults = [];
-  for (const cr of channelResults) {
-    if (cr.status === "fulfilled") {
-      allResults.push(...cr.value);
-    }
-  }
-  if (allResults.filter((r) => r.source === "graphrag").length === 0 && !channels.includes("srag")) {
-    logger.info("Hybrid RAG: graphrag returned empty, falling back to srag");
-    const sragResults = await callSRAG(query, maxResults);
-    allResults.push(...sragResults);
-    channelsUsed.push("srag (fallback)");
-  }
-  let pollutionFiltered = 0;
-  allResults = allResults.filter((r) => {
-    if (isPolluted(r.content)) {
-      pollutionFiltered++;
-      logger.debug({ source: r.source, preview: r.content.slice(0, 60) }, "Filtered polluted result");
-      return false;
-    }
-    return true;
-  });
-  allResults.sort((a, b) => {
-    if (a.source === "graphrag" && a.metadata?.type === "synthesis") return -1;
-    if (b.source === "graphrag" && b.metadata?.type === "synthesis") return 1;
-    return b.score - a.score;
-  });
-  const topResults = allResults.slice(0, maxResults);
-  const merged = topResults.map(
-    (r, i) => `[${r.source.toUpperCase()} #${i + 1}${r.score >= 0.8 ? " \u2605" : ""}] ${r.content}`
-  ).join("\n\n");
-  const graphragCount = topResults.filter((r) => r.source === "graphrag").length;
-  const sragCount = topResults.filter((r) => r.source === "srag").length;
-  const cypherCount = topResults.filter((r) => r.source === "cypher").length;
-  const durationMs = Date.now() - t0;
-  logger.info({
-    query: query.slice(0, 60),
-    complexity,
-    graphragCount,
-    sragCount,
-    cypherCount,
-    pollutionFiltered,
-    ms: durationMs
-  }, "Hybrid RAG: complete");
-  return {
-    query,
-    results: topResults,
-    srag_count: sragCount,
-    cypher_count: cypherCount,
-    graphrag_count: graphragCount,
-    merged_context: merged,
-    duration_ms: durationMs,
-    route_strategy: complexity,
-    channels_used: channelsUsed,
-    pollution_filtered: pollutionFiltered
-  };
-}
-function getChannelsForComplexity(complexity) {
-  switch (complexity) {
-    case "simple":
-      return ["graphrag", "srag"];
-    case "multi_hop":
-      return ["graphrag", "cypher"];
-    case "structured":
-      return ["cypher", "graphrag"];
-  }
-}
-function buildCypherQuery(query, depth) {
-  const stopWords = /* @__PURE__ */ new Set(["the", "and", "for", "with", "that", "this", "from", "are", "was", "how", "what", "which", "where", "when", "why", "can", "does", "will", "not", "all", "has", "have", "been", "our", "their", "its"]);
-  const keywords = query.toLowerCase().replace(/[^a-zA-Z0-9æøåÆØÅ\s]/g, "").split(/\s+/).filter((w) => w.length >= 3 && !stopWords.has(w)).slice(0, 5);
-  if (keywords.length === 0) {
-    return "MATCH (n:StrategicInsight) RETURN n.title AS title, n.domain AS domain LIMIT 5";
-  }
-  const kwConditions = keywords.map(
-    (kw) => `toLower(coalesce(n.title, n.name, n.description, '')) CONTAINS '${kw}'`
-  ).join(" OR ");
-  return `MATCH (n) WHERE (n:StrategicInsight OR n:Pattern OR n:Lesson OR n:Knowledge OR n:Memory OR n:TDCDocument)
-AND (${kwConditions})
-WITH n, labels(n)[0] AS label
-OPTIONAL MATCH (n)-[r]-(m)
-RETURN label,
-       coalesce(n.title, n.name, n.filename) AS title,
-       substring(coalesce(n.description, n.content, n.value, ''), 0, 300) AS content,
-       type(r) AS rel,
-       labels(m)[0] AS connected_to
-LIMIT 15`;
-}
-
-// src/cognitive-proxy.ts
-init_config();
-var COGNITIVE_ROUTES = {
-  reason: "/reason",
-  analyze: "/cognitive/analyze",
-  plan: "/cognitive/plan",
-  learn: "/cognitive/learn",
-  fold: "/cognitive/fold",
-  enrich: "/cognitive/enrich"
-};
-function isRlmAvailable() {
-  return config.rlmUrl.length > 0;
-}
-async function callCognitive(action, params, timeoutMs) {
-  if (!config.rlmUrl) {
-    throw new Error("RLM Engine not configured (set RLM_URL)");
-  }
-  const path2 = COGNITIVE_ROUTES[action];
-  if (!path2) {
-    throw new Error(`Unknown cognitive action: ${action}. Valid: ${Object.keys(COGNITIVE_ROUTES).join(", ")}`);
-  }
-  const url = `${config.rlmUrl}${path2}`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs ?? 12e4);
-  try {
-    logger.debug({ action, url, agent: params.agent_id }, "Cognitive proxy call");
-    const p = params;
-    let body;
-    if (action === "analyze") {
-      body = {
-        task: p.task || params.prompt,
-        context: typeof p.context === "string" ? p.context : p.context || params.prompt,
-        analysis_dimensions: p.analysis_dimensions || ["general"],
-        agent_id: params.agent_id
-      };
-    } else if (action === "reason") {
-      body = {
-        task: p.task || params.prompt,
-        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
-        agent_id: params.agent_id,
-        depth: params.depth ?? 0
-      };
-    } else if (action === "plan") {
-      body = {
-        task: p.task || params.prompt,
-        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
-        constraints: p.constraints || [],
-        agent_id: params.agent_id
-      };
-    } else if (action === "fold") {
-      body = {
-        task: p.task || params.prompt,
-        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
-        agent_id: params.agent_id
-      };
-    } else {
-      body = {
-        prompt: params.prompt,
-        task: p.task || params.prompt,
-        context: p.context || params.prompt,
-        agent_id: params.agent_id,
-        depth: params.depth ?? 0,
-        mode: params.mode ?? "standard"
-      };
-    }
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal
-    });
-    clearTimeout(timer);
-    if (!res.ok) {
-      const errText = await res.text().catch(() => `HTTP ${res.status}`);
-      throw new Error(`RLM ${action} failed: ${errText}`);
-    }
-    const data = await res.json();
-    return data.result ?? data.answer ?? data.reasoning ?? data.plan ?? data;
-  } catch (err) {
-    clearTimeout(timer);
-    if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(`RLM ${action} timed out after ${timeoutMs ?? 12e4}ms`);
-    }
-    throw err;
-  }
-}
-async function getRlmHealth() {
-  if (!config.rlmUrl) return null;
-  try {
-    const res = await fetch(`${config.rlmUrl}/health`, { signal: AbortSignal.timeout(5e3) });
-    if (!res.ok) return { status: "unhealthy", http_status: res.status };
-    return await res.json();
-  } catch {
-    return { status: "unreachable" };
-  }
-}
+// src/tool-executor.ts
+init_dual_rag();
+init_cognitive_proxy();
+init_mcp_caller();
 
 // src/chain-engine.ts
+init_mcp_caller();
+init_cognitive_proxy();
 import { v4 as uuid3 } from "uuid";
+init_logger();
+init_redis();
 
 // src/routing-engine.ts
 import { v4 as uuid2 } from "uuid";
@@ -10853,6 +11255,8 @@ async function executeChain(def) {
 }
 
 // src/verification-gate.ts
+init_logger();
+init_mcp_caller();
 import { v4 as uuid4 } from "uuid";
 async function verifyChainOutput(chainOutput, config2) {
   const maxRetries = config2.max_retries ?? 3;
@@ -10937,6 +11341,7 @@ async function runChecksParallel(checks, chainOutput) {
 
 // src/investigate-chain.ts
 init_config();
+init_logger();
 function buildInvestigateChain(topic) {
   return {
     chain_id: `investigate-${Date.now().toString(36)}`,
@@ -11145,7 +11550,8 @@ async function runInvestigation(topic) {
 }
 
 // src/tool-executor.ts
-import { v4 as uuid5 } from "uuid";
+init_logger();
+import { v4 as uuid6 } from "uuid";
 
 // src/tool-registry.ts
 import { z } from "zod";
@@ -11379,6 +11785,19 @@ var TOOL_REGISTRY = [
         tool_name: z.string().describe("MCP tool for verification")
       })).optional().describe("Verification checks to run")
     })
+  }),
+  defineTool({
+    name: "generate_deliverable",
+    namespace: "assembly",
+    description: "Generate a consulting deliverable (report, roadmap, or assessment) from a natural language prompt. Uses knowledge graph + RAG to produce a structured, citation-backed document. Returns markdown with optional PDF.",
+    input: z.object({
+      prompt: z.string().describe("What the deliverable should cover (min 10 chars)"),
+      type: z.enum(["analysis", "roadmap", "assessment"]).describe("Deliverable type"),
+      format: z.enum(["pdf", "markdown"]).optional().describe("Output format (default: markdown)"),
+      max_sections: z.number().optional().describe("Max sections (2-8, default 5)")
+    }),
+    timeoutMs: 12e4,
+    outputDescription: "Deliverable with sections, citations, confidence scores, and markdown content"
   })
 ];
 function toOpenAITools() {
@@ -11525,7 +11944,7 @@ function buildToolFallback(toolName, error) {
   }
 }
 async function executeToolUnified(toolName, args, opts) {
-  const callId = opts?.call_id ?? uuid5();
+  const callId = opts?.call_id ?? uuid6();
   const t0 = Date.now();
   try {
     const rawResult = await executeToolByName(toolName, args);
@@ -11591,7 +12010,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher, params: args.params ?? {} },
-        callId: uuid5(),
+        callId: uuid6(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
@@ -11612,7 +12031,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher },
-        callId: uuid5(),
+        callId: uuid6(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Task query failed: ${result.error_message}`;
@@ -11624,7 +12043,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: args.tool_name,
         args: args.payload ?? {},
-        callId: uuid5(),
+        callId: uuid6(),
         timeoutMs: 3e4
       });
       if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
@@ -11632,8 +12051,8 @@ ${result.merged_context}`;
     }
     case "get_platform_health": {
       const [backendHealth, graphHealth] = await Promise.allSettled([
-        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid5(), timeoutMs: 1e4 }),
-        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid5(), timeoutMs: 1e4 })
+        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid6(), timeoutMs: 1e4 }),
+        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid6(), timeoutMs: 1e4 })
       ]);
       const parts = [];
       if (backendHealth.status === "fulfilled" && backendHealth.value.status === "success") {
@@ -11649,7 +12068,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: args.query },
-        callId: uuid5(),
+        callId: uuid6(),
         timeoutMs: 2e4
       });
       if (result.status !== "success") return `Document search failed: ${result.error_message}`;
@@ -11667,7 +12086,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issues",
         args: payload,
-        callId: uuid5(),
+        callId: uuid6(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
@@ -11683,7 +12102,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issue_get",
         args: { identifier },
-        callId: uuid5(),
+        callId: uuid6(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
@@ -11738,8 +12157,8 @@ Error: ${execution.error}` : "");
       if (!topic) return "Error: topic is required";
       const customCells = args.cells;
       const cells = customCells && customCells.length > 0 ? customCells : [
-        { type: "query", id: "q1", query: `MATCH (n) WHERE toLower(coalesce(n.title,'')) CONTAINS toLower('${topic.replace(/'/g, "\\'")}') OR toLower(coalesce(n.name,'')) CONTAINS toLower('${topic.replace(/'/g, "\\'")}') RETURN labels(n)[0] AS type, coalesce(n.title, n.name) AS name, n.status AS status LIMIT 20` },
-        { type: "query", id: "q2", query: `What are the key insights and patterns related to ${topic}?` },
+        { type: "query", id: "q1", query: `MATCH (n) WHERE toLower(coalesce(n.title,'')) CONTAINS toLower($topic) OR toLower(coalesce(n.name,'')) CONTAINS toLower($topic) RETURN labels(n)[0] AS type, coalesce(n.title, n.name) AS name, n.status AS status LIMIT 20`, params: { topic } },
+        { type: "query", id: "q2", query: `What are the key insights and patterns related to this topic?`, params: { topic } },
         { type: "insight", id: "i1", prompt: `Analyze the findings about "${topic}" and provide strategic consulting insights, key patterns, and recommendations.` },
         { type: "data", id: "d1", source_cell_id: "q1", visualization: "table" },
         { type: "action", id: "a1", recommendation: `Review the analysis of "${topic}" and determine next steps for the consulting engagement.` }
@@ -11796,6 +12215,34 @@ Markdown: /api/notebooks/${encodeURIComponent(nb.$id)}.md`;
         return JSON.stringify(result, null, 2).slice(0, 800);
       } catch (err) {
         return `Verification failed: ${err}`;
+      }
+    }
+    case "generate_deliverable": {
+      const prompt = args.prompt;
+      if (!prompt || prompt.length < 10) return "Error: prompt is required (min 10 chars)";
+      const type = args.type ?? "analysis";
+      if (!["analysis", "roadmap", "assessment"].includes(type)) return "Error: type must be analysis, roadmap, or assessment";
+      try {
+        const { generateDeliverable: generateDeliverable2 } = await Promise.resolve().then(() => (init_deliverable_engine(), deliverable_engine_exports));
+        const rawMax = args.max_sections;
+        const maxSections = typeof rawMax === "number" && Number.isInteger(rawMax) ? rawMax : void 0;
+        const result = await generateDeliverable2({
+          prompt,
+          type,
+          format: args.format ?? "markdown",
+          max_sections: maxSections
+        });
+        const summary = `Deliverable "${result.title}" \u2014 ${result.status} (${result.metadata.sections_count} sections, ${result.metadata.total_citations} citations, ${result.metadata.generation_ms}ms)`;
+        const preview = result.markdown.slice(0, 600);
+        return `${summary}
+
+ID: ${result.$id}
+URL: /api/deliverables/${encodeURIComponent(result.$id)}
+Markdown: /api/deliverables/${encodeURIComponent(result.$id)}/markdown
+
+${preview}...`;
+      } catch (err) {
+        return `Deliverable generation failed: ${err}`;
       }
     }
     default:
@@ -11969,10 +12416,12 @@ toolsRouter.get("/catalog", async (_req, res) => {
 
 // src/routes/chat.ts
 import { Router as Router3 } from "express";
+init_logger();
 init_config();
 
 // src/llm-proxy.ts
 init_config();
+init_logger();
 function getProviders() {
   const providers = {};
   if (config.deepseekApiKey) {
@@ -12247,6 +12696,7 @@ function listProviders() {
 }
 
 // src/routes/chat.ts
+init_dual_rag();
 async function mcpCall(tool, payload) {
   const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
     method: "POST",
@@ -12971,6 +13421,7 @@ chatRouter.get("/ws-stats", (_req, res) => {
 
 // src/routes/chains.ts
 import { Router as Router4 } from "express";
+init_logger();
 var chainsRouter = Router4();
 chainsRouter.post("/execute", async (req, res) => {
   const body = req.body;
@@ -13076,6 +13527,8 @@ chainsRouter.get("/", (_req, res) => {
 });
 
 // src/routes/cognitive.ts
+init_cognitive_proxy();
+init_logger();
 import { Router as Router5 } from "express";
 var cognitiveRouter = Router5();
 cognitiveRouter.post("/:action", async (req, res) => {
@@ -13131,14 +13584,18 @@ import { Router as Router8 } from "express";
 
 // src/cron-scheduler.ts
 import cron from "node-cron";
+init_logger();
+init_redis();
 
 // src/graph-self-correct.ts
-import { v4 as uuid6 } from "uuid";
+init_mcp_caller();
+init_logger();
+import { v4 as uuid7 } from "uuid";
 async function graphRead(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid6(),
+    callId: uuid7(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -13149,7 +13606,7 @@ async function graphWrite(cypher, params) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { parameters: params } : {} },
-    callId: uuid6(),
+    callId: uuid7(),
     timeoutMs: 15e3
   });
   return result.status === "success";
@@ -13358,7 +13815,10 @@ async function runSelfCorrect() {
 }
 
 // src/failure-harvester.ts
-import { v4 as uuid7 } from "uuid";
+init_redis();
+init_mcp_caller();
+init_logger();
+import { v4 as uuid8 } from "uuid";
 function categorizeFailure(error) {
   const lower = error.toLowerCase();
   if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) return "timeout";
@@ -13391,7 +13851,7 @@ async function harvestFailures(windowHours = 24) {
           const failedSteps = exec.results?.filter((r) => r.status === "error") ?? [];
           const errorMsg = exec.error ?? failedSteps.map((s) => String(s.output)).join("; ") ?? "unknown";
           events.push({
-            $id: `failure-event:${uuid7()}`,
+            $id: `failure-event:${uuid8()}`,
             execution_id: execId,
             chain_name: exec.name,
             category: categorizeFailure(errorMsg),
@@ -13437,7 +13897,7 @@ async function persistToGraph(events) {
             timestamp: evt.timestamp
           }
         },
-        callId: uuid7(),
+        callId: uuid8(),
         timeoutMs: 1e4
       });
       persisted++;
@@ -13457,7 +13917,7 @@ async function persistToGraph(events) {
           `,
           params: {}
         },
-        callId: uuid7(),
+        callId: uuid8(),
         timeoutMs: 1e4
       });
       await callMcpTool({
@@ -13470,7 +13930,7 @@ async function persistToGraph(events) {
           `,
           params: {}
         },
-        callId: uuid7(),
+        callId: uuid8(),
         timeoutMs: 1e4
       });
     } catch {
@@ -13526,7 +13986,10 @@ async function runFailureHarvest(windowHours = 24) {
 }
 
 // src/competitive-crawler.ts
-import { v4 as uuid8 } from "uuid";
+init_redis();
+init_mcp_caller();
+import { v4 as uuid9 } from "uuid";
+init_logger();
 var COMPETITOR_TARGETS = [
   {
     name: "Palantir AIP",
@@ -13626,7 +14089,7 @@ async function extractCapabilities(target) {
         const cap = line.replace(/^[\s\-\*]+/, "").trim();
         if (cap.length > 10 && cap.length < 200) {
           capabilities.push({
-            $id: `capability:${target.slug}:${uuid8().slice(0, 8)}`,
+            $id: `capability:${target.slug}:${uuid9().slice(0, 8)}`,
             competitor: target.name,
             capability: cap,
             category: categorizeCapability(cap),
@@ -13676,7 +14139,7 @@ async function persistCapabilities(capabilities) {
             extracted_at: cap.extracted_at
           }
         },
-        callId: uuid8(),
+        callId: uuid9(),
         timeoutMs: 1e4
       });
       persisted++;
@@ -13700,7 +14163,7 @@ async function analyzeGaps(capabilities) {
     const result = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: "MATCH (t:Tool) RETURN t.name AS name LIMIT 200" },
-      callId: uuid8(),
+      callId: uuid9(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -13765,8 +14228,11 @@ async function runCompetitiveCrawl() {
 }
 
 // src/routes/adoption.ts
+init_redis();
+init_logger();
+init_mcp_caller();
 import { Router as Router6 } from "express";
-import { v4 as uuid9 } from "uuid";
+import { v4 as uuid10 } from "uuid";
 var adoptionRouter = Router6();
 var REDIS_KEY3 = "orchestrator:adoption-metrics";
 var REDIS_TRENDS_KEY = "orchestrator:adoption-trends";
@@ -13854,7 +14320,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (c:Conversation) WHERE c.createdAt > datetime() - duration('P1D') RETURN count(c) AS count"
       },
-      callId: uuid9(),
+      callId: uuid10(),
       timeoutMs: 1e4
     }),
     // Count artifacts from last 24h
@@ -13863,7 +14329,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (a:AnalysisArtifact) WHERE a.createdAt > datetime() - duration('P1D') RETURN count(a) AS count"
       },
-      callId: uuid9(),
+      callId: uuid10(),
       timeoutMs: 1e4
     }),
     // Count tool calls from audit trail
@@ -13872,7 +14338,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (e:AuditEvent) WHERE e.timestamp > datetime() - duration('P1D') AND e.action = 'tool_call' RETURN count(e) AS count"
       },
-      callId: uuid9(),
+      callId: uuid10(),
       timeoutMs: 1e4
     })
   ]);
@@ -13977,7 +14443,7 @@ SET m.conversations_24h = $conversations,
           featuresPct: snapshot.features_pct
         }
       },
-      callId: uuid9(),
+      callId: uuid10(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -14019,8 +14485,11 @@ adoptionRouter.get("/trends", async (req, res) => {
 });
 
 // src/routes/loose-ends.ts
+init_redis();
+init_logger();
+init_mcp_caller();
 import { Router as Router7 } from "express";
-import { v4 as uuid10 } from "uuid";
+import { v4 as uuid11 } from "uuid";
 var looseEndsRouter = Router7();
 var REDIS_KEY4 = "orchestrator:loose-ends:latest";
 var REDIS_HISTORY = "orchestrator:loose-ends:history";
@@ -14034,7 +14503,7 @@ AND NOT (b)<-[:COMPOSED_OF]-(:Assembly)
 RETURN b.id AS id, b.name AS name, b.domain AS domain, labels(b)[0] AS type
 LIMIT 25`,
     buildFinding: (records) => records.map((r) => ({
-      id: `orphan-${r.id ?? uuid10().slice(0, 8)}`,
+      id: `orphan-${r.id ?? uuid11().slice(0, 8)}`,
       severity: "warning",
       category: "orphan_block",
       title: `Orphan block: ${r.name ?? r.id}`,
@@ -14052,7 +14521,7 @@ AND NOT (a)<-[:BASED_ON]-(:Decision)
 RETURN a.id AS id, a.name AS name, a.composite AS score
 LIMIT 15`,
     buildFinding: (records) => records.map((r) => ({
-      id: `dangling-asm-${r.id ?? uuid10().slice(0, 8)}`,
+      id: `dangling-asm-${r.id ?? uuid11().slice(0, 8)}`,
       severity: "warning",
       category: "dangling_assembly",
       title: `Accepted assembly without decision: ${r.name ?? r.id}`,
@@ -14070,7 +14539,7 @@ AND NOT (d)-[:DERIVES_FROM]->()
 RETURN d.id AS id, d.title AS title, d.certified_at AS certified_at
 LIMIT 10`,
     buildFinding: (records) => records.map((r) => ({
-      id: `no-lineage-${r.id ?? uuid10().slice(0, 8)}`,
+      id: `no-lineage-${r.id ?? uuid11().slice(0, 8)}`,
       severity: "critical",
       category: "missing_lineage",
       title: `Decision without lineage: ${r.title ?? r.id}`,
@@ -14088,7 +14557,7 @@ AND NOT (n)-[]-()
 RETURN n.id AS id, labels(n)[0] AS type, n.domain AS domain, n.insight AS title
 LIMIT 20`,
     buildFinding: (records) => records.map((r) => ({
-      id: `disconnected-${r.id ?? uuid10().slice(0, 8)}`,
+      id: `disconnected-${r.id ?? uuid11().slice(0, 8)}`,
       severity: "info",
       category: "disconnected_node",
       title: `Disconnected ${r.type}: ${(r.title ?? r.id ?? "").toString().slice(0, 60)}`,
@@ -14106,7 +14575,7 @@ AND d.created_at < datetime() - duration('P7D')
 RETURN d.id AS id, d.title AS title, d.created_at AS created_at
 LIMIT 10`,
     buildFinding: (records) => records.map((r) => ({
-      id: `stale-decision-${r.id ?? uuid10().slice(0, 8)}`,
+      id: `stale-decision-${r.id ?? uuid11().slice(0, 8)}`,
       severity: "warning",
       category: "unresolved_decision",
       title: `Stale draft decision: ${r.title ?? r.id}`,
@@ -14117,7 +14586,7 @@ LIMIT 10`,
   }
 ];
 async function runLooseEndScan() {
-  const scanId = uuid10();
+  const scanId = uuid11();
   const t0 = Date.now();
   const findings = [];
   logger.info({ scan_id: scanId }, "Loose-end scan started");
@@ -14127,7 +14596,7 @@ async function runLooseEndScan() {
         const result = await callMcpTool({
           toolName: "graph.read_cypher",
           args: { query: dq.cypher },
-          callId: uuid10(),
+          callId: uuid11(),
           timeoutMs: 15e3
         });
         if (result.status !== "success") return [];
@@ -14188,7 +14657,7 @@ SET s.scanned_at = datetime(), s.duration_ms = $duration,
           total: summary.total
         }
       },
-      callId: uuid10(),
+      callId: uuid11(),
       timeoutMs: 1e4
     });
   } catch {
@@ -15044,9 +15513,11 @@ cronRouter.delete("/:id", (req, res) => {
 
 // src/routes/dashboard.ts
 import { Router as Router10 } from "express";
+init_cognitive_proxy();
 
 // src/routes/openclaw.ts
 init_config();
+init_logger();
 import { Router as Router9 } from "express";
 var openclawRouter = Router9();
 var healthStatus = {
@@ -15222,6 +15693,7 @@ openclawRouter.all("/proxy/*", async (req, res) => {
 
 // src/routes/dashboard.ts
 init_config();
+init_redis();
 var dashboardRouter = Router10();
 var CACHE_KEY = "orchestrator:dashboard-cache";
 var CACHE_TTL = 15;
@@ -15307,6 +15779,7 @@ dashboardRouter.get("/data", async (_req, res) => {
 
 // src/routes/llm.ts
 import { Router as Router11 } from "express";
+init_logger();
 var llmRouter = Router11();
 llmRouter.get("/providers", (_req, res) => {
   res.json({ success: true, data: { providers: listProviders() } });
@@ -15401,9 +15874,11 @@ llmRouter.post("/conversation", async (req, res) => {
 import { Router as Router12 } from "express";
 
 // src/audit.ts
+init_redis();
+init_logger();
 var REDIS_KEY5 = "orchestrator:audit";
 var MAX_ENTRIES = 1e3;
-var TTL_SECONDS2 = 30 * 24 * 3600;
+var TTL_SECONDS3 = 30 * 24 * 3600;
 var memoryAudit = [];
 async function logAudit(entry) {
   try {
@@ -15412,7 +15887,7 @@ async function logAudit(entry) {
       if (redis2) {
         await redis2.lpush(REDIS_KEY5, JSON.stringify(entry));
         await redis2.ltrim(REDIS_KEY5, 0, MAX_ENTRIES - 1);
-        await redis2.expire(REDIS_KEY5, TTL_SECONDS2);
+        await redis2.expire(REDIS_KEY5, TTL_SECONDS3);
         return;
       }
     }
@@ -15495,6 +15970,8 @@ auditRouter.get("/log", async (req, res) => {
 
 // src/routes/knowledge.ts
 init_config();
+init_redis();
+init_logger();
 import { Router as Router13 } from "express";
 var knowledgeRouter = Router13();
 var FEED_CACHE_KEY = "orchestrator:knowledge-feed";
@@ -15653,18 +16130,20 @@ knowledgeRouter.get("/briefing", async (_req, res) => {
 });
 
 // src/routes/artifacts.ts
+init_redis();
+init_logger();
 import { Router as Router14 } from "express";
 import { randomUUID } from "crypto";
 var artifactRouter = Router14();
 var ARTIFACT_PREFIX = "orchestrator:artifact:";
 var ARTIFACT_INDEX = "orchestrator:artifacts:index";
-var TTL_SECONDS3 = 2592e3;
+var TTL_SECONDS4 = 2592e3;
 async function storeArtifact(artifact) {
   const redis2 = getRedis();
   if (!redis2) return false;
   const key = `${ARTIFACT_PREFIX}${artifact.$id}`;
   try {
-    await redis2.set(key, JSON.stringify(artifact), "EX", TTL_SECONDS3);
+    await redis2.set(key, JSON.stringify(artifact), "EX", TTL_SECONDS4);
     await redis2.sadd(ARTIFACT_INDEX, artifact.$id);
     return true;
   } catch (err) {
@@ -15977,19 +16456,23 @@ async function renderHtml(_req, res, id) {
 }
 
 // src/routes/notebooks.ts
+init_redis();
+init_logger();
+init_mcp_caller();
+init_cognitive_proxy();
 import { Router as Router15 } from "express";
 import { randomUUID as randomUUID2 } from "crypto";
-import { v4 as uuid11 } from "uuid";
+import { v4 as uuid12 } from "uuid";
 var notebookRouter = Router15();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
-var TTL_SECONDS4 = 2592e3;
+var TTL_SECONDS5 = 2592e3;
 async function storeNotebook(notebook) {
   const redis2 = getRedis();
   if (!redis2) return false;
   const key = `${NOTEBOOK_PREFIX}${notebook.$id}`;
   try {
-    await redis2.set(key, JSON.stringify(notebook), "EX", TTL_SECONDS4);
+    await redis2.set(key, JSON.stringify(notebook), "EX", TTL_SECONDS5);
     await redis2.sadd(NOTEBOOK_INDEX, notebook.$id);
     return true;
   } catch (err) {
@@ -16019,7 +16502,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query, params: {} },
-        callId: uuid11(),
+        callId: uuid12(),
         timeoutMs: 15e3
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -16027,7 +16510,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "kg_rag.query",
         args: { question: query, max_evidence: 10 },
-        callId: uuid11(),
+        callId: uuid12(),
         timeoutMs: 2e4
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -16232,9 +16715,11 @@ async function renderNotebookMarkdown(_req, res, id) {
 }
 
 // src/routes/drill.ts
+init_redis();
+init_config();
+init_logger();
 import { Router as Router16 } from "express";
 import { randomUUID as randomUUID3 } from "crypto";
-init_config();
 var drillRouter = Router16();
 var DRILL_PREFIX = "orchestrator:drill:";
 var SESSION_TTL = 3600;
@@ -16574,9 +17059,12 @@ function trendArrow(trend) {
 }
 
 // src/routes/monitor.ts
+init_mcp_caller();
 import { Router as Router17 } from "express";
 
 // src/context-compress.ts
+init_cognitive_proxy();
+init_logger();
 var DEFAULT_MAX_TOKENS = 2e3;
 var AVG_CHARS_PER_TOKEN = 4;
 async function compressContext(content, options) {
@@ -16695,13 +17183,15 @@ ${compressed}`,
 }
 
 // src/routes/monitor.ts
-import { v4 as uuid12 } from "uuid";
+init_cognitive_proxy();
+init_logger();
+import { v4 as uuid13 } from "uuid";
 var monitorRouter = Router17();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid12(),
+    callId: uuid13(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];
@@ -16913,18 +17403,22 @@ monitorRouter.post("/compress", async (req, res) => {
 });
 
 // src/routes/assembly.ts
+init_redis();
+init_logger();
+init_mcp_caller();
+init_cognitive_proxy();
 import { Router as Router18 } from "express";
-import { v4 as uuid13 } from "uuid";
+import { v4 as uuid14 } from "uuid";
 var assemblyRouter = Router18();
-var REDIS_PREFIX = "orchestrator:assembly:";
-var REDIS_INDEX = "orchestrator:assemblies:index";
-var TTL_SECONDS5 = 2592e3;
+var REDIS_PREFIX2 = "orchestrator:assembly:";
+var REDIS_INDEX2 = "orchestrator:assemblies:index";
+var TTL_SECONDS6 = 2592e3;
 async function storeAssembly(assembly) {
   const redis2 = getRedis();
   if (!redis2) return false;
   try {
-    await redis2.set(`${REDIS_PREFIX}${assembly.$id}`, JSON.stringify(assembly), "EX", TTL_SECONDS5);
-    await redis2.sadd(REDIS_INDEX, assembly.$id);
+    await redis2.set(`${REDIS_PREFIX2}${assembly.$id}`, JSON.stringify(assembly), "EX", TTL_SECONDS6);
+    await redis2.sadd(REDIS_INDEX2, assembly.$id);
     return true;
   } catch (err) {
     logger.warn({ err: String(err) }, "Redis store failed for assembly");
@@ -16935,7 +17429,7 @@ async function loadAssembly(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX2}${id}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -16945,7 +17439,7 @@ async function listAllIds2() {
   const redis2 = getRedis();
   if (!redis2) return [];
   try {
-    return await redis2.smembers(REDIS_INDEX);
+    return await redis2.smembers(REDIS_INDEX2);
   } catch {
     return [];
   }
@@ -16978,7 +17472,7 @@ ORDER BY b.domain, b.name LIMIT 50`;
     const graphResult = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params },
-      callId: uuid13(),
+      callId: uuid14(),
       timeoutMs: 15e3
     });
     if (graphResult.status === "success" && graphResult.result) {
@@ -17044,7 +17538,7 @@ Reply as JSON:
   const assemblies = [];
   const now = (/* @__PURE__ */ new Date()).toISOString();
   for (const candidate of analysis.candidates.slice(0, maxCandidates)) {
-    const assemblyId = `widgetdc:assembly:${uuid13()}`;
+    const assemblyId = `widgetdc:assembly:${uuid14()}`;
     const selectedBlocks = blocks.filter((b) => candidate.block_ids.includes(b.block_id));
     const conflictCount = candidate.conflicts?.length ?? 0;
     const coherence = Math.max(0, Math.min(1, candidate.coherence ?? 0.5));
@@ -17103,7 +17597,7 @@ MERGE (a)-[:COMPOSED_OF]->(b)`,
             blockIds: selectedBlocks.map((b) => b.block_id)
           }
         },
-        callId: uuid13(),
+        callId: uuid14(),
         timeoutMs: 1e4
       });
     } catch (err) {
@@ -17139,7 +17633,7 @@ assemblyRouter.get("/", async (req, res) => {
   try {
     const pipeline = redis2.pipeline();
     for (const id of allIds) {
-      pipeline.get(`${REDIS_PREFIX}${id}`);
+      pipeline.get(`${REDIS_PREFIX2}${id}`);
     }
     const results = await pipeline.exec();
     if (results) {
@@ -17193,7 +17687,7 @@ assemblyRouter.put("/:id", async (req, res) => {
         query: "MATCH (a:Assembly {id: $id}) SET a.status = $status, a.updated_at = datetime()",
         params: { id: assembly.$id, status: assembly.status }
       },
-      callId: uuid13(),
+      callId: uuid14(),
       timeoutMs: 5e3
     });
   } catch {
@@ -17202,18 +17696,22 @@ assemblyRouter.put("/:id", async (req, res) => {
 });
 
 // src/routes/decisions.ts
+init_redis();
+init_logger();
+init_mcp_caller();
+init_cognitive_proxy();
 import { Router as Router19 } from "express";
-import { v4 as uuid14 } from "uuid";
+import { v4 as uuid15 } from "uuid";
 var decisionsRouter = Router19();
-var REDIS_PREFIX2 = "orchestrator:decision:";
-var REDIS_INDEX2 = "orchestrator:decisions:index";
-var TTL_SECONDS6 = 7776e3;
+var REDIS_PREFIX3 = "orchestrator:decision:";
+var REDIS_INDEX3 = "orchestrator:decisions:index";
+var TTL_SECONDS7 = 7776e3;
 async function storeDecision(decision) {
   const redis2 = getRedis();
   if (!redis2) return false;
   try {
-    await redis2.set(`${REDIS_PREFIX2}${decision.$id}`, JSON.stringify(decision), "EX", TTL_SECONDS6);
-    await redis2.sadd(REDIS_INDEX2, decision.$id);
+    await redis2.set(`${REDIS_PREFIX3}${decision.$id}`, JSON.stringify(decision), "EX", TTL_SECONDS7);
+    await redis2.sadd(REDIS_INDEX3, decision.$id);
     return true;
   } catch (err) {
     logger.warn({ err: String(err) }, "Redis store failed for decision");
@@ -17224,7 +17722,7 @@ async function loadDecision(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX2}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX3}${id}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -17234,7 +17732,7 @@ async function listAllIds3() {
   const redis2 = getRedis();
   if (!redis2) return [];
   try {
-    return await redis2.smembers(REDIS_INDEX2);
+    return await redis2.smembers(REDIS_INDEX3);
   } catch {
     return [];
   }
@@ -17256,7 +17754,7 @@ RETURN a.id AS asm_id, a.name AS asm_name, a.created_at AS asm_ts,
 ORDER BY b.name`,
         params: { assemblyId }
       },
-      callId: uuid14(),
+      callId: uuid15(),
       timeoutMs: 15e3
     });
     if (result.status === "success") {
@@ -17315,7 +17813,7 @@ decisionsRouter.post("/certify", async (req, res) => {
   const assemblyId = String(body.assembly_id);
   const title = String(body.title);
   const now = (/* @__PURE__ */ new Date()).toISOString();
-  const decisionId = `widgetdc:decision:${uuid14()}`;
+  const decisionId = `widgetdc:decision:${uuid15()}`;
   const lineageChain = await buildLineageChain(assemblyId);
   let rationale = String(body.rationale ?? "");
   let summary = String(body.summary ?? "");
@@ -17418,7 +17916,7 @@ CREATE (d)-[:CERTIFIED_BY_EVIDENCE]->(e)`,
           // Cap for query size
         }
       },
-      callId: uuid14(),
+      callId: uuid15(),
       timeoutMs: 15e3
     });
   } catch (err) {
@@ -17452,7 +17950,7 @@ decisionsRouter.get("/", async (req, res) => {
   try {
     const pipeline = redis2.pipeline();
     for (const id of allIds) {
-      pipeline.get(`${REDIS_PREFIX2}${id}`);
+      pipeline.get(`${REDIS_PREFIX3}${id}`);
     }
     const results = await pipeline.exec();
     if (results) {
@@ -17519,6 +18017,7 @@ decisionsRouter.get("/:id/lineage", async (req, res) => {
 
 // src/routes/s1-s4.ts
 import { Router as Router20 } from "express";
+init_logger();
 var s1s4Router = Router20();
 s1s4Router.post("/trigger", async (req, res) => {
   const { url, source_type, topic, weights } = req.body;
@@ -17585,6 +18084,7 @@ s1s4Router.post("/trigger", async (req, res) => {
 
 // src/auth.ts
 init_config();
+init_logger();
 function requireApiKey(req, res, next) {
   if (!config.orchestratorApiKey) {
     next();
@@ -17605,7 +18105,12 @@ function requireApiKey(req, res, next) {
   });
 }
 
+// src/index.ts
+init_cognitive_proxy();
+
 // src/state-machine.ts
+init_logger();
+init_redis();
 var REDIS_FSM_PREFIX = "orchestrator:fsm:";
 async function listPlans() {
   const redis2 = getRedis();
@@ -17624,9 +18129,11 @@ async function listPlans() {
 }
 
 // src/harvest-pipeline.ts
-import { v4 as uuid15 } from "uuid";
+init_logger();
+init_mcp_caller();
+import { v4 as uuid16 } from "uuid";
 async function extract(domain) {
-  const callId = `harvest-extract-${uuid15().substring(0, 8)}`;
+  const callId = `harvest-extract-${uuid16().substring(0, 8)}`;
   try {
     const result = await callMcpTool({
       toolName: "srag.query",
@@ -17652,7 +18159,7 @@ function generalize(items, domain) {
     if (content.length > 2e3 || name.toLowerCase().includes("framework")) tier = "framework";
     else if (content.length > 500 || name.toLowerCase().includes("template")) tier = "template";
     return {
-      id: `harvest-${uuid15().substring(0, 12)}`,
+      id: `harvest-${uuid16().substring(0, 12)}`,
       name,
       tier,
       description: content.substring(0, 300),
@@ -17669,7 +18176,7 @@ function generalize(items, domain) {
 }
 async function store(components) {
   if (components.length === 0) return 0;
-  const callId = `harvest-store-${uuid15().substring(0, 8)}`;
+  const callId = `harvest-store-${uuid16().substring(0, 8)}`;
   const labelMap = {
     framework: "Framework",
     template: "Template",
@@ -17721,7 +18228,7 @@ async function verify(components) {
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: `${comp.tier} for ${comp.industries[0]}: ${comp.name}` },
-        callId: `harvest-verify-${uuid15().substring(0, 8)}`,
+        callId: `harvest-verify-${uuid16().substring(0, 8)}`,
         timeoutMs: 15e3
       });
       const resultStr = JSON.stringify(result).toLowerCase();
@@ -17772,8 +18279,9 @@ async function runFullHarvest() {
 
 // src/routes/openai-compat.ts
 import { Router as Router21 } from "express";
+init_logger();
 init_config();
-import { v4 as uuid16 } from "uuid";
+import { v4 as uuid17 } from "uuid";
 var MAX_TOOL_ROUNDS = 2;
 var MAX_TOOL_ROUNDS_ASSISTANT = 4;
 var TOOL_CATEGORIES = [
@@ -17983,7 +18491,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     return;
   }
   const { model, messages, stream, temperature, max_tokens } = req.body;
-  const requestId = `chatcmpl-${uuid16().substring(0, 12)}`;
+  const requestId = `chatcmpl-${uuid17().substring(0, 12)}`;
   const assistant = ASSISTANT_MAP.get(model);
   const resolvedModel = assistant ? assistant.baseModel : model;
   const mapping = MODEL_TO_PROVIDER[resolvedModel] || MODEL_TO_PROVIDER["gemini-flash"];
@@ -18131,6 +18639,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
 });
 
 // src/routes/prompt-generator.ts
+init_logger();
 import { Router as Router22 } from "express";
 var promptGeneratorRouter = Router22();
 var intentRules = [
@@ -18941,8 +19450,10 @@ openapiRouter.use("/docs", swaggerUi.serve, swaggerUi.setup(spec, {
 
 // src/routes/mcp-gateway.ts
 import { Router as Router24 } from "express";
+init_mcp_caller();
 init_config();
-import { v4 as uuid17 } from "uuid";
+init_logger();
+import { v4 as uuid18 } from "uuid";
 var mcpGatewayRouter = Router24();
 var backendToolsCache = [];
 var backendToolsCacheTime = 0;
@@ -19024,7 +19535,7 @@ async function handleToolsCall(id, params) {
   if (isOrchestratorTool) {
     try {
       const results = await executeToolCalls([{
-        id: uuid17(),
+        id: uuid18(),
         function: { name: toolName, arguments: JSON.stringify(args) }
       }]);
       const result = results[0];
@@ -19052,7 +19563,7 @@ async function handleToolsCall(id, params) {
     const mcpResult = await callMcpTool({
       toolName: backendName,
       args,
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 3e4
     });
     if (mcpResult.status !== "success") {
@@ -19156,7 +19667,8 @@ mcpGatewayRouter.delete("/", (_req, res) => {
 
 // src/routes/tool-gateway.ts
 import { Router as Router25 } from "express";
-import { v4 as uuid18 } from "uuid";
+init_logger();
+import { v4 as uuid19 } from "uuid";
 var toolGatewayRouter = Router25();
 toolGatewayRouter.post("/:name", async (req, res) => {
   const { name } = req.params;
@@ -19173,7 +19685,7 @@ toolGatewayRouter.post("/:name", async (req, res) => {
     });
     return;
   }
-  const callId = req.body?.call_id ?? uuid18();
+  const callId = req.body?.call_id ?? uuid19();
   const args = req.body ?? {};
   logger.info({ tool: name, call_id: callId }, "REST tool gateway call");
   const result = await executeToolUnified(name, args, {
@@ -19209,6 +19721,7 @@ toolGatewayRouter.get("/", (_req, res) => {
 });
 
 // src/agent-seeds.ts
+init_logger();
 var AGENT_SEEDS = [
   {
     agent_id: "omega",
@@ -19459,6 +19972,8 @@ function seedAgents() {
 
 // src/routes/failures.ts
 import { Router as Router26 } from "express";
+init_redis();
+init_logger();
 var failuresRouter = Router26();
 failuresRouter.get("/summary", async (_req, res) => {
   try {
@@ -19499,6 +20014,8 @@ failuresRouter.post("/harvest", async (req, res) => {
 
 // src/routes/competitive.ts
 import { Router as Router27 } from "express";
+init_redis();
+init_logger();
 var competitiveRouter = Router27();
 var crawlInProgress = false;
 var lastCrawlAt = 0;
@@ -19563,15 +20080,18 @@ competitiveRouter.get("/targets", (_req, res) => {
 });
 
 // src/routes/fold.ts
+init_cognitive_proxy();
+init_redis();
+init_logger();
 import { Router as Router28 } from "express";
 var foldRouter = Router28();
 var DAILY_LIMIT = 100;
-var REDIS_PREFIX3 = "caas:usage:";
+var REDIS_PREFIX4 = "caas:usage:";
 async function getUsageCount(apiKey) {
   const redis2 = getRedis();
   if (!redis2) return 0;
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  const key = `${REDIS_PREFIX3}${today}:${apiKey}`;
+  const key = `${REDIS_PREFIX4}${today}:${apiKey}`;
   const count = await redis2.get(key);
   return parseInt(count ?? "0", 10);
 }
@@ -19579,7 +20099,7 @@ async function incrementUsage(apiKey) {
   const redis2 = getRedis();
   if (!redis2) return;
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  const key = `${REDIS_PREFIX3}${today}:${apiKey}`;
+  const key = `${REDIS_PREFIX4}${today}:${apiKey}`;
   await redis2.incr(key);
   await redis2.expire(key, 86400 * 2);
 }
@@ -19721,12 +20241,14 @@ foldRouter.get("/usage", async (req, res) => {
 import { Router as Router29 } from "express";
 
 // src/graph-hygiene.ts
-import { v4 as uuid19 } from "uuid";
+init_mcp_caller();
+init_logger();
+import { v4 as uuid20 } from "uuid";
 async function graphRead3(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid19(),
+    callId: uuid20(),
     timeoutMs: 3e4
   });
   if (result.status !== "success") return [];
@@ -19737,7 +20259,7 @@ async function graphWrite2(cypher, params) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {} },
-    callId: uuid19(),
+    callId: uuid20(),
     timeoutMs: 6e4
   });
   return result.status === "success";
@@ -19946,6 +20468,7 @@ async function runGraphHygiene() {
 }
 
 // src/routes/graph-hygiene.ts
+init_logger();
 var graphHygieneRouter = Router29();
 var hygieneInProgress = false;
 graphHygieneRouter.post("/run", async (_req, res) => {
@@ -19989,6 +20512,143 @@ graphHygieneRouter.post("/fix/:op", async (req, res) => {
     logger.error({ err: String(err), op }, "Graph hygiene operation failed");
     res.status(500).json({ success: false, error: { code: "OPERATION_FAILED", message: "Operation failed. Check server logs.", status_code: 500 } });
   }
+});
+
+// src/routes/deliverables.ts
+init_deliverable_engine();
+init_logger();
+import { Router as Router30 } from "express";
+var deliverablesRouter = Router30();
+var VALID_TYPES = ["analysis", "roadmap", "assessment"];
+var VALID_FORMATS = ["pdf", "markdown"];
+var rateLimitMap2 = /* @__PURE__ */ new Map();
+var RATE_LIMIT = 10;
+var RATE_WINDOW_MS = 6e4;
+function isRateLimited(key) {
+  const now = Date.now();
+  if (rateLimitMap2.size > 50) {
+    for (const [k, v] of rateLimitMap2) {
+      if (now - v.windowStart > RATE_WINDOW_MS * 2) rateLimitMap2.delete(k);
+    }
+  }
+  const entry = rateLimitMap2.get(key);
+  if (!entry || now - entry.windowStart > RATE_WINDOW_MS) {
+    rateLimitMap2.set(key, { count: 1, windowStart: now });
+    return false;
+  }
+  entry.count++;
+  return entry.count > RATE_LIMIT;
+}
+deliverablesRouter.post("/generate", async (req, res) => {
+  const apiKey = (req.headers.authorization ?? "").replace("Bearer ", "") || "anon";
+  if (isRateLimited(apiKey)) {
+    res.status(429).json({
+      success: false,
+      error: { code: "RATE_LIMITED", message: `Rate limit exceeded (${RATE_LIMIT} req/min)`, status_code: 429 }
+    });
+    return;
+  }
+  const body = req.body;
+  const prompt = body.prompt;
+  const type = body.type;
+  const format = body.format ?? "markdown";
+  const rawMaxSections = body.max_sections;
+  const maxSections = typeof rawMaxSections === "number" && Number.isInteger(rawMaxSections) ? rawMaxSections : void 0;
+  if (!prompt || typeof prompt !== "string" || prompt.length < 10) {
+    res.status(400).json({
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: "prompt is required (min 10 chars)", status_code: 400 }
+    });
+    return;
+  }
+  if (!type || !VALID_TYPES.includes(type)) {
+    res.status(400).json({
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: `type must be one of: ${VALID_TYPES.join(", ")}`, status_code: 400 }
+    });
+    return;
+  }
+  if (format && !VALID_FORMATS.includes(format)) {
+    res.status(400).json({
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: `format must be one of: ${VALID_FORMATS.join(", ")}`, status_code: 400 }
+    });
+    return;
+  }
+  const request = {
+    prompt: prompt.slice(0, 2e3),
+    type,
+    format,
+    max_sections: maxSections
+  };
+  logger.info({ prompt: prompt.slice(0, 80), type, format }, "Deliverable generation requested");
+  try {
+    const deliverable = await generateDeliverable(request);
+    res.json({
+      success: true,
+      data: {
+        deliverable_id: deliverable.$id,
+        title: deliverable.title,
+        status: deliverable.status,
+        format: deliverable.format,
+        sections_count: deliverable.metadata.sections_count,
+        total_citations: deliverable.metadata.total_citations,
+        avg_confidence: deliverable.metadata.avg_confidence,
+        generation_ms: deliverable.metadata.generation_ms,
+        url: `/api/deliverables/${encodeURIComponent(deliverable.$id)}`,
+        markdown_url: `/api/deliverables/${encodeURIComponent(deliverable.$id)}/markdown`
+      }
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const status = message.includes("Too many concurrent") ? 429 : 500;
+    res.status(status).json({
+      success: false,
+      error: { code: status === 429 ? "RATE_LIMITED" : "GENERATION_FAILED", message, status_code: status }
+    });
+  }
+});
+deliverablesRouter.get("/", async (_req, res) => {
+  const limit = Math.min(Math.max(parseInt(String(_req.query.limit ?? "20")), 1), 100);
+  const deliverables = await listDeliverables(limit);
+  res.json({
+    success: true,
+    data: deliverables.map((d) => ({
+      deliverable_id: d.$id,
+      title: d.title,
+      type: d.type,
+      status: d.status,
+      sections_count: d.metadata.sections_count,
+      total_citations: d.metadata.total_citations,
+      generation_ms: d.metadata.generation_ms,
+      created_at: d.created_at
+    })),
+    total: deliverables.length
+  });
+});
+deliverablesRouter.get("/:id", async (req, res) => {
+  const deliverable = await getDeliverable(decodeURIComponent(req.params.id));
+  if (!deliverable) {
+    res.status(404).json({
+      success: false,
+      error: { code: "NOT_FOUND", message: "Deliverable not found", status_code: 404 }
+    });
+    return;
+  }
+  res.json({ success: true, data: deliverable });
+});
+deliverablesRouter.get("/:id/markdown", async (req, res) => {
+  const deliverable = await getDeliverable(decodeURIComponent(req.params.id));
+  if (!deliverable) {
+    res.status(404).json({
+      success: false,
+      error: { code: "NOT_FOUND", message: "Deliverable not found", status_code: 404 }
+    });
+    return;
+  }
+  res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${deliverable.title.replace(/[^a-zA-Z0-9-_ ]/g, "")}.md"`);
+  res.send(deliverable.markdown);
 });
 
 // src/index.ts
@@ -20071,6 +20731,7 @@ app.use("/api/failures", requireApiKey, failuresRouter);
 app.use("/api/competitive", requireApiKey, competitiveRouter);
 app.use("/api/fold", requireApiKey, foldRouter);
 app.use("/api/graph-hygiene", requireApiKey, graphHygieneRouter);
+app.use("/api/deliverables", requireApiKey, deliverablesRouter);
 app.use("/api/tools", requireApiKey, toolGatewayRouter);
 app.use("/api/prompt-generator", promptGeneratorRouter);
 app.use(openapiRouter);
