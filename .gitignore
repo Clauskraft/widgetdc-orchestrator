@@ -7,3 +7,5 @@ logs/
 .claude/worktrees
 pipelines/__pycache__/
 _abi-extract.tmp.*
+.playwright-mcp/
+test-screenshots/

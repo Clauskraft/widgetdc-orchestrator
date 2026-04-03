@@ -23666,6 +23666,7 @@ deliverablesRouter.get("/:id/markdown", async (req, res) => {
 
 // src/routes/similarity.ts
 init_similarity_engine();
+init_compound_hooks();
 init_logger();
 import { Router as Router31 } from "express";
 var similarityRouter = Router31();
@@ -23733,6 +23734,30 @@ similarityRouter.post("/search", async (req, res) => {
       error: { code: "SIMILARITY_FAILED", message, status_code: 500 }
     });
   }
+});
+similarityRouter.post("/select", async (req, res) => {
+  const body = req.body;
+  const queryId = body.query_id;
+  const selectedMatchId = body.selected_match_id;
+  const rejectedMatchIds = body.rejected_match_ids;
+  if (!selectedMatchId || typeof selectedMatchId !== "string") {
+    res.status(400).json({
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: "selected_match_id is required", status_code: 400 }
+    });
+    return;
+  }
+  if (!Array.isArray(rejectedMatchIds) || rejectedMatchIds.length === 0) {
+    res.status(400).json({
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: "rejected_match_ids must be a non-empty array", status_code: 400 }
+    });
+    return;
+  }
+  logger.info({ queryId, selected: selectedMatchId, rejected: rejectedMatchIds.length }, "Similarity preference received");
+  hookSimilarityPreference(queryId || "unknown", selectedMatchId, rejectedMatchIds).catch(() => {
+  });
+  res.json({ success: true, data: { message: "Preference logged", selected: selectedMatchId, rejected_count: rejectedMatchIds.length } });
 });
 similarityRouter.get("/client/:id", async (req, res) => {
   const clientId = decodeURIComponent(req.params.id);

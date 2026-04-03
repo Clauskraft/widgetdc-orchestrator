@@ -11,6 +11,7 @@ import {
   type SimilarityRequest,
   type SimilarityDimension,
 } from '../similarity-engine.js'
+import { hookSimilarityPreference } from '../compound-hooks.js'
 import { logger } from '../logger.js'
 
 export const similarityRouter = Router()
@@ -87,6 +88,37 @@ similarityRouter.post('/search', async (req: Request, res: Response) => {
       error: { code: 'SIMILARITY_FAILED', message, status_code: 500 },
     })
   }
+})
+
+// ─── POST /select — Log user preference (flywheel signal) ─────────────────
+
+similarityRouter.post('/select', async (req: Request, res: Response) => {
+  const body = req.body as Record<string, unknown>
+  const queryId = body.query_id as string
+  const selectedMatchId = body.selected_match_id as string
+  const rejectedMatchIds = body.rejected_match_ids as string[]
+
+  if (!selectedMatchId || typeof selectedMatchId !== 'string') {
+    res.status(400).json({
+      success: false,
+      error: { code: 'VALIDATION_ERROR', message: 'selected_match_id is required', status_code: 400 },
+    })
+    return
+  }
+
+  if (!Array.isArray(rejectedMatchIds) || rejectedMatchIds.length === 0) {
+    res.status(400).json({
+      success: false,
+      error: { code: 'VALIDATION_ERROR', message: 'rejected_match_ids must be a non-empty array', status_code: 400 },
+    })
+    return
+  }
+
+  logger.info({ queryId, selected: selectedMatchId, rejected: rejectedMatchIds.length }, 'Similarity preference received')
+
+  hookSimilarityPreference(queryId || 'unknown', selectedMatchId, rejectedMatchIds).catch(() => {})
+
+  res.json({ success: true, data: { message: 'Preference logged', selected: selectedMatchId, rejected_count: rejectedMatchIds.length } })
 })
 
 // ─── GET /client/:id — Client details with relationships ───────────────────
