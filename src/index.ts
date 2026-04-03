@@ -68,6 +68,7 @@ import { foldRouter } from './routes/fold.js'
 import { graphHygieneRouter } from './routes/graph-hygiene.js'
 import { deliverablesRouter } from './routes/deliverables.js'
 import { similarityRouter } from './routes/similarity.js'
+import { governanceRouter } from './routes/governance.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -167,6 +168,7 @@ app.use('/api/fold', requireApiKey, foldRouter)
 app.use('/api/graph-hygiene', requireApiKey, graphHygieneRouter)
 app.use('/api/deliverables', requireApiKey, deliverablesRouter)
 app.use('/api/similarity', requireApiKey, similarityRouter)
+app.use('/api/governance', requireApiKey, governanceRouter)
 
 // Tool Gateway — REST access to ALL orchestrator tools (Triple-Protocol ABI)
 app.use('/api/tools', requireApiKey, toolGatewayRouter)

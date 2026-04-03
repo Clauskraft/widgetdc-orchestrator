@@ -1259,6 +1259,157 @@ var init_deliverable_engine = __esm({
   }
 });
 
+// src/manifesto-governance.ts
+var manifesto_governance_exports = {};
+__export(manifesto_governance_exports, {
+  MANIFESTO_PRINCIPLES: () => MANIFESTO_PRINCIPLES,
+  generateGraphCypher: () => generateGraphCypher,
+  getEnforcementMatrix: () => getEnforcementMatrix,
+  getEnforcementScore: () => getEnforcementScore,
+  getGaps: () => getGaps,
+  getPrincipleByNumber: () => getPrincipleByNumber
+});
+function getEnforcementMatrix() {
+  return MANIFESTO_PRINCIPLES;
+}
+function getPrincipleByNumber(n) {
+  return MANIFESTO_PRINCIPLES.find((p) => p.number === n);
+}
+function getGaps() {
+  return MANIFESTO_PRINCIPLES.filter((p) => p.status !== "ENFORCED");
+}
+function getEnforcementScore() {
+  const enforced = MANIFESTO_PRINCIPLES.filter((p) => p.status === "ENFORCED").length;
+  const partial = MANIFESTO_PRINCIPLES.filter((p) => p.status === "PARTIAL").length;
+  const gap = MANIFESTO_PRINCIPLES.filter((p) => p.status === "GAP").length;
+  const score = `${enforced}/10 ENFORCED, ${partial} PARTIAL, ${gap} GAP`;
+  return { enforced, partial, gap, score };
+}
+function generateGraphCypher() {
+  return MANIFESTO_PRINCIPLES.map((p) => {
+    const escaped = (s) => s.replace(/'/g, "\\'").replace(/\n/g, " ");
+    return `MERGE (p:ManifestoPrinciple {number: ${p.number}})
+SET p.name = '${escaped(p.name)}',
+    p.description = '${escaped(p.description)}',
+    p.status = '${p.status}',
+    p.enforcement_layer = '${p.enforcement_layer}',
+    p.mechanism = '${escaped(p.mechanism)}',
+    p.mechanism_detail = '${escaped(p.mechanism_detail)}',
+    p.gap_remediation = '${escaped(p.gap_remediation ?? "")}',
+    p.updatedAt = datetime()
+RETURN p;`;
+  }).join("\n\n");
+}
+var MANIFESTO_PRINCIPLES;
+var init_manifesto_governance = __esm({
+  "src/manifesto-governance.ts"() {
+    "use strict";
+    MANIFESTO_PRINCIPLES = [
+      {
+        number: 1,
+        name: "Invisible Omnipotence",
+        description: "Intelligence runs invisibly on every message. Users never see the machinery \u2014 they only experience the result.",
+        status: "ENFORCED",
+        enforcement_layer: "pipeline",
+        mechanism: "mercury_enforcement.py",
+        mechanism_detail: "Mercury enforcement pipeline runs on EVERY Open WebUI message. 5-section router: classify -> RAG -> fold -> inject -> certify. Zero user interaction required.",
+        updatedAt: "2026-04-03T00:00:00Z"
+      },
+      {
+        number: 2,
+        name: "Aesthetic Authority",
+        description: "All output meets consulting-grade formatting standards. Danish language, structured sections, proper citations.",
+        status: "ENFORCED",
+        enforcement_layer: "pipeline",
+        mechanism: "widgetdc_beautifier pipeline",
+        mechanism_detail: "Beautifier pipeline post-processes all LLM output: Danish language enforcement, structured headings, citation formatting, consulting-grade markdown. Runs as Open WebUI pipeline.",
+        updatedAt: "2026-04-03T00:00:00Z"
+      },
+      {
+        number: 3,
+        name: "Cognitive Supremacy",
+        description: "Deep reasoning via RLM Engine for complex questions. Multi-step analysis, PDR, swarms, and context folding.",
+        status: "ENFORCED",
+        enforcement_layer: "tool",
+        mechanism: "cognitive-proxy.ts + RLM Engine",
+        mechanism_detail: "RLM Engine (Python/FastAPI) provides reason/analyze/plan/learn/fold/enrich endpoints. Orchestrator proxies via cognitive-proxy.ts. Tool registry exposes reason_deeply + investigate tools. Mercury pipeline auto-routes complex queries to RLM.",
+        updatedAt: "2026-04-03T00:00:00Z"
+      },
+      {
+        number: 4,
+        name: "Mercury Efficiency",
+        description: "Context compression and intelligent folding to maximize signal-to-noise in every interaction.",
+        status: "ENFORCED",
+        enforcement_layer: "pipeline",
+        mechanism: "mercury_fold pipeline + foldToolResult()",
+        mechanism_detail: "Mercury fold pipeline compresses context in Open WebUI. Orchestrator foldToolResult() in tool-executor.ts compresses tool results >1500 chars. RLM /cognitive/fold endpoint for deep folding. Triple-layer enforcement.",
+        updatedAt: "2026-04-03T00:00:00Z"
+      },
+      {
+        number: 5,
+        name: "Immutable Truths",
+        description: "All claims are verified against the knowledge graph. No hallucination passes unchecked.",
+        status: "ENFORCED",
+        enforcement_layer: "pipeline",
+        mechanism: "Mercury certify step + verification-gate.ts",
+        mechanism_detail: "Mercury pipeline certify step validates claims against Neo4j graph on every message. Orchestrator verification-gate.ts provides post-chain verification with tripwire guardrails and auto-fix loops (max 3 retries).",
+        updatedAt: "2026-04-03T00:00:00Z"
+      },
+      {
+        number: 6,
+        name: "Anticipatory Intelligence",
+        description: "Pre-fetch relevant context before the user needs it. Proactive queue management.",
+        status: "ENFORCED",
+        enforcement_layer: "pipeline",
+        mechanism: "widgetdc_anticipator pipeline + proactive.queue",
+        mechanism_detail: "Anticipator pipeline pre-fetches related knowledge on message classification. proactive.queue MCP tool (LIN-575, backend v2.0.2) queues anticipated follow-up data. intent.resolve maps user intent to pre-load relevant graph subsets.",
+        updatedAt: "2026-04-03T00:00:00Z"
+      },
+      {
+        number: 7,
+        name: "Monopoly of Truth",
+        description: "Neo4j knowledge graph is the single source of truth. All data flows through the graph.",
+        status: "ENFORCED",
+        enforcement_layer: "tool",
+        mechanism: "graph_intel tool + dual-rag.ts + knowledge.query",
+        mechanism_detail: "widgetdc_graph_intel tool exposes Neo4j as single source. dual-rag.ts routes ALL retrieval through graph-first (graphrag -> srag -> cypher). 475K+ nodes, 3.8M+ relationships. MERGE-only writes, parameterized Cypher, read-back verify.",
+        updatedAt: "2026-04-03T00:00:00Z"
+      },
+      {
+        number: 8,
+        name: "Sovereign Market",
+        description: "Competitive intelligence through systematic capability mapping and gap analysis against market players.",
+        status: "PARTIAL",
+        enforcement_layer: "cron",
+        mechanism: "competitive-crawler.ts + failure-harvester.ts",
+        mechanism_detail: "competitive-crawler.ts crawls 5 competitors weekly (Mon 03:00 cron). failure-harvester.ts harvests failure patterns every 4h. 33+ capabilities mapped from Palantir + Copilot Studio. Gap reports generated. PARTIAL: no automated remediation loop from gaps to roadmap.",
+        gap_remediation: "Add automated gap-to-Linear-issue pipeline: when competitive crawler finds a capability gap scored >0.7, auto-create a Linear issue in backlog. Wire via existing cron infrastructure.",
+        updatedAt: "2026-04-03T00:00:00Z"
+      },
+      {
+        number: 9,
+        name: "Ubiquity",
+        description: "Platform intelligence accessible from every surface: Open WebUI, Obsidian, CLI, API, Slack.",
+        status: "ENFORCED",
+        enforcement_layer: "tool",
+        mechanism: "widgetdc_obsidian_bridge + Triple-Protocol ABI + Slack webhook",
+        mechanism_detail: "Obsidian bridge tool syncs knowledge to local vault. Triple-Protocol ABI (OpenAI + OpenAPI + MCP) exposes all tools to any client. Slack webhook integration (slack.ts). Command Center SPA. WebSocket + SSE real-time. /v1 OpenAI-compat API for any LLM client.",
+        updatedAt: "2026-04-03T00:00:00Z"
+      },
+      {
+        number: 10,
+        name: "Obsidian Protocol",
+        description: "Governance-as-code: all rules enforced by config, contracts, code, or runtime checks. Documentation alone is not enforcement.",
+        status: "ENFORCED",
+        enforcement_layer: "governance-doc",
+        mechanism: "GLOBAL_AGENT_GOVERNANCE.md + runtime enforcement chain",
+        mechanism_detail: 'GLOBAL_AGENT_GOVERNANCE.md defines the cross-repo baseline. Runtime enforcement: TypeBox validators (validation.ts), auth middleware (auth.ts), audit trail (audit.ts, 30-day TTL), ACL on tool calls, rate limiting, parameterized queries. Cron compliance scan every 6h (intel-compliance-scan). Final Rule: "If it is not enforced and verified, it is not done."',
+        updatedAt: "2026-04-03T00:00:00Z"
+      }
+    ];
+  }
+});
+
 // src/index.ts
 init_config();
 init_logger();
@@ -12052,6 +12203,16 @@ var TOOL_REGISTRY = [
     }),
     timeoutMs: 3e4,
     outputDescription: "Ranked list of similar clients with scores, shared dimensions, and match method"
+  }),
+  defineTool({
+    name: "governance_matrix",
+    namespace: "compliance",
+    description: "Get the WidgeTDC Manifesto enforcement matrix \u2014 maps all 10 principles to their runtime enforcement mechanisms. Shows status (ENFORCED/PARTIAL/GAP), enforcement layer, and gap remediation.",
+    input: z.object({
+      filter: z.enum(["all", "enforced", "gaps"]).optional().describe("Filter by status (default: all)")
+    }),
+    timeoutMs: 5e3,
+    outputDescription: "10-principle enforcement matrix with status, mechanism, and gap remediation"
   })
 ];
 function toOpenAITools() {
@@ -12521,6 +12682,22 @@ ${preview}...`;
       } catch (err) {
         return `Deliverable generation failed: ${err}`;
       }
+    }
+    case "governance_matrix": {
+      const { getEnforcementMatrix: getEnforcementMatrix2, getEnforcementScore: getEnforcementScore2, getGaps: getGaps2 } = await Promise.resolve().then(() => (init_manifesto_governance(), manifesto_governance_exports));
+      const filter = args.filter ?? "all";
+      if (filter === "gaps") {
+        const gaps = getGaps2();
+        return gaps.length === 0 ? "All 10 manifesto principles are ENFORCED. No gaps." : `${gaps.length} principle(s) with gaps:
+${gaps.map((g) => `P${g.number} ${g.name} \u2014 ${g.status}: ${g.gap_remediation ?? "No remediation specified"}`).join("\n")}`;
+      }
+      const principles = filter === "enforced" ? getEnforcementMatrix2().filter((p) => p.status === "ENFORCED") : getEnforcementMatrix2();
+      const score = getEnforcementScore2();
+      const lines = principles.map(
+        (p) => `P${p.number} ${p.name} \u2014 ${p.status} [${p.enforcement_layer}] ${p.mechanism}`
+      );
+      return `Manifesto Enforcement Matrix (${score.score}):
+${lines.join("\n")}`;
     }
     default:
       return `Unknown tool: ${name}`;
@@ -21011,6 +21188,99 @@ similarityRouter.get("/client/:id", async (req, res) => {
   res.json({ success: true, data: details });
 });
 
+// src/routes/governance.ts
+init_manifesto_governance();
+init_mcp_caller();
+init_logger();
+import { Router as Router32 } from "express";
+import { v4 as uuid22 } from "uuid";
+var governanceRouter = Router32();
+governanceRouter.get("/matrix", (_req, res) => {
+  res.json({
+    success: true,
+    data: {
+      principles: getEnforcementMatrix(),
+      score: getEnforcementScore(),
+      version: "1.0.0",
+      source: "manifesto-governance.ts",
+      governance_model: "Ambient Enforcement \u2014 additive, not subtractive"
+    }
+  });
+});
+governanceRouter.get("/score", (_req, res) => {
+  const score = getEnforcementScore();
+  res.json({ success: true, data: score });
+});
+governanceRouter.get("/gaps", (_req, res) => {
+  const gaps = getGaps();
+  res.json({
+    success: true,
+    data: {
+      count: gaps.length,
+      gaps,
+      remediation_available: gaps.filter((g) => g.gap_remediation).length
+    }
+  });
+});
+governanceRouter.post("/sync-graph", async (_req, res) => {
+  try {
+    const results = [];
+    for (const p of MANIFESTO_PRINCIPLES) {
+      try {
+        const result = await callMcpTool({
+          toolName: "graph.write_cypher",
+          args: {
+            query: `MERGE (p:ManifestoPrinciple {number: $number})
+SET p.name = $name,
+    p.description = $description,
+    p.status = $status,
+    p.enforcement_layer = $enforcement_layer,
+    p.mechanism = $mechanism,
+    p.mechanism_detail = $mechanism_detail,
+    p.gap_remediation = $gap_remediation,
+    p.updatedAt = datetime()
+RETURN p.name as name, p.status as status`,
+            params: {
+              number: p.number,
+              name: p.name,
+              description: p.description,
+              status: p.status,
+              enforcement_layer: p.enforcement_layer,
+              mechanism: p.mechanism,
+              mechanism_detail: p.mechanism_detail,
+              gap_remediation: p.gap_remediation ?? ""
+            }
+          },
+          callId: uuid22(),
+          timeoutMs: 15e3
+        });
+        results.push({
+          principle: p.number,
+          status: result.status === "success" ? "synced" : "failed"
+        });
+      } catch (err) {
+        logger.warn({ principle: p.number, err: String(err) }, "Failed to sync principle to graph");
+        results.push({ principle: p.number, status: "error" });
+      }
+    }
+    const synced = results.filter((r) => r.status === "synced").length;
+    res.json({
+      success: synced > 0,
+      data: {
+        synced,
+        total: MANIFESTO_PRINCIPLES.length,
+        results
+      }
+    });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Governance graph sync failed");
+    res.status(500).json({
+      success: false,
+      error: { code: "GOVERNANCE_SYNC_ERROR", message: "Failed to sync governance to graph", status_code: 500 }
+    });
+  }
+});
+
 // src/index.ts
 var __dirname = path.dirname(fileURLToPath(import.meta.url));
 var app = express();
@@ -21093,6 +21363,7 @@ app.use("/api/fold", requireApiKey, foldRouter);
 app.use("/api/graph-hygiene", requireApiKey, graphHygieneRouter);
 app.use("/api/deliverables", requireApiKey, deliverablesRouter);
 app.use("/api/similarity", requireApiKey, similarityRouter);
+app.use("/api/governance", requireApiKey, governanceRouter);
 app.use("/api/tools", requireApiKey, toolGatewayRouter);
 app.use("/api/prompt-generator", promptGeneratorRouter);
 app.use(openapiRouter);

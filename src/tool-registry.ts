@@ -331,6 +331,16 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     timeoutMs: 30000,
     outputDescription: 'Ranked list of similar clients with scores, shared dimensions, and match method',
   }),
+  defineTool({
+    name: 'governance_matrix',
+    namespace: 'compliance',
+    description: 'Get the WidgeTDC Manifesto enforcement matrix — maps all 10 principles to their runtime enforcement mechanisms. Shows status (ENFORCED/PARTIAL/GAP), enforcement layer, and gap remediation.',
+    input: z.object({
+      filter: z.enum(['all', 'enforced', 'gaps']).optional().describe('Filter by status (default: all)'),
+    }),
+    timeoutMs: 5000,
+    outputDescription: '10-principle enforcement matrix with status, mechanism, and gap remediation',
+  }),
 ]
 
 // ─── Protocol Compilers ─────────────────────────────────────────────────────

@@ -751,6 +751,25 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    case 'governance_matrix': {
+      const { getEnforcementMatrix, getEnforcementScore, getGaps } = await import('./manifesto-governance.js')
+      const filter = (args.filter as string) ?? 'all'
+      if (filter === 'gaps') {
+        const gaps = getGaps()
+        return gaps.length === 0
+          ? 'All 10 manifesto principles are ENFORCED. No gaps.'
+          : `${gaps.length} principle(s) with gaps:\n${gaps.map(g => `P${g.number} ${g.name} — ${g.status}: ${g.gap_remediation ?? 'No remediation specified'}`).join('\n')}`
+      }
+      const principles = filter === 'enforced'
+        ? getEnforcementMatrix().filter(p => p.status === 'ENFORCED')
+        : getEnforcementMatrix()
+      const score = getEnforcementScore()
+      const lines = principles.map(p =>
+        `P${p.number} ${p.name} — ${p.status} [${p.enforcement_layer}] ${p.mechanism}`
+      )
+      return `Manifesto Enforcement Matrix (${score.score}):\n${lines.join('\n')}`
+    }
+
     default:
       return `Unknown tool: ${name}`
   }
