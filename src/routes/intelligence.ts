@@ -107,6 +107,36 @@ intelligenceRouter.post('/adaptive-rag/retrain', async (_req: Request, res: Resp
   }
 })
 
+// ─── POST /extract-test — Debug entity extraction ───────────────────────────
+
+intelligenceRouter.post('/extract-test', async (req: Request, res: Response) => {
+  const { callMcpTool } = await import('../mcp-caller.js')
+  const { v4: uuid } = await import('uuid')
+  const content = (req.body as any)?.content ?? 'CSRD regulation, ATP pension fund, GRI framework'
+  try {
+    const llmResult = await callMcpTool({
+      toolName: 'llm.generate',
+      args: {
+        prompt: `Extract entities. Reply ONLY as JSON: {"entities":[{"name":"...","type":"..."}]}\n\nContent: ${content.slice(0, 2000)}`,
+      },
+      callId: uuid(),
+      timeoutMs: 30000,
+    })
+    const raw = llmResult.result as any
+    res.json({
+      mcp_status: llmResult.status,
+      result_type: typeof raw,
+      result_keys: raw && typeof raw === 'object' ? Object.keys(raw) : null,
+      inner_success: raw?.success,
+      content: raw?.content,
+      content_type: typeof raw?.content,
+      raw_preview: JSON.stringify(raw).slice(0, 500),
+    })
+  } catch (err) {
+    res.status(500).json({ error: String(err) })
+  }
+})
+
 // ─── GET /health — Intelligence metrics ─────────────────────────────────────
 
 intelligenceRouter.get('/health', async (_req: Request, res: Response) => {

@@ -894,6 +894,10 @@ var init_write_gate = __esm({
 });
 
 // src/mcp-caller.ts
+var mcp_caller_exports = {};
+__export(mcp_caller_exports, {
+  callMcpTool: () => callMcpTool
+});
 async function callMcpTool(opts) {
   return withMcpSpan(opts.toolName, opts.callId, async (span) => {
     const log = childLogger(opts.traceId ?? opts.callId);
@@ -25074,6 +25078,35 @@ intelligenceRouter.post("/adaptive-rag/retrain", async (_req, res) => {
     res.json({ success: true, data: result });
   } catch (err) {
     res.status(500).json({ success: false, error: { code: "RETRAIN_FAILED", message: String(err), status_code: 500 } });
+  }
+});
+intelligenceRouter.post("/extract-test", async (req, res) => {
+  const { callMcpTool: callMcpTool2 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
+  const { v4: uuid31 } = await import("uuid");
+  const content = req.body?.content ?? "CSRD regulation, ATP pension fund, GRI framework";
+  try {
+    const llmResult = await callMcpTool2({
+      toolName: "llm.generate",
+      args: {
+        prompt: `Extract entities. Reply ONLY as JSON: {"entities":[{"name":"...","type":"..."}]}
+
+Content: ${content.slice(0, 2e3)}`
+      },
+      callId: uuid31(),
+      timeoutMs: 3e4
+    });
+    const raw = llmResult.result;
+    res.json({
+      mcp_status: llmResult.status,
+      result_type: typeof raw,
+      result_keys: raw && typeof raw === "object" ? Object.keys(raw) : null,
+      inner_success: raw?.success,
+      content: raw?.content,
+      content_type: typeof raw?.content,
+      raw_preview: JSON.stringify(raw).slice(0, 500)
+    });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
   }
 });
 intelligenceRouter.get("/health", async (_req, res) => {
