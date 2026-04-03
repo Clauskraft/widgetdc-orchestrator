@@ -19473,7 +19473,12 @@ failuresRouter.get("/summary", async (_req, res) => {
         }
       }
     }
-    const summary = await runFailureHarvest(24);
+    const events = await harvestFailures(24);
+    const summary = buildFailureSummary(events, 24);
+    if (redis2) {
+      await redis2.set("orchestrator:failure-summary", JSON.stringify(summary), "EX", 900).catch(() => {
+      });
+    }
     res.json({ success: true, data: summary, source: "fresh" });
   } catch (err) {
     logger.error({ err: String(err) }, "Failure summary endpoint failed");

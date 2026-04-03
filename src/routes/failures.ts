@@ -28,8 +28,16 @@ failuresRouter.get('/summary', async (_req: Request, res: Response) => {
       }
     }
 
-    // No cache — run fresh harvest (last 24h)
-    const summary = await runFailureHarvest(24)
+    // No cache — do a lightweight scan-only (no Neo4j persistence) for fast response
+    // Full harvest with persistence happens via cron (every 4h) or POST /harvest
+    const events = await harvestFailures(24)
+    const summary = buildFailureSummary(events, 24)
+
+    // Cache for 15 minutes so next request is instant
+    if (redis) {
+      await redis.set('orchestrator:failure-summary', JSON.stringify(summary), 'EX', 900).catch(() => {})
+    }
+
     res.json({ success: true, data: summary, source: 'fresh' })
   } catch (err) {
     logger.error({ err: String(err) }, 'Failure summary endpoint failed')
