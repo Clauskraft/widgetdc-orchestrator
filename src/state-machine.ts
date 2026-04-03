@@ -13,6 +13,7 @@
 import { logger } from './logger.js'
 import { getRedis } from './redis.js'
 import { executeChain, type ChainDefinition } from './chain-engine.js'
+import { fsmSaver } from './checkpoint-saver.js'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
