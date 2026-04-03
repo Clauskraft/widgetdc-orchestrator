@@ -6,3 +6,4 @@ logs/
 *.log
 .claude/worktrees
 pipelines/__pycache__/
+_abi-extract.tmp.*

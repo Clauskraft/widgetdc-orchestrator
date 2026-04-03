@@ -1,0 +1,897 @@
+{
+  "tools": [
+    {
+      "name": "search_knowledge",
+      "namespace": "knowledge",
+      "version": "1.0",
+      "description": "Search the WidgeTDC knowledge graph and semantic vector store. Use for ANY question about platform data, consulting knowledge, patterns, documents, or entities. Returns merged results from SRAG (semantic) and Neo4j (graph).",
+      "category": "knowledge",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Natural language search query"
+          },
+          "max_results": {
+            "type": "number",
+            "description": "Max results (default 10)"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "handler": "mcp-proxy",
+      "backendTool": "srag.query + graph.read_cypher",
+      "timeoutMs": 20000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "search",
+        "knowledge"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "reason_deeply",
+      "namespace": "cognitive",
+      "version": "1.0",
+      "description": "Send a complex question to the RLM reasoning engine for deep multi-step analysis. Use for strategy questions, architecture analysis, comparisons, evaluations, and planning.",
+      "category": "cognitive",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string",
+            "description": "The complex question to reason about"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "reason",
+              "analyze",
+              "plan"
+            ],
+            "description": "Reasoning mode (default: reason)"
+          }
+        },
+        "required": [
+          "question"
+        ]
+      },
+      "handler": "mcp-proxy",
+      "backendTool": "rlm.reason",
+      "timeoutMs": 45000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "reason",
+        "deeply"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "query_graph",
+      "namespace": "graph",
+      "version": "1.0",
+      "description": "Execute a Cypher query against the Neo4j knowledge graph (475K+ nodes, 3.8M+ relationships). Use for structured data queries like counting nodes, finding relationships, listing entities.",
+      "category": "graph",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cypher": {
+            "type": "string",
+            "description": "Neo4j Cypher query (read-only, parameterized)"
+          },
+          "params": {
+            "type": "object",
+            "description": "Query parameters"
+          }
+        },
+        "required": [
+          "cypher"
+        ]
+      },
+      "handler": "mcp-proxy",
+      "backendTool": "graph.read_cypher",
+      "timeoutMs": 15000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "query",
+        "graph"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "check_tasks",
+      "namespace": "linear",
+      "version": "1.0",
+      "description": "Get active tasks, issues, and project status from the knowledge graph. Use when asked about project status, next steps, blockers, sprints, or Linear issues.",
+      "category": "linear",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "filter": {
+            "type": "string",
+            "enum": [
+              "active",
+              "blocked",
+              "recent",
+              "all"
+            ],
+            "description": "Task filter (default: active)"
+          },
+          "keyword": {
+            "type": "string",
+            "description": "Optional keyword to filter tasks"
+          }
+        }
+      },
+      "handler": "mcp-proxy",
+      "backendTool": "graph.read_cypher",
+      "timeoutMs": 10000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "check",
+        "tasks"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "call_mcp_tool",
+      "namespace": "mcp",
+      "version": "1.0",
+      "description": "Call any of the 449+ MCP tools on the WidgeTDC backend. Use for specific platform operations like embedding, compliance checks, memory operations, agent coordination.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "tool_name": {
+            "type": "string",
+            "description": "MCP tool name (e.g., srag.query, graph.health, audit.dashboard)"
+          },
+          "payload": {
+            "type": "object",
+            "description": "Tool payload arguments"
+          }
+        },
+        "required": [
+          "tool_name"
+        ]
+      },
+      "handler": "mcp-proxy",
+      "backendTool": "(dynamic)",
+      "timeoutMs": 30000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "call",
+        "mcp",
+        "tool"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "get_platform_health",
+      "namespace": "monitor",
+      "version": "1.0",
+      "description": "Get current health status of all WidgeTDC platform services (backend, RLM engine, Neo4j graph, Redis). Use when asked about system status, uptime, or health.",
+      "category": "monitor",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "handler": "mcp-proxy",
+      "backendTool": "graph.health + graph.stats",
+      "timeoutMs": 10000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "get",
+        "platform",
+        "health"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "search_documents",
+      "namespace": "knowledge",
+      "version": "1.0",
+      "description": "Search for specific documents, files, reports, or artifacts in the platform. Returns document metadata and content snippets.",
+      "category": "knowledge",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Document search query"
+          },
+          "doc_type": {
+            "type": "string",
+            "description": "Optional filter: TDCDocument, ConsultingArtifact, Pattern, etc."
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "handler": "mcp-proxy",
+      "backendTool": "srag.query",
+      "timeoutMs": 20000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "search",
+        "documents"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "linear_issues",
+      "namespace": "linear",
+      "version": "1.0",
+      "description": "Get issues from Linear project management. Use for project status, active tasks, sprint progress, blockers, or specific issue details (LIN-xxx).",
+      "category": "linear",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query or issue identifier (e.g., \"LIN-493\")"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "done",
+              "backlog",
+              "all"
+            ],
+            "description": "Filter by status (default: active)"
+          },
+          "limit": {
+            "type": "number",
+            "description": "Max results (default 10)"
+          }
+        }
+      },
+      "handler": "mcp-proxy",
+      "backendTool": "linear.issues",
+      "timeoutMs": 15000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "linear",
+        "issues"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "linear_issue_detail",
+      "namespace": "linear",
+      "version": "1.0",
+      "description": "Get detailed info about a specific Linear issue by identifier (e.g., LIN-493). Returns full description, comments, status, assignee, sub-issues.",
+      "category": "linear",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "identifier": {
+            "type": "string",
+            "description": "Issue identifier (e.g., LIN-493)"
+          }
+        },
+        "required": [
+          "identifier"
+        ]
+      },
+      "handler": "mcp-proxy",
+      "backendTool": "linear.issue_get",
+      "timeoutMs": 15000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "linear",
+        "issue",
+        "detail"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "run_chain",
+      "namespace": "chains",
+      "version": "1.0",
+      "description": "Execute a multi-step agent chain. Supports sequential, parallel, debate, and loop modes. Use for complex workflows needing coordinated tool calls.",
+      "category": "chains",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Chain name/description"
+          },
+          "mode": {
+            "type": "string",
+            "description": "Execution mode"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "agent_id": {
+                  "type": "string",
+                  "description": "Agent identifier"
+                },
+                "tool_name": {
+                  "type": "string",
+                  "description": "MCP tool to call"
+                },
+                "cognitive_action": {
+                  "type": "string",
+                  "description": "RLM action: reason, analyze, plan"
+                },
+                "prompt": {
+                  "type": "string",
+                  "description": "Prompt or arguments"
+                }
+              },
+              "required": [
+                "agent_id"
+              ]
+            },
+            "description": "Chain steps"
+          }
+        },
+        "required": [
+          "name",
+          "mode",
+          "steps"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 60000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "run",
+        "chain"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "investigate",
+      "namespace": "cognitive",
+      "version": "1.0",
+      "description": "Run a multi-agent deep investigation on a topic. Returns a comprehensive analysis artifact with graph data, compliance, strategy, and reasoning.",
+      "category": "cognitive",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "topic": {
+            "type": "string",
+            "description": "The topic to investigate deeply"
+          }
+        },
+        "required": [
+          "topic"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 120000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "investigate"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "create_notebook",
+      "namespace": "knowledge",
+      "version": "1.0",
+      "description": "Create an interactive consulting notebook with query, insight, data, and action cells. Executes all cells and returns a full notebook with results.",
+      "category": "knowledge",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "topic": {
+            "type": "string",
+            "description": "The topic to build a notebook around"
+          },
+          "cells": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "query": {
+                  "type": "string"
+                },
+                "prompt": {
+                  "type": "string"
+                },
+                "source_cell_id": {
+                  "type": "string"
+                },
+                "visualization": {
+                  "type": "string",
+                  "enum": [
+                    "table",
+                    "chart"
+                  ]
+                },
+                "recommendation": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ]
+            },
+            "description": "Custom cells. If omitted, auto-generates from topic."
+          }
+        },
+        "required": [
+          "topic"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 60000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "create",
+        "notebook"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "verify_output",
+      "namespace": "compliance",
+      "version": "1.0",
+      "description": "Run verification checks on content or data. Checks quality, accuracy, and compliance. Use after other tools to validate results.",
+      "category": "compliance",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "Content to verify"
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Check name"
+                },
+                "tool_name": {
+                  "type": "string",
+                  "description": "MCP tool for verification"
+                }
+              },
+              "required": [
+                "name",
+                "tool_name"
+              ]
+            },
+            "description": "Verification checks to run"
+          }
+        },
+        "required": [
+          "content"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 30000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "verify",
+        "output"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "generate_deliverable",
+      "namespace": "assembly",
+      "version": "1.0",
+      "description": "Generate a consulting deliverable (report, roadmap, or assessment) from a natural language prompt. Uses knowledge graph + RAG to produce a structured, citation-backed document. Returns markdown with optional PDF.",
+      "category": "assembly",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "What the deliverable should cover (min 10 chars)"
+          },
+          "type": {
+            "type": "string",
+            "description": "Deliverable type"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "pdf",
+              "markdown"
+            ],
+            "description": "Output format (default: markdown)"
+          },
+          "max_sections": {
+            "type": "number",
+            "description": "Max sections (2-8, default 5)"
+          }
+        },
+        "required": [
+          "prompt",
+          "type"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 120000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "generate",
+        "deliverable"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "precedent_search",
+      "namespace": "knowledge",
+      "version": "1.0",
+      "description": "Find similar clients, engagements, or use cases based on shared characteristics. Uses hybrid matching: structural (shared graph relationships) + semantic (embedding similarity). Returns ranked matches with explanation of what dimensions matched.",
+      "category": "knowledge",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Client name, engagement description, or use case to find matches for"
+          },
+          "dimensions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Match dimensions (default: industry, service, challenge, domain)"
+          },
+          "max_results": {
+            "type": "number",
+            "description": "Max results (1-20, default 5)"
+          },
+          "structural_weight": {
+            "type": "number",
+            "description": "Weight for structural vs semantic matching (0-1, default 0.6)"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 30000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "precedent",
+        "search"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "governance_matrix",
+      "namespace": "compliance",
+      "version": "1.0",
+      "description": "Get the WidgeTDC Manifesto enforcement matrix — maps all 10 principles to their runtime enforcement mechanisms. Shows status (ENFORCED/PARTIAL/GAP), enforcement layer, and gap remediation.",
+      "category": "compliance",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "filter": {
+            "type": "string",
+            "enum": [
+              "all",
+              "enforced",
+              "gaps"
+            ],
+            "description": "Filter by status (default: all)"
+          }
+        }
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 5000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "governance",
+        "matrix"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "run_osint_scan",
+      "namespace": "knowledge",
+      "version": "1.0",
+      "description": "Run OSINT scanning pipeline on Danish public sector domains. Scans CT logs + DMARC/SPF and ingests results to Neo4j.",
+      "category": "knowledge",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Override domain list (default: 50 DK public domains)"
+          },
+          "scan_type": {
+            "type": "string",
+            "enum": [
+              "full",
+              "ct_only",
+              "dmarc_only"
+            ],
+            "description": "Scan type (default: full)"
+          }
+        }
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 600000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "run",
+        "osint",
+        "scan"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "list_tools",
+      "namespace": "monitor",
+      "version": "1.0",
+      "description": "List all available orchestrator tools with their schemas, protocols, and categories. Use to discover what tools are available and how to call them.",
+      "category": "monitor",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "namespace": {
+            "type": "string",
+            "description": "Filter by namespace"
+          },
+          "category": {
+            "type": "string",
+            "description": "Filter by category"
+          }
+        }
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 5000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "list",
+        "tools"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "run_evolution",
+      "namespace": "chains",
+      "version": "1.0",
+      "description": "Trigger one cycle of the autonomous evolution loop (OODA: Observe→Orient→Act→Learn). Assesses platform state, identifies improvement opportunities, executes changes, and captures lessons.",
+      "category": "chains",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "focus_area": {
+            "type": "string",
+            "description": "Optional focus area for this cycle"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "If true, plan only without executing"
+          }
+        }
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 300000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "run",
+        "evolution"
+      ],
+      "deprecated": false
+    }
+  ],
+  "protocols": {
+    "openai": {
+      "count": 19,
+      "tools": [
+        "search_knowledge",
+        "reason_deeply",
+        "query_graph",
+        "check_tasks",
+        "call_mcp_tool",
+        "get_platform_health",
+        "search_documents",
+        "linear_issues",
+        "linear_issue_detail",
+        "run_chain",
+        "investigate",
+        "create_notebook",
+        "verify_output",
+        "generate_deliverable",
+        "precedent_search",
+        "governance_matrix",
+        "run_osint_scan",
+        "list_tools",
+        "run_evolution"
+      ]
+    },
+    "mcp": {
+      "count": 19,
+      "tools": [
+        "search_knowledge",
+        "reason_deeply",
+        "query_graph",
+        "check_tasks",
+        "call_mcp_tool",
+        "get_platform_health",
+        "search_documents",
+        "linear_issues",
+        "linear_issue_detail",
+        "run_chain",
+        "investigate",
+        "create_notebook",
+        "verify_output",
+        "generate_deliverable",
+        "precedent_search",
+        "governance_matrix",
+        "run_osint_scan",
+        "list_tools",
+        "run_evolution"
+      ]
+    },
+    "openapi": {
+      "count": 19,
+      "paths": [
+        "/api/tools/search_knowledge",
+        "/api/tools/reason_deeply",
+        "/api/tools/query_graph",
+        "/api/tools/check_tasks",
+        "/api/tools/call_mcp_tool",
+        "/api/tools/get_platform_health",
+        "/api/tools/search_documents",
+        "/api/tools/linear_issues",
+        "/api/tools/linear_issue_detail",
+        "/api/tools/run_chain",
+        "/api/tools/investigate",
+        "/api/tools/create_notebook",
+        "/api/tools/verify_output",
+        "/api/tools/generate_deliverable",
+        "/api/tools/precedent_search",
+        "/api/tools/governance_matrix",
+        "/api/tools/run_osint_scan",
+        "/api/tools/list_tools",
+        "/api/tools/run_evolution"
+      ]
+    }
+  },
+  "meta": {
+    "total_tools": 19,
+    "namespaces": [
+      "assembly",
+      "chains",
+      "cognitive",
+      "compliance",
+      "graph",
+      "knowledge",
+      "linear",
+      "mcp",
+      "monitor"
+    ],
+    "deprecated_count": 0,
+    "generated_at": "2026-04-03T17:09:28.631Z",
+    "abi_version": "1.0"
+  }
+}

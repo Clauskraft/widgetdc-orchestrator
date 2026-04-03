@@ -977,11 +977,11 @@ async function callCognitive(action, params, timeoutMs) {
   if (!config.rlmUrl) {
     throw new Error("RLM Engine not configured (set RLM_URL)");
   }
-  const path2 = COGNITIVE_ROUTES[action];
-  if (!path2) {
+  const path3 = COGNITIVE_ROUTES[action];
+  if (!path3) {
     throw new Error(`Unknown cognitive action: ${action}. Valid: ${Object.keys(COGNITIVE_ROUTES).join(", ")}`);
   }
-  const url = `${config.rlmUrl}${path2}`;
+  const url = `${config.rlmUrl}${path3}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs ?? 12e4);
   try {
@@ -2400,6 +2400,404 @@ var init_chain_engine = __esm({
     ];
     executions = /* @__PURE__ */ new Map();
     FUNNEL_REDIS_PREFIX = "orchestrator:funnel:";
+  }
+});
+
+// src/tool-registry.ts
+var tool_registry_exports = {};
+__export(tool_registry_exports, {
+  TOOL_REGISTRY: () => TOOL_REGISTRY,
+  defineTool: () => defineTool,
+  getCategories: () => getCategories,
+  getTool: () => getTool,
+  getToolsByCategory: () => getToolsByCategory,
+  toMCPTools: () => toMCPTools,
+  toOpenAITools: () => toOpenAITools,
+  toOpenAPIPaths: () => toOpenAPIPaths
+});
+import { z } from "zod";
+function inferCategory(namespace) {
+  const map3 = {
+    knowledge: "knowledge",
+    graph: "graph",
+    cognitive: "cognitive",
+    chains: "chains",
+    agents: "agents",
+    assembly: "assembly",
+    decisions: "decisions",
+    adoption: "adoption",
+    linear: "linear",
+    compliance: "compliance",
+    llm: "llm",
+    monitor: "monitor",
+    mcp: "mcp"
+  };
+  return map3[namespace] ?? "mcp";
+}
+function inferTags(name) {
+  return name.split("_").filter((t) => t.length > 2);
+}
+function zodToJsonSchemaSimple(schema) {
+  const shape = schema.shape;
+  const properties = {};
+  const required2 = [];
+  for (const [key, field] of Object.entries(shape)) {
+    const def = field.def ?? field._def ?? field;
+    const isOptional = def.type === "optional" || def.typeName === "ZodOptional";
+    const inner = isOptional ? def.innerType ?? def.schema ?? def : def;
+    const prop = {};
+    const innerType = inner.type ?? inner.typeName ?? "string";
+    if (innerType === "string" || innerType === "ZodString") prop.type = "string";
+    else if (innerType === "number" || innerType === "ZodNumber") prop.type = "number";
+    else if (innerType === "boolean" || innerType === "ZodBoolean") prop.type = "boolean";
+    else if (innerType === "array" || innerType === "ZodArray") {
+      prop.type = "array";
+      const itemType = inner.element ?? inner.items ?? inner.def?.element;
+      if (itemType) {
+        const itemDef = itemType.def ?? itemType._def ?? itemType;
+        const itemKind = itemDef.type ?? itemDef.typeName ?? "string";
+        if (itemKind === "string" || itemKind === "ZodString") prop.items = { type: "string" };
+        else if (itemKind === "number" || itemKind === "ZodNumber") prop.items = { type: "number" };
+        else if (itemKind === "boolean" || itemKind === "ZodBoolean") prop.items = { type: "boolean" };
+        else if (itemKind === "enum" || itemKind === "ZodEnum") prop.items = { type: "string", enum: itemDef.values ?? itemDef.def?.values };
+        else if (itemType.shape) prop.items = zodToJsonSchemaSimple(itemType);
+        else prop.items = { type: "object" };
+      } else {
+        prop.items = { type: "object" };
+      }
+    } else if (innerType === "object" || innerType === "ZodObject") {
+      Object.assign(prop, zodToJsonSchemaSimple(inner));
+    } else if (innerType === "enum" || innerType === "ZodEnum") {
+      prop.type = "string";
+      prop.enum = inner.values ?? inner.def?.values ?? inner.options;
+    } else if (innerType === "record" || innerType === "ZodRecord") {
+      prop.type = "object";
+    } else {
+      prop.type = "string";
+    }
+    const desc = field.description ?? def.description ?? inner.description;
+    if (desc) prop.description = desc;
+    properties[key] = prop;
+    if (!isOptional) required2.push(key);
+  }
+  const result = { type: "object", properties };
+  if (required2.length > 0) result.required = required2;
+  return result;
+}
+function defineTool(opts) {
+  const inputSchema = zodToJsonSchemaSimple(opts.input);
+  return {
+    name: opts.name,
+    namespace: opts.namespace,
+    version: opts.version ?? "1.0",
+    description: opts.description,
+    category: inferCategory(opts.namespace),
+    inputSchema,
+    outputDescription: opts.outputDescription,
+    handler: opts.backendTool ? "mcp-proxy" : "orchestrator",
+    backendTool: opts.backendTool,
+    timeoutMs: opts.timeoutMs ?? 3e4,
+    authRequired: opts.authRequired ?? true,
+    availableVia: opts.availableVia ?? ["openai", "openapi", "mcp"],
+    tags: inferTags(opts.name),
+    deprecated: opts.deprecated ?? false,
+    deprecatedSince: opts.deprecatedSince,
+    deprecatedMessage: opts.deprecatedMessage,
+    sunsetDate: opts.sunsetDate,
+    replacedBy: opts.replacedBy
+  };
+}
+function toOpenAITools() {
+  return TOOL_REGISTRY.filter((t) => t.availableVia.includes("openai")).map((t) => ({
+    type: "function",
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: t.inputSchema,
+      ...t.deprecated ? { deprecated: true } : {}
+    }
+  }));
+}
+function toMCPTools() {
+  return TOOL_REGISTRY.filter((t) => t.availableVia.includes("mcp")).map((t) => {
+    let description = t.description;
+    if (t.deprecated) {
+      const parts = [`[DEPRECATED since ${t.deprecatedSince ?? "unknown"}]`];
+      if (t.replacedBy) parts.push(`Use "${t.replacedBy}" instead.`);
+      if (t.deprecatedMessage) parts.push(t.deprecatedMessage);
+      if (t.sunsetDate) parts.push(`Sunset: ${t.sunsetDate}.`);
+      description = `${parts.join(" ")} \u2014 ${description}`;
+    }
+    return { name: t.name, description, inputSchema: t.inputSchema };
+  });
+}
+function toOpenAPIPaths() {
+  const paths = {};
+  for (const tool of TOOL_REGISTRY.filter((t) => t.availableVia.includes("openapi"))) {
+    const operationId = tool.name.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+    paths[`/api/tools/${tool.name}`] = {
+      post: {
+        operationId: `tool_${operationId}`,
+        summary: tool.description.slice(0, 80),
+        description: tool.description,
+        tags: [tool.category.charAt(0).toUpperCase() + tool.category.slice(1)],
+        security: tool.authRequired ? [{ BearerAuth: [] }] : [],
+        ...tool.deprecated ? { deprecated: true } : {},
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: tool.inputSchema } }
+        },
+        responses: {
+          "200": {
+            description: tool.outputDescription ?? "Tool result",
+            content: { "application/json": { schema: { type: "object" } } }
+          },
+          "400": { description: "Validation error" },
+          "401": { description: "Unauthorized" }
+        }
+      }
+    };
+  }
+  return paths;
+}
+function getTool(name) {
+  return TOOL_REGISTRY.find((t) => t.name === name);
+}
+function getToolsByCategory(category) {
+  return TOOL_REGISTRY.filter((t) => t.category === category);
+}
+function getCategories() {
+  const counts = /* @__PURE__ */ new Map();
+  for (const t of TOOL_REGISTRY) {
+    counts.set(t.category, (counts.get(t.category) ?? 0) + 1);
+  }
+  return [...counts.entries()].map(([category, count]) => ({ category, count })).sort((a, b) => b.count - a.count);
+}
+var TOOL_REGISTRY;
+var init_tool_registry = __esm({
+  "src/tool-registry.ts"() {
+    "use strict";
+    TOOL_REGISTRY = [
+      defineTool({
+        name: "search_knowledge",
+        namespace: "knowledge",
+        description: "Search the WidgeTDC knowledge graph and semantic vector store. Use for ANY question about platform data, consulting knowledge, patterns, documents, or entities. Returns merged results from SRAG (semantic) and Neo4j (graph).",
+        input: z.object({
+          query: z.string().describe("Natural language search query"),
+          max_results: z.number().optional().describe("Max results (default 10)")
+        }),
+        backendTool: "srag.query + graph.read_cypher",
+        timeoutMs: 2e4
+      }),
+      defineTool({
+        name: "reason_deeply",
+        namespace: "cognitive",
+        description: "Send a complex question to the RLM reasoning engine for deep multi-step analysis. Use for strategy questions, architecture analysis, comparisons, evaluations, and planning.",
+        input: z.object({
+          question: z.string().describe("The complex question to reason about"),
+          mode: z.enum(["reason", "analyze", "plan"]).optional().describe("Reasoning mode (default: reason)")
+        }),
+        backendTool: "rlm.reason",
+        timeoutMs: 45e3
+      }),
+      defineTool({
+        name: "query_graph",
+        namespace: "graph",
+        description: "Execute a Cypher query against the Neo4j knowledge graph (475K+ nodes, 3.8M+ relationships). Use for structured data queries like counting nodes, finding relationships, listing entities.",
+        input: z.object({
+          cypher: z.string().describe("Neo4j Cypher query (read-only, parameterized)"),
+          params: z.record(z.unknown()).optional().describe("Query parameters")
+        }),
+        backendTool: "graph.read_cypher",
+        timeoutMs: 15e3
+      }),
+      defineTool({
+        name: "check_tasks",
+        namespace: "linear",
+        description: "Get active tasks, issues, and project status from the knowledge graph. Use when asked about project status, next steps, blockers, sprints, or Linear issues.",
+        input: z.object({
+          filter: z.enum(["active", "blocked", "recent", "all"]).optional().describe("Task filter (default: active)"),
+          keyword: z.string().optional().describe("Optional keyword to filter tasks")
+        }),
+        backendTool: "graph.read_cypher",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "call_mcp_tool",
+        namespace: "mcp",
+        description: "Call any of the 449+ MCP tools on the WidgeTDC backend. Use for specific platform operations like embedding, compliance checks, memory operations, agent coordination.",
+        input: z.object({
+          tool_name: z.string().describe("MCP tool name (e.g., srag.query, graph.health, audit.dashboard)"),
+          payload: z.record(z.unknown()).optional().describe("Tool payload arguments")
+        }),
+        backendTool: "(dynamic)"
+      }),
+      defineTool({
+        name: "get_platform_health",
+        namespace: "monitor",
+        description: "Get current health status of all WidgeTDC platform services (backend, RLM engine, Neo4j graph, Redis). Use when asked about system status, uptime, or health.",
+        input: z.object({}),
+        backendTool: "graph.health + graph.stats",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "search_documents",
+        namespace: "knowledge",
+        description: "Search for specific documents, files, reports, or artifacts in the platform. Returns document metadata and content snippets.",
+        input: z.object({
+          query: z.string().describe("Document search query"),
+          doc_type: z.string().optional().describe("Optional filter: TDCDocument, ConsultingArtifact, Pattern, etc.")
+        }),
+        backendTool: "srag.query",
+        timeoutMs: 2e4
+      }),
+      defineTool({
+        name: "linear_issues",
+        namespace: "linear",
+        description: "Get issues from Linear project management. Use for project status, active tasks, sprint progress, blockers, or specific issue details (LIN-xxx).",
+        input: z.object({
+          query: z.string().optional().describe('Search query or issue identifier (e.g., "LIN-493")'),
+          status: z.enum(["active", "done", "backlog", "all"]).optional().describe("Filter by status (default: active)"),
+          limit: z.number().optional().describe("Max results (default 10)")
+        }),
+        backendTool: "linear.issues",
+        timeoutMs: 15e3
+      }),
+      defineTool({
+        name: "linear_issue_detail",
+        namespace: "linear",
+        description: "Get detailed info about a specific Linear issue by identifier (e.g., LIN-493). Returns full description, comments, status, assignee, sub-issues.",
+        input: z.object({
+          identifier: z.string().describe("Issue identifier (e.g., LIN-493)")
+        }),
+        backendTool: "linear.issue_get",
+        timeoutMs: 15e3
+      }),
+      defineTool({
+        name: "run_chain",
+        namespace: "chains",
+        description: "Execute a multi-step agent chain. Supports sequential, parallel, debate, and loop modes. Use for complex workflows needing coordinated tool calls.",
+        input: z.object({
+          name: z.string().describe("Chain name/description"),
+          mode: z.enum(["sequential", "parallel", "debate", "loop"]).describe("Execution mode"),
+          steps: z.array(z.object({
+            agent_id: z.string().describe("Agent identifier"),
+            tool_name: z.string().optional().describe("MCP tool to call"),
+            cognitive_action: z.string().optional().describe("RLM action: reason, analyze, plan"),
+            prompt: z.string().optional().describe("Prompt or arguments")
+          })).describe("Chain steps")
+        }),
+        timeoutMs: 6e4
+      }),
+      defineTool({
+        name: "investigate",
+        namespace: "cognitive",
+        description: "Run a multi-agent deep investigation on a topic. Returns a comprehensive analysis artifact with graph data, compliance, strategy, and reasoning.",
+        input: z.object({
+          topic: z.string().describe("The topic to investigate deeply")
+        }),
+        timeoutMs: 12e4
+      }),
+      defineTool({
+        name: "create_notebook",
+        namespace: "knowledge",
+        description: "Create an interactive consulting notebook with query, insight, data, and action cells. Executes all cells and returns a full notebook with results.",
+        input: z.object({
+          topic: z.string().describe("The topic to build a notebook around"),
+          cells: z.array(z.object({
+            type: z.enum(["query", "insight", "data", "action"]),
+            id: z.string().optional(),
+            query: z.string().optional(),
+            prompt: z.string().optional(),
+            source_cell_id: z.string().optional(),
+            visualization: z.enum(["table", "chart"]).optional(),
+            recommendation: z.string().optional()
+          })).optional().describe("Custom cells. If omitted, auto-generates from topic.")
+        }),
+        timeoutMs: 6e4
+      }),
+      defineTool({
+        name: "verify_output",
+        namespace: "compliance",
+        description: "Run verification checks on content or data. Checks quality, accuracy, and compliance. Use after other tools to validate results.",
+        input: z.object({
+          content: z.string().describe("Content to verify"),
+          checks: z.array(z.object({
+            name: z.string().describe("Check name"),
+            tool_name: z.string().describe("MCP tool for verification")
+          })).optional().describe("Verification checks to run")
+        })
+      }),
+      defineTool({
+        name: "generate_deliverable",
+        namespace: "assembly",
+        description: "Generate a consulting deliverable (report, roadmap, or assessment) from a natural language prompt. Uses knowledge graph + RAG to produce a structured, citation-backed document. Returns markdown with optional PDF.",
+        input: z.object({
+          prompt: z.string().describe("What the deliverable should cover (min 10 chars)"),
+          type: z.enum(["analysis", "roadmap", "assessment"]).describe("Deliverable type"),
+          format: z.enum(["pdf", "markdown"]).optional().describe("Output format (default: markdown)"),
+          max_sections: z.number().optional().describe("Max sections (2-8, default 5)")
+        }),
+        timeoutMs: 12e4,
+        outputDescription: "Deliverable with sections, citations, confidence scores, and markdown content"
+      }),
+      defineTool({
+        name: "precedent_search",
+        namespace: "knowledge",
+        description: "Find similar clients, engagements, or use cases based on shared characteristics. Uses hybrid matching: structural (shared graph relationships) + semantic (embedding similarity). Returns ranked matches with explanation of what dimensions matched.",
+        input: z.object({
+          query: z.string().describe("Client name, engagement description, or use case to find matches for"),
+          dimensions: z.array(z.enum(["industry", "service", "challenge", "domain", "size", "geography", "deliverable"])).optional().describe("Match dimensions (default: industry, service, challenge, domain)"),
+          max_results: z.number().optional().describe("Max results (1-20, default 5)"),
+          structural_weight: z.number().optional().describe("Weight for structural vs semantic matching (0-1, default 0.6)")
+        }),
+        timeoutMs: 3e4,
+        outputDescription: "Ranked list of similar clients with scores, shared dimensions, and match method"
+      }),
+      defineTool({
+        name: "governance_matrix",
+        namespace: "compliance",
+        description: "Get the WidgeTDC Manifesto enforcement matrix \u2014 maps all 10 principles to their runtime enforcement mechanisms. Shows status (ENFORCED/PARTIAL/GAP), enforcement layer, and gap remediation.",
+        input: z.object({
+          filter: z.enum(["all", "enforced", "gaps"]).optional().describe("Filter by status (default: all)")
+        }),
+        timeoutMs: 5e3,
+        outputDescription: "10-principle enforcement matrix with status, mechanism, and gap remediation"
+      }),
+      defineTool({
+        name: "run_osint_scan",
+        namespace: "knowledge",
+        description: "Run OSINT scanning pipeline on Danish public sector domains. Scans CT logs + DMARC/SPF and ingests results to Neo4j.",
+        input: z.object({
+          domains: z.array(z.string()).optional().describe("Override domain list (default: 50 DK public domains)"),
+          scan_type: z.enum(["full", "ct_only", "dmarc_only"]).optional().describe("Scan type (default: full)")
+        }),
+        timeoutMs: 6e5,
+        outputDescription: "Scan results with CT entries, DMARC results, and ingestion counts"
+      }),
+      defineTool({
+        name: "list_tools",
+        namespace: "monitor",
+        description: "List all available orchestrator tools with their schemas, protocols, and categories. Use to discover what tools are available and how to call them.",
+        input: z.object({
+          namespace: z.string().optional().describe("Filter by namespace"),
+          category: z.string().optional().describe("Filter by category")
+        }),
+        timeoutMs: 5e3,
+        outputDescription: "List of tool definitions with schemas and metadata"
+      }),
+      defineTool({
+        name: "run_evolution",
+        namespace: "chains",
+        description: "Trigger one cycle of the autonomous evolution loop (OODA: Observe\u2192Orient\u2192Act\u2192Learn). Assesses platform state, identifies improvement opportunities, executes changes, and captures lessons.",
+        input: z.object({
+          focus_area: z.string().optional().describe("Optional focus area for this cycle"),
+          dry_run: z.boolean().optional().describe("If true, plan only without executing")
+        }),
+        timeoutMs: 3e5,
+        outputDescription: "Evolution cycle results with observations, actions taken, and lessons learned"
+      })
+    ];
   }
 });
 
@@ -4038,8 +4436,8 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import { createServer } from "http";
-import path from "path";
-import { fileURLToPath } from "url";
+import path2 from "path";
+import { fileURLToPath as fileURLToPath2 } from "url";
 
 // src/routes/agents.ts
 init_agent_registry();
@@ -6000,32 +6398,32 @@ var ValueErrorIterator = class {
     return next.done ? void 0 : next.value;
   }
 };
-function Create(errorType, schema, path2, value, errors = []) {
+function Create(errorType, schema, path3, value, errors = []) {
   return {
     type: errorType,
     schema,
-    path: path2,
+    path: path3,
     value,
-    message: GetErrorFunction()({ errorType, path: path2, schema, value, errors }),
+    message: GetErrorFunction()({ errorType, path: path3, schema, value, errors }),
     errors
   };
 }
-function* FromAny2(schema, references, path2, value) {
+function* FromAny2(schema, references, path3, value) {
 }
-function* FromArgument2(schema, references, path2, value) {
+function* FromArgument2(schema, references, path3, value) {
 }
-function* FromArray4(schema, references, path2, value) {
+function* FromArray4(schema, references, path3, value) {
   if (!IsArray(value)) {
-    return yield Create(ValueErrorType.Array, schema, path2, value);
+    return yield Create(ValueErrorType.Array, schema, path3, value);
   }
   if (IsDefined2(schema.minItems) && !(value.length >= schema.minItems)) {
-    yield Create(ValueErrorType.ArrayMinItems, schema, path2, value);
+    yield Create(ValueErrorType.ArrayMinItems, schema, path3, value);
   }
   if (IsDefined2(schema.maxItems) && !(value.length <= schema.maxItems)) {
-    yield Create(ValueErrorType.ArrayMaxItems, schema, path2, value);
+    yield Create(ValueErrorType.ArrayMaxItems, schema, path3, value);
   }
   for (let i = 0; i < value.length; i++) {
-    yield* Visit4(schema.items, references, `${path2}/${i}`, value[i]);
+    yield* Visit4(schema.items, references, `${path3}/${i}`, value[i]);
   }
   if (schema.uniqueItems === true && !function() {
     const set = /* @__PURE__ */ new Set();
@@ -6039,116 +6437,116 @@ function* FromArray4(schema, references, path2, value) {
     }
     return true;
   }()) {
-    yield Create(ValueErrorType.ArrayUniqueItems, schema, path2, value);
+    yield Create(ValueErrorType.ArrayUniqueItems, schema, path3, value);
   }
   if (!(IsDefined2(schema.contains) || IsDefined2(schema.minContains) || IsDefined2(schema.maxContains))) {
     return;
   }
   const containsSchema = IsDefined2(schema.contains) ? schema.contains : Never();
-  const containsCount = value.reduce((acc, value2, index) => Visit4(containsSchema, references, `${path2}${index}`, value2).next().done === true ? acc + 1 : acc, 0);
+  const containsCount = value.reduce((acc, value2, index) => Visit4(containsSchema, references, `${path3}${index}`, value2).next().done === true ? acc + 1 : acc, 0);
   if (containsCount === 0) {
-    yield Create(ValueErrorType.ArrayContains, schema, path2, value);
+    yield Create(ValueErrorType.ArrayContains, schema, path3, value);
   }
   if (IsNumber(schema.minContains) && containsCount < schema.minContains) {
-    yield Create(ValueErrorType.ArrayMinContains, schema, path2, value);
+    yield Create(ValueErrorType.ArrayMinContains, schema, path3, value);
   }
   if (IsNumber(schema.maxContains) && containsCount > schema.maxContains) {
-    yield Create(ValueErrorType.ArrayMaxContains, schema, path2, value);
+    yield Create(ValueErrorType.ArrayMaxContains, schema, path3, value);
   }
 }
-function* FromAsyncIterator2(schema, references, path2, value) {
+function* FromAsyncIterator2(schema, references, path3, value) {
   if (!IsAsyncIterator(value))
-    yield Create(ValueErrorType.AsyncIterator, schema, path2, value);
+    yield Create(ValueErrorType.AsyncIterator, schema, path3, value);
 }
-function* FromBigInt2(schema, references, path2, value) {
+function* FromBigInt2(schema, references, path3, value) {
   if (!IsBigInt(value))
-    return yield Create(ValueErrorType.BigInt, schema, path2, value);
+    return yield Create(ValueErrorType.BigInt, schema, path3, value);
   if (IsDefined2(schema.exclusiveMaximum) && !(value < schema.exclusiveMaximum)) {
-    yield Create(ValueErrorType.BigIntExclusiveMaximum, schema, path2, value);
+    yield Create(ValueErrorType.BigIntExclusiveMaximum, schema, path3, value);
   }
   if (IsDefined2(schema.exclusiveMinimum) && !(value > schema.exclusiveMinimum)) {
-    yield Create(ValueErrorType.BigIntExclusiveMinimum, schema, path2, value);
+    yield Create(ValueErrorType.BigIntExclusiveMinimum, schema, path3, value);
   }
   if (IsDefined2(schema.maximum) && !(value <= schema.maximum)) {
-    yield Create(ValueErrorType.BigIntMaximum, schema, path2, value);
+    yield Create(ValueErrorType.BigIntMaximum, schema, path3, value);
   }
   if (IsDefined2(schema.minimum) && !(value >= schema.minimum)) {
-    yield Create(ValueErrorType.BigIntMinimum, schema, path2, value);
+    yield Create(ValueErrorType.BigIntMinimum, schema, path3, value);
   }
   if (IsDefined2(schema.multipleOf) && !(value % schema.multipleOf === BigInt(0))) {
-    yield Create(ValueErrorType.BigIntMultipleOf, schema, path2, value);
+    yield Create(ValueErrorType.BigIntMultipleOf, schema, path3, value);
   }
 }
-function* FromBoolean2(schema, references, path2, value) {
+function* FromBoolean2(schema, references, path3, value) {
   if (!IsBoolean(value))
-    yield Create(ValueErrorType.Boolean, schema, path2, value);
+    yield Create(ValueErrorType.Boolean, schema, path3, value);
 }
-function* FromConstructor2(schema, references, path2, value) {
-  yield* Visit4(schema.returns, references, path2, value.prototype);
+function* FromConstructor2(schema, references, path3, value) {
+  yield* Visit4(schema.returns, references, path3, value.prototype);
 }
-function* FromDate2(schema, references, path2, value) {
+function* FromDate2(schema, references, path3, value) {
   if (!IsDate(value))
-    return yield Create(ValueErrorType.Date, schema, path2, value);
+    return yield Create(ValueErrorType.Date, schema, path3, value);
   if (IsDefined2(schema.exclusiveMaximumTimestamp) && !(value.getTime() < schema.exclusiveMaximumTimestamp)) {
-    yield Create(ValueErrorType.DateExclusiveMaximumTimestamp, schema, path2, value);
+    yield Create(ValueErrorType.DateExclusiveMaximumTimestamp, schema, path3, value);
   }
   if (IsDefined2(schema.exclusiveMinimumTimestamp) && !(value.getTime() > schema.exclusiveMinimumTimestamp)) {
-    yield Create(ValueErrorType.DateExclusiveMinimumTimestamp, schema, path2, value);
+    yield Create(ValueErrorType.DateExclusiveMinimumTimestamp, schema, path3, value);
   }
   if (IsDefined2(schema.maximumTimestamp) && !(value.getTime() <= schema.maximumTimestamp)) {
-    yield Create(ValueErrorType.DateMaximumTimestamp, schema, path2, value);
+    yield Create(ValueErrorType.DateMaximumTimestamp, schema, path3, value);
   }
   if (IsDefined2(schema.minimumTimestamp) && !(value.getTime() >= schema.minimumTimestamp)) {
-    yield Create(ValueErrorType.DateMinimumTimestamp, schema, path2, value);
+    yield Create(ValueErrorType.DateMinimumTimestamp, schema, path3, value);
   }
   if (IsDefined2(schema.multipleOfTimestamp) && !(value.getTime() % schema.multipleOfTimestamp === 0)) {
-    yield Create(ValueErrorType.DateMultipleOfTimestamp, schema, path2, value);
+    yield Create(ValueErrorType.DateMultipleOfTimestamp, schema, path3, value);
   }
 }
-function* FromFunction2(schema, references, path2, value) {
+function* FromFunction2(schema, references, path3, value) {
   if (!IsFunction(value))
-    yield Create(ValueErrorType.Function, schema, path2, value);
+    yield Create(ValueErrorType.Function, schema, path3, value);
 }
-function* FromImport2(schema, references, path2, value) {
+function* FromImport2(schema, references, path3, value) {
   const definitions = globalThis.Object.values(schema.$defs);
   const target = schema.$defs[schema.$ref];
-  yield* Visit4(target, [...references, ...definitions], path2, value);
+  yield* Visit4(target, [...references, ...definitions], path3, value);
 }
-function* FromInteger2(schema, references, path2, value) {
+function* FromInteger2(schema, references, path3, value) {
   if (!IsInteger(value))
-    return yield Create(ValueErrorType.Integer, schema, path2, value);
+    return yield Create(ValueErrorType.Integer, schema, path3, value);
   if (IsDefined2(schema.exclusiveMaximum) && !(value < schema.exclusiveMaximum)) {
-    yield Create(ValueErrorType.IntegerExclusiveMaximum, schema, path2, value);
+    yield Create(ValueErrorType.IntegerExclusiveMaximum, schema, path3, value);
   }
   if (IsDefined2(schema.exclusiveMinimum) && !(value > schema.exclusiveMinimum)) {
-    yield Create(ValueErrorType.IntegerExclusiveMinimum, schema, path2, value);
+    yield Create(ValueErrorType.IntegerExclusiveMinimum, schema, path3, value);
   }
   if (IsDefined2(schema.maximum) && !(value <= schema.maximum)) {
-    yield Create(ValueErrorType.IntegerMaximum, schema, path2, value);
+    yield Create(ValueErrorType.IntegerMaximum, schema, path3, value);
   }
   if (IsDefined2(schema.minimum) && !(value >= schema.minimum)) {
-    yield Create(ValueErrorType.IntegerMinimum, schema, path2, value);
+    yield Create(ValueErrorType.IntegerMinimum, schema, path3, value);
   }
   if (IsDefined2(schema.multipleOf) && !(value % schema.multipleOf === 0)) {
-    yield Create(ValueErrorType.IntegerMultipleOf, schema, path2, value);
+    yield Create(ValueErrorType.IntegerMultipleOf, schema, path3, value);
   }
 }
-function* FromIntersect4(schema, references, path2, value) {
+function* FromIntersect4(schema, references, path3, value) {
   let hasError = false;
   for (const inner of schema.allOf) {
-    for (const error of Visit4(inner, references, path2, value)) {
+    for (const error of Visit4(inner, references, path3, value)) {
       hasError = true;
       yield error;
     }
   }
   if (hasError) {
-    return yield Create(ValueErrorType.Intersect, schema, path2, value);
+    return yield Create(ValueErrorType.Intersect, schema, path3, value);
   }
   if (schema.unevaluatedProperties === false) {
     const keyCheck = new RegExp(KeyOfPattern(schema));
     for (const valueKey of Object.getOwnPropertyNames(value)) {
       if (!keyCheck.test(valueKey)) {
-        yield Create(ValueErrorType.IntersectUnevaluatedProperties, schema, `${path2}/${valueKey}`, value);
+        yield Create(ValueErrorType.IntersectUnevaluatedProperties, schema, `${path3}/${valueKey}`, value);
       }
     }
   }
@@ -6156,59 +6554,59 @@ function* FromIntersect4(schema, references, path2, value) {
     const keyCheck = new RegExp(KeyOfPattern(schema));
     for (const valueKey of Object.getOwnPropertyNames(value)) {
       if (!keyCheck.test(valueKey)) {
-        const next = Visit4(schema.unevaluatedProperties, references, `${path2}/${valueKey}`, value[valueKey]).next();
+        const next = Visit4(schema.unevaluatedProperties, references, `${path3}/${valueKey}`, value[valueKey]).next();
         if (!next.done)
           yield next.value;
       }
     }
   }
 }
-function* FromIterator2(schema, references, path2, value) {
+function* FromIterator2(schema, references, path3, value) {
   if (!IsIterator(value))
-    yield Create(ValueErrorType.Iterator, schema, path2, value);
+    yield Create(ValueErrorType.Iterator, schema, path3, value);
 }
-function* FromLiteral2(schema, references, path2, value) {
+function* FromLiteral2(schema, references, path3, value) {
   if (!(value === schema.const))
-    yield Create(ValueErrorType.Literal, schema, path2, value);
+    yield Create(ValueErrorType.Literal, schema, path3, value);
 }
-function* FromNever2(schema, references, path2, value) {
-  yield Create(ValueErrorType.Never, schema, path2, value);
+function* FromNever2(schema, references, path3, value) {
+  yield Create(ValueErrorType.Never, schema, path3, value);
 }
-function* FromNot2(schema, references, path2, value) {
-  if (Visit4(schema.not, references, path2, value).next().done === true)
-    yield Create(ValueErrorType.Not, schema, path2, value);
+function* FromNot2(schema, references, path3, value) {
+  if (Visit4(schema.not, references, path3, value).next().done === true)
+    yield Create(ValueErrorType.Not, schema, path3, value);
 }
-function* FromNull2(schema, references, path2, value) {
+function* FromNull2(schema, references, path3, value) {
   if (!IsNull(value))
-    yield Create(ValueErrorType.Null, schema, path2, value);
+    yield Create(ValueErrorType.Null, schema, path3, value);
 }
-function* FromNumber2(schema, references, path2, value) {
+function* FromNumber2(schema, references, path3, value) {
   if (!TypeSystemPolicy.IsNumberLike(value))
-    return yield Create(ValueErrorType.Number, schema, path2, value);
+    return yield Create(ValueErrorType.Number, schema, path3, value);
   if (IsDefined2(schema.exclusiveMaximum) && !(value < schema.exclusiveMaximum)) {
-    yield Create(ValueErrorType.NumberExclusiveMaximum, schema, path2, value);
+    yield Create(ValueErrorType.NumberExclusiveMaximum, schema, path3, value);
   }
   if (IsDefined2(schema.exclusiveMinimum) && !(value > schema.exclusiveMinimum)) {
-    yield Create(ValueErrorType.NumberExclusiveMinimum, schema, path2, value);
+    yield Create(ValueErrorType.NumberExclusiveMinimum, schema, path3, value);
   }
   if (IsDefined2(schema.maximum) && !(value <= schema.maximum)) {
-    yield Create(ValueErrorType.NumberMaximum, schema, path2, value);
+    yield Create(ValueErrorType.NumberMaximum, schema, path3, value);
   }
   if (IsDefined2(schema.minimum) && !(value >= schema.minimum)) {
-    yield Create(ValueErrorType.NumberMinimum, schema, path2, value);
+    yield Create(ValueErrorType.NumberMinimum, schema, path3, value);
   }
   if (IsDefined2(schema.multipleOf) && !(value % schema.multipleOf === 0)) {
-    yield Create(ValueErrorType.NumberMultipleOf, schema, path2, value);
+    yield Create(ValueErrorType.NumberMultipleOf, schema, path3, value);
   }
 }
-function* FromObject2(schema, references, path2, value) {
+function* FromObject2(schema, references, path3, value) {
   if (!TypeSystemPolicy.IsObjectLike(value))
-    return yield Create(ValueErrorType.Object, schema, path2, value);
+    return yield Create(ValueErrorType.Object, schema, path3, value);
   if (IsDefined2(schema.minProperties) && !(Object.getOwnPropertyNames(value).length >= schema.minProperties)) {
-    yield Create(ValueErrorType.ObjectMinProperties, schema, path2, value);
+    yield Create(ValueErrorType.ObjectMinProperties, schema, path3, value);
   }
   if (IsDefined2(schema.maxProperties) && !(Object.getOwnPropertyNames(value).length <= schema.maxProperties)) {
-    yield Create(ValueErrorType.ObjectMaxProperties, schema, path2, value);
+    yield Create(ValueErrorType.ObjectMaxProperties, schema, path3, value);
   }
   const requiredKeys = Array.isArray(schema.required) ? schema.required : [];
   const knownKeys = Object.getOwnPropertyNames(schema.properties);
@@ -6216,12 +6614,12 @@ function* FromObject2(schema, references, path2, value) {
   for (const requiredKey of requiredKeys) {
     if (unknownKeys.includes(requiredKey))
       continue;
-    yield Create(ValueErrorType.ObjectRequiredProperty, schema.properties[requiredKey], `${path2}/${EscapeKey(requiredKey)}`, void 0);
+    yield Create(ValueErrorType.ObjectRequiredProperty, schema.properties[requiredKey], `${path3}/${EscapeKey(requiredKey)}`, void 0);
   }
   if (schema.additionalProperties === false) {
     for (const valueKey of unknownKeys) {
       if (!knownKeys.includes(valueKey)) {
-        yield Create(ValueErrorType.ObjectAdditionalProperties, schema, `${path2}/${EscapeKey(valueKey)}`, value[valueKey]);
+        yield Create(ValueErrorType.ObjectAdditionalProperties, schema, `${path3}/${EscapeKey(valueKey)}`, value[valueKey]);
       }
     }
   }
@@ -6229,235 +6627,235 @@ function* FromObject2(schema, references, path2, value) {
     for (const valueKey of unknownKeys) {
       if (knownKeys.includes(valueKey))
         continue;
-      yield* Visit4(schema.additionalProperties, references, `${path2}/${EscapeKey(valueKey)}`, value[valueKey]);
+      yield* Visit4(schema.additionalProperties, references, `${path3}/${EscapeKey(valueKey)}`, value[valueKey]);
     }
   }
   for (const knownKey of knownKeys) {
     const property = schema.properties[knownKey];
     if (schema.required && schema.required.includes(knownKey)) {
-      yield* Visit4(property, references, `${path2}/${EscapeKey(knownKey)}`, value[knownKey]);
+      yield* Visit4(property, references, `${path3}/${EscapeKey(knownKey)}`, value[knownKey]);
       if (ExtendsUndefinedCheck(schema) && !(knownKey in value)) {
-        yield Create(ValueErrorType.ObjectRequiredProperty, property, `${path2}/${EscapeKey(knownKey)}`, void 0);
+        yield Create(ValueErrorType.ObjectRequiredProperty, property, `${path3}/${EscapeKey(knownKey)}`, void 0);
       }
     } else {
       if (TypeSystemPolicy.IsExactOptionalProperty(value, knownKey)) {
-        yield* Visit4(property, references, `${path2}/${EscapeKey(knownKey)}`, value[knownKey]);
+        yield* Visit4(property, references, `${path3}/${EscapeKey(knownKey)}`, value[knownKey]);
       }
     }
   }
 }
-function* FromPromise2(schema, references, path2, value) {
+function* FromPromise2(schema, references, path3, value) {
   if (!IsPromise(value))
-    yield Create(ValueErrorType.Promise, schema, path2, value);
+    yield Create(ValueErrorType.Promise, schema, path3, value);
 }
-function* FromRecord2(schema, references, path2, value) {
+function* FromRecord2(schema, references, path3, value) {
   if (!TypeSystemPolicy.IsRecordLike(value))
-    return yield Create(ValueErrorType.Object, schema, path2, value);
+    return yield Create(ValueErrorType.Object, schema, path3, value);
   if (IsDefined2(schema.minProperties) && !(Object.getOwnPropertyNames(value).length >= schema.minProperties)) {
-    yield Create(ValueErrorType.ObjectMinProperties, schema, path2, value);
+    yield Create(ValueErrorType.ObjectMinProperties, schema, path3, value);
   }
   if (IsDefined2(schema.maxProperties) && !(Object.getOwnPropertyNames(value).length <= schema.maxProperties)) {
-    yield Create(ValueErrorType.ObjectMaxProperties, schema, path2, value);
+    yield Create(ValueErrorType.ObjectMaxProperties, schema, path3, value);
   }
   const [patternKey, patternSchema] = Object.entries(schema.patternProperties)[0];
   const regex = new RegExp(patternKey);
   for (const [propertyKey, propertyValue] of Object.entries(value)) {
     if (regex.test(propertyKey))
-      yield* Visit4(patternSchema, references, `${path2}/${EscapeKey(propertyKey)}`, propertyValue);
+      yield* Visit4(patternSchema, references, `${path3}/${EscapeKey(propertyKey)}`, propertyValue);
   }
   if (typeof schema.additionalProperties === "object") {
     for (const [propertyKey, propertyValue] of Object.entries(value)) {
       if (!regex.test(propertyKey))
-        yield* Visit4(schema.additionalProperties, references, `${path2}/${EscapeKey(propertyKey)}`, propertyValue);
+        yield* Visit4(schema.additionalProperties, references, `${path3}/${EscapeKey(propertyKey)}`, propertyValue);
     }
   }
   if (schema.additionalProperties === false) {
     for (const [propertyKey, propertyValue] of Object.entries(value)) {
       if (regex.test(propertyKey))
         continue;
-      return yield Create(ValueErrorType.ObjectAdditionalProperties, schema, `${path2}/${EscapeKey(propertyKey)}`, propertyValue);
+      return yield Create(ValueErrorType.ObjectAdditionalProperties, schema, `${path3}/${EscapeKey(propertyKey)}`, propertyValue);
     }
   }
 }
-function* FromRef2(schema, references, path2, value) {
-  yield* Visit4(Deref(schema, references), references, path2, value);
+function* FromRef2(schema, references, path3, value) {
+  yield* Visit4(Deref(schema, references), references, path3, value);
 }
-function* FromRegExp2(schema, references, path2, value) {
+function* FromRegExp2(schema, references, path3, value) {
   if (!IsString(value))
-    return yield Create(ValueErrorType.String, schema, path2, value);
+    return yield Create(ValueErrorType.String, schema, path3, value);
   if (IsDefined2(schema.minLength) && !(value.length >= schema.minLength)) {
-    yield Create(ValueErrorType.StringMinLength, schema, path2, value);
+    yield Create(ValueErrorType.StringMinLength, schema, path3, value);
   }
   if (IsDefined2(schema.maxLength) && !(value.length <= schema.maxLength)) {
-    yield Create(ValueErrorType.StringMaxLength, schema, path2, value);
+    yield Create(ValueErrorType.StringMaxLength, schema, path3, value);
   }
   const regex = new RegExp(schema.source, schema.flags);
   if (!regex.test(value)) {
-    return yield Create(ValueErrorType.RegExp, schema, path2, value);
+    return yield Create(ValueErrorType.RegExp, schema, path3, value);
   }
 }
-function* FromString2(schema, references, path2, value) {
+function* FromString2(schema, references, path3, value) {
   if (!IsString(value))
-    return yield Create(ValueErrorType.String, schema, path2, value);
+    return yield Create(ValueErrorType.String, schema, path3, value);
   if (IsDefined2(schema.minLength) && !(value.length >= schema.minLength)) {
-    yield Create(ValueErrorType.StringMinLength, schema, path2, value);
+    yield Create(ValueErrorType.StringMinLength, schema, path3, value);
   }
   if (IsDefined2(schema.maxLength) && !(value.length <= schema.maxLength)) {
-    yield Create(ValueErrorType.StringMaxLength, schema, path2, value);
+    yield Create(ValueErrorType.StringMaxLength, schema, path3, value);
   }
   if (IsString(schema.pattern)) {
     const regex = new RegExp(schema.pattern);
     if (!regex.test(value)) {
-      yield Create(ValueErrorType.StringPattern, schema, path2, value);
+      yield Create(ValueErrorType.StringPattern, schema, path3, value);
     }
   }
   if (IsString(schema.format)) {
     if (!format_exports.Has(schema.format)) {
-      yield Create(ValueErrorType.StringFormatUnknown, schema, path2, value);
+      yield Create(ValueErrorType.StringFormatUnknown, schema, path3, value);
     } else {
       const format = format_exports.Get(schema.format);
       if (!format(value)) {
-        yield Create(ValueErrorType.StringFormat, schema, path2, value);
+        yield Create(ValueErrorType.StringFormat, schema, path3, value);
       }
     }
   }
 }
-function* FromSymbol2(schema, references, path2, value) {
+function* FromSymbol2(schema, references, path3, value) {
   if (!IsSymbol(value))
-    yield Create(ValueErrorType.Symbol, schema, path2, value);
+    yield Create(ValueErrorType.Symbol, schema, path3, value);
 }
-function* FromTemplateLiteral2(schema, references, path2, value) {
+function* FromTemplateLiteral2(schema, references, path3, value) {
   if (!IsString(value))
-    return yield Create(ValueErrorType.String, schema, path2, value);
+    return yield Create(ValueErrorType.String, schema, path3, value);
   const regex = new RegExp(schema.pattern);
   if (!regex.test(value)) {
-    yield Create(ValueErrorType.StringPattern, schema, path2, value);
+    yield Create(ValueErrorType.StringPattern, schema, path3, value);
   }
 }
-function* FromThis2(schema, references, path2, value) {
-  yield* Visit4(Deref(schema, references), references, path2, value);
+function* FromThis2(schema, references, path3, value) {
+  yield* Visit4(Deref(schema, references), references, path3, value);
 }
-function* FromTuple4(schema, references, path2, value) {
+function* FromTuple4(schema, references, path3, value) {
   if (!IsArray(value))
-    return yield Create(ValueErrorType.Tuple, schema, path2, value);
+    return yield Create(ValueErrorType.Tuple, schema, path3, value);
   if (schema.items === void 0 && !(value.length === 0)) {
-    return yield Create(ValueErrorType.TupleLength, schema, path2, value);
+    return yield Create(ValueErrorType.TupleLength, schema, path3, value);
   }
   if (!(value.length === schema.maxItems)) {
-    return yield Create(ValueErrorType.TupleLength, schema, path2, value);
+    return yield Create(ValueErrorType.TupleLength, schema, path3, value);
   }
   if (!schema.items) {
     return;
   }
   for (let i = 0; i < schema.items.length; i++) {
-    yield* Visit4(schema.items[i], references, `${path2}/${i}`, value[i]);
+    yield* Visit4(schema.items[i], references, `${path3}/${i}`, value[i]);
   }
 }
-function* FromUndefined2(schema, references, path2, value) {
+function* FromUndefined2(schema, references, path3, value) {
   if (!IsUndefined(value))
-    yield Create(ValueErrorType.Undefined, schema, path2, value);
+    yield Create(ValueErrorType.Undefined, schema, path3, value);
 }
-function* FromUnion4(schema, references, path2, value) {
+function* FromUnion4(schema, references, path3, value) {
   if (Check(schema, references, value))
     return;
-  const errors = schema.anyOf.map((variant) => new ValueErrorIterator(Visit4(variant, references, path2, value)));
-  yield Create(ValueErrorType.Union, schema, path2, value, errors);
+  const errors = schema.anyOf.map((variant) => new ValueErrorIterator(Visit4(variant, references, path3, value)));
+  yield Create(ValueErrorType.Union, schema, path3, value, errors);
 }
-function* FromUint8Array2(schema, references, path2, value) {
+function* FromUint8Array2(schema, references, path3, value) {
   if (!IsUint8Array(value))
-    return yield Create(ValueErrorType.Uint8Array, schema, path2, value);
+    return yield Create(ValueErrorType.Uint8Array, schema, path3, value);
   if (IsDefined2(schema.maxByteLength) && !(value.length <= schema.maxByteLength)) {
-    yield Create(ValueErrorType.Uint8ArrayMaxByteLength, schema, path2, value);
+    yield Create(ValueErrorType.Uint8ArrayMaxByteLength, schema, path3, value);
   }
   if (IsDefined2(schema.minByteLength) && !(value.length >= schema.minByteLength)) {
-    yield Create(ValueErrorType.Uint8ArrayMinByteLength, schema, path2, value);
+    yield Create(ValueErrorType.Uint8ArrayMinByteLength, schema, path3, value);
   }
 }
-function* FromUnknown2(schema, references, path2, value) {
+function* FromUnknown2(schema, references, path3, value) {
 }
-function* FromVoid2(schema, references, path2, value) {
+function* FromVoid2(schema, references, path3, value) {
   if (!TypeSystemPolicy.IsVoidLike(value))
-    yield Create(ValueErrorType.Void, schema, path2, value);
+    yield Create(ValueErrorType.Void, schema, path3, value);
 }
-function* FromKind2(schema, references, path2, value) {
+function* FromKind2(schema, references, path3, value) {
   const check = type_exports.Get(schema[Kind]);
   if (!check(schema, value))
-    yield Create(ValueErrorType.Kind, schema, path2, value);
+    yield Create(ValueErrorType.Kind, schema, path3, value);
 }
-function* Visit4(schema, references, path2, value) {
+function* Visit4(schema, references, path3, value) {
   const references_ = IsDefined2(schema.$id) ? [...references, schema] : references;
   const schema_ = schema;
   switch (schema_[Kind]) {
     case "Any":
-      return yield* FromAny2(schema_, references_, path2, value);
+      return yield* FromAny2(schema_, references_, path3, value);
     case "Argument":
-      return yield* FromArgument2(schema_, references_, path2, value);
+      return yield* FromArgument2(schema_, references_, path3, value);
     case "Array":
-      return yield* FromArray4(schema_, references_, path2, value);
+      return yield* FromArray4(schema_, references_, path3, value);
     case "AsyncIterator":
-      return yield* FromAsyncIterator2(schema_, references_, path2, value);
+      return yield* FromAsyncIterator2(schema_, references_, path3, value);
     case "BigInt":
-      return yield* FromBigInt2(schema_, references_, path2, value);
+      return yield* FromBigInt2(schema_, references_, path3, value);
     case "Boolean":
-      return yield* FromBoolean2(schema_, references_, path2, value);
+      return yield* FromBoolean2(schema_, references_, path3, value);
     case "Constructor":
-      return yield* FromConstructor2(schema_, references_, path2, value);
+      return yield* FromConstructor2(schema_, references_, path3, value);
     case "Date":
-      return yield* FromDate2(schema_, references_, path2, value);
+      return yield* FromDate2(schema_, references_, path3, value);
     case "Function":
-      return yield* FromFunction2(schema_, references_, path2, value);
+      return yield* FromFunction2(schema_, references_, path3, value);
     case "Import":
-      return yield* FromImport2(schema_, references_, path2, value);
+      return yield* FromImport2(schema_, references_, path3, value);
     case "Integer":
-      return yield* FromInteger2(schema_, references_, path2, value);
+      return yield* FromInteger2(schema_, references_, path3, value);
     case "Intersect":
-      return yield* FromIntersect4(schema_, references_, path2, value);
+      return yield* FromIntersect4(schema_, references_, path3, value);
     case "Iterator":
-      return yield* FromIterator2(schema_, references_, path2, value);
+      return yield* FromIterator2(schema_, references_, path3, value);
     case "Literal":
-      return yield* FromLiteral2(schema_, references_, path2, value);
+      return yield* FromLiteral2(schema_, references_, path3, value);
     case "Never":
-      return yield* FromNever2(schema_, references_, path2, value);
+      return yield* FromNever2(schema_, references_, path3, value);
     case "Not":
-      return yield* FromNot2(schema_, references_, path2, value);
+      return yield* FromNot2(schema_, references_, path3, value);
     case "Null":
-      return yield* FromNull2(schema_, references_, path2, value);
+      return yield* FromNull2(schema_, references_, path3, value);
     case "Number":
-      return yield* FromNumber2(schema_, references_, path2, value);
+      return yield* FromNumber2(schema_, references_, path3, value);
     case "Object":
-      return yield* FromObject2(schema_, references_, path2, value);
+      return yield* FromObject2(schema_, references_, path3, value);
     case "Promise":
-      return yield* FromPromise2(schema_, references_, path2, value);
+      return yield* FromPromise2(schema_, references_, path3, value);
     case "Record":
-      return yield* FromRecord2(schema_, references_, path2, value);
+      return yield* FromRecord2(schema_, references_, path3, value);
     case "Ref":
-      return yield* FromRef2(schema_, references_, path2, value);
+      return yield* FromRef2(schema_, references_, path3, value);
     case "RegExp":
-      return yield* FromRegExp2(schema_, references_, path2, value);
+      return yield* FromRegExp2(schema_, references_, path3, value);
     case "String":
-      return yield* FromString2(schema_, references_, path2, value);
+      return yield* FromString2(schema_, references_, path3, value);
     case "Symbol":
-      return yield* FromSymbol2(schema_, references_, path2, value);
+      return yield* FromSymbol2(schema_, references_, path3, value);
     case "TemplateLiteral":
-      return yield* FromTemplateLiteral2(schema_, references_, path2, value);
+      return yield* FromTemplateLiteral2(schema_, references_, path3, value);
     case "This":
-      return yield* FromThis2(schema_, references_, path2, value);
+      return yield* FromThis2(schema_, references_, path3, value);
     case "Tuple":
-      return yield* FromTuple4(schema_, references_, path2, value);
+      return yield* FromTuple4(schema_, references_, path3, value);
     case "Undefined":
-      return yield* FromUndefined2(schema_, references_, path2, value);
+      return yield* FromUndefined2(schema_, references_, path3, value);
     case "Union":
-      return yield* FromUnion4(schema_, references_, path2, value);
+      return yield* FromUnion4(schema_, references_, path3, value);
     case "Uint8Array":
-      return yield* FromUint8Array2(schema_, references_, path2, value);
+      return yield* FromUint8Array2(schema_, references_, path3, value);
     case "Unknown":
-      return yield* FromUnknown2(schema_, references_, path2, value);
+      return yield* FromUnknown2(schema_, references_, path3, value);
     case "Void":
-      return yield* FromVoid2(schema_, references_, path2, value);
+      return yield* FromVoid2(schema_, references_, path3, value);
     default:
       if (!type_exports.Has(schema_[Kind]))
         throw new ValueErrorsUnknownTypeError(schema);
-      return yield* FromKind2(schema_, references_, path2, value);
+      return yield* FromKind2(schema_, references_, path3, value);
   }
 }
 function Errors(...args) {
@@ -6475,58 +6873,58 @@ var TransformDecodeCheckError = class extends TypeBoxError {
   }
 };
 var TransformDecodeError = class extends TypeBoxError {
-  constructor(schema, path2, value, error) {
+  constructor(schema, path3, value, error) {
     super(error instanceof Error ? error.message : "Unknown error");
     this.schema = schema;
-    this.path = path2;
+    this.path = path3;
     this.value = value;
     this.error = error;
   }
 };
-function Default(schema, path2, value) {
+function Default(schema, path3, value) {
   try {
     return IsTransform(schema) ? schema[TransformKind].Decode(value) : value;
   } catch (error) {
-    throw new TransformDecodeError(schema, path2, value, error);
+    throw new TransformDecodeError(schema, path3, value, error);
   }
 }
-function FromArray5(schema, references, path2, value) {
-  return IsArray(value) ? Default(schema, path2, value.map((value2, index) => Visit5(schema.items, references, `${path2}/${index}`, value2))) : Default(schema, path2, value);
+function FromArray5(schema, references, path3, value) {
+  return IsArray(value) ? Default(schema, path3, value.map((value2, index) => Visit5(schema.items, references, `${path3}/${index}`, value2))) : Default(schema, path3, value);
 }
-function FromIntersect5(schema, references, path2, value) {
+function FromIntersect5(schema, references, path3, value) {
   if (!IsObject(value) || IsValueType(value))
-    return Default(schema, path2, value);
+    return Default(schema, path3, value);
   const knownEntries = KeyOfPropertyEntries(schema);
   const knownKeys = knownEntries.map((entry) => entry[0]);
   const knownProperties = { ...value };
   for (const [knownKey, knownSchema] of knownEntries)
     if (knownKey in knownProperties) {
-      knownProperties[knownKey] = Visit5(knownSchema, references, `${path2}/${knownKey}`, knownProperties[knownKey]);
+      knownProperties[knownKey] = Visit5(knownSchema, references, `${path3}/${knownKey}`, knownProperties[knownKey]);
     }
   if (!IsTransform(schema.unevaluatedProperties)) {
-    return Default(schema, path2, knownProperties);
+    return Default(schema, path3, knownProperties);
   }
   const unknownKeys = Object.getOwnPropertyNames(knownProperties);
   const unevaluatedProperties = schema.unevaluatedProperties;
   const unknownProperties = { ...knownProperties };
   for (const key of unknownKeys)
     if (!knownKeys.includes(key)) {
-      unknownProperties[key] = Default(unevaluatedProperties, `${path2}/${key}`, unknownProperties[key]);
+      unknownProperties[key] = Default(unevaluatedProperties, `${path3}/${key}`, unknownProperties[key]);
     }
-  return Default(schema, path2, unknownProperties);
+  return Default(schema, path3, unknownProperties);
 }
-function FromImport3(schema, references, path2, value) {
+function FromImport3(schema, references, path3, value) {
   const additional = globalThis.Object.values(schema.$defs);
   const target = schema.$defs[schema.$ref];
-  const result = Visit5(target, [...references, ...additional], path2, value);
-  return Default(schema, path2, result);
+  const result = Visit5(target, [...references, ...additional], path3, value);
+  return Default(schema, path3, result);
 }
-function FromNot3(schema, references, path2, value) {
-  return Default(schema, path2, Visit5(schema.not, references, path2, value));
+function FromNot3(schema, references, path3, value) {
+  return Default(schema, path3, Visit5(schema.not, references, path3, value));
 }
-function FromObject3(schema, references, path2, value) {
+function FromObject3(schema, references, path3, value) {
   if (!IsObject(value))
-    return Default(schema, path2, value);
+    return Default(schema, path3, value);
   const knownKeys = KeyOfPropertyKeys(schema);
   const knownProperties = { ...value };
   for (const key of knownKeys) {
@@ -6534,90 +6932,90 @@ function FromObject3(schema, references, path2, value) {
       continue;
     if (IsUndefined(knownProperties[key]) && (!IsUndefined3(schema.properties[key]) || TypeSystemPolicy.IsExactOptionalProperty(knownProperties, key)))
       continue;
-    knownProperties[key] = Visit5(schema.properties[key], references, `${path2}/${key}`, knownProperties[key]);
+    knownProperties[key] = Visit5(schema.properties[key], references, `${path3}/${key}`, knownProperties[key]);
   }
   if (!IsSchema(schema.additionalProperties)) {
-    return Default(schema, path2, knownProperties);
+    return Default(schema, path3, knownProperties);
   }
   const unknownKeys = Object.getOwnPropertyNames(knownProperties);
   const additionalProperties = schema.additionalProperties;
   const unknownProperties = { ...knownProperties };
   for (const key of unknownKeys)
     if (!knownKeys.includes(key)) {
-      unknownProperties[key] = Default(additionalProperties, `${path2}/${key}`, unknownProperties[key]);
+      unknownProperties[key] = Default(additionalProperties, `${path3}/${key}`, unknownProperties[key]);
     }
-  return Default(schema, path2, unknownProperties);
+  return Default(schema, path3, unknownProperties);
 }
-function FromRecord3(schema, references, path2, value) {
+function FromRecord3(schema, references, path3, value) {
   if (!IsObject(value))
-    return Default(schema, path2, value);
+    return Default(schema, path3, value);
   const pattern = Object.getOwnPropertyNames(schema.patternProperties)[0];
   const knownKeys = new RegExp(pattern);
   const knownProperties = { ...value };
   for (const key of Object.getOwnPropertyNames(value))
     if (knownKeys.test(key)) {
-      knownProperties[key] = Visit5(schema.patternProperties[pattern], references, `${path2}/${key}`, knownProperties[key]);
+      knownProperties[key] = Visit5(schema.patternProperties[pattern], references, `${path3}/${key}`, knownProperties[key]);
     }
   if (!IsSchema(schema.additionalProperties)) {
-    return Default(schema, path2, knownProperties);
+    return Default(schema, path3, knownProperties);
   }
   const unknownKeys = Object.getOwnPropertyNames(knownProperties);
   const additionalProperties = schema.additionalProperties;
   const unknownProperties = { ...knownProperties };
   for (const key of unknownKeys)
     if (!knownKeys.test(key)) {
-      unknownProperties[key] = Default(additionalProperties, `${path2}/${key}`, unknownProperties[key]);
+      unknownProperties[key] = Default(additionalProperties, `${path3}/${key}`, unknownProperties[key]);
     }
-  return Default(schema, path2, unknownProperties);
+  return Default(schema, path3, unknownProperties);
 }
-function FromRef3(schema, references, path2, value) {
+function FromRef3(schema, references, path3, value) {
   const target = Deref(schema, references);
-  return Default(schema, path2, Visit5(target, references, path2, value));
+  return Default(schema, path3, Visit5(target, references, path3, value));
 }
-function FromThis3(schema, references, path2, value) {
+function FromThis3(schema, references, path3, value) {
   const target = Deref(schema, references);
-  return Default(schema, path2, Visit5(target, references, path2, value));
+  return Default(schema, path3, Visit5(target, references, path3, value));
 }
-function FromTuple5(schema, references, path2, value) {
-  return IsArray(value) && IsArray(schema.items) ? Default(schema, path2, schema.items.map((schema2, index) => Visit5(schema2, references, `${path2}/${index}`, value[index]))) : Default(schema, path2, value);
+function FromTuple5(schema, references, path3, value) {
+  return IsArray(value) && IsArray(schema.items) ? Default(schema, path3, schema.items.map((schema2, index) => Visit5(schema2, references, `${path3}/${index}`, value[index]))) : Default(schema, path3, value);
 }
-function FromUnion5(schema, references, path2, value) {
+function FromUnion5(schema, references, path3, value) {
   for (const subschema of schema.anyOf) {
     if (!Check(subschema, references, value))
       continue;
-    const decoded = Visit5(subschema, references, path2, value);
-    return Default(schema, path2, decoded);
+    const decoded = Visit5(subschema, references, path3, value);
+    return Default(schema, path3, decoded);
   }
-  return Default(schema, path2, value);
+  return Default(schema, path3, value);
 }
-function Visit5(schema, references, path2, value) {
+function Visit5(schema, references, path3, value) {
   const references_ = Pushref(schema, references);
   const schema_ = schema;
   switch (schema[Kind]) {
     case "Array":
-      return FromArray5(schema_, references_, path2, value);
+      return FromArray5(schema_, references_, path3, value);
     case "Import":
-      return FromImport3(schema_, references_, path2, value);
+      return FromImport3(schema_, references_, path3, value);
     case "Intersect":
-      return FromIntersect5(schema_, references_, path2, value);
+      return FromIntersect5(schema_, references_, path3, value);
     case "Not":
-      return FromNot3(schema_, references_, path2, value);
+      return FromNot3(schema_, references_, path3, value);
     case "Object":
-      return FromObject3(schema_, references_, path2, value);
+      return FromObject3(schema_, references_, path3, value);
     case "Record":
-      return FromRecord3(schema_, references_, path2, value);
+      return FromRecord3(schema_, references_, path3, value);
     case "Ref":
-      return FromRef3(schema_, references_, path2, value);
+      return FromRef3(schema_, references_, path3, value);
     case "Symbol":
-      return Default(schema_, path2, value);
+      return Default(schema_, path3, value);
     case "This":
-      return FromThis3(schema_, references_, path2, value);
+      return FromThis3(schema_, references_, path3, value);
     case "Tuple":
-      return FromTuple5(schema_, references_, path2, value);
+      return FromTuple5(schema_, references_, path3, value);
     case "Union":
-      return FromUnion5(schema_, references_, path2, value);
+      return FromUnion5(schema_, references_, path3, value);
     default:
-      return Default(schema_, path2, value);
+      return Default(schema_, path3, value);
   }
 }
 function TransformDecode(schema, references, value) {
@@ -6634,33 +7032,33 @@ var TransformEncodeCheckError = class extends TypeBoxError {
   }
 };
 var TransformEncodeError = class extends TypeBoxError {
-  constructor(schema, path2, value, error) {
+  constructor(schema, path3, value, error) {
     super(`${error instanceof Error ? error.message : "Unknown error"}`);
     this.schema = schema;
-    this.path = path2;
+    this.path = path3;
     this.value = value;
     this.error = error;
   }
 };
-function Default2(schema, path2, value) {
+function Default2(schema, path3, value) {
   try {
     return IsTransform(schema) ? schema[TransformKind].Encode(value) : value;
   } catch (error) {
-    throw new TransformEncodeError(schema, path2, value, error);
+    throw new TransformEncodeError(schema, path3, value, error);
   }
 }
-function FromArray6(schema, references, path2, value) {
-  const defaulted = Default2(schema, path2, value);
-  return IsArray(defaulted) ? defaulted.map((value2, index) => Visit6(schema.items, references, `${path2}/${index}`, value2)) : defaulted;
+function FromArray6(schema, references, path3, value) {
+  const defaulted = Default2(schema, path3, value);
+  return IsArray(defaulted) ? defaulted.map((value2, index) => Visit6(schema.items, references, `${path3}/${index}`, value2)) : defaulted;
 }
-function FromImport4(schema, references, path2, value) {
+function FromImport4(schema, references, path3, value) {
   const additional = globalThis.Object.values(schema.$defs);
   const target = schema.$defs[schema.$ref];
-  const result = Default2(schema, path2, value);
-  return Visit6(target, [...references, ...additional], path2, result);
+  const result = Default2(schema, path3, value);
+  return Visit6(target, [...references, ...additional], path3, result);
 }
-function FromIntersect6(schema, references, path2, value) {
-  const defaulted = Default2(schema, path2, value);
+function FromIntersect6(schema, references, path3, value) {
+  const defaulted = Default2(schema, path3, value);
   if (!IsObject(value) || IsValueType(value))
     return defaulted;
   const knownEntries = KeyOfPropertyEntries(schema);
@@ -6668,7 +7066,7 @@ function FromIntersect6(schema, references, path2, value) {
   const knownProperties = { ...defaulted };
   for (const [knownKey, knownSchema] of knownEntries)
     if (knownKey in knownProperties) {
-      knownProperties[knownKey] = Visit6(knownSchema, references, `${path2}/${knownKey}`, knownProperties[knownKey]);
+      knownProperties[knownKey] = Visit6(knownSchema, references, `${path3}/${knownKey}`, knownProperties[knownKey]);
     }
   if (!IsTransform(schema.unevaluatedProperties)) {
     return knownProperties;
@@ -6678,15 +7076,15 @@ function FromIntersect6(schema, references, path2, value) {
   const properties = { ...knownProperties };
   for (const key of unknownKeys)
     if (!knownKeys.includes(key)) {
-      properties[key] = Default2(unevaluatedProperties, `${path2}/${key}`, properties[key]);
+      properties[key] = Default2(unevaluatedProperties, `${path3}/${key}`, properties[key]);
     }
   return properties;
 }
-function FromNot4(schema, references, path2, value) {
-  return Default2(schema.not, path2, Default2(schema, path2, value));
+function FromNot4(schema, references, path3, value) {
+  return Default2(schema.not, path3, Default2(schema, path3, value));
 }
-function FromObject4(schema, references, path2, value) {
-  const defaulted = Default2(schema, path2, value);
+function FromObject4(schema, references, path3, value) {
+  const defaulted = Default2(schema, path3, value);
   if (!IsObject(defaulted))
     return defaulted;
   const knownKeys = KeyOfPropertyKeys(schema);
@@ -6696,7 +7094,7 @@ function FromObject4(schema, references, path2, value) {
       continue;
     if (IsUndefined(knownProperties[key]) && (!IsUndefined3(schema.properties[key]) || TypeSystemPolicy.IsExactOptionalProperty(knownProperties, key)))
       continue;
-    knownProperties[key] = Visit6(schema.properties[key], references, `${path2}/${key}`, knownProperties[key]);
+    knownProperties[key] = Visit6(schema.properties[key], references, `${path3}/${key}`, knownProperties[key]);
   }
   if (!IsSchema(schema.additionalProperties)) {
     return knownProperties;
@@ -6706,12 +7104,12 @@ function FromObject4(schema, references, path2, value) {
   const properties = { ...knownProperties };
   for (const key of unknownKeys)
     if (!knownKeys.includes(key)) {
-      properties[key] = Default2(additionalProperties, `${path2}/${key}`, properties[key]);
+      properties[key] = Default2(additionalProperties, `${path3}/${key}`, properties[key]);
     }
   return properties;
 }
-function FromRecord4(schema, references, path2, value) {
-  const defaulted = Default2(schema, path2, value);
+function FromRecord4(schema, references, path3, value) {
+  const defaulted = Default2(schema, path3, value);
   if (!IsObject(value))
     return defaulted;
   const pattern = Object.getOwnPropertyNames(schema.patternProperties)[0];
@@ -6719,7 +7117,7 @@ function FromRecord4(schema, references, path2, value) {
   const knownProperties = { ...defaulted };
   for (const key of Object.getOwnPropertyNames(value))
     if (knownKeys.test(key)) {
-      knownProperties[key] = Visit6(schema.patternProperties[pattern], references, `${path2}/${key}`, knownProperties[key]);
+      knownProperties[key] = Visit6(schema.patternProperties[pattern], references, `${path3}/${key}`, knownProperties[key]);
     }
   if (!IsSchema(schema.additionalProperties)) {
     return knownProperties;
@@ -6729,65 +7127,65 @@ function FromRecord4(schema, references, path2, value) {
   const properties = { ...knownProperties };
   for (const key of unknownKeys)
     if (!knownKeys.test(key)) {
-      properties[key] = Default2(additionalProperties, `${path2}/${key}`, properties[key]);
+      properties[key] = Default2(additionalProperties, `${path3}/${key}`, properties[key]);
     }
   return properties;
 }
-function FromRef4(schema, references, path2, value) {
+function FromRef4(schema, references, path3, value) {
   const target = Deref(schema, references);
-  const resolved = Visit6(target, references, path2, value);
-  return Default2(schema, path2, resolved);
+  const resolved = Visit6(target, references, path3, value);
+  return Default2(schema, path3, resolved);
 }
-function FromThis4(schema, references, path2, value) {
+function FromThis4(schema, references, path3, value) {
   const target = Deref(schema, references);
-  const resolved = Visit6(target, references, path2, value);
-  return Default2(schema, path2, resolved);
+  const resolved = Visit6(target, references, path3, value);
+  return Default2(schema, path3, resolved);
 }
-function FromTuple6(schema, references, path2, value) {
-  const value1 = Default2(schema, path2, value);
-  return IsArray(schema.items) ? schema.items.map((schema2, index) => Visit6(schema2, references, `${path2}/${index}`, value1[index])) : [];
+function FromTuple6(schema, references, path3, value) {
+  const value1 = Default2(schema, path3, value);
+  return IsArray(schema.items) ? schema.items.map((schema2, index) => Visit6(schema2, references, `${path3}/${index}`, value1[index])) : [];
 }
-function FromUnion6(schema, references, path2, value) {
+function FromUnion6(schema, references, path3, value) {
   for (const subschema of schema.anyOf) {
     if (!Check(subschema, references, value))
       continue;
-    const value1 = Visit6(subschema, references, path2, value);
-    return Default2(schema, path2, value1);
+    const value1 = Visit6(subschema, references, path3, value);
+    return Default2(schema, path3, value1);
   }
   for (const subschema of schema.anyOf) {
-    const value1 = Visit6(subschema, references, path2, value);
+    const value1 = Visit6(subschema, references, path3, value);
     if (!Check(schema, references, value1))
       continue;
-    return Default2(schema, path2, value1);
+    return Default2(schema, path3, value1);
   }
-  return Default2(schema, path2, value);
+  return Default2(schema, path3, value);
 }
-function Visit6(schema, references, path2, value) {
+function Visit6(schema, references, path3, value) {
   const references_ = Pushref(schema, references);
   const schema_ = schema;
   switch (schema[Kind]) {
     case "Array":
-      return FromArray6(schema_, references_, path2, value);
+      return FromArray6(schema_, references_, path3, value);
     case "Import":
-      return FromImport4(schema_, references_, path2, value);
+      return FromImport4(schema_, references_, path3, value);
     case "Intersect":
-      return FromIntersect6(schema_, references_, path2, value);
+      return FromIntersect6(schema_, references_, path3, value);
     case "Not":
-      return FromNot4(schema_, references_, path2, value);
+      return FromNot4(schema_, references_, path3, value);
     case "Object":
-      return FromObject4(schema_, references_, path2, value);
+      return FromObject4(schema_, references_, path3, value);
     case "Record":
-      return FromRecord4(schema_, references_, path2, value);
+      return FromRecord4(schema_, references_, path3, value);
     case "Ref":
-      return FromRef4(schema_, references_, path2, value);
+      return FromRef4(schema_, references_, path3, value);
     case "This":
-      return FromThis4(schema_, references_, path2, value);
+      return FromThis4(schema_, references_, path3, value);
     case "Tuple":
-      return FromTuple6(schema_, references_, path2, value);
+      return FromTuple6(schema_, references_, path3, value);
     case "Union":
-      return FromUnion6(schema_, references_, path2, value);
+      return FromUnion6(schema_, references_, path3, value);
     default:
-      return Default2(schema_, path2, value);
+      return Default2(schema_, path3, value);
   }
 }
 function TransformEncode(schema, references, value) {
@@ -8663,18 +9061,18 @@ __export(pointer_exports, {
   ValuePointerRootSetError: () => ValuePointerRootSetError
 });
 var ValuePointerRootSetError = class extends TypeBoxError {
-  constructor(value, path2, update) {
+  constructor(value, path3, update) {
     super("Cannot set root value");
     this.value = value;
-    this.path = path2;
+    this.path = path3;
     this.update = update;
   }
 };
 var ValuePointerRootDeleteError = class extends TypeBoxError {
-  constructor(value, path2) {
+  constructor(value, path3) {
     super("Cannot delete root value");
     this.value = value;
-    this.path = path2;
+    this.path = path3;
   }
 };
 function Escape(component) {
@@ -8818,82 +9216,82 @@ var ValueDiffError = class extends TypeBoxError {
     this.value = value;
   }
 };
-function CreateUpdate(path2, value) {
-  return { type: "update", path: path2, value };
+function CreateUpdate(path3, value) {
+  return { type: "update", path: path3, value };
 }
-function CreateInsert(path2, value) {
-  return { type: "insert", path: path2, value };
+function CreateInsert(path3, value) {
+  return { type: "insert", path: path3, value };
 }
-function CreateDelete(path2) {
-  return { type: "delete", path: path2 };
+function CreateDelete(path3) {
+  return { type: "delete", path: path3 };
 }
 function AssertDiffable(value) {
   if (globalThis.Object.getOwnPropertySymbols(value).length > 0)
     throw new ValueDiffError(value, "Cannot diff objects with symbols");
 }
-function* ObjectType4(path2, current, next) {
+function* ObjectType4(path3, current, next) {
   AssertDiffable(current);
   AssertDiffable(next);
   if (!IsStandardObject(next))
-    return yield CreateUpdate(path2, next);
+    return yield CreateUpdate(path3, next);
   const currentKeys = globalThis.Object.getOwnPropertyNames(current);
   const nextKeys = globalThis.Object.getOwnPropertyNames(next);
   for (const key of nextKeys) {
     if (HasPropertyKey(current, key))
       continue;
-    yield CreateInsert(`${path2}/${key}`, next[key]);
+    yield CreateInsert(`${path3}/${key}`, next[key]);
   }
   for (const key of currentKeys) {
     if (!HasPropertyKey(next, key))
       continue;
     if (Equal(current, next))
       continue;
-    yield* Visit13(`${path2}/${key}`, current[key], next[key]);
+    yield* Visit13(`${path3}/${key}`, current[key], next[key]);
   }
   for (const key of currentKeys) {
     if (HasPropertyKey(next, key))
       continue;
-    yield CreateDelete(`${path2}/${key}`);
+    yield CreateDelete(`${path3}/${key}`);
   }
 }
-function* ArrayType4(path2, current, next) {
+function* ArrayType4(path3, current, next) {
   if (!IsArray(next))
-    return yield CreateUpdate(path2, next);
+    return yield CreateUpdate(path3, next);
   for (let i = 0; i < Math.min(current.length, next.length); i++) {
-    yield* Visit13(`${path2}/${i}`, current[i], next[i]);
+    yield* Visit13(`${path3}/${i}`, current[i], next[i]);
   }
   for (let i = 0; i < next.length; i++) {
     if (i < current.length)
       continue;
-    yield CreateInsert(`${path2}/${i}`, next[i]);
+    yield CreateInsert(`${path3}/${i}`, next[i]);
   }
   for (let i = current.length - 1; i >= 0; i--) {
     if (i < next.length)
       continue;
-    yield CreateDelete(`${path2}/${i}`);
+    yield CreateDelete(`${path3}/${i}`);
   }
 }
-function* TypedArrayType2(path2, current, next) {
+function* TypedArrayType2(path3, current, next) {
   if (!IsTypedArray(next) || current.length !== next.length || globalThis.Object.getPrototypeOf(current).constructor.name !== globalThis.Object.getPrototypeOf(next).constructor.name)
-    return yield CreateUpdate(path2, next);
+    return yield CreateUpdate(path3, next);
   for (let i = 0; i < Math.min(current.length, next.length); i++) {
-    yield* Visit13(`${path2}/${i}`, current[i], next[i]);
+    yield* Visit13(`${path3}/${i}`, current[i], next[i]);
   }
 }
-function* ValueType2(path2, current, next) {
+function* ValueType2(path3, current, next) {
   if (current === next)
     return;
-  yield CreateUpdate(path2, next);
+  yield CreateUpdate(path3, next);
 }
-function* Visit13(path2, current, next) {
+function* Visit13(path3, current, next) {
   if (IsStandardObject(current))
-    return yield* ObjectType4(path2, current, next);
+    return yield* ObjectType4(path3, current, next);
   if (IsArray(current))
-    return yield* ArrayType4(path2, current, next);
+    return yield* ArrayType4(path3, current, next);
   if (IsTypedArray(current))
-    return yield* TypedArrayType2(path2, current, next);
+    return yield* TypedArrayType2(path3, current, next);
   if (IsValueType(current))
-    return yield* ValueType2(path2, current, next);
+    return yield* ValueType2(path3, current, next);
   throw new ValueDiffError(current, "Unable to diff value");
 }
 function Diff(current, next) {
@@ -8950,9 +9348,9 @@ var ValueMutateError = class extends TypeBoxError {
     super(message);
   }
 };
-function ObjectType5(root, path2, current, next) {
+function ObjectType5(root, path3, current, next) {
   if (!IsStandardObject2(current)) {
-    pointer_exports.Set(root, path2, Clone2(next));
+    pointer_exports.Set(root, path3, Clone2(next));
   } else {
     const currentKeys = Object.getOwnPropertyNames(current);
     const nextKeys = Object.getOwnPropertyNames(next);
@@ -8967,43 +9365,43 @@ function ObjectType5(root, path2, current, next) {
       }
     }
     for (const nextKey of nextKeys) {
-      Visit14(root, `${path2}/${nextKey}`, current[nextKey], next[nextKey]);
+      Visit14(root, `${path3}/${nextKey}`, current[nextKey], next[nextKey]);
     }
   }
 }
-function ArrayType5(root, path2, current, next) {
+function ArrayType5(root, path3, current, next) {
   if (!IsArray(current)) {
-    pointer_exports.Set(root, path2, Clone2(next));
+    pointer_exports.Set(root, path3, Clone2(next));
   } else {
     for (let index = 0; index < next.length; index++) {
-      Visit14(root, `${path2}/${index}`, current[index], next[index]);
+      Visit14(root, `${path3}/${index}`, current[index], next[index]);
     }
     current.splice(next.length);
   }
 }
-function TypedArrayType3(root, path2, current, next) {
+function TypedArrayType3(root, path3, current, next) {
   if (IsTypedArray(current) && current.length === next.length) {
     for (let i = 0; i < current.length; i++) {
       current[i] = next[i];
     }
   } else {
-    pointer_exports.Set(root, path2, Clone2(next));
+    pointer_exports.Set(root, path3, Clone2(next));
   }
 }
-function ValueType3(root, path2, current, next) {
+function ValueType3(root, path3, current, next) {
   if (current === next)
     return;
-  pointer_exports.Set(root, path2, next);
+  pointer_exports.Set(root, path3, next);
 }
-function Visit14(root, path2, current, next) {
+function Visit14(root, path3, current, next) {
   if (IsArray(next))
-    return ArrayType5(root, path2, current, next);
+    return ArrayType5(root, path3, current, next);
   if (IsTypedArray(next))
-    return TypedArrayType3(root, path2, current, next);
+    return TypedArrayType3(root, path3, current, next);
   if (IsStandardObject2(next))
-    return ObjectType5(root, path2, current, next);
+    return ObjectType5(root, path3, current, next);
   if (IsValueType(next))
-    return ValueType3(root, path2, current, next);
+    return ValueType3(root, path3, current, next);
 }
 function IsNonMutableValue(value) {
   return IsTypedArray(value) || IsValueType(value);
@@ -13470,357 +13868,8 @@ async function runInvestigation(topic) {
 
 // src/tool-executor.ts
 init_logger();
+init_tool_registry();
 import { v4 as uuid11 } from "uuid";
-
-// src/tool-registry.ts
-import { z } from "zod";
-function inferCategory(namespace) {
-  const map3 = {
-    knowledge: "knowledge",
-    graph: "graph",
-    cognitive: "cognitive",
-    chains: "chains",
-    agents: "agents",
-    assembly: "assembly",
-    decisions: "decisions",
-    adoption: "adoption",
-    linear: "linear",
-    compliance: "compliance",
-    llm: "llm",
-    monitor: "monitor",
-    mcp: "mcp"
-  };
-  return map3[namespace] ?? "mcp";
-}
-function inferTags(name) {
-  return name.split("_").filter((t) => t.length > 2);
-}
-function zodToJsonSchemaSimple(schema) {
-  const shape = schema.shape;
-  const properties = {};
-  const required2 = [];
-  for (const [key, field] of Object.entries(shape)) {
-    const def = field.def ?? field._def ?? field;
-    const isOptional = def.type === "optional" || def.typeName === "ZodOptional";
-    const inner = isOptional ? def.innerType ?? def.schema ?? def : def;
-    const prop = {};
-    const innerType = inner.type ?? inner.typeName ?? "string";
-    if (innerType === "string" || innerType === "ZodString") prop.type = "string";
-    else if (innerType === "number" || innerType === "ZodNumber") prop.type = "number";
-    else if (innerType === "boolean" || innerType === "ZodBoolean") prop.type = "boolean";
-    else if (innerType === "array" || innerType === "ZodArray") {
-      prop.type = "array";
-      const itemType = inner.element ?? inner.items ?? inner.def?.element;
-      if (itemType) {
-        const itemDef = itemType.def ?? itemType._def ?? itemType;
-        const itemKind = itemDef.type ?? itemDef.typeName ?? "string";
-        if (itemKind === "string" || itemKind === "ZodString") prop.items = { type: "string" };
-        else if (itemKind === "number" || itemKind === "ZodNumber") prop.items = { type: "number" };
-        else if (itemKind === "boolean" || itemKind === "ZodBoolean") prop.items = { type: "boolean" };
-        else if (itemKind === "enum" || itemKind === "ZodEnum") prop.items = { type: "string", enum: itemDef.values ?? itemDef.def?.values };
-        else if (itemType.shape) prop.items = zodToJsonSchemaSimple(itemType);
-        else prop.items = { type: "object" };
-      } else {
-        prop.items = { type: "object" };
-      }
-    } else if (innerType === "object" || innerType === "ZodObject") {
-      Object.assign(prop, zodToJsonSchemaSimple(inner));
-    } else if (innerType === "enum" || innerType === "ZodEnum") {
-      prop.type = "string";
-      prop.enum = inner.values ?? inner.def?.values ?? inner.options;
-    } else if (innerType === "record" || innerType === "ZodRecord") {
-      prop.type = "object";
-    } else {
-      prop.type = "string";
-    }
-    const desc = field.description ?? def.description ?? inner.description;
-    if (desc) prop.description = desc;
-    properties[key] = prop;
-    if (!isOptional) required2.push(key);
-  }
-  const result = { type: "object", properties };
-  if (required2.length > 0) result.required = required2;
-  return result;
-}
-function defineTool(opts) {
-  const inputSchema = zodToJsonSchemaSimple(opts.input);
-  return {
-    name: opts.name,
-    namespace: opts.namespace,
-    version: opts.version ?? "1.0",
-    description: opts.description,
-    category: inferCategory(opts.namespace),
-    inputSchema,
-    outputDescription: opts.outputDescription,
-    handler: opts.backendTool ? "mcp-proxy" : "orchestrator",
-    backendTool: opts.backendTool,
-    timeoutMs: opts.timeoutMs ?? 3e4,
-    authRequired: opts.authRequired ?? true,
-    availableVia: opts.availableVia ?? ["openai", "openapi", "mcp"],
-    tags: inferTags(opts.name),
-    deprecated: opts.deprecated
-  };
-}
-var TOOL_REGISTRY = [
-  defineTool({
-    name: "search_knowledge",
-    namespace: "knowledge",
-    description: "Search the WidgeTDC knowledge graph and semantic vector store. Use for ANY question about platform data, consulting knowledge, patterns, documents, or entities. Returns merged results from SRAG (semantic) and Neo4j (graph).",
-    input: z.object({
-      query: z.string().describe("Natural language search query"),
-      max_results: z.number().optional().describe("Max results (default 10)")
-    }),
-    backendTool: "srag.query + graph.read_cypher",
-    timeoutMs: 2e4
-  }),
-  defineTool({
-    name: "reason_deeply",
-    namespace: "cognitive",
-    description: "Send a complex question to the RLM reasoning engine for deep multi-step analysis. Use for strategy questions, architecture analysis, comparisons, evaluations, and planning.",
-    input: z.object({
-      question: z.string().describe("The complex question to reason about"),
-      mode: z.enum(["reason", "analyze", "plan"]).optional().describe("Reasoning mode (default: reason)")
-    }),
-    backendTool: "rlm.reason",
-    timeoutMs: 45e3
-  }),
-  defineTool({
-    name: "query_graph",
-    namespace: "graph",
-    description: "Execute a Cypher query against the Neo4j knowledge graph (475K+ nodes, 3.8M+ relationships). Use for structured data queries like counting nodes, finding relationships, listing entities.",
-    input: z.object({
-      cypher: z.string().describe("Neo4j Cypher query (read-only, parameterized)"),
-      params: z.record(z.unknown()).optional().describe("Query parameters")
-    }),
-    backendTool: "graph.read_cypher",
-    timeoutMs: 15e3
-  }),
-  defineTool({
-    name: "check_tasks",
-    namespace: "linear",
-    description: "Get active tasks, issues, and project status from the knowledge graph. Use when asked about project status, next steps, blockers, sprints, or Linear issues.",
-    input: z.object({
-      filter: z.enum(["active", "blocked", "recent", "all"]).optional().describe("Task filter (default: active)"),
-      keyword: z.string().optional().describe("Optional keyword to filter tasks")
-    }),
-    backendTool: "graph.read_cypher",
-    timeoutMs: 1e4
-  }),
-  defineTool({
-    name: "call_mcp_tool",
-    namespace: "mcp",
-    description: "Call any of the 449+ MCP tools on the WidgeTDC backend. Use for specific platform operations like embedding, compliance checks, memory operations, agent coordination.",
-    input: z.object({
-      tool_name: z.string().describe("MCP tool name (e.g., srag.query, graph.health, audit.dashboard)"),
-      payload: z.record(z.unknown()).optional().describe("Tool payload arguments")
-    }),
-    backendTool: "(dynamic)"
-  }),
-  defineTool({
-    name: "get_platform_health",
-    namespace: "monitor",
-    description: "Get current health status of all WidgeTDC platform services (backend, RLM engine, Neo4j graph, Redis). Use when asked about system status, uptime, or health.",
-    input: z.object({}),
-    backendTool: "graph.health + graph.stats",
-    timeoutMs: 1e4
-  }),
-  defineTool({
-    name: "search_documents",
-    namespace: "knowledge",
-    description: "Search for specific documents, files, reports, or artifacts in the platform. Returns document metadata and content snippets.",
-    input: z.object({
-      query: z.string().describe("Document search query"),
-      doc_type: z.string().optional().describe("Optional filter: TDCDocument, ConsultingArtifact, Pattern, etc.")
-    }),
-    backendTool: "srag.query",
-    timeoutMs: 2e4
-  }),
-  defineTool({
-    name: "linear_issues",
-    namespace: "linear",
-    description: "Get issues from Linear project management. Use for project status, active tasks, sprint progress, blockers, or specific issue details (LIN-xxx).",
-    input: z.object({
-      query: z.string().optional().describe('Search query or issue identifier (e.g., "LIN-493")'),
-      status: z.enum(["active", "done", "backlog", "all"]).optional().describe("Filter by status (default: active)"),
-      limit: z.number().optional().describe("Max results (default 10)")
-    }),
-    backendTool: "linear.issues",
-    timeoutMs: 15e3
-  }),
-  defineTool({
-    name: "linear_issue_detail",
-    namespace: "linear",
-    description: "Get detailed info about a specific Linear issue by identifier (e.g., LIN-493). Returns full description, comments, status, assignee, sub-issues.",
-    input: z.object({
-      identifier: z.string().describe("Issue identifier (e.g., LIN-493)")
-    }),
-    backendTool: "linear.issue_get",
-    timeoutMs: 15e3
-  }),
-  defineTool({
-    name: "run_chain",
-    namespace: "chains",
-    description: "Execute a multi-step agent chain. Supports sequential, parallel, debate, and loop modes. Use for complex workflows needing coordinated tool calls.",
-    input: z.object({
-      name: z.string().describe("Chain name/description"),
-      mode: z.enum(["sequential", "parallel", "debate", "loop"]).describe("Execution mode"),
-      steps: z.array(z.object({
-        agent_id: z.string().describe("Agent identifier"),
-        tool_name: z.string().optional().describe("MCP tool to call"),
-        cognitive_action: z.string().optional().describe("RLM action: reason, analyze, plan"),
-        prompt: z.string().optional().describe("Prompt or arguments")
-      })).describe("Chain steps")
-    }),
-    timeoutMs: 6e4
-  }),
-  defineTool({
-    name: "investigate",
-    namespace: "cognitive",
-    description: "Run a multi-agent deep investigation on a topic. Returns a comprehensive analysis artifact with graph data, compliance, strategy, and reasoning.",
-    input: z.object({
-      topic: z.string().describe("The topic to investigate deeply")
-    }),
-    timeoutMs: 12e4
-  }),
-  defineTool({
-    name: "create_notebook",
-    namespace: "knowledge",
-    description: "Create an interactive consulting notebook with query, insight, data, and action cells. Executes all cells and returns a full notebook with results.",
-    input: z.object({
-      topic: z.string().describe("The topic to build a notebook around"),
-      cells: z.array(z.object({
-        type: z.enum(["query", "insight", "data", "action"]),
-        id: z.string().optional(),
-        query: z.string().optional(),
-        prompt: z.string().optional(),
-        source_cell_id: z.string().optional(),
-        visualization: z.enum(["table", "chart"]).optional(),
-        recommendation: z.string().optional()
-      })).optional().describe("Custom cells. If omitted, auto-generates from topic.")
-    }),
-    timeoutMs: 6e4
-  }),
-  defineTool({
-    name: "verify_output",
-    namespace: "compliance",
-    description: "Run verification checks on content or data. Checks quality, accuracy, and compliance. Use after other tools to validate results.",
-    input: z.object({
-      content: z.string().describe("Content to verify"),
-      checks: z.array(z.object({
-        name: z.string().describe("Check name"),
-        tool_name: z.string().describe("MCP tool for verification")
-      })).optional().describe("Verification checks to run")
-    })
-  }),
-  defineTool({
-    name: "generate_deliverable",
-    namespace: "assembly",
-    description: "Generate a consulting deliverable (report, roadmap, or assessment) from a natural language prompt. Uses knowledge graph + RAG to produce a structured, citation-backed document. Returns markdown with optional PDF.",
-    input: z.object({
-      prompt: z.string().describe("What the deliverable should cover (min 10 chars)"),
-      type: z.enum(["analysis", "roadmap", "assessment"]).describe("Deliverable type"),
-      format: z.enum(["pdf", "markdown"]).optional().describe("Output format (default: markdown)"),
-      max_sections: z.number().optional().describe("Max sections (2-8, default 5)")
-    }),
-    timeoutMs: 12e4,
-    outputDescription: "Deliverable with sections, citations, confidence scores, and markdown content"
-  }),
-  defineTool({
-    name: "precedent_search",
-    namespace: "knowledge",
-    description: "Find similar clients, engagements, or use cases based on shared characteristics. Uses hybrid matching: structural (shared graph relationships) + semantic (embedding similarity). Returns ranked matches with explanation of what dimensions matched.",
-    input: z.object({
-      query: z.string().describe("Client name, engagement description, or use case to find matches for"),
-      dimensions: z.array(z.enum(["industry", "service", "challenge", "domain", "size", "geography", "deliverable"])).optional().describe("Match dimensions (default: industry, service, challenge, domain)"),
-      max_results: z.number().optional().describe("Max results (1-20, default 5)"),
-      structural_weight: z.number().optional().describe("Weight for structural vs semantic matching (0-1, default 0.6)")
-    }),
-    timeoutMs: 3e4,
-    outputDescription: "Ranked list of similar clients with scores, shared dimensions, and match method"
-  }),
-  defineTool({
-    name: "governance_matrix",
-    namespace: "compliance",
-    description: "Get the WidgeTDC Manifesto enforcement matrix \u2014 maps all 10 principles to their runtime enforcement mechanisms. Shows status (ENFORCED/PARTIAL/GAP), enforcement layer, and gap remediation.",
-    input: z.object({
-      filter: z.enum(["all", "enforced", "gaps"]).optional().describe("Filter by status (default: all)")
-    }),
-    timeoutMs: 5e3,
-    outputDescription: "10-principle enforcement matrix with status, mechanism, and gap remediation"
-  }),
-  defineTool({
-    name: "run_osint_scan",
-    namespace: "knowledge",
-    description: "Run OSINT scanning pipeline on Danish public sector domains. Scans CT logs + DMARC/SPF and ingests results to Neo4j.",
-    input: z.object({
-      domains: z.array(z.string()).optional().describe("Override domain list (default: 50 DK public domains)"),
-      scan_type: z.enum(["full", "ct_only", "dmarc_only"]).optional().describe("Scan type (default: full)")
-    }),
-    timeoutMs: 6e5,
-    outputDescription: "Scan results with CT entries, DMARC results, and ingestion counts"
-  }),
-  defineTool({
-    name: "run_evolution",
-    namespace: "chains",
-    description: "Trigger one cycle of the autonomous evolution loop (OODA: Observe\u2192Orient\u2192Act\u2192Learn). Assesses platform state, identifies improvement opportunities, executes changes, and captures lessons.",
-    input: z.object({
-      focus_area: z.string().optional().describe("Optional focus area for this cycle"),
-      dry_run: z.boolean().optional().describe("If true, plan only without executing")
-    }),
-    timeoutMs: 3e5,
-    outputDescription: "Evolution cycle results with observations, actions taken, and lessons learned"
-  })
-];
-function toOpenAITools() {
-  return TOOL_REGISTRY.filter((t) => t.availableVia.includes("openai") && !t.deprecated).map((t) => ({
-    type: "function",
-    function: {
-      name: t.name,
-      description: t.description,
-      parameters: t.inputSchema
-    }
-  }));
-}
-function toMCPTools() {
-  return TOOL_REGISTRY.filter((t) => t.availableVia.includes("mcp") && !t.deprecated).map((t) => ({
-    name: t.name,
-    description: t.description,
-    inputSchema: t.inputSchema
-  }));
-}
-function toOpenAPIPaths() {
-  const paths = {};
-  for (const tool of TOOL_REGISTRY.filter((t) => t.availableVia.includes("openapi") && !t.deprecated)) {
-    const operationId = tool.name.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
-    paths[`/api/tools/${tool.name}`] = {
-      post: {
-        operationId: `tool_${operationId}`,
-        summary: tool.description.slice(0, 80),
-        description: tool.description,
-        tags: [tool.category.charAt(0).toUpperCase() + tool.category.slice(1)],
-        security: tool.authRequired ? [{ BearerAuth: [] }] : [],
-        requestBody: {
-          required: true,
-          content: { "application/json": { schema: tool.inputSchema } }
-        },
-        responses: {
-          "200": {
-            description: tool.outputDescription ?? "Tool result",
-            content: { "application/json": { schema: { type: "object" } } }
-          },
-          "400": { description: "Validation error" },
-          "401": { description: "Unauthorized" }
-        }
-      }
-    };
-  }
-  return paths;
-}
-function getTool(name) {
-  return TOOL_REGISTRY.find((t) => t.name === name);
-}
-
-// src/tool-executor.ts
 var ORCHESTRATOR_TOOLS = toOpenAITools();
 var totalTokensSaved = 0;
 var totalFoldingCalls = 0;
@@ -13917,20 +13966,36 @@ function buildToolFallback(toolName, error) {
 async function executeToolUnified(toolName, args, opts) {
   const callId = opts?.call_id ?? uuid11();
   const t0 = Date.now();
+  let deprecation_notice;
+  const toolDef = getTool(toolName);
+  if (toolDef?.deprecated) {
+    logger.warn({ tool: toolName }, `Deprecated tool called: ${toolName}. ${toolDef.deprecatedMessage ?? ""}`);
+    deprecation_notice = {
+      deprecated: true,
+      since: toolDef.deprecatedSince,
+      message: toolDef.deprecatedMessage,
+      sunset_date: toolDef.sunsetDate,
+      replaced_by: toolDef.replacedBy
+    };
+  }
   try {
     const rawResult = await executeToolByName(toolName, args);
     const duration = Date.now() - t0;
     const shouldFold = opts?.fold !== false;
     const folded = shouldFold ? foldToolResult(rawResult, toolName) : rawResult;
+    const resultWithWarning = deprecation_notice ? `[DEPRECATED] ${toolDef?.deprecatedMessage ?? `Tool "${toolName}" is deprecated.`}${toolDef?.replacedBy ? ` Use "${toolDef.replacedBy}" instead.` : ""}
+
+${folded}` : folded;
     return {
       call_id: callId,
       tool_name: toolName,
       status: "success",
-      result: folded,
+      result: resultWithWarning,
       duration_ms: duration,
       completed_at: (/* @__PURE__ */ new Date()).toISOString(),
       was_folded: shouldFold && folded !== rawResult,
-      source_protocol: opts?.source_protocol ?? "unknown"
+      source_protocol: opts?.source_protocol ?? "unknown",
+      ...deprecation_notice ? { deprecation_notice } : {}
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -13943,7 +14008,8 @@ async function executeToolUnified(toolName, args, opts) {
       duration_ms: Date.now() - t0,
       completed_at: (/* @__PURE__ */ new Date()).toISOString(),
       was_folded: false,
-      source_protocol: opts?.source_protocol ?? "unknown"
+      source_protocol: opts?.source_protocol ?? "unknown",
+      ...deprecation_notice ? { deprecation_notice } : {}
     };
   }
 }
@@ -14273,6 +14339,22 @@ ${result.errors.slice(0, 10).join("\n")}`;
       } catch (err) {
         return `OSINT scan failed: ${err}`;
       }
+    }
+    case "list_tools": {
+      const { TOOL_REGISTRY: TOOL_REGISTRY3 } = await Promise.resolve().then(() => (init_tool_registry(), tool_registry_exports));
+      let tools = TOOL_REGISTRY3;
+      if (args.namespace && typeof args.namespace === "string") {
+        tools = tools.filter((t) => t.namespace === args.namespace);
+      }
+      if (args.category && typeof args.category === "string") {
+        tools = tools.filter((t) => t.category === args.category);
+      }
+      const summary = tools.map(
+        (t) => `- ${t.name} [${t.namespace}/${t.category}] \u2014 ${t.description.slice(0, 80)}${t.description.length > 80 ? "..." : ""} (${t.availableVia.join(",")})`
+      );
+      return `${tools.length} tools${args.namespace ? ` in namespace "${args.namespace}"` : ""}${args.category ? ` in category "${args.category}"` : ""}:
+
+${summary.join("\n")}`;
     }
     case "run_evolution": {
       const { runEvolutionLoop: runEvolutionLoop2 } = await Promise.resolve().then(() => (init_evolution_loop(), evolution_loop_exports));
@@ -21287,6 +21369,7 @@ promptGeneratorRouter.get("/skills", (_req, res) => {
 });
 
 // src/openapi.ts
+init_tool_registry();
 import { Router as Router23 } from "express";
 import swaggerUi from "swagger-ui-express";
 function buildOpenAPISpec() {
@@ -21873,6 +21956,7 @@ openapiRouter.use("/docs", swaggerUi.serve, swaggerUi.setup(spec, {
 
 // src/routes/mcp-gateway.ts
 import { Router as Router24 } from "express";
+init_tool_registry();
 init_mcp_caller();
 init_config();
 init_logger();
@@ -22090,6 +22174,7 @@ mcpGatewayRouter.delete("/", (_req, res) => {
 
 // src/routes/tool-gateway.ts
 import { Router as Router25 } from "express";
+init_tool_registry();
 init_logger();
 import { v4 as uuid25 } from "uuid";
 var toolGatewayRouter = Router25();
@@ -23773,8 +23858,456 @@ evolutionRouter.get("/history", async (req, res) => {
   }
 });
 
-// src/index.ts
+// src/routes/abi-docs.ts
+init_tool_registry();
+import { Router as Router36 } from "express";
+init_logger();
+var abiDocsRouter = Router36();
+abiDocsRouter.get("/docs", (_req, res) => {
+  const namespace = _req.query.namespace ?? void 0;
+  const category = _req.query.category ?? void 0;
+  let tools = TOOL_REGISTRY;
+  if (namespace) {
+    tools = tools.filter((t) => t.namespace === namespace);
+  }
+  if (category) {
+    tools = tools.filter((t) => t.category === category);
+  }
+  const toolDocs = tools.map((t) => ({
+    name: t.name,
+    namespace: t.namespace,
+    description: t.description,
+    input_schema: t.inputSchema,
+    examples: buildExamples(t.name, t.inputSchema),
+    protocols: t.availableVia,
+    category: t.category,
+    version: t.version,
+    deprecated: !!t.deprecated,
+    ...t.deprecated ? { deprecated_since: t.deprecated.since, replacement: t.deprecated.replacement } : {},
+    handler: t.handler,
+    timeout_ms: t.timeoutMs,
+    output_description: t.outputDescription ?? null,
+    tags: t.tags
+  }));
+  const byNamespace = {};
+  const byCategory = {};
+  for (const t of TOOL_REGISTRY) {
+    byNamespace[t.namespace] = (byNamespace[t.namespace] ?? 0) + 1;
+    byCategory[t.category] = (byCategory[t.category] ?? 0) + 1;
+  }
+  res.json({
+    tools: toolDocs,
+    stats: {
+      total: TOOL_REGISTRY.length,
+      filtered: toolDocs.length,
+      by_namespace: byNamespace,
+      by_category: byCategory,
+      categories: getCategories()
+    },
+    generated_at: (/* @__PURE__ */ new Date()).toISOString()
+  });
+});
+abiDocsRouter.post("/try", async (req, res) => {
+  const { tool, arguments: args } = req.body ?? {};
+  if (!tool || typeof tool !== "string") {
+    res.status(400).json({
+      success: false,
+      error: { code: "MISSING_TOOL", message: 'Request body must include "tool" (string)', status_code: 400 }
+    });
+    return;
+  }
+  const toolDef = TOOL_REGISTRY.find((t) => t.name === tool);
+  if (!toolDef) {
+    res.status(404).json({
+      success: false,
+      error: {
+        code: "TOOL_NOT_FOUND",
+        message: `Tool "${tool}" not found. Use GET /api/abi/docs to see available tools.`,
+        status_code: 404,
+        available_tools: TOOL_REGISTRY.map((t) => t.name)
+      }
+    });
+    return;
+  }
+  const safeArgs = args && typeof args === "object" ? args : {};
+  logger.info({ tool, args_keys: Object.keys(safeArgs) }, "ABI playground: executing tool");
+  const result = await executeToolUnified(tool, safeArgs, {
+    source_protocol: "abi-playground",
+    fold: false
+    // Return full result for playground
+  });
+  res.json({
+    success: result.status === "success",
+    result: result.result,
+    error_message: result.error_message ?? null,
+    duration_ms: result.duration_ms,
+    tool,
+    tool_meta: {
+      namespace: toolDef.namespace,
+      category: toolDef.category,
+      handler: toolDef.handler,
+      timeout_ms: toolDef.timeoutMs
+    }
+  });
+});
+function buildExamples(toolName, schema) {
+  const props = schema?.properties ?? {};
+  const required2 = schema?.required ?? [];
+  const minimalArgs = {};
+  for (const key of required2) {
+    const prop = props[key];
+    if (!prop) continue;
+    if (prop.type === "string") minimalArgs[key] = prop.enum?.[0] ?? `example_${key}`;
+    else if (prop.type === "number") minimalArgs[key] = 10;
+    else if (prop.type === "boolean") minimalArgs[key] = true;
+    else if (prop.type === "array") minimalArgs[key] = [];
+    else if (prop.type === "object") minimalArgs[key] = {};
+  }
+  const examples = [];
+  const curated = CURATED_EXAMPLES[toolName];
+  if (curated) {
+    examples.push(...curated);
+  } else if (Object.keys(minimalArgs).length > 0) {
+    examples.push({ description: "Minimal call with required fields", arguments: minimalArgs });
+  }
+  return examples;
+}
+var CURATED_EXAMPLES = {
+  search_knowledge: [
+    { description: "Search for cloud migration patterns", arguments: { query: "cloud migration strategy", max_results: 5 } },
+    { description: "Find consulting frameworks", arguments: { query: "consulting framework" } }
+  ],
+  reason_deeply: [
+    { description: "Analyze architecture trade-offs", arguments: { question: "What are the trade-offs between microservices and monolith?", mode: "analyze" } }
+  ],
+  query_graph: [
+    { description: "Count all nodes by label", arguments: { cypher: "MATCH (n) RETURN labels(n)[0] AS label, count(n) AS count ORDER BY count DESC LIMIT 20" } }
+  ],
+  get_platform_health: [
+    { description: "Check platform health", arguments: {} }
+  ],
+  list_tools: [
+    { description: "List all tools", arguments: {} },
+    { description: "Filter by namespace", arguments: { namespace: "knowledge" } }
+  ],
+  call_mcp_tool: [
+    { description: "Call graph health check", arguments: { tool_name: "graph.health", payload: {} } }
+  ],
+  linear_issues: [
+    { description: "Get active issues", arguments: { status: "active", limit: 5 } }
+  ],
+  governance_matrix: [
+    { description: "Show enforcement gaps", arguments: { filter: "gaps" } }
+  ]
+};
+
+// src/routes/abi-health.ts
+init_tool_registry();
+init_logger();
+import { Router as Router37 } from "express";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 var __dirname = path.dirname(fileURLToPath(import.meta.url));
+var abiHealthRouter = Router37();
+function getSnapshotPath() {
+  const testPath = path.resolve(__dirname, "..", "..", "test", "snapshots", "abi-snapshot.json");
+  if (existsSync(testPath)) return testPath;
+  const distPath = path.resolve(__dirname, "..", "abi-snapshot.json");
+  return existsSync(distPath) ? distPath : testPath;
+}
+function buildCurrentSnapshot() {
+  const openaiTools = toOpenAITools();
+  const mcpTools = toMCPTools();
+  const openapiPaths = toOpenAPIPaths();
+  return {
+    tools: TOOL_REGISTRY.map((t) => ({
+      name: t.name,
+      namespace: t.namespace,
+      version: t.version,
+      description: t.description,
+      category: t.category,
+      inputSchema: t.inputSchema,
+      handler: t.handler,
+      backendTool: t.backendTool ?? null,
+      timeoutMs: t.timeoutMs,
+      authRequired: t.authRequired,
+      availableVia: t.availableVia,
+      tags: t.tags,
+      deprecated: t.deprecated ?? null
+    })),
+    protocols: {
+      openai: { count: openaiTools.length, tools: openaiTools.map((t) => t.function.name) },
+      mcp: { count: mcpTools.length, tools: mcpTools.map((t) => t.name) },
+      openapi: { count: Object.keys(openapiPaths).length, paths: Object.keys(openapiPaths) }
+    },
+    meta: {
+      total_tools: TOOL_REGISTRY.length,
+      namespaces: [...new Set(TOOL_REGISTRY.map((t) => t.namespace))].sort(),
+      deprecated_count: TOOL_REGISTRY.filter((t) => t.deprecated).length,
+      generated_at: (/* @__PURE__ */ new Date()).toISOString(),
+      abi_version: "1.0"
+    }
+  };
+}
+function diffSnapshots(baseline, current) {
+  const breaking = [];
+  const additive = [];
+  const compatible = [];
+  const baseToolMap = new Map(baseline.tools.map((t) => [t.name, t]));
+  const currToolMap = new Map(current.tools.map((t) => [t.name, t]));
+  for (const [name] of baseToolMap) {
+    if (!currToolMap.has(name)) breaking.push(`REMOVED tool: ${name}`);
+  }
+  for (const [name] of currToolMap) {
+    if (!baseToolMap.has(name)) additive.push(`ADDED tool: ${name}`);
+  }
+  for (const [name, baseTool] of baseToolMap) {
+    const currTool = currToolMap.get(name);
+    if (!currTool) continue;
+    const baseSchema = baseTool.inputSchema ?? {};
+    const currSchema = currTool.inputSchema ?? {};
+    const baseRequired = new Set(baseSchema.required ?? []);
+    const currRequired = new Set(currSchema.required ?? []);
+    const baseProps = baseSchema.properties ?? {};
+    const currProps = currSchema.properties ?? {};
+    for (const field of Object.keys(baseProps)) {
+      if (!(field in currProps)) breaking.push(`REMOVED field: ${name}.${field}`);
+    }
+    for (const field of currRequired) {
+      if (!baseRequired.has(field) && !(field in baseProps)) {
+        breaking.push(`ADDED required field: ${name}.${field}`);
+      }
+    }
+    for (const field of Object.keys(baseProps)) {
+      if (!(field in currProps)) continue;
+      const bt = baseProps[field]?.type;
+      const ct = currProps[field]?.type;
+      if (bt && ct && bt !== ct) breaking.push(`CHANGED type: ${name}.${field} (${bt} -> ${ct})`);
+    }
+    for (const field of Object.keys(currProps)) {
+      if (!(field in baseProps) && !currRequired.has(field)) {
+        additive.push(`ADDED optional field: ${name}.${field}`);
+      }
+    }
+    if (baseTool.description !== currTool.description) {
+      compatible.push(`UPDATED description: ${name}`);
+    }
+    const baseProtos = new Set(baseTool.availableVia ?? []);
+    const currProtos = new Set(currTool.availableVia ?? []);
+    for (const p of baseProtos) {
+      if (!currProtos.has(p)) breaking.push(`REMOVED protocol: ${name} no longer via ${p}`);
+    }
+    for (const p of currProtos) {
+      if (!baseProtos.has(p)) additive.push(`ADDED protocol: ${name} now via ${p}`);
+    }
+  }
+  return { breaking, additive, compatible };
+}
+abiHealthRouter.get("/health", (_req, res) => {
+  const openaiTools = toOpenAITools();
+  const mcpTools = toMCPTools();
+  const openapiPaths = toOpenAPIPaths();
+  const snapshotPath = getSnapshotPath();
+  const hasBaseline = existsSync(snapshotPath);
+  res.json({
+    success: true,
+    data: {
+      total_tools: TOOL_REGISTRY.length,
+      namespaces: [...new Set(TOOL_REGISTRY.map((t) => t.namespace))].sort(),
+      deprecated: TOOL_REGISTRY.filter((t) => t.deprecated).length,
+      protocols: {
+        openai: openaiTools.length,
+        mcp: mcpTools.length,
+        openapi: Object.keys(openapiPaths).length
+      },
+      has_baseline_snapshot: hasBaseline,
+      abi_version: "1.0",
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    }
+  });
+});
+abiHealthRouter.get("/diff", (_req, res) => {
+  const snapshotPath = getSnapshotPath();
+  if (!existsSync(snapshotPath)) {
+    res.status(404).json({
+      success: false,
+      error: { code: "NO_BASELINE", message: "No baseline snapshot found. POST /api/abi/snapshot to create one.", status_code: 404 }
+    });
+    return;
+  }
+  try {
+    const baseline = JSON.parse(readFileSync(snapshotPath, "utf-8"));
+    const current = buildCurrentSnapshot();
+    const diff = diffSnapshots(baseline, current);
+    const totalChanges = diff.breaking.length + diff.additive.length + diff.compatible.length;
+    const isCompatible = diff.breaking.length === 0;
+    res.json({
+      success: true,
+      data: {
+        compatible: isCompatible,
+        baseline_tools: baseline.meta.total_tools,
+        current_tools: current.meta.total_tools,
+        baseline_generated_at: baseline.meta.generated_at,
+        changes: {
+          total: totalChanges,
+          breaking: diff.breaking,
+          additive: diff.additive,
+          compatible: diff.compatible
+        }
+      }
+    });
+  } catch (err) {
+    logger.error({ err: String(err) }, "ABI diff error");
+    res.status(500).json({
+      success: false,
+      error: { code: "ABI_DIFF_ERROR", message: String(err), status_code: 500 }
+    });
+  }
+});
+abiHealthRouter.post("/snapshot", (_req, res) => {
+  try {
+    const snapshot = buildCurrentSnapshot();
+    const snapshotPath = path.resolve(__dirname, "..", "..", "test", "snapshots", "abi-snapshot.json");
+    const dir = path.dirname(snapshotPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(snapshotPath, JSON.stringify(snapshot, null, 2));
+    logger.info({
+      tools: snapshot.meta.total_tools,
+      namespaces: snapshot.meta.namespaces.length
+    }, "ABI snapshot saved");
+    res.json({
+      success: true,
+      data: {
+        message: "ABI baseline snapshot saved",
+        total_tools: snapshot.meta.total_tools,
+        namespaces: snapshot.meta.namespaces,
+        protocols: snapshot.protocols,
+        saved_to: snapshotPath,
+        generated_at: snapshot.meta.generated_at
+      }
+    });
+  } catch (err) {
+    logger.error({ err: String(err) }, "ABI snapshot save error");
+    res.status(500).json({
+      success: false,
+      error: { code: "ABI_SNAPSHOT_ERROR", message: String(err), status_code: 500 }
+    });
+  }
+});
+
+// src/routes/abi-versioning.ts
+init_tool_registry();
+import { Router as Router38 } from "express";
+var abiVersioningRouter = Router38();
+abiVersioningRouter.get("/versions", (_req, res) => {
+  const tools = TOOL_REGISTRY.map((t) => ({
+    name: t.name,
+    namespace: t.namespace,
+    version: t.version,
+    category: t.category,
+    deprecated: t.deprecated ?? false,
+    deprecatedSince: t.deprecatedSince ?? null,
+    deprecatedMessage: t.deprecatedMessage ?? null,
+    sunsetDate: t.sunsetDate ?? null,
+    replacedBy: t.replacedBy ?? null,
+    availableVia: t.availableVia
+  }));
+  res.json({
+    success: true,
+    data: {
+      tools,
+      total: tools.length,
+      deprecated_count: tools.filter((t) => t.deprecated).length,
+      active_count: tools.filter((t) => !t.deprecated).length
+    }
+  });
+});
+abiVersioningRouter.get("/deprecated", (_req, res) => {
+  const deprecated = TOOL_REGISTRY.filter((t) => t.deprecated).map((t) => ({
+    name: t.name,
+    namespace: t.namespace,
+    version: t.version,
+    deprecatedSince: t.deprecatedSince ?? null,
+    deprecatedMessage: t.deprecatedMessage ?? null,
+    sunsetDate: t.sunsetDate ?? null,
+    replacedBy: t.replacedBy ?? null,
+    migration: t.replacedBy ? `Replace calls to "${t.name}" with "${t.replacedBy}". ${t.deprecatedMessage ?? ""}` : t.deprecatedMessage ?? "No migration guidance available."
+  }));
+  res.json({
+    success: true,
+    data: {
+      deprecated,
+      count: deprecated.length,
+      upcoming_sunsets: deprecated.filter((d) => d.sunsetDate).sort((a, b) => (a.sunsetDate ?? "").localeCompare(b.sunsetDate ?? ""))
+    }
+  });
+});
+var ABI_CHANGELOG = [
+  {
+    version: "2.0.0",
+    date: "2026-03-28",
+    changes: [
+      { type: "added", tool: "search_knowledge", description: "Dual-channel RAG (SRAG + Neo4j graph) search" },
+      { type: "added", tool: "reason_deeply", description: "RLM reasoning engine proxy" },
+      { type: "added", tool: "query_graph", description: "Neo4j Cypher read queries" },
+      { type: "added", tool: "check_tasks", description: "Linear task status from graph" },
+      { type: "added", tool: "call_mcp_tool", description: "Dynamic MCP tool proxy (449+ tools)" },
+      { type: "added", tool: "get_platform_health", description: "Platform service health check" },
+      { type: "added", tool: "search_documents", description: "Document search via SRAG" },
+      { type: "added", tool: "linear_issues", description: "Linear issue listing" },
+      { type: "added", tool: "linear_issue_detail", description: "Linear issue detail" },
+      { type: "added", tool: "run_chain", description: "Multi-step agent chain execution" },
+      { type: "added", tool: "investigate", description: "Deep multi-agent investigation" },
+      { type: "added", tool: "create_notebook", description: "Interactive consulting notebook" },
+      { type: "added", tool: "verify_output", description: "Content verification checks" }
+    ]
+  },
+  {
+    version: "2.1.0",
+    date: "2026-03-30",
+    changes: [
+      { type: "added", tool: "generate_deliverable", description: "Consulting deliverable generation (analysis/roadmap/assessment)" },
+      { type: "added", tool: "precedent_search", description: "Hybrid structural + semantic client similarity" }
+    ]
+  },
+  {
+    version: "2.2.0",
+    date: "2026-04-02",
+    changes: [
+      { type: "added", tool: "governance_matrix", description: "Manifesto enforcement matrix (10 principles)" },
+      { type: "added", tool: "run_osint_scan", description: "OSINT scanning pipeline for DK public sector" }
+    ]
+  },
+  {
+    version: "2.3.0",
+    date: "2026-04-03",
+    changes: [
+      { type: "added", tool: "run_evolution", description: "Autonomous OODA evolution loop" },
+      { type: "added", tool: "list_tools", description: "Tool discovery with schema and protocol info" }
+    ]
+  },
+  {
+    version: "2.4.0",
+    date: "2026-04-03",
+    changes: [
+      { type: "changed", tool: "*", description: "LIN-573: ABI tool-level versioning + deprecation lifecycle. All tools now expose version, deprecation status, sunset dates, and migration guidance across all 3 protocols." }
+    ]
+  }
+];
+abiVersioningRouter.get("/changelog", (_req, res) => {
+  res.json({
+    success: true,
+    data: {
+      changelog: ABI_CHANGELOG,
+      latest_version: ABI_CHANGELOG[ABI_CHANGELOG.length - 1]?.version ?? "0.0.0",
+      total_entries: ABI_CHANGELOG.length
+    }
+  });
+});
+
+// src/index.ts
+var __dirname2 = path2.dirname(fileURLToPath2(import.meta.url));
 var app = express();
 var server = createServer(app);
 app.use(helmet({
@@ -23821,7 +24354,7 @@ app.use((req, _res, next) => {
   logger.debug({ method: req.method, path: req.path }, "Request");
   next();
 });
-app.use(express.static(path.join(__dirname, "public"), {
+app.use(express.static(path2.join(__dirname2, "public"), {
   etag: false,
   maxAge: 0,
   setHeaders: (res) => {
@@ -23859,6 +24392,9 @@ app.use("/api/intelligence", requireApiKey, intelligenceRouter);
 app.use("/api/governance", requireApiKey, governanceRouter);
 app.use("/api/osint", requireApiKey, osintRouter);
 app.use("/api/evolution", requireApiKey, evolutionRouter);
+app.use("/api/abi", requireApiKey, abiDocsRouter);
+app.use("/api/abi", requireApiKey, abiHealthRouter);
+app.use("/api/abi", requireApiKey, abiVersioningRouter);
 app.use("/api/tools", requireApiKey, toolGatewayRouter);
 app.use("/api/prompt-generator", promptGeneratorRouter);
 app.use(openapiRouter);
@@ -23910,7 +24446,7 @@ app.get("/health", (_req, res) => {
   });
 });
 app.get("/", (_req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
+  res.sendFile(path2.join(__dirname2, "public", "index.html"));
 });
 app.use((err, req, res, next) => {
   if (err.type === "entity.parse.failed") {

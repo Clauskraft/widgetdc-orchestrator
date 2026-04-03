@@ -33,7 +33,11 @@ export interface CanonicalTool {
   authRequired: boolean
   availableVia: Array<'openai' | 'openapi' | 'mcp'>
   tags: string[]
-  deprecated?: { since: string; replacement?: string }
+  deprecated?: boolean
+  deprecatedSince?: string
+  deprecatedMessage?: string
+  sunsetDate?: string
+  replacedBy?: string
 }
 
 // ─── defineTool() builder — "easy as hell" ─────────────────────────────────
@@ -51,7 +55,11 @@ interface DefineToolOpts {
   authRequired?: boolean
   availableVia?: Array<'openai' | 'openapi' | 'mcp'>
   outputDescription?: string
-  deprecated?: { since: string; replacement?: string }
+  deprecated?: boolean
+  deprecatedSince?: string
+  deprecatedMessage?: string
+  sunsetDate?: string
+  replacedBy?: string
 }
 
 function inferCategory(namespace: string): ToolCategory {
@@ -141,7 +149,11 @@ export function defineTool(opts: DefineToolOpts): CanonicalTool {
     authRequired: opts.authRequired ?? true,
     availableVia: opts.availableVia ?? ['openai', 'openapi', 'mcp'],
     tags: inferTags(opts.name),
-    deprecated: opts.deprecated,
+    deprecated: opts.deprecated ?? false,
+    deprecatedSince: opts.deprecatedSince,
+    deprecatedMessage: opts.deprecatedMessage,
+    sunsetDate: opts.sunsetDate,
+    replacedBy: opts.replacedBy,
   }
 }
 
@@ -360,6 +372,18 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     outputDescription: 'Scan results with CT entries, DMARC results, and ingestion counts',
   }),
   defineTool({
+    name: 'list_tools',
+    namespace: 'monitor',
+    description: 'List all available orchestrator tools with their schemas, protocols, and categories. Use to discover what tools are available and how to call them.',
+    input: z.object({
+      namespace: z.string().optional().describe('Filter by namespace'),
+      category: z.string().optional().describe('Filter by category'),
+    }),
+    timeoutMs: 5000,
+    outputDescription: 'List of tool definitions with schemas and metadata',
+  }),
+
+  defineTool({
     name: 'run_evolution',
     namespace: 'chains',
     description: 'Trigger one cycle of the autonomous evolution loop (OODA: Observe→Orient→Act→Learn). Assesses platform state, identifies improvement opportunities, executes changes, and captures lessons.',
@@ -377,13 +401,14 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
 /** Compile registry → OpenAI function calling format */
 export function toOpenAITools() {
   return TOOL_REGISTRY
-    .filter(t => t.availableVia.includes('openai') && !t.deprecated)
+    .filter(t => t.availableVia.includes('openai'))
     .map(t => ({
       type: 'function' as const,
       function: {
         name: t.name,
         description: t.description,
         parameters: t.inputSchema,
+        ...(t.deprecated ? { deprecated: true } : {}),
       },
     }))
 }
@@ -391,19 +416,25 @@ export function toOpenAITools() {
 /** Compile registry → MCP tool descriptors */
 export function toMCPTools() {
   return TOOL_REGISTRY
-    .filter(t => t.availableVia.includes('mcp') && !t.deprecated)
-    .map(t => ({
-      name: t.name,
-      description: t.description,
-      inputSchema: t.inputSchema,
-    }))
+    .filter(t => t.availableVia.includes('mcp'))
+    .map(t => {
+      let description = t.description
+      if (t.deprecated) {
+        const parts = [`[DEPRECATED since ${t.deprecatedSince ?? 'unknown'}]`]
+        if (t.replacedBy) parts.push(`Use "${t.replacedBy}" instead.`)
+        if (t.deprecatedMessage) parts.push(t.deprecatedMessage)
+        if (t.sunsetDate) parts.push(`Sunset: ${t.sunsetDate}.`)
+        description = `${parts.join(' ')} — ${description}`
+      }
+      return { name: t.name, description, inputSchema: t.inputSchema }
+    })
 }
 
 /** Compile registry → OpenAPI 3.0 path entries */
 export function toOpenAPIPaths(): Record<string, object> {
   const paths: Record<string, object> = {}
 
-  for (const tool of TOOL_REGISTRY.filter(t => t.availableVia.includes('openapi') && !t.deprecated)) {
+  for (const tool of TOOL_REGISTRY.filter(t => t.availableVia.includes('openapi'))) {
     const operationId = tool.name.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase())
     paths[`/api/tools/${tool.name}`] = {
       post: {
@@ -412,6 +443,7 @@ export function toOpenAPIPaths(): Record<string, object> {
         description: tool.description,
         tags: [tool.category.charAt(0).toUpperCase() + tool.category.slice(1)],
         security: tool.authRequired ? [{ BearerAuth: [] }] : [],
+        ...(tool.deprecated ? { deprecated: true } : {}),
         requestBody: {
           required: true,
           content: { 'application/json': { schema: tool.inputSchema } },

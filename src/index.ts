@@ -73,6 +73,9 @@ import { intelligenceRouter } from './routes/intelligence.js'
 import { governanceRouter } from './routes/governance.js'
 import { osintRouter } from './routes/osint.js'
 import { evolutionRouter } from './routes/evolution.js'
+import { abiDocsRouter } from './routes/abi-docs.js'
+import { abiHealthRouter } from './routes/abi-health.js'
+import { abiVersioningRouter } from './routes/abi-versioning.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -178,6 +181,12 @@ app.use('/api/governance', requireApiKey, governanceRouter)
 app.use('/api/osint', requireApiKey, osintRouter)
 // LIN-342: Autonomous Evolution Loop (OODA)
 app.use('/api/evolution', requireApiKey, evolutionRouter)
+// LIN-572: ABI Auto-Docs + Live Playground
+app.use('/api/abi', requireApiKey, abiDocsRouter)
+// LIN-570: ABI Snapshot Testing + Breaking Change Detection
+app.use('/api/abi', requireApiKey, abiHealthRouter)
+// LIN-573: ABI Tool-Level Versioning + Deprecation
+app.use('/api/abi', requireApiKey, abiVersioningRouter)
 
 // Tool Gateway — REST access to ALL orchestrator tools (Triple-Protocol ABI)
 app.use('/api/tools', requireApiKey, toolGatewayRouter)

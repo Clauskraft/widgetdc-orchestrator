@@ -17,7 +17,7 @@ import { verifyChainOutput } from './verification-gate.js'
 import { runInvestigation } from './investigate-chain.js'
 import { logger } from './logger.js'
 import { v4 as uuid } from 'uuid'
-import { toOpenAITools } from './tool-registry.js'
+import { toOpenAITools, getTool } from './tool-registry.js'
 
 // ─── OpenAI-format tool definitions (compiled from canonical registry) ──────
 
@@ -396,6 +396,13 @@ export interface ExecutionResult {
   completed_at: string
   was_folded: boolean
   source_protocol: string
+  deprecation_notice?: {
+    deprecated: true
+    since?: string
+    message?: string
+    sunset_date?: string
+    replaced_by?: string
+  }
 }
 
 /**
@@ -410,21 +417,41 @@ export async function executeToolUnified(
   const callId = opts?.call_id ?? uuid()
   const t0 = Date.now()
 
+  // ─── Deprecation check (LIN-573) ───────────────────────────────────────
+  let deprecation_notice: ExecutionResult['deprecation_notice']
+  const toolDef = getTool(toolName)
+  if (toolDef?.deprecated) {
+    logger.warn({ tool: toolName }, `Deprecated tool called: ${toolName}. ${toolDef.deprecatedMessage ?? ''}`)
+    deprecation_notice = {
+      deprecated: true,
+      since: toolDef.deprecatedSince,
+      message: toolDef.deprecatedMessage,
+      sunset_date: toolDef.sunsetDate,
+      replaced_by: toolDef.replacedBy,
+    }
+  }
+
   try {
     const rawResult = await executeToolByName(toolName, args)
     const duration = Date.now() - t0
     const shouldFold = opts?.fold !== false
     const folded = shouldFold ? foldToolResult(rawResult, toolName) : rawResult
 
+    // Prepend deprecation warning to result if deprecated
+    const resultWithWarning = deprecation_notice
+      ? `[DEPRECATED] ${toolDef?.deprecatedMessage ?? `Tool "${toolName}" is deprecated.`}${toolDef?.replacedBy ? ` Use "${toolDef.replacedBy}" instead.` : ''}\n\n${folded}`
+      : folded
+
     return {
       call_id: callId,
       tool_name: toolName,
       status: 'success',
-      result: folded,
+      result: resultWithWarning,
       duration_ms: duration,
       completed_at: new Date().toISOString(),
       was_folded: shouldFold && folded !== rawResult,
       source_protocol: opts?.source_protocol ?? 'unknown',
+      ...(deprecation_notice ? { deprecation_notice } : {}),
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -438,6 +465,7 @@ export async function executeToolUnified(
       completed_at: new Date().toISOString(),
       was_folded: false,
       source_protocol: opts?.source_protocol ?? 'unknown',
+      ...(deprecation_notice ? { deprecation_notice } : {}),
     }
   }
 }
@@ -785,6 +813,21 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       } catch (err) {
         return `OSINT scan failed: ${err}`
       }
+    }
+
+    case 'list_tools': {
+      const { TOOL_REGISTRY } = await import('./tool-registry.js')
+      let tools = TOOL_REGISTRY
+      if (args.namespace && typeof args.namespace === 'string') {
+        tools = tools.filter(t => t.namespace === args.namespace)
+      }
+      if (args.category && typeof args.category === 'string') {
+        tools = tools.filter(t => t.category === args.category)
+      }
+      const summary = tools.map(t =>
+        `- ${t.name} [${t.namespace}/${t.category}] — ${t.description.slice(0, 80)}${t.description.length > 80 ? '...' : ''} (${t.availableVia.join(',')})`
+      )
+      return `${tools.length} tools${args.namespace ? ` in namespace "${args.namespace}"` : ''}${args.category ? ` in category "${args.category}"` : ''}:\n\n${summary.join('\n')}`
     }
 
     case 'run_evolution': {
