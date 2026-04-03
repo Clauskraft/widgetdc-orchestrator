@@ -141,9 +141,11 @@ export async function ingestDocument(req: DocumentIngestionRequest): Promise<Ing
       }
     }
 
-    // ──── Step 3: EXTRACT — Entity + relationship extraction via RLM ─────
+    // ──── Step 3: EXTRACT — Entity + relationship extraction via Mercury ────
     if (req.extract_entities !== false) {
+      logger.info({ extract_entities: req.extract_entities, contentLen: processableContent.length }, 'Step 3: EXTRACT starting')
       const extraction = await extractEntities(processableContent, req.filename, req.domain)
+      logger.info({ entities: extraction.entities.length, relations: extraction.relations.length }, 'Step 3: EXTRACT complete')
       result.entities_extracted = extraction.entities.length
       result.relations_extracted = extraction.relations.length
 

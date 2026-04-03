@@ -3312,7 +3312,9 @@ async function ingestDocument(req) {
       }
     }
     if (req.extract_entities !== false) {
+      logger.info({ extract_entities: req.extract_entities, contentLen: processableContent.length }, "Step 3: EXTRACT starting");
       const extraction = await extractEntities(processableContent, req.filename, req.domain);
+      logger.info({ entities: extraction.entities.length, relations: extraction.relations.length }, "Step 3: EXTRACT complete");
       result.entities_extracted = extraction.entities.length;
       result.relations_extracted = extraction.relations.length;
       if (extraction.entities.length > 0) {
