@@ -11,7 +11,7 @@
  */
 import { v4 as uuid } from 'uuid'
 import { callMcpTool } from './mcp-caller.js'
-// callCognitive removed — using llm.generate via callMcpTool for reliable JSON extraction
+import { callCognitive } from './cognitive-proxy.js'
 import { logger } from './logger.js'
 import { getRedis } from './redis.js'
 
@@ -77,29 +77,24 @@ async function extractAndMerge(answer: string, query: string): Promise<void> {
   if (answer.length < 50) return
 
   try {
-    const llmResult = await callMcpTool({
-      toolName: 'llm.generate',
-      args: {
-        prompt: `Extract specific named entities from this AI-generated answer. Only NAMED entities (organizations, regulations, technologies, frameworks). Reply ONLY as JSON.
+    const result = await callCognitive('reason', {
+      prompt: `Extract specific named entities from this AI-generated answer. Only NAMED entities. Reply ONLY as JSON: {"entities":[{"name":"...","type":"Organization|Regulation|Technology|Framework","domain":"..."}]}. Max 5.
 
 QUERY: ${query}
-ANSWER: ${answer.slice(0, 2000)}
+ANSWER: ${answer.slice(0, 2000)}`,
+      context: { source: 'auto-enrichment' },
+      agent_id: 'auto-enrichment',
+    }, 15000)
 
-JSON: {"entities": [{"name": "...", "type": "Organization|Regulation|Technology|Framework", "domain": "..."}]}
-Max 5 entities. If none specific enough: {"entities": []}`,
-        provider: 'deepseek',
-      },
-      callId: uuid(),
-      timeoutMs: 15000,
-    })
-
-    if (llmResult.status !== 'success') return
-    const raw = llmResult.result as any
-    const text = raw?.content ?? (typeof raw === 'string' ? raw : JSON.stringify(raw))
-    const match = String(text).match(/\{[\s\S]*\}/)
-    if (!match) return
-
-    const parsed = JSON.parse(match[0])
+    // Parse from recommendation/reasoning fields
+    const resultObj = result as any
+    const texts = [resultObj?.recommendation, resultObj?.reasoning, typeof result === 'string' ? result : JSON.stringify(result)].filter(Boolean)
+    let parsed: any = { entities: [] }
+    for (const text of texts) {
+      const match = String(text).match(/\{[\s\S]*"entities"[\s\S]*\}/)
+      if (match) { try { parsed = JSON.parse(match[0]); break } catch { /* next */ } }
+    }
+    if (!parsed.entities?.length) return
     const entities = Array.isArray(parsed.entities) ? parsed.entities.slice(0, 5) : []
 
     for (const entity of entities) {

@@ -1538,27 +1538,28 @@ function hookAutoEnrichment(answer, query) {
 async function extractAndMerge(answer, query) {
   if (answer.length < 50) return;
   try {
-    const llmResult = await callMcpTool({
-      toolName: "llm.generate",
-      args: {
-        prompt: `Extract specific named entities from this AI-generated answer. Only NAMED entities (organizations, regulations, technologies, frameworks). Reply ONLY as JSON.
+    const result = await callCognitive("reason", {
+      prompt: `Extract specific named entities from this AI-generated answer. Only NAMED entities. Reply ONLY as JSON: {"entities":[{"name":"...","type":"Organization|Regulation|Technology|Framework","domain":"..."}]}. Max 5.
 
 QUERY: ${query}
-ANSWER: ${answer.slice(0, 2e3)}
-
-JSON: {"entities": [{"name": "...", "type": "Organization|Regulation|Technology|Framework", "domain": "..."}]}
-Max 5 entities. If none specific enough: {"entities": []}`,
-        provider: "deepseek"
-      },
-      callId: uuid2(),
-      timeoutMs: 15e3
-    });
-    if (llmResult.status !== "success") return;
-    const raw = llmResult.result;
-    const text = raw?.content ?? (typeof raw === "string" ? raw : JSON.stringify(raw));
-    const match = String(text).match(/\{[\s\S]*\}/);
-    if (!match) return;
-    const parsed = JSON.parse(match[0]);
+ANSWER: ${answer.slice(0, 2e3)}`,
+      context: { source: "auto-enrichment" },
+      agent_id: "auto-enrichment"
+    }, 15e3);
+    const resultObj = result;
+    const texts = [resultObj?.recommendation, resultObj?.reasoning, typeof result === "string" ? result : JSON.stringify(result)].filter(Boolean);
+    let parsed = { entities: [] };
+    for (const text of texts) {
+      const match = String(text).match(/\{[\s\S]*"entities"[\s\S]*\}/);
+      if (match) {
+        try {
+          parsed = JSON.parse(match[0]);
+          break;
+        } catch {
+        }
+      }
+    }
+    if (!parsed.entities?.length) return;
     const entities = Array.isArray(parsed.entities) ? parsed.entities.slice(0, 5) : [];
     for (const entity of entities) {
       if (!entity.name || entity.name.length < 3) continue;
@@ -1633,6 +1634,7 @@ var init_compound_hooks = __esm({
   "src/compound-hooks.ts"() {
     "use strict";
     init_mcp_caller();
+    init_cognitive_proxy();
     init_logger();
     init_redis();
   }
@@ -3375,10 +3377,8 @@ async function tryDoclingParse(req) {
 }
 async function extractEntities(content, filename, domain) {
   try {
-    const result = await callMcpTool({
-      toolName: "llm.generate",
-      args: {
-        prompt: `Extract named entities and relationships from this document. Reply ONLY as JSON.
+    const result = await callCognitive("reason", {
+      prompt: `You are an entity extraction engine. Extract named entities and relationships from this document.
 
 DOCUMENT: "${filename}" (domain: ${domain ?? "general"})
 
@@ -3391,26 +3391,32 @@ RULES:
 - Return ONLY entities that are specific and named (not generic concepts)
 - Limit to 20 most important entities
 
-Reply as JSON:
+YOU MUST reply as JSON and nothing else:
 {"entities": [{"name": "Entity Name", "type": "Organization|Regulation|Technology|Framework|Service", "properties": {"domain": "...", "description": "..."}}], "relations": [{"from": "Entity A", "to": "Entity B", "type": "USES|COMPLIES_WITH|..."}]}`,
-        provider: "deepseek"
-      },
-      callId: uuid7(),
-      timeoutMs: 3e4
-    });
-    if (result.status !== "success") {
-      logger.warn({ error: result.error_message, filename }, "LLM entity extraction failed");
-      return { entities: [], relations: [] };
-    }
-    const raw = result.result;
-    const text = raw?.content ?? (typeof raw === "string" ? raw : JSON.stringify(raw));
-    const match = String(text).match(/\{[\s\S]*\}/);
-    if (match) {
-      const parsed = JSON.parse(match[0]);
-      return {
-        entities: Array.isArray(parsed.entities) ? parsed.entities.slice(0, 20) : [],
-        relations: Array.isArray(parsed.relations) ? parsed.relations.slice(0, 30) : []
-      };
+      context: { filename, domain: domain ?? "general", source: "document-intelligence" },
+      agent_id: "document-intelligence"
+    }, 3e4);
+    const resultObj = result;
+    const textParts = [
+      resultObj?.recommendation,
+      resultObj?.reasoning,
+      typeof result === "string" ? result : null,
+      JSON.stringify(result)
+    ].filter(Boolean);
+    for (const text of textParts) {
+      const match = String(text).match(/\{[\s\S]*"entities"[\s\S]*\}/);
+      if (match) {
+        try {
+          const parsed = JSON.parse(match[0]);
+          if (Array.isArray(parsed.entities) && parsed.entities.length > 0) {
+            return {
+              entities: parsed.entities.slice(0, 20),
+              relations: Array.isArray(parsed.relations) ? parsed.relations.slice(0, 30) : []
+            };
+          }
+        } catch {
+        }
+      }
     }
   } catch (err) {
     logger.warn({ error: String(err), filename }, "Entity extraction failed");

@@ -230,12 +230,10 @@ async function extractEntities(
   domain?: string,
 ): Promise<{ entities: ExtractedEntity[]; relations: ExtractedRelation[] }> {
   try {
-    // Use llm.generate (raw LLM text) instead of callCognitive('analyze')
-    // which returns structured RLM objects, not parseable JSON text
-    const result = await callMcpTool({
-      toolName: 'llm.generate',
-      args: {
-        prompt: `Extract named entities and relationships from this document. Reply ONLY as JSON.
+    // Use callCognitive('reason') which returns recommendation/reasoning text
+    // (not 'analyze' which returns structured objects without LLM text)
+    const result = await callCognitive('reason', {
+      prompt: `You are an entity extraction engine. Extract named entities and relationships from this document.
 
 DOCUMENT: "${filename}" (domain: ${domain ?? 'general'})
 
@@ -248,28 +246,33 @@ RULES:
 - Return ONLY entities that are specific and named (not generic concepts)
 - Limit to 20 most important entities
 
-Reply as JSON:
+YOU MUST reply as JSON and nothing else:
 {"entities": [{"name": "Entity Name", "type": "Organization|Regulation|Technology|Framework|Service", "properties": {"domain": "...", "description": "..."}}], "relations": [{"from": "Entity A", "to": "Entity B", "type": "USES|COMPLIES_WITH|..."}]}`,
-        provider: 'deepseek',
-      },
-      callId: uuid(),
-      timeoutMs: 30000,
-    })
+      context: { filename, domain: domain ?? 'general', source: 'document-intelligence' },
+      agent_id: 'document-intelligence',
+    }, 30000)
 
-    if (result.status !== 'success') {
-      logger.warn({ error: result.error_message, filename }, 'LLM entity extraction failed')
-      return { entities: [], relations: [] }
-    }
+    // RLM /reason returns {recommendation, reasoning, ...} — extract JSON from any text field
+    const resultObj = result as any
+    const textParts = [
+      resultObj?.recommendation,
+      resultObj?.reasoning,
+      typeof result === 'string' ? result : null,
+      JSON.stringify(result),
+    ].filter(Boolean)
 
-    // Parse LLM response — extract JSON from content field
-    const raw = result.result as any
-    const text = raw?.content ?? (typeof raw === 'string' ? raw : JSON.stringify(raw))
-    const match = String(text).match(/\{[\s\S]*\}/)
-    if (match) {
-      const parsed = JSON.parse(match[0])
-      return {
-        entities: Array.isArray(parsed.entities) ? parsed.entities.slice(0, 20) : [],
-        relations: Array.isArray(parsed.relations) ? parsed.relations.slice(0, 30) : [],
+    for (const text of textParts) {
+      const match = String(text).match(/\{[\s\S]*"entities"[\s\S]*\}/)
+      if (match) {
+        try {
+          const parsed = JSON.parse(match[0])
+          if (Array.isArray(parsed.entities) && parsed.entities.length > 0) {
+            return {
+              entities: parsed.entities.slice(0, 20),
+              relations: Array.isArray(parsed.relations) ? parsed.relations.slice(0, 30) : [],
+            }
+          }
+        } catch { /* try next text part */ }
       }
     }
   } catch (err) {
