@@ -265,8 +265,14 @@ async function ingestCTResults(ctResults: CTResult[]): Promise<{ nodes_created: 
   let nodesCreated = 0
   const source = `osint-scanner-${new Date().toISOString().slice(0, 10)}`
 
-  for (let i = 0; i < ctResults.length; i += MERGE_BATCH_SIZE) {
-    const batch = ctResults.slice(i, i + MERGE_BATCH_SIZE)
+  // Skip fallback data — don't ingest fabricated subdomains into graph
+  const liveResults = ctResults.filter(ct => ct.source !== 'fallback')
+  if (liveResults.length < ctResults.length) {
+    logger.info({ skipped: ctResults.length - liveResults.length }, 'Skipping fallback CT results (not ingesting fabricated data)')
+  }
+
+  for (let i = 0; i < liveResults.length; i += MERGE_BATCH_SIZE) {
+    const batch = liveResults.slice(i, i + MERGE_BATCH_SIZE)
 
     for (const ct of batch) {
       try {
@@ -326,8 +332,14 @@ async function ingestDMARCResults(dmarcResults: DMARCResult[]): Promise<{ nodes_
   let nodesCreated = 0
   const source = `osint-scanner-${new Date().toISOString().slice(0, 10)}`
 
-  for (let i = 0; i < dmarcResults.length; i += MERGE_BATCH_SIZE) {
-    const batch = dmarcResults.slice(i, i + MERGE_BATCH_SIZE)
+  // Skip fallback data — don't ingest scan_pending placeholders into graph
+  const liveResults = dmarcResults.filter(d => d.source !== 'fallback')
+  if (liveResults.length < dmarcResults.length) {
+    logger.info({ skipped: dmarcResults.length - liveResults.length }, 'Skipping fallback DMARC results (not ingesting placeholder data)')
+  }
+
+  for (let i = 0; i < liveResults.length; i += MERGE_BATCH_SIZE) {
+    const batch = liveResults.slice(i, i + MERGE_BATCH_SIZE)
 
     for (const dmarc of batch) {
       try {

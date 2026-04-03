@@ -17,6 +17,7 @@ import { captureAdoptionSnapshot, type AdoptionSnapshot } from './routes/adoptio
 import { runLooseEndScan } from './routes/loose-ends.js'
 import { notifyAdoptionDigest } from './slack.js'
 import { runGraphHygiene } from './graph-hygiene-cron.js'
+import { buildCommunitySummaries } from './hierarchical-intelligence.js'
 
 interface CronJob {
   id: string
@@ -291,22 +292,30 @@ export async function runCronJob(jobId: string): Promise<void> {
 
     // Special handler for OSINT daily scan (LIN-480)
     if (job.id === 'osint-daily-scan') {
-      const { runOsintScan } = await import('./osint-scanner.js')
-      const scanResult = await runOsintScan()
-      job.last_run = new Date().toISOString()
-      job.last_status = scanResult.errors.length === 0 ? 'completed' : 'partial'
-      job.run_count++
-      persistCronJobs()
+      try {
+        const { runOsintScan } = await import('./osint-scanner.js')
+        const scanResult = await runOsintScan()
+        job.last_run = new Date().toISOString()
+        job.last_status = scanResult.errors.length === 0 ? 'completed' : 'partial'
+        job.run_count++
+        persistCronJobs()
 
-      broadcastMessage({
-        from: 'Orchestrator',
-        to: 'All',
-        source: 'orchestrator',
-        type: 'Message',
-        message: `OSINT scan: ${scanResult.domains_scanned} domains, ${scanResult.ct_entries} CT + ${scanResult.dmarc_results} DMARC, ${scanResult.total_new_nodes} new nodes (${scanResult.tools_available ? 'live' : 'fallback'}, ${scanResult.duration_ms}ms)`,
-        timestamp: new Date().toISOString(),
-      })
-      broadcastSSE('osint-scan', { scan_id: scanResult.scan_id, domains: scanResult.domains_scanned, nodes: scanResult.total_new_nodes })
+        broadcastMessage({
+          from: 'Orchestrator',
+          to: 'All',
+          source: 'orchestrator',
+          type: 'Message',
+          message: `OSINT scan: ${scanResult.domains_scanned} domains, ${scanResult.ct_entries} CT + ${scanResult.dmarc_results} DMARC, ${scanResult.total_new_nodes} new nodes (${scanResult.tools_available ? 'live' : 'fallback'}, ${scanResult.duration_ms}ms)`,
+          timestamp: new Date().toISOString(),
+        })
+        broadcastSSE('osint-scan', { scan_id: scanResult.scan_id, domains: scanResult.domains_scanned, nodes: scanResult.total_new_nodes })
+      } catch (err) {
+        job.last_run = new Date().toISOString()
+        job.last_status = 'failed'
+        job.run_count++
+        persistCronJobs()
+        logger.error({ id: job.id, err: String(err) }, 'OSINT scan cron failed')
+      }
       return
     }
 

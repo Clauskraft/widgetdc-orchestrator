@@ -440,10 +440,10 @@ export async function runEvolutionLoop(opts?: {
   }
 
   isRunning = true
-  const cycleId = uuid().slice(0, 12)
+  const cycleId = uuid()
   const startedAt = new Date().toISOString()
   const t0 = Date.now()
-  const focusArea = opts?.focus_area
+  const focusArea = opts?.focus_area?.slice(0, 200)
   const dryRun = opts?.dry_run ?? false
 
   logger.info({ cycle_id: cycleId, focus_area: focusArea, dry_run: dryRun }, 'Evolution loop starting')
@@ -469,16 +469,20 @@ export async function runEvolutionLoop(opts?: {
     stages: {},
   }
 
-  // Total timeout guard
+  // Total timeout guard — uses AbortController to cancel in-flight stages
+  const abortController = new AbortController()
   const totalTimer = setTimeout(() => {
     if (isRunning) {
       logger.error({ cycle_id: cycleId }, 'Evolution loop hit total timeout (20min)')
-      isRunning = false
-      currentStage = undefined
+      abortController.abort()
     }
   }, TOTAL_TIMEOUT_MS)
 
   try {
+    const checkAbort = () => {
+      if (abortController.signal.aborted) throw new Error('Evolution loop aborted: total timeout exceeded')
+    }
+
     // Stage 1: OBSERVE
     let observeResult: ObserveResult
     const obs_t0 = Date.now()
@@ -489,6 +493,7 @@ export async function runEvolutionLoop(opts?: {
       cycle.stages.observe = { status: 'error', error: String(err), duration_ms: Date.now() - obs_t0 }
       throw new Error(`OBSERVE failed: ${err}`)
     }
+    checkAbort()
 
     // Stage 2: ORIENT
     let orientResult: OrientResult
@@ -500,6 +505,7 @@ export async function runEvolutionLoop(opts?: {
       cycle.stages.orient = { status: 'error', error: String(err), duration_ms: Date.now() - ori_t0 }
       throw new Error(`ORIENT failed: ${err}`)
     }
+    checkAbort()
 
     // Stage 3: ACT
     let actResult: ActResult
@@ -511,6 +517,7 @@ export async function runEvolutionLoop(opts?: {
       cycle.stages.act = { status: 'error', error: String(err), duration_ms: Date.now() - act_t0 }
       throw new Error(`ACT failed: ${err}`)
     }
+    checkAbort()
 
     // Stage 4: LEARN (skip for dry runs)
     let learnResult: LearnResult

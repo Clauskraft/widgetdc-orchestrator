@@ -54,26 +54,42 @@ osintRouter.post('/scan', async (req: Request, res: Response) => {
       scan_type: body.scan_type ?? 'full',
     }, 'OSINT scan triggered via API')
 
-    const result = await runOsintScan({
+    // Fire-and-return pattern: start scan async, return 202 immediately
+    // Clients poll GET /api/osint/status for results
+    const scanPromise = runOsintScan({
       domains: body.domains,
       scan_type: body.scan_type,
     })
 
-    res.json({
-      success: true,
-      data: {
-        scan_id: result.scan_id,
-        duration_ms: result.duration_ms,
-        scan_type: result.scan_type,
-        domains_scanned: result.domains_scanned,
-        ct_entries: result.ct_entries,
-        dmarc_results: result.dmarc_results,
-        total_new_nodes: result.total_new_nodes,
-        tools_available: result.tools_available,
-        error_count: result.errors.length,
-        errors: result.errors.slice(0, 20), // Cap error list in response
-      },
-    })
+    // Wait up to 5s — if scan completes fast, return full result
+    const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000))
+    const result = await Promise.race([scanPromise, timeout])
+
+    if (result) {
+      res.json({
+        success: true,
+        data: {
+          scan_id: result.scan_id,
+          duration_ms: result.duration_ms,
+          scan_type: result.scan_type,
+          domains_scanned: result.domains_scanned,
+          ct_entries: result.ct_entries,
+          dmarc_results: result.dmarc_results,
+          total_new_nodes: result.total_new_nodes,
+          tools_available: result.tools_available,
+          error_count: result.errors.length,
+          errors: result.errors.slice(0, 20),
+        },
+      })
+    } else {
+      // Scan still running — return 202 and let it complete in background
+      scanPromise.catch(err => logger.error({ err: String(err) }, 'Background OSINT scan failed'))
+      res.status(202).json({
+        success: true,
+        message: 'OSINT scan started. Poll GET /api/osint/status for results.',
+        status: 'running',
+      })
+    }
   } catch (err) {
     logger.error({ err: String(err) }, 'OSINT scan endpoint failed')
     res.status(500).json({
