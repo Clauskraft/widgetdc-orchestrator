@@ -1361,6 +1361,175 @@ var init_compound_hooks = __esm({
   }
 });
 
+// src/adaptive-rag.ts
+async function getAdaptiveWeights() {
+  const now = Date.now();
+  if (now - weightsCacheTime < CACHE_TTL_MS) return cachedWeights;
+  const redis2 = getRedis();
+  if (!redis2) return cachedWeights;
+  try {
+    const raw = await redis2.get(REDIS_WEIGHTS_KEY);
+    if (raw) {
+      cachedWeights = JSON.parse(raw);
+      weightsCacheTime = now;
+    }
+  } catch {
+  }
+  return cachedWeights;
+}
+async function analyzeOutcomes(windowHours = 168) {
+  const redis2 = getRedis();
+  if (!redis2) return [];
+  try {
+    const cutoff = Date.now() - windowHours * 36e5;
+    const raw = await redis2.lrange(REDIS_OUTCOMES_KEY, 0, 9999);
+    const outcomes = raw.map((r) => {
+      try {
+        return JSON.parse(r);
+      } catch {
+        return null;
+      }
+    }).filter((o) => o !== null && o.timestamp > cutoff);
+    if (outcomes.length < 10) return [];
+    const byStrategy = /* @__PURE__ */ new Map();
+    for (const o of outcomes) {
+      const existing = byStrategy.get(o.strategy) ?? [];
+      existing.push(o);
+      byStrategy.set(o.strategy, existing);
+    }
+    return Array.from(byStrategy.entries()).map(([strategy, items]) => ({
+      strategy,
+      total_queries: items.length,
+      avg_confidence: items.reduce((s, o) => s + o.confidence, 0) / items.length,
+      avg_result_count: items.reduce((s, o) => s + o.result_count, 0) / items.length,
+      zero_result_rate: items.filter((o) => o.result_count === 0).length / items.length
+    }));
+  } catch {
+    return [];
+  }
+}
+async function retrainRoutingWeights() {
+  const t0 = Date.now();
+  logger.info("Adaptive RAG: retraining routing weights");
+  const stats = await analyzeOutcomes(168);
+  const adjustments = [];
+  if (stats.length === 0) {
+    logger.info("Adaptive RAG: insufficient data for retraining (<10 samples)");
+    return { weights: cachedWeights, stats, adjustments: ["No data \u2014 keeping defaults"] };
+  }
+  const newWeights = { ...cachedWeights };
+  for (const s of stats) {
+    if (s.zero_result_rate > 0.3) {
+      const channelKey = `${s.strategy}_channels`;
+      const channels = newWeights[channelKey];
+      if (Array.isArray(channels) && !channels.includes("srag")) {
+        channels.push("srag");
+        adjustments.push(`${s.strategy}: added srag fallback (${(s.zero_result_rate * 100).toFixed(0)}% zero-result rate)`);
+      }
+    }
+    if (s.avg_confidence < 0.3) {
+      const channelKey = `${s.strategy}_channels`;
+      const channels = newWeights[channelKey];
+      if (Array.isArray(channels) && !channels.includes("community")) {
+        channels.push("community");
+        adjustments.push(`${s.strategy}: added community channel (avg confidence ${s.avg_confidence.toFixed(2)})`);
+      }
+    }
+    if (s.avg_confidence > 0.7 && s.avg_result_count > 5) {
+      adjustments.push(`${s.strategy}: performing well (confidence ${s.avg_confidence.toFixed(2)}, ${s.avg_result_count.toFixed(0)} results avg)`);
+    }
+  }
+  const overallAvgConf = stats.reduce((s, st) => s + st.avg_confidence, 0) / stats.length;
+  if (overallAvgConf > 0.6) {
+    newWeights.confidence_threshold = Math.min(0.6, overallAvgConf * 0.7);
+    adjustments.push(`Confidence threshold \u2192 ${newWeights.confidence_threshold.toFixed(2)} (from avg ${overallAvgConf.toFixed(2)})`);
+  }
+  newWeights.updated_at = (/* @__PURE__ */ new Date()).toISOString();
+  newWeights.training_samples = stats.reduce((s, st) => s + st.total_queries, 0);
+  const redis2 = getRedis();
+  if (redis2) {
+    try {
+      await redis2.set(REDIS_WEIGHTS_KEY, JSON.stringify(newWeights));
+    } catch {
+    }
+  }
+  cachedWeights = newWeights;
+  weightsCacheTime = Date.now();
+  logger.info({
+    samples: newWeights.training_samples,
+    adjustments: adjustments.length,
+    ms: Date.now() - t0
+  }, "Adaptive RAG: retraining complete");
+  return { weights: newWeights, stats, adjustments };
+}
+async function sendQLearningReward(state, action, reward) {
+  if (!isRlmAvailable()) return;
+  try {
+    await callCognitive("learn", {
+      prompt: JSON.stringify({
+        state: {
+          query_type: state.query_type,
+          channel_count: state.channels_used.length,
+          result_density: state.result_count > 0 ? 1 : 0
+        },
+        action: {
+          strategy: action.strategy,
+          threshold: action.confidence_threshold
+        },
+        reward,
+        agent_id: "adaptive-rag",
+        domain: "rag-optimization"
+      }),
+      context: { source: "adaptive-rag-f5", type: "q-learning-reward" },
+      agent_id: "adaptive-rag"
+    }, 1e4);
+    logger.debug({ reward: reward.toFixed(3), strategy: action.strategy }, "Q-learning reward sent");
+  } catch {
+  }
+}
+function calculateCompoundMetric(stats) {
+  if (stats.length === 0) return { score: 0, accuracy: 0, quality: 0, coverage: 0 };
+  const totalQueries = stats.reduce((s, st) => s + st.total_queries, 0);
+  const accuracy = stats.reduce((s, st) => s + st.avg_confidence * st.total_queries, 0) / totalQueries;
+  const quality = 1 - stats.reduce((s, st) => s + st.zero_result_rate * st.total_queries, 0) / totalQueries;
+  const coverage = Math.min(1, stats.reduce((s, st) => s + st.avg_result_count * st.total_queries, 0) / totalQueries / 5);
+  return {
+    score: Math.round(accuracy * quality * coverage * 1e3) / 1e3,
+    accuracy: Math.round(accuracy * 1e3) / 1e3,
+    quality: Math.round(quality * 1e3) / 1e3,
+    coverage: Math.round(coverage * 1e3) / 1e3
+  };
+}
+async function getAdaptiveRAGDashboard() {
+  const weights = await getAdaptiveWeights();
+  const stats = await analyzeOutcomes(168);
+  const compound_metric = calculateCompoundMetric(stats);
+  const outcome_count = stats.reduce((s, st) => s + st.total_queries, 0);
+  return { weights, stats, compound_metric, outcome_count };
+}
+var DEFAULT_WEIGHTS, REDIS_WEIGHTS_KEY, REDIS_OUTCOMES_KEY, cachedWeights, weightsCacheTime, CACHE_TTL_MS;
+var init_adaptive_rag = __esm({
+  "src/adaptive-rag.ts"() {
+    "use strict";
+    init_redis();
+    init_cognitive_proxy();
+    init_logger();
+    DEFAULT_WEIGHTS = {
+      simple_channels: ["graphrag", "srag"],
+      multi_hop_channels: ["graphrag", "cypher", "community"],
+      structured_channels: ["cypher", "graphrag"],
+      confidence_threshold: 0.4,
+      updated_at: (/* @__PURE__ */ new Date()).toISOString(),
+      training_samples: 0
+    };
+    REDIS_WEIGHTS_KEY = "orchestrator:adaptive-rag:weights";
+    REDIS_OUTCOMES_KEY = "orchestrator:rag-quality-signals";
+    cachedWeights = { ...DEFAULT_WEIGHTS };
+    weightsCacheTime = 0;
+    CACHE_TTL_MS = 6e4;
+  }
+});
+
 // src/dual-rag.ts
 import { v4 as uuid3 } from "uuid";
 function classifyQuery(query) {
@@ -1475,7 +1644,7 @@ async function dualChannelRAG(query, options) {
   const depth = options?.cypherDepth ?? 2;
   const complexity = classifyQuery(query);
   logger.info({ query: query.slice(0, 80), complexity }, "Hybrid RAG: routing query");
-  const channels = options?.forceChannels ?? getChannelsForComplexity(complexity);
+  const channels = options?.forceChannels ?? await getChannelsForComplexity(complexity);
   const channelPromises = [];
   const channelsUsed = [];
   if (channels.includes("graphrag")) {
@@ -1553,9 +1722,32 @@ async function dualChannelRAG(query, options) {
   const avgScore = topResults.length > 0 ? topResults.reduce((s, r) => s + r.score, 0) / topResults.length : 0;
   hookQualitySignal(query, complexity, channelsUsed, topResults.length, avgScore).catch(() => {
   });
+  const qualitySignal = topResults.length > 0 ? 1 : 0;
+  const coverageSignal = Math.min(1, topResults.length / 5);
+  const compoundReward = avgScore * qualitySignal * coverageSignal;
+  sendQLearningReward(
+    { query_type: complexity, channels_used: channelsUsed, result_count: topResults.length },
+    { strategy: complexity, confidence_threshold: 0.4 },
+    compoundReward
+  ).catch(() => {
+  });
   return response;
 }
-function getChannelsForComplexity(complexity) {
+async function getChannelsForComplexity(complexity) {
+  try {
+    const w = await getAdaptiveWeights();
+    if (w.training_samples > 0) {
+      switch (complexity) {
+        case "simple":
+          return w.simple_channels;
+        case "multi_hop":
+          return w.multi_hop_channels;
+        case "structured":
+          return w.structured_channels;
+      }
+    }
+  } catch {
+  }
   switch (complexity) {
     case "simple":
       return ["graphrag", "srag"];
@@ -1593,6 +1785,7 @@ var init_dual_rag = __esm({
     init_write_gate();
     init_hierarchical_intelligence();
     init_compound_hooks();
+    init_adaptive_rag();
   }
 });
 
@@ -16749,6 +16942,7 @@ SET s.orphan_ratio = $orphan_ratio,
 
 // src/cron-scheduler.ts
 init_hierarchical_intelligence();
+init_adaptive_rag();
 var jobs = /* @__PURE__ */ new Map();
 var cronTasks = /* @__PURE__ */ new Map();
 var REDIS_CRON_KEY = "orchestrator:cron-jobs";
@@ -16945,6 +17139,30 @@ async function runCronJob(jobId) {
         job.run_count++;
         persistCronJobs();
         logger.error({ id: job.id, err: String(err) }, "Graph hygiene cron failed");
+      }
+      return;
+    }
+    if (job.id === "adaptive-rag-retrain") {
+      try {
+        const result2 = await retrainRoutingWeights();
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = `${result2.adjustments.length} adjustments, ${result2.weights.training_samples} samples`;
+        job.run_count++;
+        persistCronJobs();
+        broadcastMessage({
+          from: "Orchestrator",
+          to: "All",
+          source: "orchestrator",
+          type: "Message",
+          message: `Adaptive RAG retrained: ${result2.adjustments.length} adjustments from ${result2.weights.training_samples} samples. ${result2.adjustments.join("; ") || "No changes needed."}`,
+          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        });
+      } catch (err) {
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = "failed";
+        job.run_count++;
+        persistCronJobs();
+        logger.error({ id: job.id, err: String(err) }, "Adaptive RAG retrain cron failed");
       }
       return;
     }
@@ -17220,6 +17438,18 @@ function registerDefaultLoops() {
           }
         }
       ]
+    }
+  });
+  registerCronJob({
+    id: "adaptive-rag-retrain",
+    name: "Adaptive RAG Weight Retraining",
+    schedule: "0 5 * * 1",
+    // Monday 05:00 UTC
+    enabled: true,
+    chain: {
+      name: "Adaptive RAG Retrain",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
     }
   });
   registerCronJob({
@@ -21643,9 +21873,9 @@ import { v4 as uuid24 } from "uuid";
 var mcpGatewayRouter = Router24();
 var backendToolsCache = [];
 var backendToolsCacheTime = 0;
-var CACHE_TTL_MS = 3e5;
+var CACHE_TTL_MS2 = 3e5;
 async function getBackendTools() {
-  if (Date.now() - backendToolsCacheTime < CACHE_TTL_MS && backendToolsCache.length > 0) {
+  if (Date.now() - backendToolsCacheTime < CACHE_TTL_MS2 && backendToolsCache.length > 0) {
     return backendToolsCache;
   }
   try {
@@ -23144,6 +23374,7 @@ MERGE (a)-[:${rel.type.replace(/[^A-Z_]/g, "_")}]->(b)`,
 // src/routes/intelligence.ts
 init_hierarchical_intelligence();
 init_write_gate();
+init_adaptive_rag();
 init_logger();
 var intelligenceRouter = Router32();
 intelligenceRouter.post("/ingest", async (req, res) => {
@@ -23203,6 +23434,22 @@ intelligenceRouter.get("/communities/search", async (req, res) => {
   }
   const results = await searchCommunitySummaries(query, 10);
   res.json({ success: true, data: results });
+});
+intelligenceRouter.get("/adaptive-rag", async (_req, res) => {
+  try {
+    const dashboard = await getAdaptiveRAGDashboard();
+    res.json({ success: true, data: dashboard });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { code: "DASHBOARD_FAILED", message: String(err), status_code: 500 } });
+  }
+});
+intelligenceRouter.post("/adaptive-rag/retrain", async (_req, res) => {
+  try {
+    const result = await retrainRoutingWeights();
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { code: "RETRAIN_FAILED", message: String(err), status_code: 500 } });
+  }
 });
 intelligenceRouter.get("/health", async (_req, res) => {
   try {

@@ -18,6 +18,7 @@ import { v4 as uuid } from 'uuid'
 import { isPolluted } from './write-gate.js'
 import { searchCommunitySummaries } from './hierarchical-intelligence.js'
 import { hookQualitySignal, hookAutoEnrichment } from './compound-hooks.js'
+import { getAdaptiveWeights, sendQLearningReward } from './adaptive-rag.js'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -207,7 +208,7 @@ export async function dualChannelRAG(query: string, options?: {
   logger.info({ query: query.slice(0, 80), complexity }, 'Hybrid RAG: routing query')
 
   // Determine which channels to call based on complexity
-  const channels = options?.forceChannels ?? getChannelsForComplexity(complexity)
+  const channels = options?.forceChannels ?? await getChannelsForComplexity(complexity)
   const channelPromises: Promise<RAGResult[]>[] = []
   const channelsUsed: string[] = []
 
@@ -306,21 +307,41 @@ export async function dualChannelRAG(query: string, options?: {
     ? topResults.reduce((s, r) => s + r.score, 0) / topResults.length : 0
   hookQualitySignal(query, complexity, channelsUsed, topResults.length, avgScore).catch(() => {})
 
+  // F5: Q-learning reward (non-blocking) — compound metric as reward
+  const qualitySignal = topResults.length > 0 ? 1 : 0
+  const coverageSignal = Math.min(1, topResults.length / 5)
+  const compoundReward = avgScore * qualitySignal * coverageSignal
+  sendQLearningReward(
+    { query_type: complexity, channels_used: channelsUsed, result_count: topResults.length },
+    { strategy: complexity, confidence_threshold: 0.4 },
+    compoundReward,
+  ).catch(() => {})
+
   return response
 }
 
 // ─── Channel Selection ──────────────────────────────────────────────────────
 
-function getChannelsForComplexity(complexity: QueryComplexity): ('graphrag' | 'srag' | 'cypher')[] {
+async function getChannelsForComplexity(complexity: QueryComplexity): Promise<('graphrag' | 'srag' | 'cypher')[]> {
+  // F5: Try adaptive weights from Redis (trained by retrainRoutingWeights cron)
+  try {
+    const w = await getAdaptiveWeights()
+    if (w.training_samples > 0) {
+      switch (complexity) {
+        case 'simple': return w.simple_channels as any
+        case 'multi_hop': return w.multi_hop_channels as any
+        case 'structured': return w.structured_channels as any
+      }
+    }
+  } catch { /* fallback to defaults */ }
+
+  // Default routing (pre-training)
   switch (complexity) {
     case 'simple':
-      // graphrag primary, srag for breadth
       return ['graphrag', 'srag']
     case 'multi_hop':
-      // graphrag for reasoning + cypher for structured context
       return ['graphrag', 'cypher']
     case 'structured':
-      // cypher primary + graphrag for enrichment
       return ['cypher', 'graphrag']
   }
 }

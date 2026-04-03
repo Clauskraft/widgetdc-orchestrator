@@ -10,6 +10,7 @@ import { ingestDocument, type DocumentIngestionRequest } from '../document-intel
 import { buildCommunitySummaries, searchCommunitySummaries } from '../hierarchical-intelligence.js'
 import { runGraphHygiene } from '../graph-hygiene-cron.js'
 import { getWriteGateStats } from '../write-gate.js'
+import { getAdaptiveRAGDashboard, retrainRoutingWeights } from '../adaptive-rag.js'
 import { logger } from '../logger.js'
 
 export const intelligenceRouter = Router()
@@ -82,6 +83,28 @@ intelligenceRouter.get('/communities/search', async (req: Request, res: Response
   }
   const results = await searchCommunitySummaries(query, 10)
   res.json({ success: true, data: results })
+})
+
+// ─── GET /adaptive-rag — Adaptive RAG dashboard ─────────────────────────────
+
+intelligenceRouter.get('/adaptive-rag', async (_req: Request, res: Response) => {
+  try {
+    const dashboard = await getAdaptiveRAGDashboard()
+    res.json({ success: true, data: dashboard })
+  } catch (err) {
+    res.status(500).json({ success: false, error: { code: 'DASHBOARD_FAILED', message: String(err), status_code: 500 } })
+  }
+})
+
+// ─── POST /adaptive-rag/retrain — Trigger manual retraining ─────────────────
+
+intelligenceRouter.post('/adaptive-rag/retrain', async (_req: Request, res: Response) => {
+  try {
+    const result = await retrainRoutingWeights()
+    res.json({ success: true, data: result })
+  } catch (err) {
+    res.status(500).json({ success: false, error: { code: 'RETRAIN_FAILED', message: String(err), status_code: 500 } })
+  }
 })
 
 // ─── GET /health — Intelligence metrics ─────────────────────────────────────

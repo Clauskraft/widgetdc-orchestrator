@@ -18,6 +18,7 @@ import { runLooseEndScan } from './routes/loose-ends.js'
 import { notifyAdoptionDigest } from './slack.js'
 import { runGraphHygiene } from './graph-hygiene-cron.js'
 import { buildCommunitySummaries } from './hierarchical-intelligence.js'
+import { retrainRoutingWeights } from './adaptive-rag.js'
 
 interface CronJob {
   id: string
@@ -267,6 +268,33 @@ export async function runCronJob(jobId: string): Promise<void> {
         job.run_count++
         persistCronJobs()
         logger.error({ id: job.id, err: String(err) }, 'Graph hygiene cron failed')
+      }
+      return
+    }
+
+    // F5: Weekly adaptive RAG retraining
+    if (job.id === 'adaptive-rag-retrain') {
+      try {
+        const result = await retrainRoutingWeights()
+        job.last_run = new Date().toISOString()
+        job.last_status = `${result.adjustments.length} adjustments, ${result.weights.training_samples} samples`
+        job.run_count++
+        persistCronJobs()
+
+        broadcastMessage({
+          from: 'Orchestrator',
+          to: 'All',
+          source: 'orchestrator',
+          type: 'Message',
+          message: `Adaptive RAG retrained: ${result.adjustments.length} adjustments from ${result.weights.training_samples} samples. ${result.adjustments.join('; ') || 'No changes needed.'}`,
+          timestamp: new Date().toISOString(),
+        })
+      } catch (err) {
+        job.last_run = new Date().toISOString()
+        job.last_status = 'failed'
+        job.run_count++
+        persistCronJobs()
+        logger.error({ id: job.id, err: String(err) }, 'Adaptive RAG retrain cron failed')
       }
       return
     }
@@ -619,6 +647,19 @@ export function registerDefaultLoops(): void {
   })
 
   // Self-correcting graph agent — detects and fixes inconsistencies every 2 hours
+  // F5: Weekly adaptive RAG retraining (Q-learning integration)
+  registerCronJob({
+    id: 'adaptive-rag-retrain',
+    name: 'Adaptive RAG Weight Retraining',
+    schedule: '0 5 * * 1', // Monday 05:00 UTC
+    enabled: true,
+    chain: {
+      name: 'Adaptive RAG Retrain',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
   // F3: Weekly community summary builder (hierarchical intelligence)
   registerCronJob({
     id: 'community-builder-weekly',
