@@ -232,7 +232,7 @@ async function extractEntities(
 ): Promise<{ entities: ExtractedEntity[]; relations: ExtractedRelation[] }> {
   try {
     // Use Mercury 2 via backend MCP llm.generate — ultra-fast entity extraction
-    // NOT callCognitive (RLM ignores input, uses its own RAG context — wrong for extraction)
+    logger.info({ filename, domain, contentLen: content.length }, 'Entity extraction: calling Mercury llm.generate')
     const llmResult = await callMcpTool({
       toolName: 'llm.generate',
       args: {
@@ -255,6 +255,8 @@ JSON format:
       callId: uuid(),
       timeoutMs: 30000,
     })
+
+    logger.info({ mcpStatus: llmResult.status, hasResult: !!llmResult.result, resultType: typeof llmResult.result }, 'Entity extraction: Mercury response received')
 
     if (llmResult.status !== 'success') {
       logger.warn({ error: llmResult.error_message }, 'Mercury entity extraction: MCP call failed')

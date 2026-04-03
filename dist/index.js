@@ -3375,6 +3375,7 @@ async function tryDoclingParse(req) {
 }
 async function extractEntities(content, filename, domain) {
   try {
+    logger.info({ filename, domain, contentLen: content.length }, "Entity extraction: calling Mercury llm.generate");
     const llmResult = await callMcpTool({
       toolName: "llm.generate",
       args: {
@@ -3397,6 +3398,7 @@ JSON format:
       callId: uuid7(),
       timeoutMs: 3e4
     });
+    logger.info({ mcpStatus: llmResult.status, hasResult: !!llmResult.result, resultType: typeof llmResult.result }, "Entity extraction: Mercury response received");
     if (llmResult.status !== "success") {
       logger.warn({ error: llmResult.error_message }, "Mercury entity extraction: MCP call failed");
       return { entities: [], relations: [] };
