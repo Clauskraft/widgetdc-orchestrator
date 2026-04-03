@@ -1182,11 +1182,125 @@
         "query"
       ],
       "deprecated": false
+    },
+    {
+      "name": "forge_tool",
+      "namespace": "intelligence",
+      "version": "1.0",
+      "description": "Forge a new MCP tool at runtime. Generates tool definition + handler via LLM, registers in runtime registry, and optionally verifies. Supports 3 handler types: mcp-proxy (forward to backend tool), llm-generate (LLM answers), cypher-query (Neo4j template).",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Tool name (snake_case, e.g. \"analyze_risk\")"
+          },
+          "purpose": {
+            "type": "string",
+            "description": "What the tool should do"
+          },
+          "handler_type": {
+            "type": "string",
+            "description": "Handler: mcp-proxy, llm-generate, cypher-query (default: llm-generate)"
+          },
+          "backend_tool": {
+            "type": "string",
+            "description": "For mcp-proxy: backend tool name to forward to"
+          },
+          "system_prompt": {
+            "type": "string",
+            "description": "For llm-generate: system prompt"
+          },
+          "cypher_template": {
+            "type": "string",
+            "description": "For cypher-query: Cypher template with $params"
+          },
+          "verify": {
+            "type": "boolean",
+            "description": "Run verification after creation (default: true)"
+          }
+        },
+        "required": [
+          "name",
+          "purpose"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 60000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "forge",
+        "tool"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "forge_analyze_gaps",
+      "namespace": "intelligence",
+      "version": "1.0",
+      "description": "Analyze recent tool usage patterns to identify gaps — tools that are missing, frequently failing, or requested but not available. Returns suggested new tools to forge.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "description": "LLM provider for analysis (default: deepseek)"
+          }
+        }
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 30000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "forge",
+        "analyze",
+        "gaps"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "forge_list",
+      "namespace": "intelligence",
+      "version": "1.0",
+      "description": "List all dynamically forged tools with their handler type, verification status, and creation date.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 5000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "forge",
+        "list"
+      ],
+      "deprecated": false
     }
   ],
   "protocols": {
     "openai": {
-      "count": 29,
+      "count": 32,
       "tools": [
         "search_knowledge",
         "reason_deeply",
@@ -1216,11 +1330,14 @@
         "graph_hygiene_run",
         "critique_refine",
         "judge_response",
-        "moa_query"
+        "moa_query",
+        "forge_tool",
+        "forge_analyze_gaps",
+        "forge_list"
       ]
     },
     "mcp": {
-      "count": 29,
+      "count": 32,
       "tools": [
         "search_knowledge",
         "reason_deeply",
@@ -1250,11 +1367,14 @@
         "graph_hygiene_run",
         "critique_refine",
         "judge_response",
-        "moa_query"
+        "moa_query",
+        "forge_tool",
+        "forge_analyze_gaps",
+        "forge_list"
       ]
     },
     "openapi": {
-      "count": 29,
+      "count": 32,
       "paths": [
         "/api/tools/search_knowledge",
         "/api/tools/reason_deeply",
@@ -1284,12 +1404,15 @@
         "/api/tools/graph_hygiene_run",
         "/api/tools/critique_refine",
         "/api/tools/judge_response",
-        "/api/tools/moa_query"
+        "/api/tools/moa_query",
+        "/api/tools/forge_tool",
+        "/api/tools/forge_analyze_gaps",
+        "/api/tools/forge_list"
       ]
     }
   },
   "meta": {
-    "total_tools": 29,
+    "total_tools": 32,
     "namespaces": [
       "assembly",
       "chains",
@@ -1303,7 +1426,7 @@
       "monitor"
     ],
     "deprecated_count": 0,
-    "generated_at": "2026-04-03T19:46:16.375Z",
+    "generated_at": "2026-04-03T19:49:20.076Z",
     "abi_version": "1.0"
   }
 }

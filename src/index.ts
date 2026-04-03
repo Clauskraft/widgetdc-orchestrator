@@ -298,6 +298,8 @@ async function boot() {
   await initRedis()
   await AgentRegistry.hydrate()
   seedAgents()
+  // LIN-594: Load persisted forged tools from Redis
+  import('./skill-forge.js').then(m => m.loadForgedTools()).catch(() => {})
   await hydrateMessages()
   await hydrateCronJobs()
   registerDefaultLoops()

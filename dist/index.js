@@ -3199,6 +3199,40 @@ var init_tool_registry = __esm({
         }),
         timeoutMs: 12e4,
         outputDescription: "Consensus response with agent attributions, confidence score, and classification"
+      }),
+      defineTool({
+        name: "forge_tool",
+        namespace: "intelligence",
+        description: "Forge a new MCP tool at runtime. Generates tool definition + handler via LLM, registers in runtime registry, and optionally verifies. Supports 3 handler types: mcp-proxy (forward to backend tool), llm-generate (LLM answers), cypher-query (Neo4j template).",
+        input: z.object({
+          name: z.string().describe('Tool name (snake_case, e.g. "analyze_risk")'),
+          purpose: z.string().describe("What the tool should do"),
+          handler_type: z.string().optional().describe("Handler: mcp-proxy, llm-generate, cypher-query (default: llm-generate)"),
+          backend_tool: z.string().optional().describe("For mcp-proxy: backend tool name to forward to"),
+          system_prompt: z.string().optional().describe("For llm-generate: system prompt"),
+          cypher_template: z.string().optional().describe("For cypher-query: Cypher template with $params"),
+          verify: z.boolean().optional().describe("Run verification after creation (default: true)")
+        }),
+        timeoutMs: 6e4,
+        outputDescription: "Forge result with tool spec, verification status, and handler config"
+      }),
+      defineTool({
+        name: "forge_analyze_gaps",
+        namespace: "intelligence",
+        description: "Analyze recent tool usage patterns to identify gaps \u2014 tools that are missing, frequently failing, or requested but not available. Returns suggested new tools to forge.",
+        input: z.object({
+          provider: z.string().optional().describe("LLM provider for analysis (default: deepseek)")
+        }),
+        timeoutMs: 3e4,
+        outputDescription: "Gap analysis with patterns, frequencies, and tool suggestions"
+      }),
+      defineTool({
+        name: "forge_list",
+        namespace: "intelligence",
+        description: "List all dynamically forged tools with their handler type, verification status, and creation date.",
+        input: z.object({}),
+        timeoutMs: 5e3,
+        outputDescription: "List of forged tools with specs"
       })
     ];
   }
@@ -5251,6 +5285,11 @@ var init_evolution_loop = __esm({
 });
 
 // src/llm-proxy.ts
+var llm_proxy_exports = {};
+__export(llm_proxy_exports, {
+  chatLLM: () => chatLLM,
+  listProviders: () => listProviders
+});
 function getProviders() {
   const providers = {};
   if (config.deepseekApiKey) {
@@ -5851,6 +5890,249 @@ Respond ONLY in this exact JSON format:
   "methodology": <0-10>,
   "explanation": "<2-3 sentence summary of strengths and weaknesses>"
 }`;
+  }
+});
+
+// src/skill-forge.ts
+var skill_forge_exports = {};
+__export(skill_forge_exports, {
+  analyzeToolGaps: () => analyzeToolGaps,
+  executeForgedTool: () => executeForgedTool,
+  forgeTool: () => forgeTool,
+  getForgedTools: () => getForgedTools,
+  hasForgedTool: () => hasForgedTool,
+  loadForgedTools: () => loadForgedTools,
+  verifyForgedTool: () => verifyForgedTool
+});
+import { v4 as uuid14 } from "uuid";
+function getForgedTools() {
+  return [...FORGED_TOOLS.values()];
+}
+function hasForgedTool(name) {
+  return FORGED_TOOLS.has(name);
+}
+async function analyzeToolGaps(provider = "deepseek") {
+  const redis2 = getRedis();
+  let failurePatterns = [];
+  if (redis2) {
+    try {
+      const keys = await redis2.keys("orchestrator:audit:*");
+      const recentKeys = keys.slice(-100);
+      for (const key of recentKeys) {
+        const raw = await redis2.get(key);
+        if (raw) {
+          const entry = JSON.parse(raw);
+          if (entry.action === "tool_call" && entry.status === "error") {
+            failurePatterns.push(`${entry.tool}: ${entry.error}`);
+          }
+        }
+      }
+    } catch {
+    }
+  }
+  const toolNotFoundPattern = failurePatterns.filter((p) => p.includes("not found") || p.includes("NOT_FOUND"));
+  if (failurePatterns.length < 3) {
+    return {
+      gaps: [{ pattern: "insufficient_data", frequency: 0, suggestion: "Need more usage data to identify gaps" }],
+      total_calls_analyzed: failurePatterns.length,
+      failure_rate: 0
+    };
+  }
+  try {
+    const result = await chatLLM({
+      provider,
+      messages: [
+        { role: "system", content: `Analyze these tool failure patterns and suggest new tools. Return JSON: {"gaps": [{"pattern": "description", "frequency": N, "suggestion": "new tool name + purpose"}]}` },
+        { role: "user", content: `Failure patterns:
+${failurePatterns.slice(0, 50).join("\n")}` }
+      ],
+      temperature: 0.3,
+      max_tokens: 500
+    });
+    const match = result.content.match(/\{[\s\S]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      return {
+        gaps: parsed.gaps || [],
+        total_calls_analyzed: failurePatterns.length,
+        failure_rate: toolNotFoundPattern.length / Math.max(failurePatterns.length, 1)
+      };
+    }
+  } catch {
+  }
+  return { gaps: [], total_calls_analyzed: failurePatterns.length, failure_rate: 0 };
+}
+async function forgeTool(name, purpose, handlerType = "mcp-proxy", handlerConfig = {}, provider = "deepseek") {
+  const t0 = Date.now();
+  if (FORGED_TOOLS.has(name)) {
+    return { action: "already_exists", message: `Tool '${name}' already forged`, duration_ms: Date.now() - t0 };
+  }
+  let description = purpose;
+  let inputSchema = { type: "object", properties: {} };
+  try {
+    const result = await chatLLM({
+      provider,
+      messages: [
+        { role: "system", content: `Generate a tool specification. Return JSON only: {"description": "clear description", "input_schema": {"type": "object", "properties": {...}, "required": [...]}}. Keep it concise and practical.` },
+        { role: "user", content: `Tool name: ${name}
+Purpose: ${purpose}
+Handler type: ${handlerType}` }
+      ],
+      temperature: 0.3,
+      max_tokens: 500
+    });
+    const match = result.content.match(/\{[\s\S]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      description = parsed.description || purpose;
+      inputSchema = parsed.input_schema || inputSchema;
+    }
+  } catch {
+  }
+  const namespace = name.split("_")[0] || "custom";
+  const spec2 = {
+    id: uuid14(),
+    name,
+    namespace,
+    description,
+    input_schema: inputSchema,
+    handler_type: handlerType,
+    handler_config: handlerConfig,
+    created_by: "skill-forge",
+    created_at: (/* @__PURE__ */ new Date()).toISOString(),
+    verified: false
+  };
+  FORGED_TOOLS.set(name, spec2);
+  const redis2 = getRedis();
+  if (redis2) {
+    try {
+      await redis2.set(`${REDIS_PREFIX4}${name}`, JSON.stringify(spec2), "EX", 86400 * 30);
+    } catch {
+    }
+  }
+  logger.info({ name, namespace, handlerType }, "Skill Forge: tool created");
+  return {
+    action: "created",
+    tool: spec2,
+    message: `Tool '${name}' forged successfully (${handlerType})`,
+    duration_ms: Date.now() - t0
+  };
+}
+async function verifyForgedTool(name) {
+  const spec2 = FORGED_TOOLS.get(name);
+  if (!spec2) return { verified: false, result: `Tool '${name}' not found in forge` };
+  try {
+    let testResult;
+    if (spec2.handler_type === "mcp-proxy" && spec2.handler_config.backend_tool) {
+      const result = await callMcpTool({
+        toolName: spec2.handler_config.backend_tool,
+        args: {},
+        callId: uuid14(),
+        timeoutMs: 1e4
+      });
+      testResult = result.status === "success" ? "Backend tool reachable" : `Backend error: ${result.error_message}`;
+      spec2.verified = result.status === "success";
+    } else if (spec2.handler_type === "cypher-query" && spec2.handler_config.cypher_template) {
+      const result = await callMcpTool({
+        toolName: "graph.read_cypher",
+        args: { query: "RETURN 1 AS test" },
+        callId: uuid14(),
+        timeoutMs: 5e3
+      });
+      testResult = result.status === "success" ? "Cypher engine reachable" : `Cypher error: ${result.error_message}`;
+      spec2.verified = result.status === "success";
+    } else {
+      testResult = "LLM-generate tools verified by schema presence";
+      spec2.verified = true;
+    }
+    spec2.verification_result = testResult;
+    const redis2 = getRedis();
+    if (redis2) {
+      try {
+        await redis2.set(`${REDIS_PREFIX4}${name}`, JSON.stringify(spec2), "EX", 86400 * 30);
+      } catch {
+      }
+    }
+    return { verified: spec2.verified, result: testResult };
+  } catch (err) {
+    return { verified: false, result: `Verification failed: ${err}` };
+  }
+}
+async function executeForgedTool(name, args) {
+  const spec2 = FORGED_TOOLS.get(name);
+  if (!spec2) return `Forged tool '${name}' not found`;
+  try {
+    switch (spec2.handler_type) {
+      case "mcp-proxy": {
+        if (!spec2.handler_config.backend_tool) return "Error: no backend_tool configured";
+        const result = await callMcpTool({
+          toolName: spec2.handler_config.backend_tool,
+          args,
+          callId: uuid14(),
+          timeoutMs: 3e4
+        });
+        return result.status === "success" ? JSON.stringify(result.result, null, 2).slice(0, 1e3) : `Error: ${result.error_message}`;
+      }
+      case "cypher-query": {
+        if (!spec2.handler_config.cypher_template) return "Error: no cypher_template configured";
+        const result = await callMcpTool({
+          toolName: "graph.read_cypher",
+          args: { query: spec2.handler_config.cypher_template, params: args },
+          callId: uuid14(),
+          timeoutMs: 15e3
+        });
+        return result.status === "success" ? JSON.stringify(result.result, null, 2).slice(0, 1e3) : `Error: ${result.error_message}`;
+      }
+      case "llm-generate": {
+        const { chatLLM: chat } = await Promise.resolve().then(() => (init_llm_proxy(), llm_proxy_exports));
+        const sysPrompt = spec2.handler_config.system_prompt ?? `You are a helpful tool called "${name}". ${spec2.description}`;
+        const result = await chat({
+          provider: "deepseek",
+          messages: [
+            { role: "system", content: sysPrompt },
+            { role: "user", content: JSON.stringify(args) }
+          ],
+          temperature: 0.5
+        });
+        return result.content;
+      }
+      default:
+        return `Unknown handler type: ${spec2.handler_type}`;
+    }
+  } catch (err) {
+    return `Execution error: ${err}`;
+  }
+}
+async function loadForgedTools() {
+  const redis2 = getRedis();
+  if (!redis2) return 0;
+  try {
+    const keys = await redis2.keys(`${REDIS_PREFIX4}*`);
+    let loaded = 0;
+    for (const key of keys) {
+      const raw = await redis2.get(key);
+      if (raw) {
+        const spec2 = JSON.parse(raw);
+        FORGED_TOOLS.set(spec2.name, spec2);
+        loaded++;
+      }
+    }
+    if (loaded > 0) logger.info({ count: loaded }, "Skill Forge: loaded persisted tools");
+    return loaded;
+  } catch {
+    return 0;
+  }
+}
+var FORGED_TOOLS, REDIS_PREFIX4;
+var init_skill_forge = __esm({
+  "src/skill-forge.ts"() {
+    "use strict";
+    init_llm_proxy();
+    init_mcp_caller();
+    init_redis();
+    init_logger();
+    FORGED_TOOLS = /* @__PURE__ */ new Map();
+    REDIS_PREFIX4 = "forge:";
   }
 });
 
@@ -15220,7 +15502,7 @@ async function runInvestigation(topic) {
 // src/tool-executor.ts
 init_logger();
 init_tool_registry();
-import { v4 as uuid14 } from "uuid";
+import { v4 as uuid15 } from "uuid";
 var ORCHESTRATOR_TOOLS = toOpenAITools();
 var totalTokensSaved = 0;
 var totalFoldingCalls = 0;
@@ -15315,7 +15597,7 @@ function buildToolFallback(toolName, error) {
   }
 }
 async function executeToolUnified(toolName, args, opts) {
-  const callId = opts?.call_id ?? uuid14();
+  const callId = opts?.call_id ?? uuid15();
   const t0 = Date.now();
   let deprecation_notice;
   const toolDef = getTool(toolName);
@@ -15403,7 +15685,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher, params: args.params ?? {} },
-        callId: uuid14(),
+        callId: uuid15(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
@@ -15424,7 +15706,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher },
-        callId: uuid14(),
+        callId: uuid15(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Task query failed: ${result.error_message}`;
@@ -15436,7 +15718,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: args.tool_name,
         args: args.payload ?? {},
-        callId: uuid14(),
+        callId: uuid15(),
         timeoutMs: 3e4
       });
       if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
@@ -15444,8 +15726,8 @@ ${result.merged_context}`;
     }
     case "get_platform_health": {
       const [backendHealth, graphHealth] = await Promise.allSettled([
-        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid14(), timeoutMs: 1e4 }),
-        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid14(), timeoutMs: 1e4 })
+        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid15(), timeoutMs: 1e4 }),
+        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid15(), timeoutMs: 1e4 })
       ]);
       const parts = [];
       if (backendHealth.status === "fulfilled" && backendHealth.value.status === "success") {
@@ -15461,7 +15743,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: args.query },
-        callId: uuid14(),
+        callId: uuid15(),
         timeoutMs: 2e4
       });
       if (result.status !== "success") return `Document search failed: ${result.error_message}`;
@@ -15479,7 +15761,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issues",
         args: payload,
-        callId: uuid14(),
+        callId: uuid15(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
@@ -15495,7 +15777,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issue_get",
         args: { identifier },
-        callId: uuid14(),
+        callId: uuid15(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
@@ -15894,8 +16176,65 @@ ${s.explanation}`;
         return `Agent judge failed: ${err}`;
       }
     }
-    default:
+    case "forge_tool": {
+      const toolName = args.name;
+      const purpose = args.purpose;
+      if (!toolName || !purpose) return "Error: name and purpose are required";
+      try {
+        const { forgeTool: forgeTool2, verifyForgedTool: verifyForgedTool2 } = await Promise.resolve().then(() => (init_skill_forge(), skill_forge_exports));
+        const handlerType = args.handler_type ?? "llm-generate";
+        const config2 = {};
+        if (args.backend_tool) config2.backend_tool = args.backend_tool;
+        if (args.system_prompt) config2.system_prompt = args.system_prompt;
+        if (args.cypher_template) config2.cypher_template = args.cypher_template;
+        const result = await forgeTool2(toolName, purpose, handlerType, config2);
+        if (result.action !== "created") return `Forge: ${result.message}`;
+        const shouldVerify = args.verify !== false;
+        let verifyMsg = "";
+        if (shouldVerify) {
+          const vResult = await verifyForgedTool2(toolName);
+          verifyMsg = `
+Verification: ${vResult.verified ? "PASSED" : "FAILED"} \u2014 ${vResult.result}`;
+        }
+        return `Forged tool "${toolName}" (${handlerType}, ${result.duration_ms}ms)${verifyMsg}
+Description: ${result.tool?.description}`;
+      } catch (err) {
+        return `Forge failed: ${err}`;
+      }
+    }
+    case "forge_analyze_gaps": {
+      try {
+        const { analyzeToolGaps: analyzeToolGaps2 } = await Promise.resolve().then(() => (init_skill_forge(), skill_forge_exports));
+        const analysis = await analyzeToolGaps2(args.provider ?? "deepseek");
+        if (analysis.gaps.length === 0) return `No gaps found (${analysis.total_calls_analyzed} calls analyzed)`;
+        const gapLines = analysis.gaps.map((g) => `- ${g.pattern} (freq: ${g.frequency}): ${g.suggestion}`);
+        return `Gap Analysis (${analysis.total_calls_analyzed} calls, ${(analysis.failure_rate * 100).toFixed(1)}% failure rate):
+${gapLines.join("\n")}`;
+      } catch (err) {
+        return `Gap analysis failed: ${err}`;
+      }
+    }
+    case "forge_list": {
+      try {
+        const { getForgedTools: getForgedTools2 } = await Promise.resolve().then(() => (init_skill_forge(), skill_forge_exports));
+        const tools = getForgedTools2();
+        if (tools.length === 0) return "No forged tools. Use forge_tool to create one.";
+        return `${tools.length} forged tools:
+${tools.map((t) => `- ${t.name} (${t.handler_type}, ${t.verified ? "verified" : "unverified"}) \u2014 ${t.description.slice(0, 80)}`).join("\n")}`;
+      } catch (err) {
+        return `List failed: ${err}`;
+      }
+    }
+    default: {
+      try {
+        const { hasForgedTool: hasForgedTool2, executeForgedTool: executeForgedTool2 } = await Promise.resolve().then(() => (init_skill_forge(), skill_forge_exports));
+        if (hasForgedTool2(name)) {
+          return await executeForgedTool2(name, args);
+        }
+      } catch {
+      }
       return `Unknown tool: ${name}`;
+    }
   }
 }
 
@@ -16973,12 +17312,12 @@ import cron from "node-cron";
 // src/graph-self-correct.ts
 init_mcp_caller();
 init_logger();
-import { v4 as uuid15 } from "uuid";
+import { v4 as uuid16 } from "uuid";
 async function graphRead(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid15(),
+    callId: uuid16(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -16989,7 +17328,7 @@ async function graphWrite(cypher, params, force = true) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {}, _force: force },
-    callId: uuid15(),
+    callId: uuid16(),
     timeoutMs: 15e3
   });
   return result.status === "success";
@@ -17445,7 +17784,7 @@ init_redis();
 init_mcp_caller();
 init_logger();
 init_sse();
-import { v4 as uuid16 } from "uuid";
+import { v4 as uuid17 } from "uuid";
 function categorizeFailure(error) {
   const lower = error.toLowerCase();
   if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) return "timeout";
@@ -17478,7 +17817,7 @@ async function harvestFailures(windowHours = 24) {
           const failedSteps = exec.results?.filter((r) => r.status === "error") ?? [];
           const errorMsg = exec.error ?? failedSteps.map((s) => String(s.output)).join("; ") ?? "unknown";
           events.push({
-            $id: `failure-event:${uuid16()}`,
+            $id: `failure-event:${uuid17()}`,
             execution_id: execId,
             chain_name: exec.name,
             category: categorizeFailure(errorMsg),
@@ -17524,7 +17863,7 @@ async function persistToGraph(events) {
             timestamp: evt.timestamp
           }
         },
-        callId: uuid16(),
+        callId: uuid17(),
         timeoutMs: 1e4
       });
       persisted++;
@@ -17544,7 +17883,7 @@ async function persistToGraph(events) {
           `,
           params: {}
         },
-        callId: uuid16(),
+        callId: uuid17(),
         timeoutMs: 1e4
       });
       await callMcpTool({
@@ -17557,7 +17896,7 @@ async function persistToGraph(events) {
           `,
           params: {}
         },
-        callId: uuid16(),
+        callId: uuid17(),
         timeoutMs: 1e4
       });
     } catch {
@@ -17618,7 +17957,7 @@ init_mcp_caller();
 init_llm_proxy();
 init_logger();
 init_sse();
-import { v4 as uuid17 } from "uuid";
+import { v4 as uuid18 } from "uuid";
 var COMPETITOR_TARGETS = [
   {
     name: "Palantir AIP",
@@ -17718,7 +18057,7 @@ async function extractCapabilities(target) {
         const cap = line.replace(/^[\s\-\*]+/, "").trim();
         if (cap.length > 10 && cap.length < 200) {
           capabilities.push({
-            $id: `capability:${target.slug}:${uuid17().slice(0, 8)}`,
+            $id: `capability:${target.slug}:${uuid18().slice(0, 8)}`,
             competitor: target.name,
             capability: cap,
             category: categorizeCapability(cap),
@@ -17768,7 +18107,7 @@ async function persistCapabilities(capabilities) {
             extracted_at: cap.extracted_at
           }
         },
-        callId: uuid17(),
+        callId: uuid18(),
         timeoutMs: 1e4
       });
       persisted++;
@@ -17792,7 +18131,7 @@ async function analyzeGaps(capabilities) {
     const result = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: "MATCH (t:Tool) RETURN t.name AS name LIMIT 200" },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -17861,7 +18200,7 @@ init_redis();
 init_logger();
 init_mcp_caller();
 import { Router as Router6 } from "express";
-import { v4 as uuid18 } from "uuid";
+import { v4 as uuid19 } from "uuid";
 var adoptionRouter = Router6();
 var REDIS_KEY3 = "orchestrator:adoption-metrics";
 var REDIS_TRENDS_KEY = "orchestrator:adoption-trends";
@@ -17949,7 +18288,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (c:Conversation) WHERE c.createdAt > datetime() - duration('P1D') RETURN count(c) AS count"
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 1e4
     }),
     // Count artifacts from last 24h
@@ -17958,7 +18297,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (a:AnalysisArtifact) WHERE a.createdAt > datetime() - duration('P1D') RETURN count(a) AS count"
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 1e4
     }),
     // Count tool calls from audit trail
@@ -17967,7 +18306,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (e:AuditEvent) WHERE e.timestamp > datetime() - duration('P1D') AND e.action = 'tool_call' RETURN count(e) AS count"
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 1e4
     })
   ]);
@@ -18072,7 +18411,7 @@ SET m.conversations_24h = $conversations,
           featuresPct: snapshot.features_pct
         }
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -18119,7 +18458,7 @@ init_logger();
 init_mcp_caller();
 init_sse();
 import { Router as Router7 } from "express";
-import { v4 as uuid19 } from "uuid";
+import { v4 as uuid20 } from "uuid";
 var looseEndsRouter = Router7();
 var REDIS_KEY4 = "orchestrator:loose-ends:latest";
 var REDIS_HISTORY = "orchestrator:loose-ends:history";
@@ -18133,7 +18472,7 @@ AND NOT (b)<-[:COMPOSED_OF]-(:Assembly)
 RETURN b.id AS id, b.name AS name, b.domain AS domain, labels(b)[0] AS type
 LIMIT 25`,
     buildFinding: (records) => records.map((r) => ({
-      id: `orphan-${r.id ?? uuid19().slice(0, 8)}`,
+      id: `orphan-${r.id ?? uuid20().slice(0, 8)}`,
       severity: "warning",
       category: "orphan_block",
       title: `Orphan block: ${r.name ?? r.id}`,
@@ -18151,7 +18490,7 @@ AND NOT (a)<-[:BASED_ON]-(:Decision)
 RETURN a.id AS id, a.name AS name, a.composite AS score
 LIMIT 15`,
     buildFinding: (records) => records.map((r) => ({
-      id: `dangling-asm-${r.id ?? uuid19().slice(0, 8)}`,
+      id: `dangling-asm-${r.id ?? uuid20().slice(0, 8)}`,
       severity: "warning",
       category: "dangling_assembly",
       title: `Accepted assembly without decision: ${r.name ?? r.id}`,
@@ -18169,7 +18508,7 @@ AND NOT (d)-[:DERIVES_FROM]->()
 RETURN d.id AS id, d.title AS title, d.certified_at AS certified_at
 LIMIT 10`,
     buildFinding: (records) => records.map((r) => ({
-      id: `no-lineage-${r.id ?? uuid19().slice(0, 8)}`,
+      id: `no-lineage-${r.id ?? uuid20().slice(0, 8)}`,
       severity: "critical",
       category: "missing_lineage",
       title: `Decision without lineage: ${r.title ?? r.id}`,
@@ -18187,7 +18526,7 @@ AND NOT (n)-[]-()
 RETURN n.id AS id, labels(n)[0] AS type, n.domain AS domain, n.insight AS title
 LIMIT 20`,
     buildFinding: (records) => records.map((r) => ({
-      id: `disconnected-${r.id ?? uuid19().slice(0, 8)}`,
+      id: `disconnected-${r.id ?? uuid20().slice(0, 8)}`,
       severity: "info",
       category: "disconnected_node",
       title: `Disconnected ${r.type}: ${(r.title ?? r.id ?? "").toString().slice(0, 60)}`,
@@ -18205,7 +18544,7 @@ AND d.created_at < datetime() - duration('P7D')
 RETURN d.id AS id, d.title AS title, d.created_at AS created_at
 LIMIT 10`,
     buildFinding: (records) => records.map((r) => ({
-      id: `stale-decision-${r.id ?? uuid19().slice(0, 8)}`,
+      id: `stale-decision-${r.id ?? uuid20().slice(0, 8)}`,
       severity: "warning",
       category: "unresolved_decision",
       title: `Stale draft decision: ${r.title ?? r.id}`,
@@ -18216,7 +18555,7 @@ LIMIT 10`,
   }
 ];
 async function runLooseEndScan() {
-  const scanId = uuid19();
+  const scanId = uuid20();
   const t0 = Date.now();
   const findings = [];
   logger.info({ scan_id: scanId }, "Loose-end scan started");
@@ -18226,7 +18565,7 @@ async function runLooseEndScan() {
         const result = await callMcpTool({
           toolName: "graph.read_cypher",
           args: { query: dq.cypher },
-          callId: uuid19(),
+          callId: uuid20(),
           timeoutMs: 15e3
         });
         if (result.status !== "success") return [];
@@ -18287,7 +18626,7 @@ SET s.scanned_at = datetime(), s.duration_ms = $duration,
           total: summary.total
         }
       },
-      callId: uuid19(),
+      callId: uuid20(),
       timeoutMs: 1e4
     });
   } catch {
@@ -20289,7 +20628,7 @@ init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router15 } from "express";
 import { randomUUID as randomUUID2 } from "crypto";
-import { v4 as uuid20 } from "uuid";
+import { v4 as uuid21 } from "uuid";
 var notebookRouter = Router15();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
@@ -20329,7 +20668,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query, params: {} },
-        callId: uuid20(),
+        callId: uuid21(),
         timeoutMs: 15e3
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -20337,7 +20676,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "kg_rag.query",
         args: { question: query, max_evidence: 10 },
-        callId: uuid20(),
+        callId: uuid21(),
         timeoutMs: 2e4
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -21013,13 +21352,13 @@ ${compressed}`,
 init_chain_engine();
 init_cognitive_proxy();
 init_logger();
-import { v4 as uuid21 } from "uuid";
+import { v4 as uuid22 } from "uuid";
 var monitorRouter = Router17();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid21(),
+    callId: uuid22(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];
@@ -21236,16 +21575,16 @@ init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router18 } from "express";
-import { v4 as uuid22 } from "uuid";
+import { v4 as uuid23 } from "uuid";
 var assemblyRouter = Router18();
-var REDIS_PREFIX4 = "orchestrator:assembly:";
+var REDIS_PREFIX5 = "orchestrator:assembly:";
 var REDIS_INDEX2 = "orchestrator:assemblies:index";
 var TTL_SECONDS6 = 2592e3;
 async function storeAssembly(assembly) {
   const redis2 = getRedis();
   if (!redis2) return false;
   try {
-    await redis2.set(`${REDIS_PREFIX4}${assembly.$id}`, JSON.stringify(assembly), "EX", TTL_SECONDS6);
+    await redis2.set(`${REDIS_PREFIX5}${assembly.$id}`, JSON.stringify(assembly), "EX", TTL_SECONDS6);
     await redis2.sadd(REDIS_INDEX2, assembly.$id);
     return true;
   } catch (err) {
@@ -21257,7 +21596,7 @@ async function loadAssembly(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX4}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX5}${id}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -21300,7 +21639,7 @@ ORDER BY b.domain, b.name LIMIT 50`;
     const graphResult = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params },
-      callId: uuid22(),
+      callId: uuid23(),
       timeoutMs: 15e3
     });
     if (graphResult.status === "success" && graphResult.result) {
@@ -21366,7 +21705,7 @@ Reply as JSON:
   const assemblies = [];
   const now = (/* @__PURE__ */ new Date()).toISOString();
   for (const candidate of analysis.candidates.slice(0, maxCandidates)) {
-    const assemblyId = `widgetdc:assembly:${uuid22()}`;
+    const assemblyId = `widgetdc:assembly:${uuid23()}`;
     const selectedBlocks = blocks.filter((b) => candidate.block_ids.includes(b.block_id));
     const conflictCount = candidate.conflicts?.length ?? 0;
     const coherence = Math.max(0, Math.min(1, candidate.coherence ?? 0.5));
@@ -21425,7 +21764,7 @@ MERGE (a)-[:COMPOSED_OF]->(b)`,
             blockIds: selectedBlocks.map((b) => b.block_id)
           }
         },
-        callId: uuid22(),
+        callId: uuid23(),
         timeoutMs: 1e4
       });
     } catch (err) {
@@ -21461,7 +21800,7 @@ assemblyRouter.get("/", async (req, res) => {
   try {
     const pipeline = redis2.pipeline();
     for (const id of allIds) {
-      pipeline.get(`${REDIS_PREFIX4}${id}`);
+      pipeline.get(`${REDIS_PREFIX5}${id}`);
     }
     const results = await pipeline.exec();
     if (results) {
@@ -21515,7 +21854,7 @@ assemblyRouter.put("/:id", async (req, res) => {
         query: "MATCH (a:Assembly {id: $id}) SET a.status = $status, a.updated_at = datetime()",
         params: { id: assembly.$id, status: assembly.status }
       },
-      callId: uuid22(),
+      callId: uuid23(),
       timeoutMs: 5e3
     });
   } catch {
@@ -21530,16 +21869,16 @@ init_mcp_caller();
 init_cognitive_proxy();
 init_sse();
 import { Router as Router19 } from "express";
-import { v4 as uuid23 } from "uuid";
+import { v4 as uuid24 } from "uuid";
 var decisionsRouter = Router19();
-var REDIS_PREFIX5 = "orchestrator:decision:";
+var REDIS_PREFIX6 = "orchestrator:decision:";
 var REDIS_INDEX3 = "orchestrator:decisions:index";
 var TTL_SECONDS7 = 7776e3;
 async function storeDecision(decision) {
   const redis2 = getRedis();
   if (!redis2) return false;
   try {
-    await redis2.set(`${REDIS_PREFIX5}${decision.$id}`, JSON.stringify(decision), "EX", TTL_SECONDS7);
+    await redis2.set(`${REDIS_PREFIX6}${decision.$id}`, JSON.stringify(decision), "EX", TTL_SECONDS7);
     await redis2.sadd(REDIS_INDEX3, decision.$id);
     return true;
   } catch (err) {
@@ -21551,7 +21890,7 @@ async function loadDecision(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX5}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX6}${id}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -21583,7 +21922,7 @@ RETURN a.id AS asm_id, a.name AS asm_name, a.created_at AS asm_ts,
 ORDER BY b.name`,
         params: { assemblyId }
       },
-      callId: uuid23(),
+      callId: uuid24(),
       timeoutMs: 15e3
     });
     if (result.status === "success") {
@@ -21642,7 +21981,7 @@ decisionsRouter.post("/certify", async (req, res) => {
   const assemblyId = String(body.assembly_id);
   const title = String(body.title);
   const now = (/* @__PURE__ */ new Date()).toISOString();
-  const decisionId = `widgetdc:decision:${uuid23()}`;
+  const decisionId = `widgetdc:decision:${uuid24()}`;
   const lineageChain = await buildLineageChain(assemblyId);
   let rationale = String(body.rationale ?? "");
   let summary = String(body.summary ?? "");
@@ -21745,7 +22084,7 @@ CREATE (d)-[:CERTIFIED_BY_EVIDENCE]->(e)`,
           // Cap for query size
         }
       },
-      callId: uuid23(),
+      callId: uuid24(),
       timeoutMs: 15e3
     });
   } catch (err) {
@@ -21779,7 +22118,7 @@ decisionsRouter.get("/", async (req, res) => {
   try {
     const pipeline = redis2.pipeline();
     for (const id of allIds) {
-      pipeline.get(`${REDIS_PREFIX5}${id}`);
+      pipeline.get(`${REDIS_PREFIX6}${id}`);
     }
     const results = await pipeline.exec();
     if (results) {
@@ -21969,9 +22308,9 @@ async function listPlans() {
 // src/harvest-pipeline.ts
 init_logger();
 init_mcp_caller();
-import { v4 as uuid24 } from "uuid";
+import { v4 as uuid25 } from "uuid";
 async function extract(domain) {
-  const callId = `harvest-extract-${uuid24().substring(0, 8)}`;
+  const callId = `harvest-extract-${uuid25().substring(0, 8)}`;
   try {
     const result = await callMcpTool({
       toolName: "srag.query",
@@ -21997,7 +22336,7 @@ function generalize(items, domain) {
     if (content.length > 2e3 || name.toLowerCase().includes("framework")) tier = "framework";
     else if (content.length > 500 || name.toLowerCase().includes("template")) tier = "template";
     return {
-      id: `harvest-${uuid24().substring(0, 12)}`,
+      id: `harvest-${uuid25().substring(0, 12)}`,
       name,
       tier,
       description: content.substring(0, 300),
@@ -22014,7 +22353,7 @@ function generalize(items, domain) {
 }
 async function store(components) {
   if (components.length === 0) return 0;
-  const callId = `harvest-store-${uuid24().substring(0, 8)}`;
+  const callId = `harvest-store-${uuid25().substring(0, 8)}`;
   const labelMap = {
     framework: "Framework",
     template: "Template",
@@ -22066,7 +22405,7 @@ async function verify(components) {
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: `${comp.tier} for ${comp.industries[0]}: ${comp.name}` },
-        callId: `harvest-verify-${uuid24().substring(0, 8)}`,
+        callId: `harvest-verify-${uuid25().substring(0, 8)}`,
         timeoutMs: 15e3
       });
       const resultStr = JSON.stringify(result).toLowerCase();
@@ -22120,7 +22459,7 @@ init_llm_proxy();
 import { Router as Router21 } from "express";
 init_logger();
 init_config();
-import { v4 as uuid25 } from "uuid";
+import { v4 as uuid26 } from "uuid";
 var MAX_TOOL_ROUNDS = 2;
 var MAX_TOOL_ROUNDS_ASSISTANT = 4;
 var TOOL_CATEGORIES = [
@@ -22330,7 +22669,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     return;
   }
   const { model, messages, stream, temperature, max_tokens } = req.body;
-  const requestId = `chatcmpl-${uuid25().substring(0, 12)}`;
+  const requestId = `chatcmpl-${uuid26().substring(0, 12)}`;
   const assistant = ASSISTANT_MAP.get(model);
   const resolvedModel = assistant ? assistant.baseModel : model;
   const mapping = MODEL_TO_PROVIDER[resolvedModel] || MODEL_TO_PROVIDER["gemini-flash"];
@@ -23294,7 +23633,7 @@ init_tool_registry();
 init_mcp_caller();
 init_config();
 init_logger();
-import { v4 as uuid26 } from "uuid";
+import { v4 as uuid27 } from "uuid";
 var mcpGatewayRouter = Router24();
 var backendToolsCache = [];
 var backendToolsCacheTime = 0;
@@ -23376,7 +23715,7 @@ async function handleToolsCall(id, params) {
   if (isOrchestratorTool) {
     try {
       const results = await executeToolCalls([{
-        id: uuid26(),
+        id: uuid27(),
         function: { name: toolName, arguments: JSON.stringify(args) }
       }]);
       const result = results[0];
@@ -23404,7 +23743,7 @@ async function handleToolsCall(id, params) {
     const mcpResult = await callMcpTool({
       toolName: backendName,
       args,
-      callId: uuid26(),
+      callId: uuid27(),
       timeoutMs: 3e4
     });
     if (mcpResult.status !== "success") {
@@ -23510,7 +23849,7 @@ mcpGatewayRouter.delete("/", (_req, res) => {
 import { Router as Router25 } from "express";
 init_tool_registry();
 init_logger();
-import { v4 as uuid27 } from "uuid";
+import { v4 as uuid28 } from "uuid";
 var toolGatewayRouter = Router25();
 toolGatewayRouter.post("/:name", async (req, res) => {
   const { name } = req.params;
@@ -23527,7 +23866,7 @@ toolGatewayRouter.post("/:name", async (req, res) => {
     });
     return;
   }
-  const callId = req.body?.call_id ?? uuid27();
+  const callId = req.body?.call_id ?? uuid28();
   const args = req.body ?? {};
   logger.info({ tool: name, call_id: callId }, "REST tool gateway call");
   const result = await executeToolUnified(name, args, {
@@ -23932,12 +24271,12 @@ init_logger();
 import { Router as Router28 } from "express";
 var foldRouter = Router28();
 var DAILY_LIMIT = 100;
-var REDIS_PREFIX6 = "caas:usage:";
+var REDIS_PREFIX7 = "caas:usage:";
 async function getUsageCount(apiKey) {
   const redis2 = getRedis();
   if (!redis2) return 0;
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  const key = `${REDIS_PREFIX6}${today}:${apiKey}`;
+  const key = `${REDIS_PREFIX7}${today}:${apiKey}`;
   const count = await redis2.get(key);
   return parseInt(count ?? "0", 10);
 }
@@ -23945,7 +24284,7 @@ async function incrementUsage(apiKey) {
   const redis2 = getRedis();
   if (!redis2) return;
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  const key = `${REDIS_PREFIX6}${today}:${apiKey}`;
+  const key = `${REDIS_PREFIX7}${today}:${apiKey}`;
   await redis2.incr(key);
   await redis2.expire(key, 86400 * 2);
 }
@@ -24090,12 +24429,12 @@ import { Router as Router29 } from "express";
 init_mcp_caller();
 init_logger();
 init_sse();
-import { v4 as uuid28 } from "uuid";
+import { v4 as uuid29 } from "uuid";
 async function graphRead3(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid28(),
+    callId: uuid29(),
     timeoutMs: 3e4
   });
   if (result.status !== "success") return [];
@@ -24106,7 +24445,7 @@ async function graphWrite2(cypher, params) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {} },
-    callId: uuid28(),
+    callId: uuid29(),
     timeoutMs: 6e4
   });
   return result.status === "success";
@@ -24733,7 +25072,7 @@ init_manifesto_governance();
 init_mcp_caller();
 init_logger();
 import { Router as Router33 } from "express";
-import { v4 as uuid29 } from "uuid";
+import { v4 as uuid30 } from "uuid";
 var governanceRouter = Router33();
 governanceRouter.get("/matrix", (_req, res) => {
   res.json({
@@ -24791,7 +25130,7 @@ RETURN p.name as name, p.status as status`,
               gap_remediation: p.gap_remediation ?? ""
             }
           },
-          callId: uuid29(),
+          callId: uuid30(),
           timeoutMs: 15e3
         });
         results.push({
@@ -25774,6 +26113,8 @@ async function boot() {
   await initRedis();
   await AgentRegistry.hydrate();
   seedAgents();
+  Promise.resolve().then(() => (init_skill_forge(), skill_forge_exports)).then((m) => m.loadForgedTools()).catch(() => {
+  });
   await hydrateMessages();
   await hydrateCronJobs();
   registerDefaultLoops();

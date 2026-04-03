@@ -999,7 +999,67 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
-    default:
+    case 'forge_tool': {
+      const toolName = args.name as string
+      const purpose = args.purpose as string
+      if (!toolName || !purpose) return 'Error: name and purpose are required'
+      try {
+        const { forgeTool, verifyForgedTool } = await import('./skill-forge.js')
+        const handlerType = (args.handler_type as string) ?? 'llm-generate'
+        const config: Record<string, string | undefined> = {}
+        if (args.backend_tool) config.backend_tool = args.backend_tool as string
+        if (args.system_prompt) config.system_prompt = args.system_prompt as string
+        if (args.cypher_template) config.cypher_template = args.cypher_template as string
+
+        const result = await forgeTool(toolName, purpose, handlerType as any, config)
+        if (result.action !== 'created') return `Forge: ${result.message}`
+
+        // Auto-verify unless disabled
+        const shouldVerify = args.verify !== false
+        let verifyMsg = ''
+        if (shouldVerify) {
+          const vResult = await verifyForgedTool(toolName)
+          verifyMsg = `\nVerification: ${vResult.verified ? 'PASSED' : 'FAILED'} — ${vResult.result}`
+        }
+
+        return `Forged tool "${toolName}" (${handlerType}, ${result.duration_ms}ms)${verifyMsg}\nDescription: ${result.tool?.description}`
+      } catch (err) {
+        return `Forge failed: ${err}`
+      }
+    }
+
+    case 'forge_analyze_gaps': {
+      try {
+        const { analyzeToolGaps } = await import('./skill-forge.js')
+        const analysis = await analyzeToolGaps((args.provider as string) ?? 'deepseek')
+        if (analysis.gaps.length === 0) return `No gaps found (${analysis.total_calls_analyzed} calls analyzed)`
+        const gapLines = analysis.gaps.map(g => `- ${g.pattern} (freq: ${g.frequency}): ${g.suggestion}`)
+        return `Gap Analysis (${analysis.total_calls_analyzed} calls, ${(analysis.failure_rate * 100).toFixed(1)}% failure rate):\n${gapLines.join('\n')}`
+      } catch (err) {
+        return `Gap analysis failed: ${err}`
+      }
+    }
+
+    case 'forge_list': {
+      try {
+        const { getForgedTools } = await import('./skill-forge.js')
+        const tools = getForgedTools()
+        if (tools.length === 0) return 'No forged tools. Use forge_tool to create one.'
+        return `${tools.length} forged tools:\n${tools.map(t => `- ${t.name} (${t.handler_type}, ${t.verified ? 'verified' : 'unverified'}) — ${t.description.slice(0, 80)}`).join('\n')}`
+      } catch (err) {
+        return `List failed: ${err}`
+      }
+    }
+
+    default: {
+      // Check forged tools before giving up
+      try {
+        const { hasForgedTool, executeForgedTool } = await import('./skill-forge.js')
+        if (hasForgedTool(name)) {
+          return await executeForgedTool(name, args)
+        }
+      } catch { /* not a forged tool */ }
       return `Unknown tool: ${name}`
+    }
   }
 }

@@ -518,6 +518,42 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     timeoutMs: 120000,
     outputDescription: 'Consensus response with agent attributions, confidence score, and classification',
   }),
+  defineTool({
+    name: 'forge_tool',
+    namespace: 'intelligence',
+    description: 'Forge a new MCP tool at runtime. Generates tool definition + handler via LLM, registers in runtime registry, and optionally verifies. Supports 3 handler types: mcp-proxy (forward to backend tool), llm-generate (LLM answers), cypher-query (Neo4j template).',
+    input: z.object({
+      name: z.string().describe('Tool name (snake_case, e.g. "analyze_risk")'),
+      purpose: z.string().describe('What the tool should do'),
+      handler_type: z.string().optional().describe('Handler: mcp-proxy, llm-generate, cypher-query (default: llm-generate)'),
+      backend_tool: z.string().optional().describe('For mcp-proxy: backend tool name to forward to'),
+      system_prompt: z.string().optional().describe('For llm-generate: system prompt'),
+      cypher_template: z.string().optional().describe('For cypher-query: Cypher template with $params'),
+      verify: z.boolean().optional().describe('Run verification after creation (default: true)'),
+    }),
+    timeoutMs: 60000,
+    outputDescription: 'Forge result with tool spec, verification status, and handler config',
+  }),
+
+  defineTool({
+    name: 'forge_analyze_gaps',
+    namespace: 'intelligence',
+    description: 'Analyze recent tool usage patterns to identify gaps — tools that are missing, frequently failing, or requested but not available. Returns suggested new tools to forge.',
+    input: z.object({
+      provider: z.string().optional().describe('LLM provider for analysis (default: deepseek)'),
+    }),
+    timeoutMs: 30000,
+    outputDescription: 'Gap analysis with patterns, frequencies, and tool suggestions',
+  }),
+
+  defineTool({
+    name: 'forge_list',
+    namespace: 'intelligence',
+    description: 'List all dynamically forged tools with their handler type, verification status, and creation date.',
+    input: z.object({}),
+    timeoutMs: 5000,
+    outputDescription: 'List of forged tools with specs',
+  }),
 ]
 
 // ─── Protocol Compilers ─────────────────────────────────────────────────────
