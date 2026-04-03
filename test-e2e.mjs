@@ -743,32 +743,36 @@ await test('76. POST /api/similarity/select accepts valid preference', async () 
   assert(r.body?.data?.rejected_count === 2, `expected 2 rejected, got ${r.body?.data?.rejected_count}`)
 })
 
-// ── 77. Tool registry has 23+ tools ──
-await test('77. GET /api/tools lists 23+ registered tools', async () => {
+// ── 77. Tool registry has 25 tools (Wave 2) ──
+await test('77. GET /api/tools lists 25 registered tools with Wave 2', async () => {
   const r = await api('/api/tools')
   assert(r.ok, `HTTP ${r.status}`)
   const tools = r.body?.data?.tools || r.body?.tools || []
-  assert(tools.length >= 23, `expected 23+ tools, got ${tools.length}`)
-  // Verify core tools exist
+  assert(tools.length >= 25, `expected 25+ tools, got ${tools.length}`)
+  // Verify Wave 2 tools exist
   const names = tools.map(t => t.name)
-  assert(names.includes('search_knowledge'), 'search_knowledge tool missing')
-  assert(names.includes('generate_deliverable'), 'generate_deliverable tool missing')
+  assert(names.includes('critique_refine'), 'critique_refine tool missing from registry')
+  assert(names.includes('judge_response'), 'judge_response tool missing from registry')
   assert(names.includes('graph_hygiene_run'), 'graph_hygiene_run tool missing')
 })
 
-// ── 78. Tool gateway — critique_refine rejects empty query ──
+// ── 78. Tool gateway — critique_refine exists and rejects empty query ──
 await test('78. POST /api/tools/critique_refine rejects empty query', async () => {
   const r = await api('/api/tools/critique_refine', { method: 'POST', body: JSON.stringify({ query: '' }) })
-  // Should return error (either 400 or 200 with error in body)
-  const hasError = !r.ok || (r.body?.data?.result ?? '').includes('Error')
-  assert(hasError, `expected error for empty query, got status ${r.status}`)
+  assert(r.status !== 404, `critique_refine tool not found (404) — deploy may be pending`)
+  // Tool should return 200 with error message in result (tool executor pattern)
+  assert(r.ok, `expected 200, got ${r.status}`)
+  const result = r.body?.data?.result ?? ''
+  assert(result.includes('Error'), `expected Error in result for empty query, got: ${result.slice(0, 100)}`)
 })
 
-// ── 79. Tool gateway — judge_response rejects missing args ──
+// ── 79. Tool gateway — judge_response exists and rejects missing args ──
 await test('79. POST /api/tools/judge_response rejects missing args', async () => {
   const r = await api('/api/tools/judge_response', { method: 'POST', body: JSON.stringify({}) })
-  const hasError = !r.ok || (r.body?.data?.result ?? '').includes('Error')
-  assert(hasError, `expected error for missing args, got status ${r.status}`)
+  assert(r.status !== 404, `judge_response tool not found (404) — deploy may be pending`)
+  assert(r.ok, `expected 200, got ${r.status}`)
+  const result = r.body?.data?.result ?? ''
+  assert(result.includes('Error'), `expected Error in result for missing args, got: ${result.slice(0, 100)}`)
 })
 
 // ── 80. Health endpoint includes write_gate_stats ──
