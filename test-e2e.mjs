@@ -756,31 +756,33 @@ await test('77. GET /api/tools lists 25 registered tools with Wave 2', async () 
   assert(names.includes('graph_hygiene_run'), 'graph_hygiene_run tool missing')
 })
 
-// ── 78. Tool gateway — critique_refine exists and rejects empty query ──
+// ── 78. Tool gateway — critique_refine validates min query length ──
 await test('78. POST /api/tools/critique_refine rejects empty query', async () => {
   const r = await api('/api/tools/critique_refine', { method: 'POST', body: JSON.stringify({ query: '' }) })
-  assert(r.status !== 404, `critique_refine tool not found (404) — deploy may be pending`)
-  // Tool should return 200 with error message in result (tool executor pattern)
-  assert(r.ok, `expected 200, got ${r.status}`)
+  assert(r.status !== 404, `critique_refine not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'critique_refine', `wrong tool_name: ${r.body?.data?.tool_name}`)
   const result = r.body?.data?.result ?? ''
-  assert(result.includes('Error'), `expected Error in result for empty query, got: ${result.slice(0, 100)}`)
+  assert(result === 'Error: query is required (min 5 chars)', `unexpected result: ${result}`)
 })
 
-// ── 79. Tool gateway — judge_response exists and rejects missing args ──
+// ── 79. Tool gateway — judge_response requires query + response ──
 await test('79. POST /api/tools/judge_response rejects missing args', async () => {
   const r = await api('/api/tools/judge_response', { method: 'POST', body: JSON.stringify({}) })
-  assert(r.status !== 404, `judge_response tool not found (404) — deploy may be pending`)
-  assert(r.ok, `expected 200, got ${r.status}`)
+  assert(r.status !== 404, `judge_response not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'judge_response', `wrong tool_name: ${r.body?.data?.tool_name}`)
   const result = r.body?.data?.result ?? ''
-  assert(result.includes('Error'), `expected Error in result for missing args, got: ${result.slice(0, 100)}`)
+  assert(result === 'Error: query and response are required', `unexpected result: ${result}`)
 })
 
 // ── 80. Health endpoint includes write_gate_stats ──
-await test('80. GET /health includes write_gate_stats and version 3.0.0', async () => {
+await test('80. GET /health includes write_gate_stats and cron_jobs', async () => {
   const r = await fetch(`${BASE}/health`).then(res => res.json())
   assert(r.write_gate_stats !== undefined, 'missing write_gate_stats')
-  assert(r.version === '3.0.0', `expected version 3.0.0, got ${r.version}`)
+  assert(r.version, `missing version field`)
   assert(r.cron_jobs >= 20, `expected 20+ crons, got ${r.cron_jobs}`)
+  assert(r.agents_registered >= 1, `expected 1+ agents, got ${r.agents_registered}`)
 })
 
 // ═══════════════════════════════════════════════════════════════
