@@ -289,6 +289,56 @@ export async function runCronJob(jobId: string): Promise<void> {
       return
     }
 
+    // Special handler for OSINT daily scan (LIN-480)
+    if (job.id === 'osint-daily-scan') {
+      const { runOsintScan } = await import('./osint-scanner.js')
+      const scanResult = await runOsintScan()
+      job.last_run = new Date().toISOString()
+      job.last_status = scanResult.errors.length === 0 ? 'completed' : 'partial'
+      job.run_count++
+      persistCronJobs()
+
+      broadcastMessage({
+        from: 'Orchestrator',
+        to: 'All',
+        source: 'orchestrator',
+        type: 'Message',
+        message: `OSINT scan: ${scanResult.domains_scanned} domains, ${scanResult.ct_entries} CT + ${scanResult.dmarc_results} DMARC, ${scanResult.total_new_nodes} new nodes (${scanResult.tools_available ? 'live' : 'fallback'}, ${scanResult.duration_ms}ms)`,
+        timestamp: new Date().toISOString(),
+      })
+      broadcastSSE('osint-scan', { scan_id: scanResult.scan_id, domains: scanResult.domains_scanned, nodes: scanResult.total_new_nodes })
+      return
+    }
+
+    // Special handler for autonomous evolution loop (LIN-342)
+    if (job.id === 'evolution-loop') {
+      try {
+        const { runEvolutionLoop } = await import('./evolution-loop.js')
+        const cycle = await runEvolutionLoop()
+        job.last_run = new Date().toISOString()
+        job.last_status = cycle.status
+        job.run_count++
+        persistCronJobs()
+
+        broadcastMessage({
+          from: 'Orchestrator',
+          to: 'All',
+          source: 'orchestrator',
+          type: 'Message',
+          message: `Evolution OODA cycle ${cycle.status}: ${cycle.summary} (${cycle.duration_ms}ms)`,
+          timestamp: new Date().toISOString(),
+        })
+        broadcastSSE('evolution-cycle', cycle)
+      } catch (err) {
+        job.last_run = new Date().toISOString()
+        job.last_status = 'failed'
+        job.run_count++
+        persistCronJobs()
+        logger.error({ id: job.id, err: String(err) }, 'Evolution loop cron failed')
+      }
+      return
+    }
+
     const result = await executeChain(job.chain)
     job.last_run = new Date().toISOString()
     job.last_status = result.status
@@ -672,6 +722,23 @@ export function registerDefaultLoops(): void {
   })
 
   // ═══════════════════════════════════════════════════════════════════════
+  // OSINT DAILY SCAN (LIN-480) — CT + DMARC scan of 50 DK public domains
+  // Scans CT transparency logs + DMARC/SPF, ingests to Neo4j
+  // ═══════════════════════════════════════════════════════════════════════
+
+  registerCronJob({
+    id: 'osint-daily-scan',
+    name: 'OSINT Daily Domain Scan',
+    schedule: '0 2 * * *', // 02:00 UTC daily
+    enabled: false, // Enable when ready for production
+    chain: {
+      name: 'OSINT Domain Scan',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════
   // LOOSE-END DETECTOR (LIN-535) — Daily scan for orphans, contradictions, gaps
   // Runs 5 detection queries against Neo4j, persists results, broadcasts via SSE
   // ═══════════════════════════════════════════════════════════════════════
@@ -939,6 +1006,24 @@ export function registerDefaultLoops(): void {
           },
         },
       ],
+    },
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // LIN-342: AUTONOMOUS EVOLUTION LOOP (OODA cycle)
+  // 4 stages: Observe → Orient → Act → Learn
+  // Disabled by default — enable via API or cron panel
+  // ═══════════════════════════════════════════════════════════════════════
+
+  registerCronJob({
+    id: 'evolution-loop',
+    name: 'Autonomous Evolution Loop (OODA)',
+    schedule: '0 */6 * * *', // Every 6 hours
+    enabled: false,
+    chain: {
+      name: 'Evolution OODA Cycle',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
     },
   })
 }

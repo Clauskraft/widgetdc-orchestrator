@@ -341,6 +341,28 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     timeoutMs: 5000,
     outputDescription: '10-principle enforcement matrix with status, mechanism, and gap remediation',
   }),
+  defineTool({
+    name: 'run_osint_scan',
+    namespace: 'knowledge',
+    description: 'Run OSINT scanning pipeline on Danish public sector domains. Scans CT logs + DMARC/SPF and ingests results to Neo4j.',
+    input: z.object({
+      domains: z.array(z.string()).optional().describe('Override domain list (default: 50 DK public domains)'),
+      scan_type: z.enum(['full', 'ct_only', 'dmarc_only']).optional().describe('Scan type (default: full)'),
+    }),
+    timeoutMs: 600000,
+    outputDescription: 'Scan results with CT entries, DMARC results, and ingestion counts',
+  }),
+  defineTool({
+    name: 'run_evolution',
+    namespace: 'chains',
+    description: 'Trigger one cycle of the autonomous evolution loop (OODA: Observe→Orient→Act→Learn). Assesses platform state, identifies improvement opportunities, executes changes, and captures lessons.',
+    input: z.object({
+      focus_area: z.string().optional().describe('Optional focus area for this cycle'),
+      dry_run: z.boolean().optional().describe('If true, plan only without executing'),
+    }),
+    timeoutMs: 300000,
+    outputDescription: 'Evolution cycle results with observations, actions taken, and lessons learned',
+  }),
 ]
 
 // ─── Protocol Compilers ─────────────────────────────────────────────────────

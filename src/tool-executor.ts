@@ -770,6 +770,32 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       return `Manifesto Enforcement Matrix (${score.score}):\n${lines.join('\n')}`
     }
 
+    case 'run_osint_scan': {
+      try {
+        const { runOsintScan } = await import('./osint-scanner.js')
+        const result = await runOsintScan({
+          domains: args.domains as string[] | undefined,
+          scan_type: args.scan_type as 'full' | 'ct_only' | 'dmarc_only' | undefined,
+        })
+        const summary = `OSINT scan ${result.scan_id} completed in ${result.duration_ms}ms — ${result.domains_scanned} domains, ${result.ct_entries} CT entries, ${result.dmarc_results} DMARC results, ${result.total_new_nodes} new nodes (tools: ${result.tools_available ? 'live' : 'fallback'})`
+        if (result.errors.length > 0) {
+          return `${summary}\n\nErrors (${result.errors.length}):\n${result.errors.slice(0, 10).join('\n')}`
+        }
+        return summary
+      } catch (err) {
+        return `OSINT scan failed: ${err}`
+      }
+    }
+
+    case 'run_evolution': {
+      const { runEvolutionLoop } = await import('./evolution-loop.js')
+      const result = await runEvolutionLoop({
+        focus_area: args.focus_area as string | undefined,
+        dry_run: (args.dry_run as boolean) ?? false,
+      })
+      return `Evolution cycle ${result.status}: ${result.summary}`
+    }
+
     default:
       return `Unknown tool: ${name}`
   }

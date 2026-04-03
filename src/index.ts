@@ -70,6 +70,8 @@ import { deliverablesRouter } from './routes/deliverables.js'
 import { similarityRouter } from './routes/similarity.js'
 import { getWriteGateStats } from './write-gate.js'
 import { governanceRouter } from './routes/governance.js'
+import { osintRouter } from './routes/osint.js'
+import { evolutionRouter } from './routes/evolution.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -170,6 +172,10 @@ app.use('/api/graph-hygiene', requireApiKey, graphHygieneRouter)
 app.use('/api/deliverables', requireApiKey, deliverablesRouter)
 app.use('/api/similarity', requireApiKey, similarityRouter)
 app.use('/api/governance', requireApiKey, governanceRouter)
+// LIN-480: OSINT Scanning Pipeline
+app.use('/api/osint', requireApiKey, osintRouter)
+// LIN-342: Autonomous Evolution Loop (OODA)
+app.use('/api/evolution', requireApiKey, evolutionRouter)
 
 // Tool Gateway — REST access to ALL orchestrator tools (Triple-Protocol ABI)
 app.use('/api/tools', requireApiKey, toolGatewayRouter)
