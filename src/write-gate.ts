@@ -87,6 +87,26 @@ export function validateBeforeMerge(
     return { allowed: true }
   }
 
+  // F5: Truncated query detection — catch incomplete Cypher sent by LLM-generated queries
+  if (query.length > 0) {
+    const trimmed = query.trim()
+    const truncationSignals = [
+      /SET\s+\w+\.\w{1,20}$/i,           // ends mid-property: "SET old.validUnt"
+      /WHERE\s+\w+\.\w{0,20}$/i,          // ends mid-condition
+      /RETURN\s*$/i,                        // RETURN with nothing after
+      /,\s*$/,                              // trailing comma
+      /['"][^'"]{0,50}$/,                   // unterminated string literal
+    ]
+    for (const pattern of truncationSignals) {
+      if (pattern.test(trimmed)) {
+        metrics.writes_rejected++
+        const reason = `Cypher query appears truncated (matched: ${pattern.source}): "${trimmed.slice(-40)}"`
+        logger.warn({ preview: trimmed.slice(-60) }, `Write REJECTED: ${reason}`)
+        return { allowed: false, reason }
+      }
+    }
+  }
+
   // B-2: Pollution detection — check all string params for LLM prompt content
   for (const [key, value] of Object.entries(params)) {
     if (typeof value === 'string' && value.length > 20) {

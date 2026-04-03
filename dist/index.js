@@ -110,7 +110,9 @@ var init_config = __esm({
       maxConcurrentPerAgent: parseInt(optional("MAX_CONCURRENT_PER_AGENT", "5"), 10),
       agentOpenAccess: optional("AGENT_OPEN_ACCESS", "true") === "true",
       // OpenTelemetry (LIN-589) — set OTEL_EXPORTER_OTLP_ENDPOINT to activate tracing
-      otelEnabled: !!process.env.OTEL_EXPORTER_OTLP_ENDPOINT
+      otelEnabled: !!process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
+      // F4: IP deny list — comma-separated IPs or CIDRs (e.g. "167.82.233.0/24,104.156.83.88")
+      ipDenyList: optional("IP_DENY_LIST", "")
     };
   }
 });
@@ -700,7 +702,7 @@ function isSlackEnabled() {
   return Boolean(config.backendUrl) && Boolean(config.backendApiKey);
 }
 async function postToSlack(payload) {
-  if (!isSlackEnabled()) return;
+  if (!isSlackEnabled() || !_slackToolAvailable) return;
   try {
     const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
       method: "POST",
@@ -714,7 +716,12 @@ async function postToSlack(payload) {
       })
     });
     if (!res.ok) {
-      logger.warn({ status: res.status }, "Slack MCP post failed");
+      if (res.status === 404) {
+        _slackToolAvailable = false;
+        logger.warn("slack.channel.post not found on backend \u2014 Slack notifications disabled until restart. Register slack as a deferred namespace on the backend to fix.");
+      } else {
+        logger.warn({ status: res.status }, "Slack MCP post failed");
+      }
     }
   } catch (err) {
     logger.warn({ err: String(err) }, "Slack MCP post error");
@@ -772,11 +779,13 @@ function notifyAdoptionDigest(digest) {
     channel: "#ops-status"
   });
 }
+var _slackToolAvailable;
 var init_slack = __esm({
   "src/slack.ts"() {
     "use strict";
     init_config();
     init_logger();
+    _slackToolAvailable = true;
   }
 });
 
@@ -799,6 +808,29 @@ function validateBeforeMerge(query, params, force) {
     metrics.writes_passed++;
     logger.warn("Write-path validation bypassed (force=true)");
     return { allowed: true };
+  }
+  if (query.length > 0) {
+    const trimmed = query.trim();
+    const truncationSignals = [
+      /SET\s+\w+\.\w{1,20}$/i,
+      // ends mid-property: "SET old.validUnt"
+      /WHERE\s+\w+\.\w{0,20}$/i,
+      // ends mid-condition
+      /RETURN\s*$/i,
+      // RETURN with nothing after
+      /,\s*$/,
+      // trailing comma
+      /['"][^'"]{0,50}$/
+      // unterminated string literal
+    ];
+    for (const pattern of truncationSignals) {
+      if (pattern.test(trimmed)) {
+        metrics.writes_rejected++;
+        const reason = `Cypher query appears truncated (matched: ${pattern.source}): "${trimmed.slice(-40)}"`;
+        logger.warn({ preview: trimmed.slice(-60) }, `Write REJECTED: ${reason}`);
+        return { allowed: false, reason };
+      }
+    }
   }
   for (const [key, value] of Object.entries(params)) {
     if (typeof value === "string" && value.length > 20) {
@@ -898,6 +930,27 @@ var mcp_caller_exports = {};
 __export(mcp_caller_exports, {
   callMcpTool: () => callMcpTool
 });
+async function ensureAuditLessonsRead() {
+  const now = Date.now();
+  if (_auditLessonsCache && now - _auditLessonsCache.fetchedAt < AUDIT_LESSONS_TTL_MS) return;
+  try {
+    const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${config.backendApiKey}`,
+        "X-Call-Id": "audit-lessons-prefetch"
+      },
+      body: JSON.stringify({ tool: "audit.lessons", payload: {} }),
+      signal: AbortSignal.timeout(5e3)
+    });
+    if (res.ok) {
+      const parsed = await res.json().catch(() => null);
+      _auditLessonsCache = { data: parsed?.result ?? parsed, fetchedAt: now };
+    }
+  } catch {
+  }
+}
 async function callMcpTool(opts) {
   return withMcpSpan(opts.toolName, opts.callId, async (span) => {
     const log = childLogger(opts.traceId ?? opts.callId);
@@ -908,6 +961,7 @@ async function callMcpTool(opts) {
     const body = JSON.stringify({ tool: opts.toolName, payload: wireArgs });
     log.debug({ tool: opts.toolName, url }, "MCP call start");
     if (opts.toolName === "graph.write_cypher") {
+      await ensureAuditLessonsRead();
       const query = typeof opts.args.query === "string" ? opts.args.query : "";
       const params = opts.args.params ?? opts.args;
       const force = opts.args._force === true;
@@ -1106,7 +1160,7 @@ async function aggregateSseStream(res, callId, log) {
     throw Object.assign(new Error(`SSE_PARSE_ERROR: ${err}`), { code: "SSE_PARSE_ERROR" });
   }
 }
-var MAX_RETRIES, RETRY_DELAY_MS;
+var MAX_RETRIES, RETRY_DELAY_MS, _auditLessonsCache, AUDIT_LESSONS_TTL_MS;
 var init_mcp_caller = __esm({
   "src/mcp-caller.ts"() {
     "use strict";
@@ -1116,6 +1170,8 @@ var init_mcp_caller = __esm({
     init_tracing();
     MAX_RETRIES = 2;
     RETRY_DELAY_MS = 1e3;
+    _auditLessonsCache = null;
+    AUDIT_LESSONS_TTL_MS = 10 * 60 * 1e3;
   }
 });
 
@@ -26050,6 +26106,29 @@ app.use(cors({
 }));
 app.use(express.json({ limit: "100kb" }));
 app.use(express.urlencoded({ extended: false }));
+var ipDenyRaw = process.env.IP_DENY_LIST ?? "";
+var ipDenyList = ipDenyRaw.split(",").map((s) => s.trim()).filter(Boolean);
+if (ipDenyList.length > 0) {
+  app.use((req, res, next) => {
+    const clientIp = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ?? req.socket.remoteAddress ?? "";
+    const blocked = ipDenyList.some((entry) => {
+      if (entry.includes("/")) {
+        const [base, bits] = entry.split("/");
+        const mask = ~((1 << 32 - parseInt(bits)) - 1) >>> 0;
+        const toNum = (ip) => ip.split(".").reduce((a, o) => (a << 8) + parseInt(o), 0) >>> 0;
+        return (toNum(clientIp) & mask) === (toNum(base) & mask);
+      }
+      return clientIp === entry;
+    });
+    if (blocked) {
+      logger.warn({ ip: clientIp }, "Blocked request from denied IP");
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+    next();
+  });
+  logger.info({ count: ipDenyList.length }, "IP deny list active");
+}
 app.use((req, _res, next) => {
   logger.debug({ method: req.method, path: req.path }, "Request");
   next();

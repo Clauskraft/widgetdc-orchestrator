@@ -126,6 +126,33 @@ app.use(cors({
 app.use(express.json({ limit: '100kb' }))
 app.use(express.urlencoded({ extended: false }))
 
+// F4: IP deny list — block known scanner ranges (env: IP_DENY_LIST, comma-separated CIDRs or IPs)
+const ipDenyRaw = process.env.IP_DENY_LIST ?? ''
+const ipDenyList = ipDenyRaw.split(',').map(s => s.trim()).filter(Boolean)
+
+if (ipDenyList.length > 0) {
+  app.use((req, res, next) => {
+    const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ?? req.socket.remoteAddress ?? ''
+    const blocked = ipDenyList.some(entry => {
+      if (entry.includes('/')) {
+        // CIDR match (supports /24 and /32)
+        const [base, bits] = entry.split('/')
+        const mask = ~((1 << (32 - parseInt(bits))) - 1) >>> 0
+        const toNum = (ip: string) => ip.split('.').reduce((a, o) => (a << 8) + parseInt(o), 0) >>> 0
+        return (toNum(clientIp) & mask) === (toNum(base) & mask)
+      }
+      return clientIp === entry
+    })
+    if (blocked) {
+      logger.warn({ ip: clientIp }, 'Blocked request from denied IP')
+      res.status(403).json({ error: 'Forbidden' })
+      return
+    }
+    next()
+  })
+  logger.info({ count: ipDenyList.length }, 'IP deny list active')
+}
+
 // Request logging
 app.use((req, _res, next) => {
   logger.debug({ method: req.method, path: req.path }, 'Request')

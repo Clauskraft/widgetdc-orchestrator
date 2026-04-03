@@ -28,6 +28,36 @@ interface McpCallOptions {
 const MAX_RETRIES = 2
 const RETRY_DELAY_MS = 1000
 
+// F2: Cached audit.lessons — prevents hydration warning spam from backend.
+// Backend expects agents to read audit.lessons before graph.write_cypher.
+// Cache refreshes every 10 minutes; write calls proceed even if fetch fails.
+let _auditLessonsCache: { data: unknown; fetchedAt: number } | null = null
+const AUDIT_LESSONS_TTL_MS = 10 * 60 * 1000
+
+async function ensureAuditLessonsRead(): Promise<void> {
+  const now = Date.now()
+  if (_auditLessonsCache && now - _auditLessonsCache.fetchedAt < AUDIT_LESSONS_TTL_MS) return
+
+  try {
+    const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.backendApiKey}`,
+        'X-Call-Id': 'audit-lessons-prefetch',
+      },
+      body: JSON.stringify({ tool: 'audit.lessons', payload: {} }),
+      signal: AbortSignal.timeout(5000),
+    })
+    if (res.ok) {
+      const parsed = await res.json().catch(() => null) as Record<string, unknown> | null
+      _auditLessonsCache = { data: parsed?.result ?? parsed, fetchedAt: now }
+    }
+  } catch {
+    // Non-fatal — write calls proceed regardless
+  }
+}
+
 export async function callMcpTool(opts: McpCallOptions): Promise<OrchestratorToolResult> {
   return withMcpSpan(opts.toolName, opts.callId, async (span) => {
     const log = childLogger(opts.traceId ?? opts.callId)
@@ -43,6 +73,9 @@ export async function callMcpTool(opts: McpCallOptions): Promise<OrchestratorToo
 
     // B-1: Write-path circuit breaker — intercept graph.write_cypher
     if (opts.toolName === 'graph.write_cypher') {
+      // F2: Read audit.lessons before writing (cached, non-blocking)
+      await ensureAuditLessonsRead()
+
       const query = typeof opts.args.query === 'string' ? opts.args.query : ''
       const params = (opts.args.params as Record<string, unknown>) ?? opts.args
       const force = opts.args._force === true

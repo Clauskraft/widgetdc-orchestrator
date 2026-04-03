@@ -23,8 +23,13 @@ interface SlackPostPayload {
   channel: string
 }
 
+// F3: Track whether slack.channel.post is available on the backend.
+// After first TOOL_NOT_FOUND, suppress further attempts until next restart
+// to avoid log noise from repeated calls to a missing tool.
+let _slackToolAvailable = true
+
 async function postToSlack(payload: SlackPostPayload): Promise<void> {
-  if (!isSlackEnabled()) return
+  if (!isSlackEnabled() || !_slackToolAvailable) return
 
   try {
     const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
@@ -40,7 +45,12 @@ async function postToSlack(payload: SlackPostPayload): Promise<void> {
     })
 
     if (!res.ok) {
-      logger.warn({ status: res.status }, 'Slack MCP post failed')
+      if (res.status === 404) {
+        _slackToolAvailable = false
+        logger.warn('slack.channel.post not found on backend — Slack notifications disabled until restart. Register slack as a deferred namespace on the backend to fix.')
+      } else {
+        logger.warn({ status: res.status }, 'Slack MCP post failed')
+      }
     }
   } catch (err) {
     logger.warn({ err: String(err) }, 'Slack MCP post error')
