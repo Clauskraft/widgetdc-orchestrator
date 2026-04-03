@@ -99,10 +99,11 @@ Return max 5 entities. If none are specific enough, return {"entities": []}`,
     for (const entity of entities) {
       if (!entity.name || entity.name.length < 3) continue
       try {
+        const safeLabel = (entity.type ?? 'Knowledge').replace(/[^A-Za-z0-9_]/g, '_').slice(0, 64)
         await callMcpTool({
           toolName: 'graph.write_cypher',
           args: {
-            query: `MERGE (n:${entity.type ?? 'Knowledge'} {name: $name})
+            query: `MERGE (n:${safeLabel} {name: $name})
 ON CREATE SET n.domain = $domain, n.source = 'auto-enrichment', n.createdAt = datetime()
 SET n.updatedAt = datetime()`,
             params: {

@@ -71,7 +71,10 @@ export async function getAdaptiveWeights(): Promise<AdaptiveWeights> {
   if (!redis) return cachedWeights
 
   try {
-    const raw = await redis.get(REDIS_WEIGHTS_KEY)
+    const raw = await Promise.race([
+      redis.get(REDIS_WEIGHTS_KEY),
+      new Promise<null>(r => setTimeout(() => r(null), 200)),
+    ])
     if (raw) {
       cachedWeights = JSON.parse(raw)
       weightsCacheTime = now

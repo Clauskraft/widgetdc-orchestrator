@@ -180,7 +180,13 @@ ORDER BY cnt DESC LIMIT 30`,
 
 // ─── Collect members from Leiden result ─────────────────────────────────────
 
+const SAFE_COMMUNITY_PROPS = new Set(['communityId', 'communityId2', 'leiden_community', 'louvain_community'])
+
 async function collectCommunityMembers(propertyName: string): Promise<CommunityData[]> {
+  if (!SAFE_COMMUNITY_PROPS.has(propertyName)) {
+    logger.warn({ propertyName }, 'Rejected unsafe community property name')
+    return []
+  }
   const result = await callMcpTool({
     toolName: 'graph.read_cypher',
     args: {
@@ -318,7 +324,7 @@ RETURN c.id AS id, c.name AS name, c.summary AS summary, c.domain AS domain, c.m
 ORDER BY c.member_count DESC
 LIMIT $limit`,
         params: {
-          keyword: query.split(/\s+/).filter(w => w.length >= 3).slice(0, 3).join(' '),
+          keyword: query.split(/\s+/).filter(w => w.length >= 3).slice(0, 3).join(' ').slice(0, 80),
           limit: maxResults,
         },
       },

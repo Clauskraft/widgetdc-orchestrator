@@ -33,7 +33,9 @@ export async function callMcpTool(opts: McpCallOptions): Promise<OrchestratorToo
   const timeoutMs = opts.timeoutMs ?? config.mcpTimeoutMs
 
   const url = `${config.backendUrl}/api/mcp/route`
-  const body = JSON.stringify({ tool: opts.toolName, payload: opts.args })
+  // Strip internal _force sentinel before sending to backend
+  const { _force: _stripForce, ...wireArgs } = opts.args
+  const body = JSON.stringify({ tool: opts.toolName, payload: wireArgs })
 
   log.debug({ tool: opts.toolName, url }, 'MCP call start')
 

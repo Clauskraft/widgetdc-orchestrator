@@ -277,10 +277,11 @@ async function mergeToGraph(
   // Batch MERGE entities
   for (const entity of entities) {
     try {
+      const safeLabel = (entity.type ?? 'Knowledge').replace(/[^A-Za-z0-9_]/g, '_').slice(0, 64)
       await callMcpTool({
         toolName: 'graph.write_cypher',
         args: {
-          query: `MERGE (n:${entity.type} {name: $name})
+          query: `MERGE (n:${safeLabel} {name: $name})
 SET n.domain = $domain, n.source = $source, n.updatedAt = datetime()
 WITH n
 MERGE (d:TDCDocument {filename: $filename})

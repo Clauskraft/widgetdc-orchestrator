@@ -849,7 +849,8 @@ async function callMcpTool(opts) {
   const t0 = Date.now();
   const timeoutMs = opts.timeoutMs ?? config.mcpTimeoutMs;
   const url = `${config.backendUrl}/api/mcp/route`;
-  const body = JSON.stringify({ tool: opts.toolName, payload: opts.args });
+  const { _force: _stripForce, ...wireArgs } = opts.args;
+  const body = JSON.stringify({ tool: opts.toolName, payload: wireArgs });
   log.debug({ tool: opts.toolName, url }, "MCP call start");
   if (opts.toolName === "graph.write_cypher") {
     const query = typeof opts.args.query === "string" ? opts.args.query : "";
@@ -1281,6 +1282,10 @@ ORDER BY cnt DESC LIMIT 30`
   }));
 }
 async function collectCommunityMembers(propertyName) {
+  if (!SAFE_COMMUNITY_PROPS.has(propertyName)) {
+    logger.warn({ propertyName }, "Rejected unsafe community property name");
+    return [];
+  }
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: {
@@ -1392,7 +1397,7 @@ RETURN c.id AS id, c.name AS name, c.summary AS summary, c.domain AS domain, c.m
 ORDER BY c.member_count DESC
 LIMIT $limit`,
         params: {
-          keyword: query.split(/\s+/).filter((w) => w.length >= 3).slice(0, 3).join(" "),
+          keyword: query.split(/\s+/).filter((w) => w.length >= 3).slice(0, 3).join(" ").slice(0, 80),
           limit: maxResults
         }
       },
@@ -1413,12 +1418,14 @@ LIMIT $limit`,
     return [];
   }
 }
+var SAFE_COMMUNITY_PROPS;
 var init_hierarchical_intelligence = __esm({
   "src/hierarchical-intelligence.ts"() {
     "use strict";
     init_mcp_caller();
     init_cognitive_proxy();
     init_logger();
+    SAFE_COMMUNITY_PROPS = /* @__PURE__ */ new Set(["communityId", "communityId2", "leiden_community", "louvain_community"]);
   }
 });
 
@@ -1490,10 +1497,11 @@ Return max 5 entities. If none are specific enough, return {"entities": []}`,
     for (const entity of entities) {
       if (!entity.name || entity.name.length < 3) continue;
       try {
+        const safeLabel = (entity.type ?? "Knowledge").replace(/[^A-Za-z0-9_]/g, "_").slice(0, 64);
         await callMcpTool({
           toolName: "graph.write_cypher",
           args: {
-            query: `MERGE (n:${entity.type ?? "Knowledge"} {name: $name})
+            query: `MERGE (n:${safeLabel} {name: $name})
 ON CREATE SET n.domain = $domain, n.source = 'auto-enrichment', n.createdAt = datetime()
 SET n.updatedAt = datetime()`,
             params: {
@@ -1580,7 +1588,10 @@ async function getAdaptiveWeights() {
   const redis2 = getRedis();
   if (!redis2) return cachedWeights;
   try {
-    const raw = await redis2.get(REDIS_WEIGHTS_KEY);
+    const raw = await Promise.race([
+      redis2.get(REDIS_WEIGHTS_KEY),
+      new Promise((r) => setTimeout(() => r(null), 200))
+    ]);
     if (raw) {
       cachedWeights = JSON.parse(raw);
       weightsCacheTime = now;
@@ -3228,10 +3239,11 @@ async function mergeToGraph(entities, relations, req) {
   let merged = 0;
   for (const entity of entities) {
     try {
+      const safeLabel = (entity.type ?? "Knowledge").replace(/[^A-Za-z0-9_]/g, "_").slice(0, 64);
       await callMcpTool({
         toolName: "graph.write_cypher",
         args: {
-          query: `MERGE (n:${entity.type} {name: $name})
+          query: `MERGE (n:${safeLabel} {name: $name})
 SET n.domain = $domain, n.source = $source, n.updatedAt = datetime()
 WITH n
 MERGE (d:TDCDocument {filename: $filename})
@@ -3322,7 +3334,7 @@ async function runGraphHygiene() {
     queryMetric(`
       MATCH (n) WITH count(n) AS total
       MATCH (o) WHERE NOT (o)-[]-()
-      RETURN toFloat(count(o)) / total AS orphan_ratio, count(o) AS orphan_count, total
+      RETURN CASE WHEN total = 0 THEN 0.0 ELSE toFloat(count(o)) / total END AS orphan_ratio, count(o) AS orphan_count, total
     `),
     // 2. Average rels per node
     queryMetric(`

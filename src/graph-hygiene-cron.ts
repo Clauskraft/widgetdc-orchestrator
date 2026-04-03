@@ -85,7 +85,7 @@ export async function runGraphHygiene(): Promise<{
     queryMetric(`
       MATCH (n) WITH count(n) AS total
       MATCH (o) WHERE NOT (o)-[]-()
-      RETURN toFloat(count(o)) / total AS orphan_ratio, count(o) AS orphan_count, total
+      RETURN CASE WHEN total = 0 THEN 0.0 ELSE toFloat(count(o)) / total END AS orphan_ratio, count(o) AS orphan_count, total
     `),
     // 2. Average rels per node
     queryMetric(`
