@@ -23754,22 +23754,40 @@ similarityRouter.post("/select", async (req, res) => {
     });
     return;
   }
+  if (rejectedMatchIds.some((id) => typeof id !== "string" || id.length === 0)) {
+    res.status(400).json({
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: "All rejected_match_ids must be non-empty strings", status_code: 400 }
+    });
+    return;
+  }
   logger.info({ queryId, selected: selectedMatchId, rejected: rejectedMatchIds.length }, "Similarity preference received");
   hookSimilarityPreference(queryId || "unknown", selectedMatchId, rejectedMatchIds).catch(() => {
   });
   res.json({ success: true, data: { message: "Preference logged", selected: selectedMatchId, rejected_count: rejectedMatchIds.length } });
 });
 similarityRouter.get("/client/:id", async (req, res) => {
-  const clientId = decodeURIComponent(req.params.id);
-  const details = await getClientDetails(clientId);
-  if (!details) {
-    res.status(404).json({
-      success: false,
-      error: { code: "NOT_FOUND", message: "Client not found", status_code: 404 }
-    });
+  let clientId;
+  try {
+    clientId = decodeURIComponent(req.params.id);
+  } catch {
+    res.status(400).json({ success: false, error: { code: "VALIDATION_ERROR", message: "Invalid client ID encoding", status_code: 400 } });
     return;
   }
-  res.json({ success: true, data: details });
+  try {
+    const details = await getClientDetails(clientId);
+    if (!details) {
+      res.status(404).json({
+        success: false,
+        error: { code: "NOT_FOUND", message: "Client not found", status_code: 404 }
+      });
+      return;
+    }
+    res.json({ success: true, data: details });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, error: { code: "CLIENT_FETCH_FAILED", message, status_code: 500 } });
+  }
 });
 
 // src/index.ts
