@@ -3398,10 +3398,14 @@ JSON format:
       timeoutMs: 3e4
     });
     if (llmResult.status !== "success") {
-      logger.warn({ error: llmResult.error_message }, "Mercury entity extraction failed");
+      logger.warn({ error: llmResult.error_message }, "Mercury entity extraction: MCP call failed");
       return { entities: [], relations: [] };
     }
     const raw = llmResult.result;
+    if (raw?.success === false) {
+      logger.warn({ error: raw?.error }, "Mercury entity extraction: Mercury returned error");
+      return { entities: [], relations: [] };
+    }
     const text = raw?.content ?? (typeof raw === "string" ? raw : "");
     const match = String(text).match(/\{[\s\S]*"entities"[\s\S]*\}/);
     if (match) {
