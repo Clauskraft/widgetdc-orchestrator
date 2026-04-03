@@ -437,6 +437,36 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     timeoutMs: 30000,
     outputDescription: 'Health metrics with alerts if thresholds are crossed',
   }),
+
+  // ─── SNOUT Wave 2: Steal Smart ──────────────────────────────────────────────
+
+  defineTool({
+    name: 'critique_refine',
+    namespace: 'intelligence',
+    description: 'Run Constitutional AI-inspired generate→critique→revise pipeline. Generates a response, critiques it against quality principles, then revises. Returns original, critique, and refined version.',
+    input: z.object({
+      query: z.string().describe('The query or task to process'),
+      provider: z.string().optional().describe('LLM provider (default: deepseek)'),
+      principles: z.array(z.string()).optional().describe('Custom critique principles (default: 5 standard)'),
+      max_rounds: z.number().optional().describe('Max refine rounds (default: 1)'),
+    }),
+    timeoutMs: 120000,
+    outputDescription: 'Original response, critique, revised response, and timing',
+  }),
+
+  defineTool({
+    name: 'judge_response',
+    namespace: 'intelligence',
+    description: 'Score an agent response on 5 PRISM dimensions (Precision, Reasoning, Information, Safety, Methodology). Returns 0-10 scores per dimension plus aggregate. Based on openevals prompt templates.',
+    input: z.object({
+      query: z.string().describe('The original query/task'),
+      response: z.string().describe('The agent response to evaluate'),
+      context: z.string().optional().describe('Optional reference context or expected answer'),
+      provider: z.string().optional().describe('LLM provider for judging (default: deepseek)'),
+    }),
+    timeoutMs: 60000,
+    outputDescription: 'PRISM scores (0-10 each) with aggregate and explanation',
+  }),
 ]
 
 // ─── Protocol Compilers ─────────────────────────────────────────────────────

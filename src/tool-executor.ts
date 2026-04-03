@@ -902,6 +902,44 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       return `Evolution cycle ${result.status}: ${result.summary}`
     }
 
+    // ─── SNOUT Wave 2: Steal Smart ──────────────────────────────────────────
+
+    case 'critique_refine': {
+      const query = args.query as string
+      if (!query || query.length < 5) return 'Error: query is required (min 5 chars)'
+      try {
+        const { critiqueRefine } = await import('./critique-refine.js')
+        const result = await critiqueRefine(
+          query,
+          (args.provider as string) ?? 'deepseek',
+          args.principles as string[] | undefined,
+          (args.max_rounds as number) ?? 1,
+        )
+        return `Critique-Refine (${result.provider}, ${result.rounds} round, ${result.duration_ms}ms):\n\n**Original:**\n${result.original.slice(0, 400)}\n\n**Critique:**\n${result.critique.slice(0, 300)}\n\n**Revised:**\n${result.revised.slice(0, 500)}`
+      } catch (err) {
+        return `Critique-refine failed: ${err}`
+      }
+    }
+
+    case 'judge_response': {
+      const query = args.query as string
+      const response = args.response as string
+      if (!query || !response) return 'Error: query and response are required'
+      try {
+        const { judgeResponse } = await import('./agent-judge.js')
+        const result = await judgeResponse(
+          query,
+          response,
+          args.context as string | undefined,
+          (args.provider as string) ?? 'deepseek',
+        )
+        const s = result.score
+        return `PRISM Score: ${s.aggregate}/10 (${result.duration_ms}ms)\n  P-Precision:   ${s.precision}/10\n  R-Reasoning:   ${s.reasoning}/10\n  I-Information:  ${s.information}/10\n  S-Safety:      ${s.safety}/10\n  M-Methodology: ${s.methodology}/10\n\n${s.explanation}`
+      } catch (err) {
+        return `Agent judge failed: ${err}`
+      }
+    }
+
     default:
       return `Unknown tool: ${name}`
   }

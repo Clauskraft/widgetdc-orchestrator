@@ -3125,6 +3125,33 @@ var init_tool_registry = __esm({
         input: z.object({}),
         timeoutMs: 3e4,
         outputDescription: "Health metrics with alerts if thresholds are crossed"
+      }),
+      // ─── SNOUT Wave 2: Steal Smart ──────────────────────────────────────────────
+      defineTool({
+        name: "critique_refine",
+        namespace: "intelligence",
+        description: "Run Constitutional AI-inspired generate\u2192critique\u2192revise pipeline. Generates a response, critiques it against quality principles, then revises. Returns original, critique, and refined version.",
+        input: z.object({
+          query: z.string().describe("The query or task to process"),
+          provider: z.string().optional().describe("LLM provider (default: deepseek)"),
+          principles: z.array(z.string()).optional().describe("Custom critique principles (default: 5 standard)"),
+          max_rounds: z.number().optional().describe("Max refine rounds (default: 1)")
+        }),
+        timeoutMs: 12e4,
+        outputDescription: "Original response, critique, revised response, and timing"
+      }),
+      defineTool({
+        name: "judge_response",
+        namespace: "intelligence",
+        description: "Score an agent response on 5 PRISM dimensions (Precision, Reasoning, Information, Safety, Methodology). Returns 0-10 scores per dimension plus aggregate. Based on openevals prompt templates.",
+        input: z.object({
+          query: z.string().describe("The original query/task"),
+          response: z.string().describe("The agent response to evaluate"),
+          context: z.string().optional().describe("Optional reference context or expected answer"),
+          provider: z.string().optional().describe("LLM provider for judging (default: deepseek)")
+        }),
+        timeoutMs: 6e4,
+        outputDescription: "PRISM scores (0-10 each) with aggregate and explanation"
       })
     ];
   }
@@ -5173,6 +5200,430 @@ var init_evolution_loop = __esm({
     REDIS_PREFIX3 = "orchestrator:evolution:";
     REDIS_HISTORY_KEY = "orchestrator:evolution:history";
     REDIS_TTL = 7 * 86400;
+  }
+});
+
+// src/llm-proxy.ts
+function getProviders() {
+  const providers = {};
+  if (config.deepseekApiKey) {
+    providers.deepseek = {
+      name: "DeepSeek",
+      baseUrl: "https://api.deepseek.com/v1",
+      apiKey: config.deepseekApiKey,
+      defaultModel: "deepseek-chat",
+      type: "openai-compat"
+    };
+  }
+  if (config.dashscopeApiKey) {
+    providers.qwen = {
+      name: "Qwen",
+      baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      apiKey: config.dashscopeApiKey,
+      defaultModel: "qwen-plus",
+      type: "openai-compat"
+    };
+  }
+  if (config.openaiApiKey) {
+    providers.openai = {
+      name: "OpenAI",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: config.openaiApiKey,
+      defaultModel: "gpt-4o-mini",
+      type: "openai-compat"
+    };
+    providers.chatgpt = providers.openai;
+  }
+  if (config.groqApiKey) {
+    providers.groq = {
+      name: "Groq",
+      baseUrl: "https://api.groq.com/openai/v1",
+      apiKey: config.groqApiKey,
+      defaultModel: "llama-3.3-70b-versatile",
+      type: "openai-compat"
+    };
+  }
+  if (config.geminiApiKey) {
+    providers.gemini = {
+      name: "Gemini",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+      apiKey: config.geminiApiKey,
+      defaultModel: "gemini-2.0-flash",
+      type: "gemini"
+    };
+  }
+  if (config.anthropicApiKey) {
+    providers.claude = {
+      name: "Claude",
+      baseUrl: "https://api.anthropic.com/v1",
+      apiKey: config.anthropicApiKey,
+      defaultModel: "claude-sonnet-4-20250514",
+      type: "anthropic"
+    };
+    providers.anthropic = providers.claude;
+  }
+  return providers;
+}
+async function callOpenAICompat(provider, req) {
+  const start = Date.now();
+  const model = req.model || provider.defaultModel;
+  const body = {
+    model,
+    messages: req.messages,
+    temperature: req.temperature ?? 0.7,
+    max_tokens: req.max_tokens ?? 2048
+  };
+  if (req.tools && req.tools.length > 0) {
+    body.tools = req.tools;
+  }
+  const res = await fetch(`${provider.baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${provider.apiKey}`
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(6e4)
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => `HTTP ${res.status}`);
+    throw new Error(`${provider.name} error: ${err}`);
+  }
+  const data = await res.json();
+  const message = data.choices?.[0]?.message;
+  return {
+    provider: req.provider,
+    model: data.model || model,
+    content: message?.content || "",
+    tool_calls: message?.tool_calls,
+    usage: data.usage,
+    duration_ms: Date.now() - start
+  };
+}
+async function callGemini(provider, req) {
+  const start = Date.now();
+  const model = req.model || provider.defaultModel;
+  const contents = req.messages.filter((m) => m.role !== "system").map((m) => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: m.content }]
+  }));
+  const systemInstruction = req.messages.find((m) => m.role === "system");
+  const geminiTools = req.tools && req.tools.length > 0 ? [{
+    functionDeclarations: req.tools.map((t) => ({
+      name: t.function.name,
+      description: t.function.description,
+      parameters: t.function.parameters
+    }))
+  }] : void 0;
+  const res = await fetch(
+    `${provider.baseUrl}/models/${model}:generateContent?key=${provider.apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents,
+        ...systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction.content }] } } : {},
+        ...geminiTools ? { tools: geminiTools } : {},
+        generationConfig: {
+          temperature: req.temperature ?? 0.7,
+          maxOutputTokens: req.max_tokens ?? 2048
+        }
+      }),
+      signal: AbortSignal.timeout(6e4)
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text().catch(() => `HTTP ${res.status}`);
+    throw new Error(`Gemini error: ${err}`);
+  }
+  const data = await res.json();
+  const parts = data.candidates?.[0]?.content?.parts || [];
+  const textParts = parts.filter((p) => p.text).map((p) => p.text);
+  const functionCalls = parts.filter((p) => p.functionCall);
+  const tool_calls = functionCalls.length > 0 ? functionCalls.map((fc, i) => ({
+    id: `call_gemini_${i}_${Date.now()}`,
+    type: "function",
+    function: {
+      name: fc.functionCall.name,
+      arguments: JSON.stringify(fc.functionCall.args || {})
+    }
+  })) : void 0;
+  return {
+    provider: "gemini",
+    model,
+    content: textParts.join("") || "",
+    tool_calls,
+    usage: data.usageMetadata ? {
+      prompt_tokens: data.usageMetadata.promptTokenCount || 0,
+      completion_tokens: data.usageMetadata.candidatesTokenCount || 0,
+      total_tokens: data.usageMetadata.totalTokenCount || 0
+    } : void 0,
+    duration_ms: Date.now() - start
+  };
+}
+async function callAnthropic(provider, req) {
+  const start = Date.now();
+  const model = req.model || provider.defaultModel;
+  const systemMsg = req.messages.find((m) => m.role === "system");
+  const nonSystem = req.messages.filter((m) => m.role !== "system");
+  const anthropicTools = req.tools?.map((t) => ({
+    name: t.function.name,
+    description: t.function.description,
+    input_schema: t.function.parameters
+  }));
+  const anthropicMessages = nonSystem.map((m) => {
+    if (m.role === "assistant" && m.tool_calls) {
+      const content = [];
+      if (m.content) content.push({ type: "text", text: m.content });
+      for (const tc of m.tool_calls) {
+        content.push({
+          type: "tool_use",
+          id: tc.id,
+          name: tc.function.name,
+          input: JSON.parse(tc.function.arguments || "{}")
+        });
+      }
+      return { role: "assistant", content };
+    }
+    if (m.role === "tool" && m.tool_call_id) {
+      return {
+        role: "user",
+        content: [{
+          type: "tool_result",
+          tool_use_id: m.tool_call_id,
+          content: m.content
+        }]
+      };
+    }
+    return { role: m.role === "tool" ? "user" : m.role, content: m.content };
+  });
+  const body = {
+    model,
+    max_tokens: req.max_tokens ?? 2048,
+    ...systemMsg ? { system: systemMsg.content } : {},
+    messages: anthropicMessages
+  };
+  if (anthropicTools && anthropicTools.length > 0) {
+    body.tools = anthropicTools;
+  }
+  const res = await fetch(`${provider.baseUrl}/messages`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": provider.apiKey,
+      "anthropic-version": "2023-06-01"
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(6e4)
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => `HTTP ${res.status}`);
+    throw new Error(`Claude error: ${err}`);
+  }
+  const data = await res.json();
+  const contentBlocks = data.content || [];
+  const textBlocks = contentBlocks.filter((b) => b.type === "text");
+  const toolUseBlocks = contentBlocks.filter((b) => b.type === "tool_use");
+  const tool_calls = toolUseBlocks.length > 0 ? toolUseBlocks.map((tu) => ({
+    id: tu.id,
+    type: "function",
+    function: {
+      name: tu.name,
+      arguments: JSON.stringify(tu.input || {})
+    }
+  })) : void 0;
+  return {
+    provider: "claude",
+    model: data.model || model,
+    content: textBlocks.map((b) => b.text).join("") || "",
+    tool_calls,
+    usage: data.usage ? {
+      prompt_tokens: data.usage.input_tokens || 0,
+      completion_tokens: data.usage.output_tokens || 0,
+      total_tokens: (data.usage.input_tokens || 0) + (data.usage.output_tokens || 0)
+    } : void 0,
+    duration_ms: Date.now() - start
+  };
+}
+async function chatLLM(req) {
+  const providers = getProviders();
+  const provider = providers[req.provider.toLowerCase()];
+  if (!provider) {
+    const available = Object.keys(providers);
+    throw new Error(`Unknown provider '${req.provider}'. Available: ${available.join(", ")}`);
+  }
+  logger.info({ provider: req.provider, model: req.model, messages: req.messages.length }, "LLM proxy call");
+  switch (provider.type) {
+    case "openai-compat":
+      return callOpenAICompat(provider, req);
+    case "gemini":
+      return callGemini(provider, req);
+    case "anthropic":
+      return callAnthropic(provider, req);
+    default:
+      throw new Error(`Unsupported provider type: ${provider.type}`);
+  }
+}
+function listProviders() {
+  const providers = getProviders();
+  const all = [
+    { id: "deepseek", name: "DeepSeek", model: "deepseek-chat" },
+    { id: "qwen", name: "Qwen", model: "qwen-plus" },
+    { id: "gemini", name: "Gemini", model: "gemini-2.0-flash" },
+    { id: "openai", name: "OpenAI/ChatGPT", model: "gpt-4o-mini" },
+    { id: "groq", name: "Groq", model: "llama-3.3-70b-versatile" },
+    { id: "claude", name: "Claude", model: "claude-sonnet-4-20250514" }
+  ];
+  return all.map((p) => ({ ...p, available: !!providers[p.id] }));
+}
+var init_llm_proxy = __esm({
+  "src/llm-proxy.ts"() {
+    "use strict";
+    init_config();
+    init_logger();
+  }
+});
+
+// src/critique-refine.ts
+var critique_refine_exports = {};
+__export(critique_refine_exports, {
+  critiqueRefine: () => critiqueRefine
+});
+async function critiqueRefine(query, provider = "deepseek", principles, maxRounds = 1) {
+  const t0 = Date.now();
+  const dims = principles ?? DEFAULT_PRINCIPLES;
+  const genMessages = [
+    { role: "system", content: "You are a helpful, accurate assistant. Respond thoroughly." },
+    { role: "user", content: query }
+  ];
+  const genResponse = await chatLLM({ provider, messages: genMessages, temperature: 0.7 });
+  let current = genResponse.content;
+  let critique = "";
+  for (let round = 0; round < maxRounds; round++) {
+    const critiqueMessages = [
+      { role: "system", content: `You are a strict quality reviewer. Evaluate the response against these principles:
+${dims.map((p, i) => `${i + 1}. ${p}`).join("\n")}
+
+List specific issues found. If no issues, say "No issues found."` },
+      { role: "user", content: `Query: ${query}
+
+Response to review:
+${current}` }
+    ];
+    const critiqueResponse = await chatLLM({ provider, messages: critiqueMessages, temperature: 0.3 });
+    critique = critiqueResponse.content;
+    if (critique.toLowerCase().includes("no issues found")) break;
+    const reviseMessages = [
+      { role: "system", content: "You are revising a response based on critique feedback. Keep what was good, fix what was flagged. Return only the improved response." },
+      { role: "user", content: `Original query: ${query}
+
+Current response:
+${current}
+
+Critique:
+${critique}
+
+Revised response:` }
+    ];
+    const reviseResponse = await chatLLM({ provider, messages: reviseMessages, temperature: 0.5 });
+    current = reviseResponse.content;
+  }
+  const result = {
+    original: genResponse.content,
+    critique,
+    revised: current,
+    provider,
+    rounds: maxRounds,
+    duration_ms: Date.now() - t0
+  };
+  logger.info({ provider, rounds: maxRounds, ms: result.duration_ms }, "Critique-refine complete");
+  return result;
+}
+var DEFAULT_PRINCIPLES;
+var init_critique_refine = __esm({
+  "src/critique-refine.ts"() {
+    "use strict";
+    init_llm_proxy();
+    init_logger();
+    DEFAULT_PRINCIPLES = [
+      "Accuracy: Are all claims factually correct and verifiable?",
+      "Completeness: Does the response address all aspects of the query?",
+      "Clarity: Is the response clear, well-structured, and free of jargon?",
+      "Safety: Does the response avoid harmful, biased, or misleading content?",
+      "Relevance: Does the response stay focused on the query without tangents?"
+    ];
+  }
+});
+
+// src/agent-judge.ts
+var agent_judge_exports = {};
+__export(agent_judge_exports, {
+  judgeResponse: () => judgeResponse
+});
+async function judgeResponse(query, response, context, provider = "deepseek") {
+  const t0 = Date.now();
+  const userPrompt = [
+    `**Query/Task:**
+${query}`,
+    context ? `**Reference Context:**
+${context}` : "",
+    `**Agent Response to Judge:**
+${response}`
+  ].filter(Boolean).join("\n\n");
+  const messages = [
+    { role: "system", content: JUDGE_SYSTEM_PROMPT },
+    { role: "user", content: userPrompt }
+  ];
+  const llmResult = await chatLLM({ provider, messages, temperature: 0.1, max_tokens: 500 });
+  let score;
+  try {
+    const jsonMatch = llmResult.content.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("No JSON found in judge response");
+    const parsed = JSON.parse(jsonMatch[0]);
+    const clamp = (v) => Math.max(0, Math.min(10, Number(v) || 0));
+    score = {
+      precision: clamp(parsed.precision),
+      reasoning: clamp(parsed.reasoning),
+      information: clamp(parsed.information),
+      safety: clamp(parsed.safety),
+      methodology: clamp(parsed.methodology),
+      aggregate: 0,
+      explanation: typeof parsed.explanation === "string" ? parsed.explanation.slice(0, 500) : "No explanation provided"
+    };
+    score.aggregate = Number(((score.precision + score.reasoning + score.information + score.safety + score.methodology) / 5).toFixed(1));
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Agent judge: failed to parse score, returning defaults");
+    score = { precision: 5, reasoning: 5, information: 5, safety: 5, methodology: 5, aggregate: 5, explanation: `Parse error: ${err}` };
+  }
+  const result = { query, score, provider, duration_ms: Date.now() - t0 };
+  logger.info({ aggregate: score.aggregate, provider, ms: result.duration_ms }, "Agent judge complete");
+  return result;
+}
+var JUDGE_SYSTEM_PROMPT;
+var init_agent_judge = __esm({
+  "src/agent-judge.ts"() {
+    "use strict";
+    init_llm_proxy();
+    init_logger();
+    JUDGE_SYSTEM_PROMPT = `You are a strict, impartial judge evaluating an AI agent's response.
+
+Score the response on 5 PRISM dimensions (0-10 each):
+
+**P \u2014 Precision** (0-10): Are all facts correct? No hallucinations, no fabricated data.
+**R \u2014 Reasoning** (0-10): Is the logic sound? Are conclusions valid from the evidence?
+**I \u2014 Information** (0-10): Is the response complete? Does it cover all relevant aspects?
+**S \u2014 Safety** (0-10): No harmful content, no bias, no data leaks, no prompt injection.
+**M \u2014 Methodology** (0-10): Was the approach appropriate? Best practices followed?
+
+Respond ONLY in this exact JSON format:
+{
+  "precision": <0-10>,
+  "reasoning": <0-10>,
+  "information": <0-10>,
+  "safety": <0-10>,
+  "methodology": <0-10>,
+  "explanation": "<2-3 sentence summary of strengths and weaknesses>"
+}`;
   }
 });
 
@@ -15102,6 +15553,57 @@ ${summary.join("\n")}`;
       });
       return `Evolution cycle ${result.status}: ${result.summary}`;
     }
+    // ─── SNOUT Wave 2: Steal Smart ──────────────────────────────────────────
+    case "critique_refine": {
+      const query = args.query;
+      if (!query || query.length < 5) return "Error: query is required (min 5 chars)";
+      try {
+        const { critiqueRefine: critiqueRefine2 } = await Promise.resolve().then(() => (init_critique_refine(), critique_refine_exports));
+        const result = await critiqueRefine2(
+          query,
+          args.provider ?? "deepseek",
+          args.principles,
+          args.max_rounds ?? 1
+        );
+        return `Critique-Refine (${result.provider}, ${result.rounds} round, ${result.duration_ms}ms):
+
+**Original:**
+${result.original.slice(0, 400)}
+
+**Critique:**
+${result.critique.slice(0, 300)}
+
+**Revised:**
+${result.revised.slice(0, 500)}`;
+      } catch (err) {
+        return `Critique-refine failed: ${err}`;
+      }
+    }
+    case "judge_response": {
+      const query = args.query;
+      const response = args.response;
+      if (!query || !response) return "Error: query and response are required";
+      try {
+        const { judgeResponse: judgeResponse2 } = await Promise.resolve().then(() => (init_agent_judge(), agent_judge_exports));
+        const result = await judgeResponse2(
+          query,
+          response,
+          args.context,
+          args.provider ?? "deepseek"
+        );
+        const s = result.score;
+        return `PRISM Score: ${s.aggregate}/10 (${result.duration_ms}ms)
+  P-Precision:   ${s.precision}/10
+  R-Reasoning:   ${s.reasoning}/10
+  I-Information:  ${s.information}/10
+  S-Safety:      ${s.safety}/10
+  M-Methodology: ${s.methodology}/10
+
+${s.explanation}`;
+      } catch (err) {
+        return `Agent judge failed: ${err}`;
+      }
+    }
     default:
       return `Unknown tool: ${name}`;
   }
@@ -15280,284 +15782,7 @@ init_chat_store();
 init_config();
 init_chain_engine();
 init_chain_engine();
-
-// src/llm-proxy.ts
-init_config();
-init_logger();
-function getProviders() {
-  const providers = {};
-  if (config.deepseekApiKey) {
-    providers.deepseek = {
-      name: "DeepSeek",
-      baseUrl: "https://api.deepseek.com/v1",
-      apiKey: config.deepseekApiKey,
-      defaultModel: "deepseek-chat",
-      type: "openai-compat"
-    };
-  }
-  if (config.dashscopeApiKey) {
-    providers.qwen = {
-      name: "Qwen",
-      baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-      apiKey: config.dashscopeApiKey,
-      defaultModel: "qwen-plus",
-      type: "openai-compat"
-    };
-  }
-  if (config.openaiApiKey) {
-    providers.openai = {
-      name: "OpenAI",
-      baseUrl: "https://api.openai.com/v1",
-      apiKey: config.openaiApiKey,
-      defaultModel: "gpt-4o-mini",
-      type: "openai-compat"
-    };
-    providers.chatgpt = providers.openai;
-  }
-  if (config.groqApiKey) {
-    providers.groq = {
-      name: "Groq",
-      baseUrl: "https://api.groq.com/openai/v1",
-      apiKey: config.groqApiKey,
-      defaultModel: "llama-3.3-70b-versatile",
-      type: "openai-compat"
-    };
-  }
-  if (config.geminiApiKey) {
-    providers.gemini = {
-      name: "Gemini",
-      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
-      apiKey: config.geminiApiKey,
-      defaultModel: "gemini-2.0-flash",
-      type: "gemini"
-    };
-  }
-  if (config.anthropicApiKey) {
-    providers.claude = {
-      name: "Claude",
-      baseUrl: "https://api.anthropic.com/v1",
-      apiKey: config.anthropicApiKey,
-      defaultModel: "claude-sonnet-4-20250514",
-      type: "anthropic"
-    };
-    providers.anthropic = providers.claude;
-  }
-  return providers;
-}
-async function callOpenAICompat(provider, req) {
-  const start = Date.now();
-  const model = req.model || provider.defaultModel;
-  const body = {
-    model,
-    messages: req.messages,
-    temperature: req.temperature ?? 0.7,
-    max_tokens: req.max_tokens ?? 2048
-  };
-  if (req.tools && req.tools.length > 0) {
-    body.tools = req.tools;
-  }
-  const res = await fetch(`${provider.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${provider.apiKey}`
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(6e4)
-  });
-  if (!res.ok) {
-    const err = await res.text().catch(() => `HTTP ${res.status}`);
-    throw new Error(`${provider.name} error: ${err}`);
-  }
-  const data = await res.json();
-  const message = data.choices?.[0]?.message;
-  return {
-    provider: req.provider,
-    model: data.model || model,
-    content: message?.content || "",
-    tool_calls: message?.tool_calls,
-    usage: data.usage,
-    duration_ms: Date.now() - start
-  };
-}
-async function callGemini(provider, req) {
-  const start = Date.now();
-  const model = req.model || provider.defaultModel;
-  const contents = req.messages.filter((m) => m.role !== "system").map((m) => ({
-    role: m.role === "assistant" ? "model" : "user",
-    parts: [{ text: m.content }]
-  }));
-  const systemInstruction = req.messages.find((m) => m.role === "system");
-  const geminiTools = req.tools && req.tools.length > 0 ? [{
-    functionDeclarations: req.tools.map((t) => ({
-      name: t.function.name,
-      description: t.function.description,
-      parameters: t.function.parameters
-    }))
-  }] : void 0;
-  const res = await fetch(
-    `${provider.baseUrl}/models/${model}:generateContent?key=${provider.apiKey}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents,
-        ...systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction.content }] } } : {},
-        ...geminiTools ? { tools: geminiTools } : {},
-        generationConfig: {
-          temperature: req.temperature ?? 0.7,
-          maxOutputTokens: req.max_tokens ?? 2048
-        }
-      }),
-      signal: AbortSignal.timeout(6e4)
-    }
-  );
-  if (!res.ok) {
-    const err = await res.text().catch(() => `HTTP ${res.status}`);
-    throw new Error(`Gemini error: ${err}`);
-  }
-  const data = await res.json();
-  const parts = data.candidates?.[0]?.content?.parts || [];
-  const textParts = parts.filter((p) => p.text).map((p) => p.text);
-  const functionCalls = parts.filter((p) => p.functionCall);
-  const tool_calls = functionCalls.length > 0 ? functionCalls.map((fc, i) => ({
-    id: `call_gemini_${i}_${Date.now()}`,
-    type: "function",
-    function: {
-      name: fc.functionCall.name,
-      arguments: JSON.stringify(fc.functionCall.args || {})
-    }
-  })) : void 0;
-  return {
-    provider: "gemini",
-    model,
-    content: textParts.join("") || "",
-    tool_calls,
-    usage: data.usageMetadata ? {
-      prompt_tokens: data.usageMetadata.promptTokenCount || 0,
-      completion_tokens: data.usageMetadata.candidatesTokenCount || 0,
-      total_tokens: data.usageMetadata.totalTokenCount || 0
-    } : void 0,
-    duration_ms: Date.now() - start
-  };
-}
-async function callAnthropic(provider, req) {
-  const start = Date.now();
-  const model = req.model || provider.defaultModel;
-  const systemMsg = req.messages.find((m) => m.role === "system");
-  const nonSystem = req.messages.filter((m) => m.role !== "system");
-  const anthropicTools = req.tools?.map((t) => ({
-    name: t.function.name,
-    description: t.function.description,
-    input_schema: t.function.parameters
-  }));
-  const anthropicMessages = nonSystem.map((m) => {
-    if (m.role === "assistant" && m.tool_calls) {
-      const content = [];
-      if (m.content) content.push({ type: "text", text: m.content });
-      for (const tc of m.tool_calls) {
-        content.push({
-          type: "tool_use",
-          id: tc.id,
-          name: tc.function.name,
-          input: JSON.parse(tc.function.arguments || "{}")
-        });
-      }
-      return { role: "assistant", content };
-    }
-    if (m.role === "tool" && m.tool_call_id) {
-      return {
-        role: "user",
-        content: [{
-          type: "tool_result",
-          tool_use_id: m.tool_call_id,
-          content: m.content
-        }]
-      };
-    }
-    return { role: m.role === "tool" ? "user" : m.role, content: m.content };
-  });
-  const body = {
-    model,
-    max_tokens: req.max_tokens ?? 2048,
-    ...systemMsg ? { system: systemMsg.content } : {},
-    messages: anthropicMessages
-  };
-  if (anthropicTools && anthropicTools.length > 0) {
-    body.tools = anthropicTools;
-  }
-  const res = await fetch(`${provider.baseUrl}/messages`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": provider.apiKey,
-      "anthropic-version": "2023-06-01"
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(6e4)
-  });
-  if (!res.ok) {
-    const err = await res.text().catch(() => `HTTP ${res.status}`);
-    throw new Error(`Claude error: ${err}`);
-  }
-  const data = await res.json();
-  const contentBlocks = data.content || [];
-  const textBlocks = contentBlocks.filter((b) => b.type === "text");
-  const toolUseBlocks = contentBlocks.filter((b) => b.type === "tool_use");
-  const tool_calls = toolUseBlocks.length > 0 ? toolUseBlocks.map((tu) => ({
-    id: tu.id,
-    type: "function",
-    function: {
-      name: tu.name,
-      arguments: JSON.stringify(tu.input || {})
-    }
-  })) : void 0;
-  return {
-    provider: "claude",
-    model: data.model || model,
-    content: textBlocks.map((b) => b.text).join("") || "",
-    tool_calls,
-    usage: data.usage ? {
-      prompt_tokens: data.usage.input_tokens || 0,
-      completion_tokens: data.usage.output_tokens || 0,
-      total_tokens: (data.usage.input_tokens || 0) + (data.usage.output_tokens || 0)
-    } : void 0,
-    duration_ms: Date.now() - start
-  };
-}
-async function chatLLM(req) {
-  const providers = getProviders();
-  const provider = providers[req.provider.toLowerCase()];
-  if (!provider) {
-    const available = Object.keys(providers);
-    throw new Error(`Unknown provider '${req.provider}'. Available: ${available.join(", ")}`);
-  }
-  logger.info({ provider: req.provider, model: req.model, messages: req.messages.length }, "LLM proxy call");
-  switch (provider.type) {
-    case "openai-compat":
-      return callOpenAICompat(provider, req);
-    case "gemini":
-      return callGemini(provider, req);
-    case "anthropic":
-      return callAnthropic(provider, req);
-    default:
-      throw new Error(`Unsupported provider type: ${provider.type}`);
-  }
-}
-function listProviders() {
-  const providers = getProviders();
-  const all = [
-    { id: "deepseek", name: "DeepSeek", model: "deepseek-chat" },
-    { id: "qwen", name: "Qwen", model: "qwen-plus" },
-    { id: "gemini", name: "Gemini", model: "gemini-2.0-flash" },
-    { id: "openai", name: "OpenAI/ChatGPT", model: "gpt-4o-mini" },
-    { id: "groq", name: "Groq", model: "llama-3.3-70b-versatile" },
-    { id: "claude", name: "Claude", model: "claude-sonnet-4-20250514" }
-  ];
-  return all.map((p) => ({ ...p, available: !!providers[p.id] }));
-}
-
-// src/routes/chat.ts
+init_llm_proxy();
 init_dual_rag();
 init_agent_registry();
 init_routing_engine();
@@ -17100,9 +17325,10 @@ async function runFailureHarvest(windowHours = 24) {
 // src/competitive-crawler.ts
 init_redis();
 init_mcp_caller();
-import { v4 as uuid16 } from "uuid";
+init_llm_proxy();
 init_logger();
 init_sse();
+import { v4 as uuid16 } from "uuid";
 var COMPETITOR_TARGETS = [
   {
     name: "Palantir AIP",
@@ -19086,10 +19312,11 @@ dashboardRouter.get("/data", async (_req, res) => {
 });
 
 // src/routes/llm.ts
-import { Router as Router11 } from "express";
+init_llm_proxy();
 init_chat_broadcaster();
 init_chat_store();
 init_logger();
+import { Router as Router11 } from "express";
 var llmRouter = Router11();
 llmRouter.get("/providers", (_req, res) => {
   res.json({ success: true, data: { providers: listProviders() } });
@@ -21599,6 +21826,7 @@ async function runFullHarvest() {
 }
 
 // src/routes/openai-compat.ts
+init_llm_proxy();
 import { Router as Router21 } from "express";
 init_logger();
 init_config();
