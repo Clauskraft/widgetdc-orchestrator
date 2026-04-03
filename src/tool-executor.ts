@@ -944,6 +944,25 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    case 'moa_query': {
+      const query = args.query as string
+      if (!query || query.length < 5) return 'Error: query is required (min 5 chars)'
+      try {
+        const { routeMoA } = await import('./moa-router.js')
+        const result = await routeMoA({
+          query,
+          agents: args.agents as string[] | undefined,
+          max_agents: args.max_agents as number | undefined,
+          provider: args.provider as string | undefined,
+        })
+        const agentList = result.agents_dispatched.join(', ') || 'none'
+        const header = `MoA [${result.classification.complexity}] → ${agentList} (confidence: ${result.confidence.toFixed(2)}, ${result.duration_ms}ms)`
+        return `${header}\nDomains: ${result.classification.domains.join(', ')}\n\n${result.consensus}`
+      } catch (err) {
+        return `MoA routing failed: ${err}`
+      }
+    }
+
     case 'critique_refine': {
       const query = args.query as string
       if (!query || query.length < 5) return 'Error: query is required (min 5 chars)'

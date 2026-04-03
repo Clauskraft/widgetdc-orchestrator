@@ -3185,6 +3185,20 @@ var init_tool_registry = __esm({
         }),
         timeoutMs: 6e4,
         outputDescription: "PRISM scores (0-10 each) with aggregate and explanation"
+      }),
+      // ─── SNOUT Wave 3: Build Unique ──────────────────────────────────────────
+      defineTool({
+        name: "moa_query",
+        namespace: "intelligence",
+        description: "Mixture-of-Agents routing: classifies query complexity, selects 2-3 specialist agents by capability match, dispatches in parallel, and merges responses via LLM consensus. Use for complex queries that benefit from multiple perspectives.",
+        input: z.object({
+          query: z.string().describe("The complex query to route through MoA"),
+          agents: z.array(z.string()).optional().describe("Force specific agent IDs (bypass auto-selection)"),
+          max_agents: z.number().optional().describe("Max agents to dispatch (default: 3)"),
+          provider: z.string().optional().describe("LLM provider for classify + merge (default: deepseek)")
+        }),
+        timeoutMs: 12e4,
+        outputDescription: "Consensus response with agent attributions, confidence score, and classification"
       })
     ];
   }
@@ -5514,6 +5528,186 @@ var init_llm_proxy = __esm({
     "use strict";
     init_config();
     init_logger();
+  }
+});
+
+// src/moa-router.ts
+var moa_router_exports = {};
+__export(moa_router_exports, {
+  routeMoA: () => routeMoA
+});
+import { v4 as uuid13 } from "uuid";
+async function classifyQuery2(query, provider) {
+  try {
+    const result = await chatLLM({
+      provider,
+      messages: [
+        { role: "system", content: `Classify this query. Return JSON only: {"complexity": "simple|medium|complex", "domains": ["security","knowledge","architecture","consulting","graph","code","intelligence","compliance","operations"]}. Pick 1-3 most relevant domains.` },
+        { role: "user", content: query }
+      ],
+      temperature: 0.1,
+      max_tokens: 100
+    });
+    const match = result.content.match(/\{[\s\S]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      return {
+        complexity: parsed.complexity || "medium",
+        domains: Array.isArray(parsed.domains) ? parsed.domains.slice(0, 3) : ["knowledge"]
+      };
+    }
+  } catch {
+  }
+  return { complexity: "medium", domains: ["knowledge"] };
+}
+function selectAgents(domains, maxAgents) {
+  const targetCapabilities = /* @__PURE__ */ new Set();
+  for (const domain of domains) {
+    const caps = DOMAIN_CAPABILITIES[domain] ?? [];
+    caps.forEach((c) => targetCapabilities.add(c));
+  }
+  const candidates = [];
+  for (const entry of AgentRegistry.all()) {
+    const agentCaps = entry.handshake.capabilities ?? [];
+    const matched = agentCaps.filter((c) => targetCapabilities.has(c));
+    if (matched.length === 0) continue;
+    candidates.push({
+      agent_id: entry.handshake.agent_id,
+      display_name: entry.handshake.display_name ?? entry.handshake.agent_id,
+      capabilities: agentCaps,
+      match_score: matched.length / Math.max(targetCapabilities.size, 1),
+      matched_capabilities: matched
+    });
+  }
+  return candidates.sort((a, b) => b.match_score - a.match_score).slice(0, maxAgents);
+}
+async function dispatchAgents(query, agents) {
+  const chainDef = {
+    name: `moa-${uuid13().slice(0, 8)}`,
+    mode: "parallel",
+    steps: agents.map((a) => ({
+      agent_id: a.agent_id,
+      tool_name: "search_knowledge",
+      arguments: { query }
+    }))
+  };
+  const execution = await executeChain(chainDef);
+  return execution.results.map((r, i) => ({
+    agent_id: agents[i]?.agent_id ?? r.agent_id,
+    response: typeof r.output === "string" ? r.output : JSON.stringify(r.output ?? ""),
+    status: r.status
+  }));
+}
+async function mergeConsensus(query, responses, provider) {
+  const successResponses = responses.filter((r) => r.status === "success" && r.response.length > 10);
+  if (successResponses.length === 0) {
+    return { consensus: "No successful agent responses to merge.", confidence: 0 };
+  }
+  if (successResponses.length === 1) {
+    return { consensus: successResponses[0].response, confidence: 0.6 };
+  }
+  const agentOutputs = successResponses.map(
+    (r) => `## Agent: ${r.agent_id}
+${r.response.slice(0, 1e3)}`
+  ).join("\n\n---\n\n");
+  try {
+    const result = await chatLLM({
+      provider,
+      messages: [
+        { role: "system", content: `You are merging responses from multiple specialist agents into a single consensus answer. Synthesize the best information from each, resolve contradictions by favoring the more specific/evidence-backed claim. Output the merged answer, then on the last line: "CONFIDENCE: 0.X" (0.0-1.0).` },
+        { role: "user", content: `Query: ${query}
+
+${agentOutputs}` }
+      ],
+      temperature: 0.3,
+      max_tokens: 2e3
+    });
+    let confidence = 0.7;
+    const confMatch = result.content.match(/CONFIDENCE:\s*([\d.]+)/);
+    if (confMatch) confidence = Math.min(1, Math.max(0, parseFloat(confMatch[1])));
+    const consensus = result.content.replace(/CONFIDENCE:\s*[\d.]+\s*$/, "").trim();
+    return { consensus, confidence };
+  } catch (err) {
+    return {
+      consensus: successResponses.map((r) => `[${r.agent_id}] ${r.response}`).join("\n\n"),
+      confidence: 0.4
+    };
+  }
+}
+async function routeMoA(request) {
+  const t0 = Date.now();
+  const provider = request.provider ?? "deepseek";
+  const maxAgents = request.max_agents ?? 3;
+  const classification = await classifyQuery2(request.query, provider);
+  let agents;
+  if (request.agents && request.agents.length > 0) {
+    agents = request.agents.map((id) => {
+      const entry = AgentRegistry.get(id);
+      return {
+        agent_id: id,
+        display_name: entry?.handshake.display_name ?? id,
+        capabilities: entry?.handshake.capabilities ?? [],
+        match_score: 1,
+        matched_capabilities: []
+      };
+    });
+  } else {
+    agents = selectAgents(classification.domains, maxAgents);
+  }
+  if (agents.length === 0) {
+    return {
+      query: request.query,
+      agents_dispatched: [],
+      responses: [],
+      consensus: "No suitable agents found for this query.",
+      confidence: 0,
+      classification,
+      duration_ms: Date.now() - t0
+    };
+  }
+  logger.info({
+    query: request.query.slice(0, 80),
+    agents: agents.map((a) => a.agent_id),
+    domains: classification.domains,
+    complexity: classification.complexity
+  }, "MoA routing: dispatching agents");
+  const responses = await dispatchAgents(request.query, agents);
+  const { consensus, confidence } = await mergeConsensus(request.query, responses, provider);
+  const result = {
+    query: request.query,
+    agents_dispatched: agents.map((a) => a.agent_id),
+    responses,
+    consensus,
+    confidence,
+    classification,
+    duration_ms: Date.now() - t0
+  };
+  logger.info({
+    agents: result.agents_dispatched,
+    confidence,
+    ms: result.duration_ms
+  }, "MoA routing complete");
+  return result;
+}
+var DOMAIN_CAPABILITIES;
+var init_moa_router = __esm({
+  "src/moa-router.ts"() {
+    "use strict";
+    init_agent_registry();
+    init_chain_engine();
+    init_llm_proxy();
+    init_logger();
+    DOMAIN_CAPABILITIES = {
+      security: ["threat_hunting", "osint", "cti", "compliance", "attack_surface"],
+      knowledge: ["context_management", "memory_store", "search", "embeddings"],
+      architecture: ["sitrep", "architecture", "governance", "compliance"],
+      consulting: ["engagement_analysis", "deliverable_generation", "client_profiling"],
+      graph: ["graph_intelligence", "neo4j", "community_detection", "embeddings"],
+      code: ["code_analysis", "reinforcement_learning", "dreaming"],
+      intelligence: ["harvest", "competitive_intel", "osint", "data_collection"],
+      compliance: ["compliance", "governance", "legal", "regulatory"],
+      operations: ["delegation", "task_management", "agent_coordination", "introspection"]
+    };
   }
 });
 
@@ -15026,7 +15220,7 @@ async function runInvestigation(topic) {
 // src/tool-executor.ts
 init_logger();
 init_tool_registry();
-import { v4 as uuid13 } from "uuid";
+import { v4 as uuid14 } from "uuid";
 var ORCHESTRATOR_TOOLS = toOpenAITools();
 var totalTokensSaved = 0;
 var totalFoldingCalls = 0;
@@ -15121,7 +15315,7 @@ function buildToolFallback(toolName, error) {
   }
 }
 async function executeToolUnified(toolName, args, opts) {
-  const callId = opts?.call_id ?? uuid13();
+  const callId = opts?.call_id ?? uuid14();
   const t0 = Date.now();
   let deprecation_notice;
   const toolDef = getTool(toolName);
@@ -15209,7 +15403,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher, params: args.params ?? {} },
-        callId: uuid13(),
+        callId: uuid14(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
@@ -15230,7 +15424,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher },
-        callId: uuid13(),
+        callId: uuid14(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Task query failed: ${result.error_message}`;
@@ -15242,7 +15436,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: args.tool_name,
         args: args.payload ?? {},
-        callId: uuid13(),
+        callId: uuid14(),
         timeoutMs: 3e4
       });
       if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
@@ -15250,8 +15444,8 @@ ${result.merged_context}`;
     }
     case "get_platform_health": {
       const [backendHealth, graphHealth] = await Promise.allSettled([
-        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid13(), timeoutMs: 1e4 }),
-        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid13(), timeoutMs: 1e4 })
+        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid14(), timeoutMs: 1e4 }),
+        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid14(), timeoutMs: 1e4 })
       ]);
       const parts = [];
       if (backendHealth.status === "fulfilled" && backendHealth.value.status === "success") {
@@ -15267,7 +15461,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: args.query },
-        callId: uuid13(),
+        callId: uuid14(),
         timeoutMs: 2e4
       });
       if (result.status !== "success") return `Document search failed: ${result.error_message}`;
@@ -15285,7 +15479,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issues",
         args: payload,
-        callId: uuid13(),
+        callId: uuid14(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
@@ -15301,7 +15495,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issue_get",
         args: { identifier },
-        callId: uuid13(),
+        callId: uuid14(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
@@ -15627,6 +15821,27 @@ ${result.merged_context}`;
         return `Q-learning reward sent: strategy=${strategy}, reward=${reward}${args.reason ? `, reason: ${args.reason}` : ""}`;
       } catch (err) {
         return `Reward signal failed: ${err}`;
+      }
+    }
+    case "moa_query": {
+      const query = args.query;
+      if (!query || query.length < 5) return "Error: query is required (min 5 chars)";
+      try {
+        const { routeMoA: routeMoA2 } = await Promise.resolve().then(() => (init_moa_router(), moa_router_exports));
+        const result = await routeMoA2({
+          query,
+          agents: args.agents,
+          max_agents: args.max_agents,
+          provider: args.provider
+        });
+        const agentList = result.agents_dispatched.join(", ") || "none";
+        const header = `MoA [${result.classification.complexity}] \u2192 ${agentList} (confidence: ${result.confidence.toFixed(2)}, ${result.duration_ms}ms)`;
+        return `${header}
+Domains: ${result.classification.domains.join(", ")}
+
+${result.consensus}`;
+      } catch (err) {
+        return `MoA routing failed: ${err}`;
       }
     }
     case "critique_refine": {
@@ -16758,12 +16973,12 @@ import cron from "node-cron";
 // src/graph-self-correct.ts
 init_mcp_caller();
 init_logger();
-import { v4 as uuid14 } from "uuid";
+import { v4 as uuid15 } from "uuid";
 async function graphRead(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid14(),
+    callId: uuid15(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -16774,7 +16989,7 @@ async function graphWrite(cypher, params, force = true) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {}, _force: force },
-    callId: uuid14(),
+    callId: uuid15(),
     timeoutMs: 15e3
   });
   return result.status === "success";
@@ -17230,7 +17445,7 @@ init_redis();
 init_mcp_caller();
 init_logger();
 init_sse();
-import { v4 as uuid15 } from "uuid";
+import { v4 as uuid16 } from "uuid";
 function categorizeFailure(error) {
   const lower = error.toLowerCase();
   if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) return "timeout";
@@ -17263,7 +17478,7 @@ async function harvestFailures(windowHours = 24) {
           const failedSteps = exec.results?.filter((r) => r.status === "error") ?? [];
           const errorMsg = exec.error ?? failedSteps.map((s) => String(s.output)).join("; ") ?? "unknown";
           events.push({
-            $id: `failure-event:${uuid15()}`,
+            $id: `failure-event:${uuid16()}`,
             execution_id: execId,
             chain_name: exec.name,
             category: categorizeFailure(errorMsg),
@@ -17309,7 +17524,7 @@ async function persistToGraph(events) {
             timestamp: evt.timestamp
           }
         },
-        callId: uuid15(),
+        callId: uuid16(),
         timeoutMs: 1e4
       });
       persisted++;
@@ -17329,7 +17544,7 @@ async function persistToGraph(events) {
           `,
           params: {}
         },
-        callId: uuid15(),
+        callId: uuid16(),
         timeoutMs: 1e4
       });
       await callMcpTool({
@@ -17342,7 +17557,7 @@ async function persistToGraph(events) {
           `,
           params: {}
         },
-        callId: uuid15(),
+        callId: uuid16(),
         timeoutMs: 1e4
       });
     } catch {
@@ -17403,7 +17618,7 @@ init_mcp_caller();
 init_llm_proxy();
 init_logger();
 init_sse();
-import { v4 as uuid16 } from "uuid";
+import { v4 as uuid17 } from "uuid";
 var COMPETITOR_TARGETS = [
   {
     name: "Palantir AIP",
@@ -17503,7 +17718,7 @@ async function extractCapabilities(target) {
         const cap = line.replace(/^[\s\-\*]+/, "").trim();
         if (cap.length > 10 && cap.length < 200) {
           capabilities.push({
-            $id: `capability:${target.slug}:${uuid16().slice(0, 8)}`,
+            $id: `capability:${target.slug}:${uuid17().slice(0, 8)}`,
             competitor: target.name,
             capability: cap,
             category: categorizeCapability(cap),
@@ -17553,7 +17768,7 @@ async function persistCapabilities(capabilities) {
             extracted_at: cap.extracted_at
           }
         },
-        callId: uuid16(),
+        callId: uuid17(),
         timeoutMs: 1e4
       });
       persisted++;
@@ -17577,7 +17792,7 @@ async function analyzeGaps(capabilities) {
     const result = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: "MATCH (t:Tool) RETURN t.name AS name LIMIT 200" },
-      callId: uuid16(),
+      callId: uuid17(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -17646,7 +17861,7 @@ init_redis();
 init_logger();
 init_mcp_caller();
 import { Router as Router6 } from "express";
-import { v4 as uuid17 } from "uuid";
+import { v4 as uuid18 } from "uuid";
 var adoptionRouter = Router6();
 var REDIS_KEY3 = "orchestrator:adoption-metrics";
 var REDIS_TRENDS_KEY = "orchestrator:adoption-trends";
@@ -17734,7 +17949,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (c:Conversation) WHERE c.createdAt > datetime() - duration('P1D') RETURN count(c) AS count"
       },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 1e4
     }),
     // Count artifacts from last 24h
@@ -17743,7 +17958,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (a:AnalysisArtifact) WHERE a.createdAt > datetime() - duration('P1D') RETURN count(a) AS count"
       },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 1e4
     }),
     // Count tool calls from audit trail
@@ -17752,7 +17967,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (e:AuditEvent) WHERE e.timestamp > datetime() - duration('P1D') AND e.action = 'tool_call' RETURN count(e) AS count"
       },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 1e4
     })
   ]);
@@ -17857,7 +18072,7 @@ SET m.conversations_24h = $conversations,
           featuresPct: snapshot.features_pct
         }
       },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -17904,7 +18119,7 @@ init_logger();
 init_mcp_caller();
 init_sse();
 import { Router as Router7 } from "express";
-import { v4 as uuid18 } from "uuid";
+import { v4 as uuid19 } from "uuid";
 var looseEndsRouter = Router7();
 var REDIS_KEY4 = "orchestrator:loose-ends:latest";
 var REDIS_HISTORY = "orchestrator:loose-ends:history";
@@ -17918,7 +18133,7 @@ AND NOT (b)<-[:COMPOSED_OF]-(:Assembly)
 RETURN b.id AS id, b.name AS name, b.domain AS domain, labels(b)[0] AS type
 LIMIT 25`,
     buildFinding: (records) => records.map((r) => ({
-      id: `orphan-${r.id ?? uuid18().slice(0, 8)}`,
+      id: `orphan-${r.id ?? uuid19().slice(0, 8)}`,
       severity: "warning",
       category: "orphan_block",
       title: `Orphan block: ${r.name ?? r.id}`,
@@ -17936,7 +18151,7 @@ AND NOT (a)<-[:BASED_ON]-(:Decision)
 RETURN a.id AS id, a.name AS name, a.composite AS score
 LIMIT 15`,
     buildFinding: (records) => records.map((r) => ({
-      id: `dangling-asm-${r.id ?? uuid18().slice(0, 8)}`,
+      id: `dangling-asm-${r.id ?? uuid19().slice(0, 8)}`,
       severity: "warning",
       category: "dangling_assembly",
       title: `Accepted assembly without decision: ${r.name ?? r.id}`,
@@ -17954,7 +18169,7 @@ AND NOT (d)-[:DERIVES_FROM]->()
 RETURN d.id AS id, d.title AS title, d.certified_at AS certified_at
 LIMIT 10`,
     buildFinding: (records) => records.map((r) => ({
-      id: `no-lineage-${r.id ?? uuid18().slice(0, 8)}`,
+      id: `no-lineage-${r.id ?? uuid19().slice(0, 8)}`,
       severity: "critical",
       category: "missing_lineage",
       title: `Decision without lineage: ${r.title ?? r.id}`,
@@ -17972,7 +18187,7 @@ AND NOT (n)-[]-()
 RETURN n.id AS id, labels(n)[0] AS type, n.domain AS domain, n.insight AS title
 LIMIT 20`,
     buildFinding: (records) => records.map((r) => ({
-      id: `disconnected-${r.id ?? uuid18().slice(0, 8)}`,
+      id: `disconnected-${r.id ?? uuid19().slice(0, 8)}`,
       severity: "info",
       category: "disconnected_node",
       title: `Disconnected ${r.type}: ${(r.title ?? r.id ?? "").toString().slice(0, 60)}`,
@@ -17990,7 +18205,7 @@ AND d.created_at < datetime() - duration('P7D')
 RETURN d.id AS id, d.title AS title, d.created_at AS created_at
 LIMIT 10`,
     buildFinding: (records) => records.map((r) => ({
-      id: `stale-decision-${r.id ?? uuid18().slice(0, 8)}`,
+      id: `stale-decision-${r.id ?? uuid19().slice(0, 8)}`,
       severity: "warning",
       category: "unresolved_decision",
       title: `Stale draft decision: ${r.title ?? r.id}`,
@@ -18001,7 +18216,7 @@ LIMIT 10`,
   }
 ];
 async function runLooseEndScan() {
-  const scanId = uuid18();
+  const scanId = uuid19();
   const t0 = Date.now();
   const findings = [];
   logger.info({ scan_id: scanId }, "Loose-end scan started");
@@ -18011,7 +18226,7 @@ async function runLooseEndScan() {
         const result = await callMcpTool({
           toolName: "graph.read_cypher",
           args: { query: dq.cypher },
-          callId: uuid18(),
+          callId: uuid19(),
           timeoutMs: 15e3
         });
         if (result.status !== "success") return [];
@@ -18072,7 +18287,7 @@ SET s.scanned_at = datetime(), s.duration_ms = $duration,
           total: summary.total
         }
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 1e4
     });
   } catch {
@@ -20074,7 +20289,7 @@ init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router15 } from "express";
 import { randomUUID as randomUUID2 } from "crypto";
-import { v4 as uuid19 } from "uuid";
+import { v4 as uuid20 } from "uuid";
 var notebookRouter = Router15();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
@@ -20114,7 +20329,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query, params: {} },
-        callId: uuid19(),
+        callId: uuid20(),
         timeoutMs: 15e3
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -20122,7 +20337,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "kg_rag.query",
         args: { question: query, max_evidence: 10 },
-        callId: uuid19(),
+        callId: uuid20(),
         timeoutMs: 2e4
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -20798,13 +21013,13 @@ ${compressed}`,
 init_chain_engine();
 init_cognitive_proxy();
 init_logger();
-import { v4 as uuid20 } from "uuid";
+import { v4 as uuid21 } from "uuid";
 var monitorRouter = Router17();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid20(),
+    callId: uuid21(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];
@@ -21021,7 +21236,7 @@ init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router18 } from "express";
-import { v4 as uuid21 } from "uuid";
+import { v4 as uuid22 } from "uuid";
 var assemblyRouter = Router18();
 var REDIS_PREFIX4 = "orchestrator:assembly:";
 var REDIS_INDEX2 = "orchestrator:assemblies:index";
@@ -21085,7 +21300,7 @@ ORDER BY b.domain, b.name LIMIT 50`;
     const graphResult = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params },
-      callId: uuid21(),
+      callId: uuid22(),
       timeoutMs: 15e3
     });
     if (graphResult.status === "success" && graphResult.result) {
@@ -21151,7 +21366,7 @@ Reply as JSON:
   const assemblies = [];
   const now = (/* @__PURE__ */ new Date()).toISOString();
   for (const candidate of analysis.candidates.slice(0, maxCandidates)) {
-    const assemblyId = `widgetdc:assembly:${uuid21()}`;
+    const assemblyId = `widgetdc:assembly:${uuid22()}`;
     const selectedBlocks = blocks.filter((b) => candidate.block_ids.includes(b.block_id));
     const conflictCount = candidate.conflicts?.length ?? 0;
     const coherence = Math.max(0, Math.min(1, candidate.coherence ?? 0.5));
@@ -21210,7 +21425,7 @@ MERGE (a)-[:COMPOSED_OF]->(b)`,
             blockIds: selectedBlocks.map((b) => b.block_id)
           }
         },
-        callId: uuid21(),
+        callId: uuid22(),
         timeoutMs: 1e4
       });
     } catch (err) {
@@ -21300,7 +21515,7 @@ assemblyRouter.put("/:id", async (req, res) => {
         query: "MATCH (a:Assembly {id: $id}) SET a.status = $status, a.updated_at = datetime()",
         params: { id: assembly.$id, status: assembly.status }
       },
-      callId: uuid21(),
+      callId: uuid22(),
       timeoutMs: 5e3
     });
   } catch {
@@ -21315,7 +21530,7 @@ init_mcp_caller();
 init_cognitive_proxy();
 init_sse();
 import { Router as Router19 } from "express";
-import { v4 as uuid22 } from "uuid";
+import { v4 as uuid23 } from "uuid";
 var decisionsRouter = Router19();
 var REDIS_PREFIX5 = "orchestrator:decision:";
 var REDIS_INDEX3 = "orchestrator:decisions:index";
@@ -21368,7 +21583,7 @@ RETURN a.id AS asm_id, a.name AS asm_name, a.created_at AS asm_ts,
 ORDER BY b.name`,
         params: { assemblyId }
       },
-      callId: uuid22(),
+      callId: uuid23(),
       timeoutMs: 15e3
     });
     if (result.status === "success") {
@@ -21427,7 +21642,7 @@ decisionsRouter.post("/certify", async (req, res) => {
   const assemblyId = String(body.assembly_id);
   const title = String(body.title);
   const now = (/* @__PURE__ */ new Date()).toISOString();
-  const decisionId = `widgetdc:decision:${uuid22()}`;
+  const decisionId = `widgetdc:decision:${uuid23()}`;
   const lineageChain = await buildLineageChain(assemblyId);
   let rationale = String(body.rationale ?? "");
   let summary = String(body.summary ?? "");
@@ -21530,7 +21745,7 @@ CREATE (d)-[:CERTIFIED_BY_EVIDENCE]->(e)`,
           // Cap for query size
         }
       },
-      callId: uuid22(),
+      callId: uuid23(),
       timeoutMs: 15e3
     });
   } catch (err) {
@@ -21754,9 +21969,9 @@ async function listPlans() {
 // src/harvest-pipeline.ts
 init_logger();
 init_mcp_caller();
-import { v4 as uuid23 } from "uuid";
+import { v4 as uuid24 } from "uuid";
 async function extract(domain) {
-  const callId = `harvest-extract-${uuid23().substring(0, 8)}`;
+  const callId = `harvest-extract-${uuid24().substring(0, 8)}`;
   try {
     const result = await callMcpTool({
       toolName: "srag.query",
@@ -21782,7 +21997,7 @@ function generalize(items, domain) {
     if (content.length > 2e3 || name.toLowerCase().includes("framework")) tier = "framework";
     else if (content.length > 500 || name.toLowerCase().includes("template")) tier = "template";
     return {
-      id: `harvest-${uuid23().substring(0, 12)}`,
+      id: `harvest-${uuid24().substring(0, 12)}`,
       name,
       tier,
       description: content.substring(0, 300),
@@ -21799,7 +22014,7 @@ function generalize(items, domain) {
 }
 async function store(components) {
   if (components.length === 0) return 0;
-  const callId = `harvest-store-${uuid23().substring(0, 8)}`;
+  const callId = `harvest-store-${uuid24().substring(0, 8)}`;
   const labelMap = {
     framework: "Framework",
     template: "Template",
@@ -21851,7 +22066,7 @@ async function verify(components) {
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: `${comp.tier} for ${comp.industries[0]}: ${comp.name}` },
-        callId: `harvest-verify-${uuid23().substring(0, 8)}`,
+        callId: `harvest-verify-${uuid24().substring(0, 8)}`,
         timeoutMs: 15e3
       });
       const resultStr = JSON.stringify(result).toLowerCase();
@@ -21905,7 +22120,7 @@ init_llm_proxy();
 import { Router as Router21 } from "express";
 init_logger();
 init_config();
-import { v4 as uuid24 } from "uuid";
+import { v4 as uuid25 } from "uuid";
 var MAX_TOOL_ROUNDS = 2;
 var MAX_TOOL_ROUNDS_ASSISTANT = 4;
 var TOOL_CATEGORIES = [
@@ -22115,7 +22330,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     return;
   }
   const { model, messages, stream, temperature, max_tokens } = req.body;
-  const requestId = `chatcmpl-${uuid24().substring(0, 12)}`;
+  const requestId = `chatcmpl-${uuid25().substring(0, 12)}`;
   const assistant = ASSISTANT_MAP.get(model);
   const resolvedModel = assistant ? assistant.baseModel : model;
   const mapping = MODEL_TO_PROVIDER[resolvedModel] || MODEL_TO_PROVIDER["gemini-flash"];
@@ -23079,7 +23294,7 @@ init_tool_registry();
 init_mcp_caller();
 init_config();
 init_logger();
-import { v4 as uuid25 } from "uuid";
+import { v4 as uuid26 } from "uuid";
 var mcpGatewayRouter = Router24();
 var backendToolsCache = [];
 var backendToolsCacheTime = 0;
@@ -23161,7 +23376,7 @@ async function handleToolsCall(id, params) {
   if (isOrchestratorTool) {
     try {
       const results = await executeToolCalls([{
-        id: uuid25(),
+        id: uuid26(),
         function: { name: toolName, arguments: JSON.stringify(args) }
       }]);
       const result = results[0];
@@ -23189,7 +23404,7 @@ async function handleToolsCall(id, params) {
     const mcpResult = await callMcpTool({
       toolName: backendName,
       args,
-      callId: uuid25(),
+      callId: uuid26(),
       timeoutMs: 3e4
     });
     if (mcpResult.status !== "success") {
@@ -23295,7 +23510,7 @@ mcpGatewayRouter.delete("/", (_req, res) => {
 import { Router as Router25 } from "express";
 init_tool_registry();
 init_logger();
-import { v4 as uuid26 } from "uuid";
+import { v4 as uuid27 } from "uuid";
 var toolGatewayRouter = Router25();
 toolGatewayRouter.post("/:name", async (req, res) => {
   const { name } = req.params;
@@ -23312,7 +23527,7 @@ toolGatewayRouter.post("/:name", async (req, res) => {
     });
     return;
   }
-  const callId = req.body?.call_id ?? uuid26();
+  const callId = req.body?.call_id ?? uuid27();
   const args = req.body ?? {};
   logger.info({ tool: name, call_id: callId }, "REST tool gateway call");
   const result = await executeToolUnified(name, args, {
@@ -23875,12 +24090,12 @@ import { Router as Router29 } from "express";
 init_mcp_caller();
 init_logger();
 init_sse();
-import { v4 as uuid27 } from "uuid";
+import { v4 as uuid28 } from "uuid";
 async function graphRead3(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid27(),
+    callId: uuid28(),
     timeoutMs: 3e4
   });
   if (result.status !== "success") return [];
@@ -23891,7 +24106,7 @@ async function graphWrite2(cypher, params) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {} },
-    callId: uuid27(),
+    callId: uuid28(),
     timeoutMs: 6e4
   });
   return result.status === "success";
@@ -24518,7 +24733,7 @@ init_manifesto_governance();
 init_mcp_caller();
 init_logger();
 import { Router as Router33 } from "express";
-import { v4 as uuid28 } from "uuid";
+import { v4 as uuid29 } from "uuid";
 var governanceRouter = Router33();
 governanceRouter.get("/matrix", (_req, res) => {
   res.json({
@@ -24576,7 +24791,7 @@ RETURN p.name as name, p.status as status`,
               gap_remediation: p.gap_remediation ?? ""
             }
           },
-          callId: uuid28(),
+          callId: uuid29(),
           timeoutMs: 15e3
         });
         results.push({

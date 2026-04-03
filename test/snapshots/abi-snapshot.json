@@ -1134,11 +1134,59 @@
         "response"
       ],
       "deprecated": false
+    },
+    {
+      "name": "moa_query",
+      "namespace": "intelligence",
+      "version": "1.0",
+      "description": "Mixture-of-Agents routing: classifies query complexity, selects 2-3 specialist agents by capability match, dispatches in parallel, and merges responses via LLM consensus. Use for complex queries that benefit from multiple perspectives.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "The complex query to route through MoA"
+          },
+          "agents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Force specific agent IDs (bypass auto-selection)"
+          },
+          "max_agents": {
+            "type": "number",
+            "description": "Max agents to dispatch (default: 3)"
+          },
+          "provider": {
+            "type": "string",
+            "description": "LLM provider for classify + merge (default: deepseek)"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 120000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "moa",
+        "query"
+      ],
+      "deprecated": false
     }
   ],
   "protocols": {
     "openai": {
-      "count": 28,
+      "count": 29,
       "tools": [
         "search_knowledge",
         "reason_deeply",
@@ -1167,11 +1215,12 @@
         "adaptive_rag_reward",
         "graph_hygiene_run",
         "critique_refine",
-        "judge_response"
+        "judge_response",
+        "moa_query"
       ]
     },
     "mcp": {
-      "count": 28,
+      "count": 29,
       "tools": [
         "search_knowledge",
         "reason_deeply",
@@ -1200,11 +1249,12 @@
         "adaptive_rag_reward",
         "graph_hygiene_run",
         "critique_refine",
-        "judge_response"
+        "judge_response",
+        "moa_query"
       ]
     },
     "openapi": {
-      "count": 28,
+      "count": 29,
       "paths": [
         "/api/tools/search_knowledge",
         "/api/tools/reason_deeply",
@@ -1233,12 +1283,13 @@
         "/api/tools/adaptive_rag_reward",
         "/api/tools/graph_hygiene_run",
         "/api/tools/critique_refine",
-        "/api/tools/judge_response"
+        "/api/tools/judge_response",
+        "/api/tools/moa_query"
       ]
     }
   },
   "meta": {
-    "total_tools": 28,
+    "total_tools": 29,
     "namespaces": [
       "assembly",
       "chains",
@@ -1252,7 +1303,7 @@
       "monitor"
     ],
     "deprecated_count": 0,
-    "generated_at": "2026-04-03T19:36:12.509Z",
+    "generated_at": "2026-04-03T19:46:16.375Z",
     "abi_version": "1.0"
   }
 }

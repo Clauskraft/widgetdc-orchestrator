@@ -503,6 +503,21 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     timeoutMs: 60000,
     outputDescription: 'PRISM scores (0-10 each) with aggregate and explanation',
   }),
+  // ─── SNOUT Wave 3: Build Unique ──────────────────────────────────────────
+
+  defineTool({
+    name: 'moa_query',
+    namespace: 'intelligence',
+    description: 'Mixture-of-Agents routing: classifies query complexity, selects 2-3 specialist agents by capability match, dispatches in parallel, and merges responses via LLM consensus. Use for complex queries that benefit from multiple perspectives.',
+    input: z.object({
+      query: z.string().describe('The complex query to route through MoA'),
+      agents: z.array(z.string()).optional().describe('Force specific agent IDs (bypass auto-selection)'),
+      max_agents: z.number().optional().describe('Max agents to dispatch (default: 3)'),
+      provider: z.string().optional().describe('LLM provider for classify + merge (default: deepseek)'),
+    }),
+    timeoutMs: 120000,
+    outputDescription: 'Consensus response with agent attributions, confidence score, and classification',
+  }),
 ]
 
 // ─── Protocol Compilers ─────────────────────────────────────────────────────
