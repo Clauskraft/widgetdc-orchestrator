@@ -706,6 +706,28 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    case 'precedent_search': {
+      const query = args.query as string
+      if (!query || query.length < 3) return 'Error: query is required (min 3 chars)'
+      try {
+        const { findSimilarClients } = await import('./similarity-engine.js')
+        const result = await findSimilarClients({
+          query,
+          dimensions: args.dimensions as any,
+          max_results: (typeof args.max_results === 'number' && Number.isInteger(args.max_results)) ? args.max_results : undefined,
+          structural_weight: (typeof args.structural_weight === 'number') ? args.structural_weight : undefined,
+        })
+        if (result.matches.length === 0) return `No similar clients found for "${query}" (method: ${result.method}, ${result.duration_ms}ms)`
+        const lines = result.matches.map((m, i) => {
+          const dims = m.shared_dimensions.map(d => `${d.dimension}: ${d.shared_values.slice(0, 3).join(', ')}`).join(' | ')
+          return `${i + 1}. ${m.client_name} (score: ${m.overall_score.toFixed(2)}, ${m.node_type})${dims ? ` — ${dims}` : ''}`
+        })
+        return `Found ${result.matches.length} similar clients (method: ${result.method}, ${result.duration_ms}ms):\n\n${lines.join('\n')}`
+      } catch (err) {
+        return `Precedent search failed: ${err}`
+      }
+    }
+
     case 'generate_deliverable': {
       const prompt = args.prompt as string
       if (!prompt || prompt.length < 10) return 'Error: prompt is required (min 10 chars)'

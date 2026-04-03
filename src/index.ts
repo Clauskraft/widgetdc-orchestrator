@@ -67,6 +67,7 @@ import { competitiveRouter } from './routes/competitive.js'
 import { foldRouter } from './routes/fold.js'
 import { graphHygieneRouter } from './routes/graph-hygiene.js'
 import { deliverablesRouter } from './routes/deliverables.js'
+import { similarityRouter } from './routes/similarity.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -165,6 +166,7 @@ app.use('/api/fold', requireApiKey, foldRouter)
 // LIN-574: Knowledge Graph Hygiene
 app.use('/api/graph-hygiene', requireApiKey, graphHygieneRouter)
 app.use('/api/deliverables', requireApiKey, deliverablesRouter)
+app.use('/api/similarity', requireApiKey, similarityRouter)
 
 // Tool Gateway — REST access to ALL orchestrator tools (Triple-Protocol ABI)
 app.use('/api/tools', requireApiKey, toolGatewayRouter)

@@ -317,6 +317,20 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     timeoutMs: 120000,
     outputDescription: 'Deliverable with sections, citations, confidence scores, and markdown content',
   }),
+
+  defineTool({
+    name: 'precedent_search',
+    namespace: 'knowledge',
+    description: 'Find similar clients, engagements, or use cases based on shared characteristics. Uses hybrid matching: structural (shared graph relationships) + semantic (embedding similarity). Returns ranked matches with explanation of what dimensions matched.',
+    input: z.object({
+      query: z.string().describe('Client name, engagement description, or use case to find matches for'),
+      dimensions: z.array(z.enum(['industry', 'service', 'challenge', 'domain', 'size', 'geography', 'deliverable'])).optional().describe('Match dimensions (default: industry, service, challenge, domain)'),
+      max_results: z.number().optional().describe('Max results (1-20, default 5)'),
+      structural_weight: z.number().optional().describe('Weight for structural vs semantic matching (0-1, default 0.6)'),
+    }),
+    timeoutMs: 30000,
+    outputDescription: 'Ranked list of similar clients with scores, shared dimensions, and match method',
+  }),
 ]
 
 // ─── Protocol Compilers ─────────────────────────────────────────────────────

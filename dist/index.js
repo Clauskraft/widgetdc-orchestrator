@@ -672,6 +672,247 @@ var init_cognitive_proxy = __esm({
   }
 });
 
+// src/similarity-engine.ts
+var similarity_engine_exports = {};
+__export(similarity_engine_exports, {
+  findSimilarClients: () => findSimilarClients,
+  getClientDetails: () => getClientDetails
+});
+import { v4 as uuid5 } from "uuid";
+async function findSimilarClients(req) {
+  const t0 = Date.now();
+  const maxResults = Math.min(Math.max(req.max_results ?? 5, 1), 20);
+  const alpha = Math.min(Math.max(req.structural_weight ?? 0.6, 0), 1);
+  const dimensions = req.dimensions ?? DEFAULT_DIMENSIONS;
+  logger.info({ query: req.query.slice(0, 80), dimensions, alpha }, "Similarity: searching");
+  const queryNode = await findQueryNode(req.query);
+  let matches;
+  let method;
+  if (queryNode) {
+    const structural = await computeStructuralSimilarity(queryNode.id, queryNode.labels, dimensions);
+    const semantic = await computeSemanticSimilarity(req.query, maxResults * 3);
+    matches = mergeScores(structural, semantic, alpha, maxResults);
+    method = structural.length > 0 && semantic.length > 0 ? "hybrid" : structural.length > 0 ? "graph" : "semantic";
+  } else {
+    const semantic = await computeSemanticSimilarity(req.query, maxResults * 2);
+    matches = semantic.slice(0, maxResults);
+    method = "semantic";
+  }
+  const result = {
+    query: req.query,
+    query_node_id: queryNode?.id ?? null,
+    matches: matches.slice(0, maxResults),
+    total_candidates: matches.length,
+    dimensions_used: dimensions,
+    duration_ms: Date.now() - t0,
+    method
+  };
+  logger.info({
+    query: req.query.slice(0, 60),
+    matches: result.matches.length,
+    method,
+    ms: result.duration_ms
+  }, "Similarity: complete");
+  return result;
+}
+async function findQueryNode(query) {
+  try {
+    const result = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: `MATCH (n) WHERE (n:Client OR n:Engagement OR n:UseCase OR n:Tender OR n:ConsultingService)
+AND (toLower(coalesce(n.name, n.title, '')) CONTAINS toLower($q)
+  OR n.id = $q)
+RETURN n.id AS id, labels(n) AS labels, coalesce(n.name, n.title) AS name
+LIMIT 1`,
+        params: { q: query }
+      },
+      callId: uuid5(),
+      timeoutMs: 1e4
+    });
+    if (result.status === "success") {
+      const rows = result.result?.results ?? result.result;
+      if (Array.isArray(rows) && rows.length > 0) {
+        return { id: String(rows[0].id), labels: rows[0].labels ?? [] };
+      }
+    }
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Similarity: query node lookup failed");
+  }
+  return null;
+}
+async function computeStructuralSimilarity(nodeId, nodeLabels, dimensions) {
+  const nodeLabel = nodeLabels[0] ?? "Client";
+  const relClauses = dimensions.filter((d) => DIMENSION_RELS[d]).map((d) => {
+    const { rel, target_label } = DIMENSION_RELS[d];
+    return `
+OPTIONAL MATCH (source)-[:${rel}]->(t1:${target_label})
+WITH source, other, collect(DISTINCT t1.name) AS source_${d}
+OPTIONAL MATCH (other)-[:${rel}]->(t2:${target_label})
+WITH source, other, source_${d}, collect(DISTINCT t2.name) AS other_${d},
+     [x IN source_${d} WHERE x IN collect(DISTINCT t2.name)] AS shared_${d}`;
+  });
+  const jaccardExprs = dimensions.filter((d) => DIMENSION_RELS[d]).map((d) => `CASE WHEN size(source_${d}) + size(other_${d}) - size(shared_${d}) = 0 THEN 0.0
+       ELSE toFloat(size(shared_${d})) / (size(source_${d}) + size(other_${d}) - size(shared_${d}))
+       END`);
+  try {
+    const cypher = `
+MATCH (source {id: $sourceId})
+MATCH (source)-[r1]->(shared)<-[r2]-(other)
+WHERE other <> source
+  AND labels(other)[0] IN ['Client', 'Engagement', 'UseCase', 'Tender', 'ConsultingService']
+  AND type(r1) IN $relTypes
+WITH other,
+     count(DISTINCT shared) AS shared_count,
+     collect(DISTINCT {dim: type(r1), value: coalesce(shared.name, shared.title, '')}) AS shared_details
+ORDER BY shared_count DESC
+LIMIT 20
+RETURN other.id AS client_id,
+       coalesce(other.name, other.title) AS client_name,
+       labels(other)[0] AS node_type,
+       shared_count,
+       shared_details`;
+    const relTypes = dimensions.filter((d) => DIMENSION_RELS[d]).map((d) => DIMENSION_RELS[d].rel);
+    const result = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: { query: cypher, params: { sourceId: nodeId, relTypes } },
+      callId: uuid5(),
+      timeoutMs: 15e3
+    });
+    if (result.status !== "success") return [];
+    const rows = result.result?.results ?? result.result;
+    if (!Array.isArray(rows)) return [];
+    const maxShared = Math.max(1, ...rows.map((r) => {
+      const sc = r.shared_count;
+      return typeof sc === "object" && sc?.low !== void 0 ? sc.low : Number(sc) || 0;
+    }));
+    return rows.map((r) => {
+      const sharedCount = typeof r.shared_count === "object" && r.shared_count?.low !== void 0 ? r.shared_count.low : Number(r.shared_count) || 0;
+      const score = sharedCount / maxShared;
+      const details = Array.isArray(r.shared_details) ? r.shared_details : [];
+      const dimGroups = /* @__PURE__ */ new Map();
+      for (const d of details) {
+        const dim = String(d.dim ?? "");
+        const val = String(d.value ?? "");
+        if (!dimGroups.has(dim)) dimGroups.set(dim, []);
+        dimGroups.get(dim).push(val);
+      }
+      const sharedDimensions = Array.from(dimGroups.entries()).map(([dim, vals]) => ({
+        dimension: dim,
+        shared_values: vals.slice(0, 5),
+        jaccard: vals.length / Math.max(1, sharedCount)
+      }));
+      return {
+        client_id: String(r.client_id ?? ""),
+        client_name: String(r.client_name ?? "Unknown"),
+        overall_score: score,
+        structural_score: score,
+        semantic_score: 0,
+        shared_dimensions: sharedDimensions,
+        node_type: String(r.node_type ?? "Client")
+      };
+    });
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Similarity: structural computation failed");
+    return [];
+  }
+}
+async function computeSemanticSimilarity(query, maxResults) {
+  try {
+    const result = await callMcpTool({
+      toolName: "srag.query",
+      args: { query },
+      callId: uuid5(),
+      timeoutMs: 2e4
+    });
+    if (result.status !== "success") return [];
+    const data = result.result;
+    const items = Array.isArray(data) ? data : data?.results ? data.results : data?.chunks ? data.chunks : [];
+    return items.filter((item) => {
+      const title = String(item.title ?? item.name ?? "").toLowerCase();
+      const type = String(item.type ?? item.label ?? "").toLowerCase();
+      return type.includes("client") || type.includes("engagement") || type.includes("usecase") || type.includes("tender") || type.includes("consulting") || title.length > 0;
+    }).slice(0, maxResults).map((item) => ({
+      client_id: String(item.id ?? item.$id ?? ""),
+      client_name: String(item.title ?? item.name ?? "Unknown"),
+      overall_score: item.score ?? item.similarity ?? 0.5,
+      structural_score: 0,
+      semantic_score: item.score ?? item.similarity ?? 0.5,
+      shared_dimensions: [],
+      node_type: String(item.type ?? item.label ?? "Document")
+    }));
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Similarity: semantic computation failed");
+    return [];
+  }
+}
+function mergeScores(structural, semantic, alpha, maxResults) {
+  const merged = /* @__PURE__ */ new Map();
+  for (const s of structural) {
+    merged.set(s.client_id || s.client_name, {
+      ...s,
+      overall_score: alpha * s.structural_score
+    });
+  }
+  for (const s of semantic) {
+    const key = s.client_id || s.client_name;
+    const existing = merged.get(key);
+    if (existing) {
+      existing.semantic_score = s.semantic_score;
+      existing.overall_score = alpha * existing.structural_score + (1 - alpha) * s.semantic_score;
+    } else {
+      merged.set(key, {
+        ...s,
+        overall_score: (1 - alpha) * s.semantic_score
+      });
+    }
+  }
+  return Array.from(merged.values()).sort((a, b) => b.overall_score - a.overall_score).slice(0, maxResults);
+}
+async function getClientDetails(clientId) {
+  try {
+    const result = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: `MATCH (n {id: $id})
+OPTIONAL MATCH (n)-[r]->(related)
+RETURN n AS client,
+       labels(n) AS labels,
+       collect(DISTINCT {rel: type(r), target: coalesce(related.name, related.title), target_type: labels(related)[0]}) AS relationships`,
+        params: { id: clientId }
+      },
+      callId: uuid5(),
+      timeoutMs: 1e4
+    });
+    if (result.status === "success") {
+      const rows = result.result?.results ?? result.result;
+      if (Array.isArray(rows) && rows.length > 0) {
+        return rows[0];
+      }
+    }
+  } catch {
+  }
+  return null;
+}
+var DIMENSION_RELS, DEFAULT_DIMENSIONS;
+var init_similarity_engine = __esm({
+  "src/similarity-engine.ts"() {
+    "use strict";
+    init_mcp_caller();
+    init_logger();
+    DIMENSION_RELS = {
+      industry: { rel: "IN_INDUSTRY", target_label: "Industry" },
+      service: { rel: "USED_SERVICE", target_label: "ConsultingService" },
+      challenge: { rel: "FACED_CHALLENGE", target_label: "Challenge" },
+      domain: { rel: "IN_DOMAIN", target_label: "Domain" },
+      size: { rel: "HAS_SIZE", target_label: "SizeSegment" },
+      geography: { rel: "IN_GEOGRAPHY", target_label: "Geography" },
+      deliverable: { rel: "RECEIVED", target_label: "Deliverable" }
+    };
+    DEFAULT_DIMENSIONS = ["industry", "service", "challenge", "domain"];
+  }
+});
+
 // src/deliverable-engine.ts
 var deliverable_engine_exports = {};
 __export(deliverable_engine_exports, {
@@ -679,7 +920,7 @@ __export(deliverable_engine_exports, {
   getDeliverable: () => getDeliverable,
   listDeliverables: () => listDeliverables
 });
-import { v4 as uuid5 } from "uuid";
+import { v4 as uuid6 } from "uuid";
 async function persist(d) {
   deliverableCache.set(d.$id, d);
   if (deliverableCache.size > CACHE_MAX_SIZE) {
@@ -731,7 +972,7 @@ async function generateDeliverable(req) {
   }
   activeGenerations++;
   const t0 = Date.now();
-  const deliverableId = `widgetdc:deliverable:${uuid5()}`;
+  const deliverableId = `widgetdc:deliverable:${uuid6()}`;
   const format = req.format ?? "markdown";
   const maxSections = Math.min(Math.max(req.max_sections ?? 5, 2), 8);
   const deliverable = {
@@ -982,7 +1223,7 @@ async function renderPDF(deliverable) {
         content: deliverable.markdown,
         template: deliverable.type
       },
-      callId: uuid5(),
+      callId: uuid6(),
       timeoutMs: 45e3
     });
     if (result.status === "success" && result.result) {
@@ -11551,7 +11792,7 @@ async function runInvestigation(topic) {
 
 // src/tool-executor.ts
 init_logger();
-import { v4 as uuid6 } from "uuid";
+import { v4 as uuid7 } from "uuid";
 
 // src/tool-registry.ts
 import { z } from "zod";
@@ -11798,6 +12039,19 @@ var TOOL_REGISTRY = [
     }),
     timeoutMs: 12e4,
     outputDescription: "Deliverable with sections, citations, confidence scores, and markdown content"
+  }),
+  defineTool({
+    name: "precedent_search",
+    namespace: "knowledge",
+    description: "Find similar clients, engagements, or use cases based on shared characteristics. Uses hybrid matching: structural (shared graph relationships) + semantic (embedding similarity). Returns ranked matches with explanation of what dimensions matched.",
+    input: z.object({
+      query: z.string().describe("Client name, engagement description, or use case to find matches for"),
+      dimensions: z.array(z.enum(["industry", "service", "challenge", "domain", "size", "geography", "deliverable"])).optional().describe("Match dimensions (default: industry, service, challenge, domain)"),
+      max_results: z.number().optional().describe("Max results (1-20, default 5)"),
+      structural_weight: z.number().optional().describe("Weight for structural vs semantic matching (0-1, default 0.6)")
+    }),
+    timeoutMs: 3e4,
+    outputDescription: "Ranked list of similar clients with scores, shared dimensions, and match method"
   })
 ];
 function toOpenAITools() {
@@ -11944,7 +12198,7 @@ function buildToolFallback(toolName, error) {
   }
 }
 async function executeToolUnified(toolName, args, opts) {
-  const callId = opts?.call_id ?? uuid6();
+  const callId = opts?.call_id ?? uuid7();
   const t0 = Date.now();
   try {
     const rawResult = await executeToolByName(toolName, args);
@@ -12010,7 +12264,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher, params: args.params ?? {} },
-        callId: uuid6(),
+        callId: uuid7(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
@@ -12031,7 +12285,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher },
-        callId: uuid6(),
+        callId: uuid7(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Task query failed: ${result.error_message}`;
@@ -12043,7 +12297,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: args.tool_name,
         args: args.payload ?? {},
-        callId: uuid6(),
+        callId: uuid7(),
         timeoutMs: 3e4
       });
       if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
@@ -12051,8 +12305,8 @@ ${result.merged_context}`;
     }
     case "get_platform_health": {
       const [backendHealth, graphHealth] = await Promise.allSettled([
-        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid6(), timeoutMs: 1e4 }),
-        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid6(), timeoutMs: 1e4 })
+        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid7(), timeoutMs: 1e4 }),
+        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid7(), timeoutMs: 1e4 })
       ]);
       const parts = [];
       if (backendHealth.status === "fulfilled" && backendHealth.value.status === "success") {
@@ -12068,7 +12322,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: args.query },
-        callId: uuid6(),
+        callId: uuid7(),
         timeoutMs: 2e4
       });
       if (result.status !== "success") return `Document search failed: ${result.error_message}`;
@@ -12086,7 +12340,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issues",
         args: payload,
-        callId: uuid6(),
+        callId: uuid7(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
@@ -12102,7 +12356,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issue_get",
         args: { identifier },
-        callId: uuid6(),
+        callId: uuid7(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
@@ -12215,6 +12469,29 @@ Markdown: /api/notebooks/${encodeURIComponent(nb.$id)}.md`;
         return JSON.stringify(result, null, 2).slice(0, 800);
       } catch (err) {
         return `Verification failed: ${err}`;
+      }
+    }
+    case "precedent_search": {
+      const query = args.query;
+      if (!query || query.length < 3) return "Error: query is required (min 3 chars)";
+      try {
+        const { findSimilarClients: findSimilarClients2 } = await Promise.resolve().then(() => (init_similarity_engine(), similarity_engine_exports));
+        const result = await findSimilarClients2({
+          query,
+          dimensions: args.dimensions,
+          max_results: typeof args.max_results === "number" && Number.isInteger(args.max_results) ? args.max_results : void 0,
+          structural_weight: typeof args.structural_weight === "number" ? args.structural_weight : void 0
+        });
+        if (result.matches.length === 0) return `No similar clients found for "${query}" (method: ${result.method}, ${result.duration_ms}ms)`;
+        const lines = result.matches.map((m, i) => {
+          const dims = m.shared_dimensions.map((d) => `${d.dimension}: ${d.shared_values.slice(0, 3).join(", ")}`).join(" | ");
+          return `${i + 1}. ${m.client_name} (score: ${m.overall_score.toFixed(2)}, ${m.node_type})${dims ? ` \u2014 ${dims}` : ""}`;
+        });
+        return `Found ${result.matches.length} similar clients (method: ${result.method}, ${result.duration_ms}ms):
+
+${lines.join("\n")}`;
+      } catch (err) {
+        return `Precedent search failed: ${err}`;
       }
     }
     case "generate_deliverable": {
@@ -13590,12 +13867,12 @@ init_redis();
 // src/graph-self-correct.ts
 init_mcp_caller();
 init_logger();
-import { v4 as uuid7 } from "uuid";
+import { v4 as uuid8 } from "uuid";
 async function graphRead(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid7(),
+    callId: uuid8(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -13606,7 +13883,7 @@ async function graphWrite(cypher, params) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { parameters: params } : {} },
-    callId: uuid7(),
+    callId: uuid8(),
     timeoutMs: 15e3
   });
   return result.status === "success";
@@ -13818,7 +14095,7 @@ async function runSelfCorrect() {
 init_redis();
 init_mcp_caller();
 init_logger();
-import { v4 as uuid8 } from "uuid";
+import { v4 as uuid9 } from "uuid";
 function categorizeFailure(error) {
   const lower = error.toLowerCase();
   if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) return "timeout";
@@ -13851,7 +14128,7 @@ async function harvestFailures(windowHours = 24) {
           const failedSteps = exec.results?.filter((r) => r.status === "error") ?? [];
           const errorMsg = exec.error ?? failedSteps.map((s) => String(s.output)).join("; ") ?? "unknown";
           events.push({
-            $id: `failure-event:${uuid8()}`,
+            $id: `failure-event:${uuid9()}`,
             execution_id: execId,
             chain_name: exec.name,
             category: categorizeFailure(errorMsg),
@@ -13897,7 +14174,7 @@ async function persistToGraph(events) {
             timestamp: evt.timestamp
           }
         },
-        callId: uuid8(),
+        callId: uuid9(),
         timeoutMs: 1e4
       });
       persisted++;
@@ -13917,7 +14194,7 @@ async function persistToGraph(events) {
           `,
           params: {}
         },
-        callId: uuid8(),
+        callId: uuid9(),
         timeoutMs: 1e4
       });
       await callMcpTool({
@@ -13930,7 +14207,7 @@ async function persistToGraph(events) {
           `,
           params: {}
         },
-        callId: uuid8(),
+        callId: uuid9(),
         timeoutMs: 1e4
       });
     } catch {
@@ -13988,7 +14265,7 @@ async function runFailureHarvest(windowHours = 24) {
 // src/competitive-crawler.ts
 init_redis();
 init_mcp_caller();
-import { v4 as uuid9 } from "uuid";
+import { v4 as uuid10 } from "uuid";
 init_logger();
 var COMPETITOR_TARGETS = [
   {
@@ -14089,7 +14366,7 @@ async function extractCapabilities(target) {
         const cap = line.replace(/^[\s\-\*]+/, "").trim();
         if (cap.length > 10 && cap.length < 200) {
           capabilities.push({
-            $id: `capability:${target.slug}:${uuid9().slice(0, 8)}`,
+            $id: `capability:${target.slug}:${uuid10().slice(0, 8)}`,
             competitor: target.name,
             capability: cap,
             category: categorizeCapability(cap),
@@ -14139,7 +14416,7 @@ async function persistCapabilities(capabilities) {
             extracted_at: cap.extracted_at
           }
         },
-        callId: uuid9(),
+        callId: uuid10(),
         timeoutMs: 1e4
       });
       persisted++;
@@ -14163,7 +14440,7 @@ async function analyzeGaps(capabilities) {
     const result = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: "MATCH (t:Tool) RETURN t.name AS name LIMIT 200" },
-      callId: uuid9(),
+      callId: uuid10(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -14232,7 +14509,7 @@ init_redis();
 init_logger();
 init_mcp_caller();
 import { Router as Router6 } from "express";
-import { v4 as uuid10 } from "uuid";
+import { v4 as uuid11 } from "uuid";
 var adoptionRouter = Router6();
 var REDIS_KEY3 = "orchestrator:adoption-metrics";
 var REDIS_TRENDS_KEY = "orchestrator:adoption-trends";
@@ -14320,7 +14597,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (c:Conversation) WHERE c.createdAt > datetime() - duration('P1D') RETURN count(c) AS count"
       },
-      callId: uuid10(),
+      callId: uuid11(),
       timeoutMs: 1e4
     }),
     // Count artifacts from last 24h
@@ -14329,7 +14606,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (a:AnalysisArtifact) WHERE a.createdAt > datetime() - duration('P1D') RETURN count(a) AS count"
       },
-      callId: uuid10(),
+      callId: uuid11(),
       timeoutMs: 1e4
     }),
     // Count tool calls from audit trail
@@ -14338,7 +14615,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (e:AuditEvent) WHERE e.timestamp > datetime() - duration('P1D') AND e.action = 'tool_call' RETURN count(e) AS count"
       },
-      callId: uuid10(),
+      callId: uuid11(),
       timeoutMs: 1e4
     })
   ]);
@@ -14443,7 +14720,7 @@ SET m.conversations_24h = $conversations,
           featuresPct: snapshot.features_pct
         }
       },
-      callId: uuid10(),
+      callId: uuid11(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -14489,7 +14766,7 @@ init_redis();
 init_logger();
 init_mcp_caller();
 import { Router as Router7 } from "express";
-import { v4 as uuid11 } from "uuid";
+import { v4 as uuid12 } from "uuid";
 var looseEndsRouter = Router7();
 var REDIS_KEY4 = "orchestrator:loose-ends:latest";
 var REDIS_HISTORY = "orchestrator:loose-ends:history";
@@ -14503,7 +14780,7 @@ AND NOT (b)<-[:COMPOSED_OF]-(:Assembly)
 RETURN b.id AS id, b.name AS name, b.domain AS domain, labels(b)[0] AS type
 LIMIT 25`,
     buildFinding: (records) => records.map((r) => ({
-      id: `orphan-${r.id ?? uuid11().slice(0, 8)}`,
+      id: `orphan-${r.id ?? uuid12().slice(0, 8)}`,
       severity: "warning",
       category: "orphan_block",
       title: `Orphan block: ${r.name ?? r.id}`,
@@ -14521,7 +14798,7 @@ AND NOT (a)<-[:BASED_ON]-(:Decision)
 RETURN a.id AS id, a.name AS name, a.composite AS score
 LIMIT 15`,
     buildFinding: (records) => records.map((r) => ({
-      id: `dangling-asm-${r.id ?? uuid11().slice(0, 8)}`,
+      id: `dangling-asm-${r.id ?? uuid12().slice(0, 8)}`,
       severity: "warning",
       category: "dangling_assembly",
       title: `Accepted assembly without decision: ${r.name ?? r.id}`,
@@ -14539,7 +14816,7 @@ AND NOT (d)-[:DERIVES_FROM]->()
 RETURN d.id AS id, d.title AS title, d.certified_at AS certified_at
 LIMIT 10`,
     buildFinding: (records) => records.map((r) => ({
-      id: `no-lineage-${r.id ?? uuid11().slice(0, 8)}`,
+      id: `no-lineage-${r.id ?? uuid12().slice(0, 8)}`,
       severity: "critical",
       category: "missing_lineage",
       title: `Decision without lineage: ${r.title ?? r.id}`,
@@ -14557,7 +14834,7 @@ AND NOT (n)-[]-()
 RETURN n.id AS id, labels(n)[0] AS type, n.domain AS domain, n.insight AS title
 LIMIT 20`,
     buildFinding: (records) => records.map((r) => ({
-      id: `disconnected-${r.id ?? uuid11().slice(0, 8)}`,
+      id: `disconnected-${r.id ?? uuid12().slice(0, 8)}`,
       severity: "info",
       category: "disconnected_node",
       title: `Disconnected ${r.type}: ${(r.title ?? r.id ?? "").toString().slice(0, 60)}`,
@@ -14575,7 +14852,7 @@ AND d.created_at < datetime() - duration('P7D')
 RETURN d.id AS id, d.title AS title, d.created_at AS created_at
 LIMIT 10`,
     buildFinding: (records) => records.map((r) => ({
-      id: `stale-decision-${r.id ?? uuid11().slice(0, 8)}`,
+      id: `stale-decision-${r.id ?? uuid12().slice(0, 8)}`,
       severity: "warning",
       category: "unresolved_decision",
       title: `Stale draft decision: ${r.title ?? r.id}`,
@@ -14586,7 +14863,7 @@ LIMIT 10`,
   }
 ];
 async function runLooseEndScan() {
-  const scanId = uuid11();
+  const scanId = uuid12();
   const t0 = Date.now();
   const findings = [];
   logger.info({ scan_id: scanId }, "Loose-end scan started");
@@ -14596,7 +14873,7 @@ async function runLooseEndScan() {
         const result = await callMcpTool({
           toolName: "graph.read_cypher",
           args: { query: dq.cypher },
-          callId: uuid11(),
+          callId: uuid12(),
           timeoutMs: 15e3
         });
         if (result.status !== "success") return [];
@@ -14657,7 +14934,7 @@ SET s.scanned_at = datetime(), s.duration_ms = $duration,
           total: summary.total
         }
       },
-      callId: uuid11(),
+      callId: uuid12(),
       timeoutMs: 1e4
     });
   } catch {
@@ -16462,7 +16739,7 @@ init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router15 } from "express";
 import { randomUUID as randomUUID2 } from "crypto";
-import { v4 as uuid12 } from "uuid";
+import { v4 as uuid13 } from "uuid";
 var notebookRouter = Router15();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
@@ -16502,7 +16779,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query, params: {} },
-        callId: uuid12(),
+        callId: uuid13(),
         timeoutMs: 15e3
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -16510,7 +16787,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "kg_rag.query",
         args: { question: query, max_evidence: 10 },
-        callId: uuid12(),
+        callId: uuid13(),
         timeoutMs: 2e4
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -17185,13 +17462,13 @@ ${compressed}`,
 // src/routes/monitor.ts
 init_cognitive_proxy();
 init_logger();
-import { v4 as uuid13 } from "uuid";
+import { v4 as uuid14 } from "uuid";
 var monitorRouter = Router17();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid13(),
+    callId: uuid14(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];
@@ -17408,7 +17685,7 @@ init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router18 } from "express";
-import { v4 as uuid14 } from "uuid";
+import { v4 as uuid15 } from "uuid";
 var assemblyRouter = Router18();
 var REDIS_PREFIX2 = "orchestrator:assembly:";
 var REDIS_INDEX2 = "orchestrator:assemblies:index";
@@ -17472,7 +17749,7 @@ ORDER BY b.domain, b.name LIMIT 50`;
     const graphResult = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params },
-      callId: uuid14(),
+      callId: uuid15(),
       timeoutMs: 15e3
     });
     if (graphResult.status === "success" && graphResult.result) {
@@ -17538,7 +17815,7 @@ Reply as JSON:
   const assemblies = [];
   const now = (/* @__PURE__ */ new Date()).toISOString();
   for (const candidate of analysis.candidates.slice(0, maxCandidates)) {
-    const assemblyId = `widgetdc:assembly:${uuid14()}`;
+    const assemblyId = `widgetdc:assembly:${uuid15()}`;
     const selectedBlocks = blocks.filter((b) => candidate.block_ids.includes(b.block_id));
     const conflictCount = candidate.conflicts?.length ?? 0;
     const coherence = Math.max(0, Math.min(1, candidate.coherence ?? 0.5));
@@ -17597,7 +17874,7 @@ MERGE (a)-[:COMPOSED_OF]->(b)`,
             blockIds: selectedBlocks.map((b) => b.block_id)
           }
         },
-        callId: uuid14(),
+        callId: uuid15(),
         timeoutMs: 1e4
       });
     } catch (err) {
@@ -17687,7 +17964,7 @@ assemblyRouter.put("/:id", async (req, res) => {
         query: "MATCH (a:Assembly {id: $id}) SET a.status = $status, a.updated_at = datetime()",
         params: { id: assembly.$id, status: assembly.status }
       },
-      callId: uuid14(),
+      callId: uuid15(),
       timeoutMs: 5e3
     });
   } catch {
@@ -17701,7 +17978,7 @@ init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router19 } from "express";
-import { v4 as uuid15 } from "uuid";
+import { v4 as uuid16 } from "uuid";
 var decisionsRouter = Router19();
 var REDIS_PREFIX3 = "orchestrator:decision:";
 var REDIS_INDEX3 = "orchestrator:decisions:index";
@@ -17754,7 +18031,7 @@ RETURN a.id AS asm_id, a.name AS asm_name, a.created_at AS asm_ts,
 ORDER BY b.name`,
         params: { assemblyId }
       },
-      callId: uuid15(),
+      callId: uuid16(),
       timeoutMs: 15e3
     });
     if (result.status === "success") {
@@ -17813,7 +18090,7 @@ decisionsRouter.post("/certify", async (req, res) => {
   const assemblyId = String(body.assembly_id);
   const title = String(body.title);
   const now = (/* @__PURE__ */ new Date()).toISOString();
-  const decisionId = `widgetdc:decision:${uuid15()}`;
+  const decisionId = `widgetdc:decision:${uuid16()}`;
   const lineageChain = await buildLineageChain(assemblyId);
   let rationale = String(body.rationale ?? "");
   let summary = String(body.summary ?? "");
@@ -17916,7 +18193,7 @@ CREATE (d)-[:CERTIFIED_BY_EVIDENCE]->(e)`,
           // Cap for query size
         }
       },
-      callId: uuid15(),
+      callId: uuid16(),
       timeoutMs: 15e3
     });
   } catch (err) {
@@ -18131,9 +18408,9 @@ async function listPlans() {
 // src/harvest-pipeline.ts
 init_logger();
 init_mcp_caller();
-import { v4 as uuid16 } from "uuid";
+import { v4 as uuid17 } from "uuid";
 async function extract(domain) {
-  const callId = `harvest-extract-${uuid16().substring(0, 8)}`;
+  const callId = `harvest-extract-${uuid17().substring(0, 8)}`;
   try {
     const result = await callMcpTool({
       toolName: "srag.query",
@@ -18159,7 +18436,7 @@ function generalize(items, domain) {
     if (content.length > 2e3 || name.toLowerCase().includes("framework")) tier = "framework";
     else if (content.length > 500 || name.toLowerCase().includes("template")) tier = "template";
     return {
-      id: `harvest-${uuid16().substring(0, 12)}`,
+      id: `harvest-${uuid17().substring(0, 12)}`,
       name,
       tier,
       description: content.substring(0, 300),
@@ -18176,7 +18453,7 @@ function generalize(items, domain) {
 }
 async function store(components) {
   if (components.length === 0) return 0;
-  const callId = `harvest-store-${uuid16().substring(0, 8)}`;
+  const callId = `harvest-store-${uuid17().substring(0, 8)}`;
   const labelMap = {
     framework: "Framework",
     template: "Template",
@@ -18228,7 +18505,7 @@ async function verify(components) {
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: `${comp.tier} for ${comp.industries[0]}: ${comp.name}` },
-        callId: `harvest-verify-${uuid16().substring(0, 8)}`,
+        callId: `harvest-verify-${uuid17().substring(0, 8)}`,
         timeoutMs: 15e3
       });
       const resultStr = JSON.stringify(result).toLowerCase();
@@ -18281,7 +18558,7 @@ async function runFullHarvest() {
 import { Router as Router21 } from "express";
 init_logger();
 init_config();
-import { v4 as uuid17 } from "uuid";
+import { v4 as uuid18 } from "uuid";
 var MAX_TOOL_ROUNDS = 2;
 var MAX_TOOL_ROUNDS_ASSISTANT = 4;
 var TOOL_CATEGORIES = [
@@ -18491,7 +18768,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     return;
   }
   const { model, messages, stream, temperature, max_tokens } = req.body;
-  const requestId = `chatcmpl-${uuid17().substring(0, 12)}`;
+  const requestId = `chatcmpl-${uuid18().substring(0, 12)}`;
   const assistant = ASSISTANT_MAP.get(model);
   const resolvedModel = assistant ? assistant.baseModel : model;
   const mapping = MODEL_TO_PROVIDER[resolvedModel] || MODEL_TO_PROVIDER["gemini-flash"];
@@ -19453,7 +19730,7 @@ import { Router as Router24 } from "express";
 init_mcp_caller();
 init_config();
 init_logger();
-import { v4 as uuid18 } from "uuid";
+import { v4 as uuid19 } from "uuid";
 var mcpGatewayRouter = Router24();
 var backendToolsCache = [];
 var backendToolsCacheTime = 0;
@@ -19535,7 +19812,7 @@ async function handleToolsCall(id, params) {
   if (isOrchestratorTool) {
     try {
       const results = await executeToolCalls([{
-        id: uuid18(),
+        id: uuid19(),
         function: { name: toolName, arguments: JSON.stringify(args) }
       }]);
       const result = results[0];
@@ -19563,7 +19840,7 @@ async function handleToolsCall(id, params) {
     const mcpResult = await callMcpTool({
       toolName: backendName,
       args,
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 3e4
     });
     if (mcpResult.status !== "success") {
@@ -19668,7 +19945,7 @@ mcpGatewayRouter.delete("/", (_req, res) => {
 // src/routes/tool-gateway.ts
 import { Router as Router25 } from "express";
 init_logger();
-import { v4 as uuid19 } from "uuid";
+import { v4 as uuid20 } from "uuid";
 var toolGatewayRouter = Router25();
 toolGatewayRouter.post("/:name", async (req, res) => {
   const { name } = req.params;
@@ -19685,7 +19962,7 @@ toolGatewayRouter.post("/:name", async (req, res) => {
     });
     return;
   }
-  const callId = req.body?.call_id ?? uuid19();
+  const callId = req.body?.call_id ?? uuid20();
   const args = req.body ?? {};
   logger.info({ tool: name, call_id: callId }, "REST tool gateway call");
   const result = await executeToolUnified(name, args, {
@@ -20243,12 +20520,12 @@ import { Router as Router29 } from "express";
 // src/graph-hygiene.ts
 init_mcp_caller();
 init_logger();
-import { v4 as uuid20 } from "uuid";
+import { v4 as uuid21 } from "uuid";
 async function graphRead3(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid20(),
+    callId: uuid21(),
     timeoutMs: 3e4
   });
   if (result.status !== "success") return [];
@@ -20259,7 +20536,7 @@ async function graphWrite2(cypher, params) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {} },
-    callId: uuid20(),
+    callId: uuid21(),
     timeoutMs: 6e4
   });
   return result.status === "success";
@@ -20651,6 +20928,89 @@ deliverablesRouter.get("/:id/markdown", async (req, res) => {
   res.send(deliverable.markdown);
 });
 
+// src/routes/similarity.ts
+init_similarity_engine();
+init_logger();
+import { Router as Router31 } from "express";
+var similarityRouter = Router31();
+var VALID_DIMENSIONS = [
+  "industry",
+  "service",
+  "challenge",
+  "domain",
+  "size",
+  "geography",
+  "deliverable"
+];
+similarityRouter.post("/search", async (req, res) => {
+  const body = req.body;
+  const query = body.query;
+  if (!query || typeof query !== "string" || query.length < 3) {
+    res.status(400).json({
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: "query is required (min 3 chars)", status_code: 400 }
+    });
+    return;
+  }
+  const rawDimensions = body.dimensions;
+  let dimensions;
+  if (rawDimensions && Array.isArray(rawDimensions)) {
+    const invalid = rawDimensions.filter((d) => !VALID_DIMENSIONS.includes(d));
+    if (invalid.length > 0) {
+      res.status(400).json({
+        success: false,
+        error: { code: "VALIDATION_ERROR", message: `Invalid dimensions: ${invalid.join(", ")}. Valid: ${VALID_DIMENSIONS.join(", ")}`, status_code: 400 }
+      });
+      return;
+    }
+    dimensions = rawDimensions;
+  }
+  const rawWeight = body.structural_weight;
+  const structuralWeight = typeof rawWeight === "number" && rawWeight >= 0 && rawWeight <= 1 ? rawWeight : void 0;
+  const rawMax = body.max_results;
+  const maxResults = typeof rawMax === "number" && Number.isInteger(rawMax) && rawMax > 0 ? rawMax : void 0;
+  const request = {
+    query: query.slice(0, 500),
+    dimensions,
+    max_results: maxResults,
+    structural_weight: structuralWeight
+  };
+  logger.info({ query: query.slice(0, 80) }, "Similarity search requested");
+  try {
+    const result = await findSimilarClients(request);
+    res.json({
+      success: true,
+      data: {
+        query: result.query,
+        query_node_id: result.query_node_id,
+        method: result.method,
+        matches: result.matches,
+        total_candidates: result.total_candidates,
+        dimensions_used: result.dimensions_used,
+        duration_ms: result.duration_ms
+      }
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(500).json({
+      success: false,
+      error: { code: "SIMILARITY_FAILED", message, status_code: 500 }
+    });
+  }
+});
+similarityRouter.get("/client/:id", async (req, res) => {
+  const clientId = decodeURIComponent(req.params.id);
+  const details = await getClientDetails(clientId);
+  if (!details) {
+    res.status(404).json({
+      success: false,
+      error: { code: "NOT_FOUND", message: "Client not found", status_code: 404 }
+    });
+    return;
+  }
+  res.json({ success: true, data: details });
+});
+
 // src/index.ts
 var __dirname = path.dirname(fileURLToPath(import.meta.url));
 var app = express();
@@ -20732,6 +21092,7 @@ app.use("/api/competitive", requireApiKey, competitiveRouter);
 app.use("/api/fold", requireApiKey, foldRouter);
 app.use("/api/graph-hygiene", requireApiKey, graphHygieneRouter);
 app.use("/api/deliverables", requireApiKey, deliverablesRouter);
+app.use("/api/similarity", requireApiKey, similarityRouter);
 app.use("/api/tools", requireApiKey, toolGatewayRouter);
 app.use("/api/prompt-generator", promptGeneratorRouter);
 app.use(openapiRouter);
