@@ -68,6 +68,7 @@ import { foldRouter } from './routes/fold.js'
 import { graphHygieneRouter } from './routes/graph-hygiene.js'
 import { deliverablesRouter } from './routes/deliverables.js'
 import { similarityRouter } from './routes/similarity.js'
+import { getWriteGateStats } from './write-gate.js'
 import { governanceRouter } from './routes/governance.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -232,6 +233,7 @@ app.get('/health', (_req, res) => {
     openclaw_healthy: isOpenClawHealthy(),
     librechat_url: config.libreChatUrl || null,
     slack_enabled: isSlackEnabled(),
+    write_gate_stats: getWriteGateStats(),
     timestamp: new Date().toISOString(),
   })
 })

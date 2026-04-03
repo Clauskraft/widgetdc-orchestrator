@@ -15,6 +15,7 @@
 import { callMcpTool } from './mcp-caller.js'
 import { logger } from './logger.js'
 import { v4 as uuid } from 'uuid'
+import { isPolluted } from './write-gate.js'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -41,30 +42,7 @@ interface DualRAGResponse {
   pollution_filtered: number
 }
 
-// ─── Pollution Filter (P0: LLM prompt contamination) ────────────────────────
-
-const POLLUTION_PATTERNS = [
-  /you are (?:a |an )?(?:helpful |expert |professional )/i,
-  /^(?:system|assistant|human):/im,
-  /\b(?:claude|chatgpt|gpt-4|openai)\s+(?:is|can|should|will)\b/i,
-  /\bdo not (?:hallucinate|make up|fabricate)\b/i,
-  /\byour (?:task|role|job|purpose) is to\b/i,
-  /\brespond (?:in|with|using) (?:json|markdown|the following)\b/i,
-  /\banswer (?:only|strictly|exclusively) (?:in|with|based)\b/i,
-  /\b(?:ignore|disregard) (?:previous|all|any) (?:instructions|prompts)\b/i,
-  /\byou (?:must|should|will) (?:always|never|only)\b/i,
-  /\bas an ai (?:language )?model\b/i,
-]
-
-function isPolluted(text: string): boolean {
-  if (!text || text.length < 20) return false
-  let matchCount = 0
-  for (const pattern of POLLUTION_PATTERNS) {
-    if (pattern.test(text)) matchCount++
-    if (matchCount >= 2) return true // 2+ pattern matches → polluted
-  }
-  return false
-}
+// ─── Pollution Filter — imported from write-gate.ts (single source of truth) ─
 
 // ─── Query Complexity Classification ────────────────────────────────────────
 

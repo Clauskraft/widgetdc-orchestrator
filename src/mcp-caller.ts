@@ -14,6 +14,7 @@
 import type { OrchestratorToolResult } from '@widgetdc/contracts/orchestrator'
 import { config } from './config.js'
 import { childLogger } from './logger.js'
+import { validateBeforeMerge } from './write-gate.js'
 
 interface McpCallOptions {
   toolName: string
@@ -35,6 +36,26 @@ export async function callMcpTool(opts: McpCallOptions): Promise<OrchestratorToo
   const body = JSON.stringify({ tool: opts.toolName, payload: opts.args })
 
   log.debug({ tool: opts.toolName, url }, 'MCP call start')
+
+  // B-1: Write-path circuit breaker — intercept graph.write_cypher
+  if (opts.toolName === 'graph.write_cypher') {
+    const query = typeof opts.args.query === 'string' ? opts.args.query : ''
+    const params = (opts.args.params as Record<string, unknown>) ?? opts.args
+    const force = opts.args._force === true
+    const validation = validateBeforeMerge(query, params, force)
+    if (!validation.allowed) {
+      return {
+        call_id: opts.callId,
+        status: 'error',
+        result: null,
+        error_message: `Write-path validation rejected: ${validation.reason}`,
+        error_code: 'VALIDATION_REJECTED',
+        duration_ms: Date.now() - t0,
+        trace_id: opts.traceId ?? null,
+        completed_at: new Date().toISOString(),
+      }
+    }
+  }
 
   // Retry loop for transient CDN 503 errors
   let lastError: string | null = null

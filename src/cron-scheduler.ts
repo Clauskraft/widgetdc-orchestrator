@@ -16,6 +16,7 @@ import { runCompetitiveCrawl } from './competitive-crawler.js'
 import { captureAdoptionSnapshot, type AdoptionSnapshot } from './routes/adoption.js'
 import { runLooseEndScan } from './routes/loose-ends.js'
 import { notifyAdoptionDigest } from './slack.js'
+import { runGraphHygiene } from './graph-hygiene-cron.js'
 
 interface CronJob {
   id: string
@@ -236,6 +237,35 @@ export async function runCronJob(jobId: string): Promise<void> {
         job.run_count++
         persistCronJobs()
         logger.error({ id: job.id, err: String(err) }, 'Competitive crawl cron failed')
+      }
+      return
+    }
+
+    // Special handler for graph hygiene daily (F1, LIN-574 v3.0)
+    if (job.id === 'graph-hygiene-daily') {
+      try {
+        const result = await runGraphHygiene()
+        job.last_run = new Date().toISOString()
+        job.last_status = result.alerts.length > 0 ? `${result.alerts.length} alerts` : 'healthy'
+        job.run_count++
+        persistCronJobs()
+
+        const status = result.alerts.length > 0 ? '🔴' : '🟢'
+        broadcastMessage({
+          from: 'Orchestrator',
+          to: 'All',
+          source: 'orchestrator',
+          type: 'Message',
+          message: `${status} Graph hygiene: orphans=${(result.metrics.orphan_ratio * 100).toFixed(1)}%, domains=${result.metrics.domain_count}, pollution=${result.metrics.pollution_count}, ${result.alerts.length} alerts (${result.duration_ms}ms)`,
+          timestamp: new Date().toISOString(),
+        })
+        broadcastSSE('graph-hygiene', result)
+      } catch (err) {
+        job.last_run = new Date().toISOString()
+        job.last_status = 'failed'
+        job.run_count++
+        persistCronJobs()
+        logger.error({ id: job.id, err: String(err) }, 'Graph hygiene cron failed')
       }
       return
     }
@@ -503,6 +533,19 @@ export function registerDefaultLoops(): void {
   })
 
   // Self-correcting graph agent — detects and fixes inconsistencies every 2 hours
+  // F1: Daily graph hygiene — 6 health queries + snapshots + anomaly alerting
+  registerCronJob({
+    id: 'graph-hygiene-daily',
+    name: 'Graph Hygiene Health Check',
+    schedule: '0 4 * * *',
+    enabled: true,
+    chain: {
+      name: 'Graph Hygiene',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
   registerCronJob({
     id: 'graph-self-correct',
     name: 'Self-Correcting Graph Agent',

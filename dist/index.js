@@ -127,6 +127,119 @@ var init_redis = __esm({
   }
 });
 
+// src/write-gate.ts
+function isPolluted(text) {
+  if (!text || text.length < 20) return false;
+  let matchCount = 0;
+  for (const pattern of POLLUTION_PATTERNS) {
+    if (pattern.test(text)) matchCount++;
+    if (matchCount >= 2) return true;
+  }
+  return false;
+}
+function getWriteGateStats() {
+  return { ...metrics };
+}
+function validateBeforeMerge(query, params, force) {
+  metrics.writes_total++;
+  if (force) {
+    metrics.writes_passed++;
+    logger.warn("Write-path validation bypassed (force=true)");
+    return { allowed: true };
+  }
+  for (const [key, value] of Object.entries(params)) {
+    if (typeof value === "string" && value.length > 20) {
+      if (isPolluted(value)) {
+        metrics.writes_rejected++;
+        const reason = `Content in param "${key}" matches LLM prompt pollution patterns`;
+        logger.warn({ param: key, preview: value.slice(0, 80) }, `Write REJECTED: ${reason}`);
+        return { allowed: false, reason };
+      }
+    }
+  }
+  const domainMatch = query.match(/(?:MERGE|CREATE)\s*\(\w*:Domain\s*\{[^}]*name:\s*\$(\w+)/i);
+  if (domainMatch) {
+    const paramName = domainMatch[1];
+    const domainName = params[paramName];
+    if (typeof domainName === "string" && !CANONICAL_DOMAINS.has(domainName)) {
+      metrics.writes_rejected++;
+      const reason = `Domain '${domainName}' not in canonical allowlist (${CANONICAL_DOMAINS.size} domains)`;
+      logger.warn({ domain: domainName }, `Write REJECTED: ${reason}`);
+      return { allowed: false, reason };
+    }
+  }
+  for (const [key, value] of Object.entries(params)) {
+    if (Array.isArray(value) && value.length > 100 && typeof value[0] === "number") {
+      if (!VALID_EMBEDDING_DIMS.has(value.length)) {
+        metrics.writes_rejected++;
+        const reason = `Embedding dimension ${value.length} in param "${key}" does not match expected (384 or 1536)`;
+        logger.warn({ param: key, dim: value.length }, `Write REJECTED: ${reason}`);
+        return { allowed: false, reason };
+      }
+    }
+  }
+  const isNodeCreation = /(?:CREATE|MERGE)\s*\([^)]*:[A-Z]\w+/i.test(query) && /ON\s+CREATE\s+SET|CREATE\s*\(/i.test(query);
+  if (isNodeCreation) {
+    const hasIdentifier = Object.entries(params).some(([key, val]) => {
+      return (key === "title" || key === "name" || key === "filename") && typeof val === "string" && val.trim().length > 0;
+    });
+    const setsIdentifier = /SET\s+\w+\.(title|name|filename)\s*=/i.test(query);
+    if (!hasIdentifier && !setsIdentifier) {
+      const isInfraNode = /:(GraphHealthSnapshot|RLMDecision|RLMTool|RLMPattern)/i.test(query);
+      if (!isInfraNode) {
+        metrics.writes_rejected++;
+        const reason = "New nodes must have a non-empty title, name, or filename";
+        logger.warn({ cypher: query.slice(0, 120) }, `Write REJECTED: ${reason}`);
+        return { allowed: false, reason };
+      }
+    }
+  }
+  metrics.writes_passed++;
+  return { allowed: true };
+}
+var POLLUTION_PATTERNS, CANONICAL_DOMAINS, VALID_EMBEDDING_DIMS, metrics;
+var init_write_gate = __esm({
+  "src/write-gate.ts"() {
+    "use strict";
+    init_logger();
+    POLLUTION_PATTERNS = [
+      /you are (?:a |an )?(?:helpful |expert |professional )/i,
+      /^(?:system|assistant|human):/im,
+      /\b(?:claude|chatgpt|gpt-4|openai)\s+(?:is|can|should|will)\b/i,
+      /\bdo not (?:hallucinate|make up|fabricate)\b/i,
+      /\byour (?:task|role|job|purpose) is to\b/i,
+      /\brespond (?:in|with|using) (?:json|markdown|the following)\b/i,
+      /\banswer (?:only|strictly|exclusively) (?:in|with|based)\b/i,
+      /\b(?:ignore|disregard) (?:previous|all|any) (?:instructions|prompts)\b/i,
+      /\byou (?:must|should|will) (?:always|never|only)\b/i,
+      /\bas an ai (?:language )?model\b/i
+    ];
+    CANONICAL_DOMAINS = /* @__PURE__ */ new Set([
+      "AI",
+      "Architecture",
+      "Cloud",
+      "Consulting",
+      "Cybersecurity",
+      "Finance",
+      "HR",
+      "Learning",
+      "Marketing",
+      "Operations",
+      "Product Management",
+      "Public Sector",
+      "Risk & Compliance",
+      "Strategy",
+      "Technology"
+    ]);
+    VALID_EMBEDDING_DIMS = /* @__PURE__ */ new Set([384, 1536]);
+    metrics = {
+      writes_total: 0,
+      writes_passed: 0,
+      writes_rejected: 0
+    };
+  }
+});
+
 // src/mcp-caller.ts
 async function callMcpTool(opts) {
   const log = childLogger(opts.traceId ?? opts.callId);
@@ -135,6 +248,24 @@ async function callMcpTool(opts) {
   const url = `${config.backendUrl}/api/mcp/route`;
   const body = JSON.stringify({ tool: opts.toolName, payload: opts.args });
   log.debug({ tool: opts.toolName, url }, "MCP call start");
+  if (opts.toolName === "graph.write_cypher") {
+    const query = typeof opts.args.query === "string" ? opts.args.query : "";
+    const params = opts.args.params ?? opts.args;
+    const force = opts.args._force === true;
+    const validation = validateBeforeMerge(query, params, force);
+    if (!validation.allowed) {
+      return {
+        call_id: opts.callId,
+        status: "error",
+        result: null,
+        error_message: `Write-path validation rejected: ${validation.reason}`,
+        error_code: "VALIDATION_REJECTED",
+        duration_ms: Date.now() - t0,
+        trace_id: opts.traceId ?? null,
+        completed_at: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+  }
   let lastError = null;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (attempt > 0) {
@@ -314,6 +445,7 @@ var init_mcp_caller = __esm({
     "use strict";
     init_config();
     init_logger();
+    init_write_gate();
     MAX_RETRIES = 2;
     RETRY_DELAY_MS = 1e3;
   }
@@ -321,15 +453,6 @@ var init_mcp_caller = __esm({
 
 // src/dual-rag.ts
 import { v4 as uuid } from "uuid";
-function isPolluted(text) {
-  if (!text || text.length < 20) return false;
-  let matchCount = 0;
-  for (const pattern of POLLUTION_PATTERNS) {
-    if (pattern.test(text)) matchCount++;
-    if (matchCount >= 2) return true;
-  }
-  return false;
-}
 function classifyQuery(query) {
   const q = query.toLowerCase();
   if (/\b(?:how many|count|list all|list the|total|statistics|stats)\b/.test(q)) {
@@ -544,24 +667,12 @@ RETURN label,
        labels(m)[0] AS connected_to
 LIMIT 15`;
 }
-var POLLUTION_PATTERNS;
 var init_dual_rag = __esm({
   "src/dual-rag.ts"() {
     "use strict";
     init_mcp_caller();
     init_logger();
-    POLLUTION_PATTERNS = [
-      /you are (?:a |an )?(?:helpful |expert |professional )/i,
-      /^(?:system|assistant|human):/im,
-      /\b(?:claude|chatgpt|gpt-4|openai)\s+(?:is|can|should|will)\b/i,
-      /\bdo not (?:hallucinate|make up|fabricate)\b/i,
-      /\byour (?:task|role|job|purpose) is to\b/i,
-      /\brespond (?:in|with|using) (?:json|markdown|the following)\b/i,
-      /\banswer (?:only|strictly|exclusively) (?:in|with|based)\b/i,
-      /\b(?:ignore|disregard) (?:previous|all|any) (?:instructions|prompts)\b/i,
-      /\byou (?:must|should|will) (?:always|never|only)\b/i,
-      /\bas an ai (?:language )?model\b/i
-    ];
+    init_write_gate();
   }
 });
 
@@ -14727,18 +14838,18 @@ adoptionRouter.get("/metrics", async (_req, res) => {
       logger.warn({ err: String(err) }, "Redis read failed for adoption metrics");
     }
   }
-  const metrics = {
+  const metrics2 = {
     ...DEFAULT_METRICS,
     generated_at: (/* @__PURE__ */ new Date()).toISOString()
   };
   if (redis2) {
     try {
-      await redis2.set(REDIS_KEY3, JSON.stringify(metrics));
+      await redis2.set(REDIS_KEY3, JSON.stringify(metrics2));
     } catch (err) {
       logger.warn({ err: String(err) }, "Redis write failed for adoption metrics");
     }
   }
-  res.json(metrics);
+  res.json(metrics2);
 });
 adoptionRouter.put("/metrics", async (req, res) => {
   const redis2 = getRedis();
@@ -15191,6 +15302,174 @@ looseEndsRouter.get("/history", async (req, res) => {
   }
 });
 
+// src/graph-hygiene-cron.ts
+init_mcp_caller();
+init_logger();
+import { v4 as uuid13 } from "uuid";
+var THRESHOLDS = {
+  orphan_ratio: { max: 0.05 },
+  avg_rels_per_node: { min: 2, max: 50 },
+  embedding_coverage: { min: 0.5 },
+  domain_count: { exact: 15 },
+  stale_node_count: { max: 0.1 },
+  // ratio
+  pollution_count: { max: 0 }
+};
+function neo4jInt(val) {
+  if (typeof val === "number") return val;
+  if (val && typeof val === "object" && "low" in val) return val.low;
+  return Number(val) || 0;
+}
+async function queryMetric(cypher) {
+  const result = await callMcpTool({
+    toolName: "graph.read_cypher",
+    args: { query: cypher },
+    callId: uuid13(),
+    timeoutMs: 15e3
+  });
+  if (result.status !== "success") return [];
+  const data = result.result;
+  return data?.results ?? (Array.isArray(data) ? data : []);
+}
+async function runGraphHygiene() {
+  const t0 = Date.now();
+  logger.info("Graph hygiene cron: starting health check");
+  const [orphanData, relData, embedData, domainData, staleData, pollutionData] = await Promise.allSettled([
+    // 1. Orphan ratio
+    queryMetric(`
+      MATCH (n) WITH count(n) AS total
+      MATCH (o) WHERE NOT (o)-[]-()
+      RETURN toFloat(count(o)) / total AS orphan_ratio, count(o) AS orphan_count, total
+    `),
+    // 2. Average rels per node
+    queryMetric(`
+      MATCH (n) OPTIONAL MATCH (n)-[r]-()
+      RETURN toFloat(count(r)) / count(DISTINCT n) AS avg_rels
+    `),
+    // 3. Embedding coverage (nodes with embedding property)
+    queryMetric(`
+      MATCH (n) WHERE n.embedding IS NOT NULL
+      WITH count(n) AS with_emb
+      MATCH (m) RETURN toFloat(with_emb) / count(m) AS coverage, with_emb
+    `),
+    // 4. Domain count
+    queryMetric(`MATCH (d:Domain) RETURN count(d) AS domain_count`),
+    // 5. Stale nodes (>90 days since update)
+    queryMetric(`
+      MATCH (n) WHERE n.updatedAt IS NOT NULL AND n.updatedAt < datetime() - duration('P90D')
+      RETURN count(n) AS stale_count
+    `),
+    // 6. Pollution probe
+    queryMetric(`
+      MATCH (n) WHERE n.content IS NOT NULL
+        AND (toLower(n.content) CONTAINS 'you are a helpful'
+          OR toLower(n.content) CONTAINS 'as an ai language model'
+          OR toLower(n.content) CONTAINS 'your task is to')
+      RETURN count(n) AS pollution_count
+    `)
+  ]);
+  const metrics2 = {
+    orphan_ratio: 0,
+    avg_rels_per_node: 0,
+    embedding_coverage: 0,
+    domain_count: 0,
+    stale_node_count: 0,
+    pollution_count: 0
+  };
+  if (orphanData.status === "fulfilled" && orphanData.value[0]) {
+    metrics2.orphan_ratio = Number(orphanData.value[0].orphan_ratio) || 0;
+  }
+  if (relData.status === "fulfilled" && relData.value[0]) {
+    metrics2.avg_rels_per_node = Number(relData.value[0].avg_rels) || 0;
+  }
+  if (embedData.status === "fulfilled" && embedData.value[0]) {
+    metrics2.embedding_coverage = Number(embedData.value[0].coverage) || 0;
+  }
+  if (domainData.status === "fulfilled" && domainData.value[0]) {
+    metrics2.domain_count = neo4jInt(domainData.value[0].domain_count);
+  }
+  if (staleData.status === "fulfilled" && staleData.value[0]) {
+    metrics2.stale_node_count = neo4jInt(staleData.value[0].stale_count);
+  }
+  if (pollutionData.status === "fulfilled" && pollutionData.value[0]) {
+    metrics2.pollution_count = neo4jInt(pollutionData.value[0].pollution_count);
+  }
+  const alerts = [];
+  if (metrics2.orphan_ratio > (THRESHOLDS.orphan_ratio.max ?? 1)) {
+    alerts.push({ metric: "orphan_ratio", value: metrics2.orphan_ratio, threshold: 0.05, message: `Orphan ratio ${(metrics2.orphan_ratio * 100).toFixed(1)}% exceeds 5% threshold` });
+  }
+  if (metrics2.avg_rels_per_node < (THRESHOLDS.avg_rels_per_node.min ?? 0)) {
+    alerts.push({ metric: "avg_rels_per_node", value: metrics2.avg_rels_per_node, threshold: 2, message: `Avg rels/node ${metrics2.avg_rels_per_node.toFixed(1)} below minimum 2` });
+  }
+  if (metrics2.embedding_coverage < (THRESHOLDS.embedding_coverage.min ?? 0)) {
+    alerts.push({ metric: "embedding_coverage", value: metrics2.embedding_coverage, threshold: 0.5, message: `Embedding coverage ${(metrics2.embedding_coverage * 100).toFixed(1)}% below 50% threshold` });
+  }
+  if (metrics2.domain_count !== (THRESHOLDS.domain_count.exact ?? 15)) {
+    alerts.push({ metric: "domain_count", value: metrics2.domain_count, threshold: 15, message: `Domain count ${metrics2.domain_count} \u2260 expected 15 (drift detected)` });
+  }
+  if (metrics2.pollution_count > (THRESHOLDS.pollution_count.max ?? 0)) {
+    alerts.push({ metric: "pollution_count", value: metrics2.pollution_count, threshold: 0, message: `${metrics2.pollution_count} polluted nodes detected \u2014 write-gate may have been bypassed` });
+  }
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (s:GraphHealthSnapshot {date: date()})
+SET s.orphan_ratio = $orphan_ratio,
+    s.avg_rels = $avg_rels,
+    s.embedding_coverage = $embedding_coverage,
+    s.domain_count = $domain_count,
+    s.stale_count = $stale_count,
+    s.pollution_count = $pollution_count,
+    s.alert_count = $alert_count,
+    s.timestamp = datetime()`,
+        params: {
+          orphan_ratio: metrics2.orphan_ratio,
+          avg_rels: metrics2.avg_rels_per_node,
+          embedding_coverage: metrics2.embedding_coverage,
+          domain_count: metrics2.domain_count,
+          stale_count: metrics2.stale_node_count,
+          pollution_count: metrics2.pollution_count,
+          alert_count: alerts.length
+        },
+        _force: true
+        // Infrastructure write — bypass validation
+      },
+      callId: uuid13(),
+      timeoutMs: 1e4
+    });
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Graph hygiene: failed to store snapshot in Neo4j");
+  }
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MATCH (s:GraphHealthSnapshot) WHERE s.timestamp < datetime() - duration('P90D') DETACH DELETE s`,
+        _force: true
+      },
+      callId: uuid13(),
+      timeoutMs: 1e4
+    });
+  } catch {
+  }
+  if (alerts.length > 0) {
+    const alertMsg = alerts.map((a) => `${a.metric}: ${a.message}`).join("\n");
+    broadcastSSE("graph-health-alert", { metrics: metrics2, alerts });
+    if (isSlackEnabled()) {
+      logger.info(`Slack alert: Graph Health Alert (${alerts.length} issues)`);
+    }
+    logger.warn({ alerts: alerts.length }, `Graph hygiene: ${alerts.length} alerts triggered`);
+  }
+  const duration_ms = Date.now() - t0;
+  logger.info({
+    ...metrics2,
+    alerts: alerts.length,
+    ms: duration_ms
+  }, "Graph hygiene cron: complete");
+  return { metrics: metrics2, alerts, duration_ms };
+}
+
 // src/cron-scheduler.ts
 var jobs = /* @__PURE__ */ new Map();
 var cronTasks = /* @__PURE__ */ new Map();
@@ -15362,6 +15641,32 @@ async function runCronJob(jobId) {
         job.run_count++;
         persistCronJobs();
         logger.error({ id: job.id, err: String(err) }, "Competitive crawl cron failed");
+      }
+      return;
+    }
+    if (job.id === "graph-hygiene-daily") {
+      try {
+        const result2 = await runGraphHygiene();
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = result2.alerts.length > 0 ? `${result2.alerts.length} alerts` : "healthy";
+        job.run_count++;
+        persistCronJobs();
+        const status = result2.alerts.length > 0 ? "\u{1F534}" : "\u{1F7E2}";
+        broadcastMessage({
+          from: "Orchestrator",
+          to: "All",
+          source: "orchestrator",
+          type: "Message",
+          message: `${status} Graph hygiene: orphans=${(result2.metrics.orphan_ratio * 100).toFixed(1)}%, domains=${result2.metrics.domain_count}, pollution=${result2.metrics.pollution_count}, ${result2.alerts.length} alerts (${result2.duration_ms}ms)`,
+          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        });
+        broadcastSSE("graph-hygiene", result2);
+      } catch (err) {
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = "failed";
+        job.run_count++;
+        persistCronJobs();
+        logger.error({ id: job.id, err: String(err) }, "Graph hygiene cron failed");
       }
       return;
     }
@@ -15561,6 +15866,17 @@ function registerDefaultLoops() {
           }
         }
       ]
+    }
+  });
+  registerCronJob({
+    id: "graph-hygiene-daily",
+    name: "Graph Hygiene Health Check",
+    schedule: "0 4 * * *",
+    enabled: true,
+    chain: {
+      name: "Graph Hygiene",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
     }
   });
   registerCronJob({
@@ -16925,7 +17241,7 @@ init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router15 } from "express";
 import { randomUUID as randomUUID2 } from "crypto";
-import { v4 as uuid13 } from "uuid";
+import { v4 as uuid14 } from "uuid";
 var notebookRouter = Router15();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
@@ -16965,7 +17281,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query, params: {} },
-        callId: uuid13(),
+        callId: uuid14(),
         timeoutMs: 15e3
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -16973,7 +17289,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "kg_rag.query",
         args: { question: query, max_evidence: 10 },
-        callId: uuid13(),
+        callId: uuid14(),
         timeoutMs: 2e4
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -17648,20 +17964,20 @@ ${compressed}`,
 // src/routes/monitor.ts
 init_cognitive_proxy();
 init_logger();
-import { v4 as uuid14 } from "uuid";
+import { v4 as uuid15 } from "uuid";
 var monitorRouter = Router17();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid14(),
+    callId: uuid15(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];
   const data = result.result;
   return data?.results || data || [];
 }
-function neo4jInt(val) {
+function neo4jInt2(val) {
   if (val == null) return 0;
   if (typeof val === "number") return val;
   if (typeof val === "object" && "low" in val) return val.low;
@@ -17716,26 +18032,26 @@ monitorRouter.get("/status", async (_req, res) => {
       data: {
         timestamp: (/* @__PURE__ */ new Date()).toISOString(),
         evolution: {
-          events_last_7d: neo4jInt(ev.events_7d),
+          events_last_7d: neo4jInt2(ev.events_7d),
           avg_pass_rate: ev.avg_pass_rate ?? null,
           latest_event: ev.latest
         },
         failure_memory: {
-          total: neo4jInt(fm.total),
-          resolved: neo4jInt(fm.resolved),
-          unresolved: neo4jInt(fm.total) - neo4jInt(fm.resolved)
+          total: neo4jInt2(fm.total),
+          resolved: neo4jInt2(fm.resolved),
+          unresolved: neo4jInt2(fm.total) - neo4jInt2(fm.resolved)
         },
         self_corrections: {
-          total_runs: neo4jInt(sc.runs),
-          total_fixed: neo4jInt(sc.total_fixed),
+          total_runs: neo4jInt2(sc.runs),
+          total_fixed: neo4jInt2(sc.total_fixed),
           latest_run: sc.latest
         },
         bi_temporal: {
-          nodes_with_temporal_metadata: neo4jInt(bt.temporal_nodes)
+          nodes_with_temporal_metadata: neo4jInt2(bt.temporal_nodes)
         },
         features: {
-          "1_bi_temporal_edges": neo4jInt(bt.temporal_nodes) > 0 ? "active" : "pending",
-          "2_self_correcting_graph": neo4jInt(sc.runs) > 0 ? "active" : "registered",
+          "1_bi_temporal_edges": neo4jInt2(bt.temporal_nodes) > 0 ? "active" : "pending",
+          "2_self_correcting_graph": neo4jInt2(sc.runs) > 0 ? "active" : "registered",
           "3_context_compression": isRlmAvailable() ? "available" : "no_rlm",
           "4_adaptive_graph_of_thoughts": "active",
           "5_gvu_debate": "active",
@@ -17760,7 +18076,7 @@ monitorRouter.get("/status", async (_req, res) => {
         })),
         graph_stats: graphStats.map((r) => ({
           label: r.label,
-          count: neo4jInt(r.count)
+          count: neo4jInt2(r.count)
         }))
       }
     });
@@ -17871,7 +18187,7 @@ init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router18 } from "express";
-import { v4 as uuid15 } from "uuid";
+import { v4 as uuid16 } from "uuid";
 var assemblyRouter = Router18();
 var REDIS_PREFIX2 = "orchestrator:assembly:";
 var REDIS_INDEX2 = "orchestrator:assemblies:index";
@@ -17935,7 +18251,7 @@ ORDER BY b.domain, b.name LIMIT 50`;
     const graphResult = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params },
-      callId: uuid15(),
+      callId: uuid16(),
       timeoutMs: 15e3
     });
     if (graphResult.status === "success" && graphResult.result) {
@@ -18001,7 +18317,7 @@ Reply as JSON:
   const assemblies = [];
   const now = (/* @__PURE__ */ new Date()).toISOString();
   for (const candidate of analysis.candidates.slice(0, maxCandidates)) {
-    const assemblyId = `widgetdc:assembly:${uuid15()}`;
+    const assemblyId = `widgetdc:assembly:${uuid16()}`;
     const selectedBlocks = blocks.filter((b) => candidate.block_ids.includes(b.block_id));
     const conflictCount = candidate.conflicts?.length ?? 0;
     const coherence = Math.max(0, Math.min(1, candidate.coherence ?? 0.5));
@@ -18060,7 +18376,7 @@ MERGE (a)-[:COMPOSED_OF]->(b)`,
             blockIds: selectedBlocks.map((b) => b.block_id)
           }
         },
-        callId: uuid15(),
+        callId: uuid16(),
         timeoutMs: 1e4
       });
     } catch (err) {
@@ -18150,7 +18466,7 @@ assemblyRouter.put("/:id", async (req, res) => {
         query: "MATCH (a:Assembly {id: $id}) SET a.status = $status, a.updated_at = datetime()",
         params: { id: assembly.$id, status: assembly.status }
       },
-      callId: uuid15(),
+      callId: uuid16(),
       timeoutMs: 5e3
     });
   } catch {
@@ -18164,7 +18480,7 @@ init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router19 } from "express";
-import { v4 as uuid16 } from "uuid";
+import { v4 as uuid17 } from "uuid";
 var decisionsRouter = Router19();
 var REDIS_PREFIX3 = "orchestrator:decision:";
 var REDIS_INDEX3 = "orchestrator:decisions:index";
@@ -18217,7 +18533,7 @@ RETURN a.id AS asm_id, a.name AS asm_name, a.created_at AS asm_ts,
 ORDER BY b.name`,
         params: { assemblyId }
       },
-      callId: uuid16(),
+      callId: uuid17(),
       timeoutMs: 15e3
     });
     if (result.status === "success") {
@@ -18276,7 +18592,7 @@ decisionsRouter.post("/certify", async (req, res) => {
   const assemblyId = String(body.assembly_id);
   const title = String(body.title);
   const now = (/* @__PURE__ */ new Date()).toISOString();
-  const decisionId = `widgetdc:decision:${uuid16()}`;
+  const decisionId = `widgetdc:decision:${uuid17()}`;
   const lineageChain = await buildLineageChain(assemblyId);
   let rationale = String(body.rationale ?? "");
   let summary = String(body.summary ?? "");
@@ -18379,7 +18695,7 @@ CREATE (d)-[:CERTIFIED_BY_EVIDENCE]->(e)`,
           // Cap for query size
         }
       },
-      callId: uuid16(),
+      callId: uuid17(),
       timeoutMs: 15e3
     });
   } catch (err) {
@@ -18594,9 +18910,9 @@ async function listPlans() {
 // src/harvest-pipeline.ts
 init_logger();
 init_mcp_caller();
-import { v4 as uuid17 } from "uuid";
+import { v4 as uuid18 } from "uuid";
 async function extract(domain) {
-  const callId = `harvest-extract-${uuid17().substring(0, 8)}`;
+  const callId = `harvest-extract-${uuid18().substring(0, 8)}`;
   try {
     const result = await callMcpTool({
       toolName: "srag.query",
@@ -18622,7 +18938,7 @@ function generalize(items, domain) {
     if (content.length > 2e3 || name.toLowerCase().includes("framework")) tier = "framework";
     else if (content.length > 500 || name.toLowerCase().includes("template")) tier = "template";
     return {
-      id: `harvest-${uuid17().substring(0, 12)}`,
+      id: `harvest-${uuid18().substring(0, 12)}`,
       name,
       tier,
       description: content.substring(0, 300),
@@ -18639,7 +18955,7 @@ function generalize(items, domain) {
 }
 async function store(components) {
   if (components.length === 0) return 0;
-  const callId = `harvest-store-${uuid17().substring(0, 8)}`;
+  const callId = `harvest-store-${uuid18().substring(0, 8)}`;
   const labelMap = {
     framework: "Framework",
     template: "Template",
@@ -18691,7 +19007,7 @@ async function verify(components) {
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: `${comp.tier} for ${comp.industries[0]}: ${comp.name}` },
-        callId: `harvest-verify-${uuid17().substring(0, 8)}`,
+        callId: `harvest-verify-${uuid18().substring(0, 8)}`,
         timeoutMs: 15e3
       });
       const resultStr = JSON.stringify(result).toLowerCase();
@@ -18744,7 +19060,7 @@ async function runFullHarvest() {
 import { Router as Router21 } from "express";
 init_logger();
 init_config();
-import { v4 as uuid18 } from "uuid";
+import { v4 as uuid19 } from "uuid";
 var MAX_TOOL_ROUNDS = 2;
 var MAX_TOOL_ROUNDS_ASSISTANT = 4;
 var TOOL_CATEGORIES = [
@@ -18954,7 +19270,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     return;
   }
   const { model, messages, stream, temperature, max_tokens } = req.body;
-  const requestId = `chatcmpl-${uuid18().substring(0, 12)}`;
+  const requestId = `chatcmpl-${uuid19().substring(0, 12)}`;
   const assistant = ASSISTANT_MAP.get(model);
   const resolvedModel = assistant ? assistant.baseModel : model;
   const mapping = MODEL_TO_PROVIDER[resolvedModel] || MODEL_TO_PROVIDER["gemini-flash"];
@@ -19916,7 +20232,7 @@ import { Router as Router24 } from "express";
 init_mcp_caller();
 init_config();
 init_logger();
-import { v4 as uuid19 } from "uuid";
+import { v4 as uuid20 } from "uuid";
 var mcpGatewayRouter = Router24();
 var backendToolsCache = [];
 var backendToolsCacheTime = 0;
@@ -19998,7 +20314,7 @@ async function handleToolsCall(id, params) {
   if (isOrchestratorTool) {
     try {
       const results = await executeToolCalls([{
-        id: uuid19(),
+        id: uuid20(),
         function: { name: toolName, arguments: JSON.stringify(args) }
       }]);
       const result = results[0];
@@ -20026,7 +20342,7 @@ async function handleToolsCall(id, params) {
     const mcpResult = await callMcpTool({
       toolName: backendName,
       args,
-      callId: uuid19(),
+      callId: uuid20(),
       timeoutMs: 3e4
     });
     if (mcpResult.status !== "success") {
@@ -20131,7 +20447,7 @@ mcpGatewayRouter.delete("/", (_req, res) => {
 // src/routes/tool-gateway.ts
 import { Router as Router25 } from "express";
 init_logger();
-import { v4 as uuid20 } from "uuid";
+import { v4 as uuid21 } from "uuid";
 var toolGatewayRouter = Router25();
 toolGatewayRouter.post("/:name", async (req, res) => {
   const { name } = req.params;
@@ -20148,7 +20464,7 @@ toolGatewayRouter.post("/:name", async (req, res) => {
     });
     return;
   }
-  const callId = req.body?.call_id ?? uuid20();
+  const callId = req.body?.call_id ?? uuid21();
   const args = req.body ?? {};
   logger.info({ tool: name, call_id: callId }, "REST tool gateway call");
   const result = await executeToolUnified(name, args, {
@@ -20706,12 +21022,12 @@ import { Router as Router29 } from "express";
 // src/graph-hygiene.ts
 init_mcp_caller();
 init_logger();
-import { v4 as uuid21 } from "uuid";
+import { v4 as uuid22 } from "uuid";
 async function graphRead3(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid21(),
+    callId: uuid22(),
     timeoutMs: 3e4
   });
   if (result.status !== "success") return [];
@@ -20722,12 +21038,12 @@ async function graphWrite2(cypher, params) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {} },
-    callId: uuid21(),
+    callId: uuid22(),
     timeoutMs: 6e4
   });
   return result.status === "success";
 }
-function neo4jInt2(val) {
+function neo4jInt3(val) {
   if (val == null) return 0;
   if (typeof val === "number") return val;
   if (typeof val === "object" && "low" in val) return val.low;
@@ -20739,7 +21055,7 @@ async function fixFrameworkDomainRels() {
     WHERE NOT (f)-[:IN_DOMAIN]->(:Domain)
     RETURN count(f) AS count
   `);
-  const missingCount = neo4jInt2(before[0]?.count);
+  const missingCount = neo4jInt3(before[0]?.count);
   if (missingCount === 0) {
     return { operation: "framework_domain_rels", severity: "P0", before: 0, after: 0, fixed: 0, details: "No missing IN_DOMAIN rels" };
   }
@@ -20758,7 +21074,7 @@ async function fixFrameworkDomainRels() {
     WHERE NOT (f)-[:IN_DOMAIN]->(:Domain)
     RETURN count(f) AS count
   `);
-  const remaining = neo4jInt2(after[0]?.count);
+  const remaining = neo4jInt3(after[0]?.count);
   const fixed = missingCount - remaining;
   return {
     operation: "framework_domain_rels",
@@ -20783,13 +21099,13 @@ var DOMAIN_CONSOLIDATION = {
 };
 async function consolidateDomains() {
   const beforeResult = await graphRead3(`MATCH (d:Domain) RETURN count(d) AS count`);
-  const domainsBefore = neo4jInt2(beforeResult[0]?.count);
+  const domainsBefore = neo4jInt3(beforeResult[0]?.count);
   let totalMerged = 0;
   for (const [canonical, variants] of Object.entries(DOMAIN_CONSOLIDATION)) {
     for (const variant of variants) {
       if (variant === canonical) continue;
       const exists = await graphRead3(`MATCH (d:Domain {name: '${variant}'}) RETURN count(d) AS count`);
-      if (neo4jInt2(exists[0]?.count) === 0) continue;
+      if (neo4jInt3(exists[0]?.count) === 0) continue;
       const ok = await graphWrite2(`
         MATCH (variant:Domain {name: $variant})
         MATCH (canonical:Domain {name: $canonical})
@@ -20831,7 +21147,7 @@ async function consolidateDomains() {
     }
   }
   const afterResult = await graphRead3(`MATCH (d:Domain) RETURN count(d) AS count`);
-  const domainsAfter = neo4jInt2(afterResult[0]?.count);
+  const domainsAfter = neo4jInt3(afterResult[0]?.count);
   return {
     operation: "domain_consolidation",
     severity: "P1",
@@ -20847,7 +21163,7 @@ async function purgeGraphBloat() {
     WHERE NOT (d)-[:DECIDED_BY|AFFECTS|IMPLEMENTS|REFERENCES]-()
     RETURN count(d) AS count
   `);
-  const orphans = neo4jInt2(orphanCount[0]?.count);
+  const orphans = neo4jInt3(orphanCount[0]?.count);
   let totalDeleted = 0;
   if (orphans > 0) {
     for (let i = 0; i < Math.ceil(orphans / 1e3); i++) {
@@ -20867,7 +21183,7 @@ async function purgeGraphBloat() {
     MATCH ()-[r:SHOULD_AWARE_OF]->()
     RETURN count(r) AS count
   `);
-  const saCount = neo4jInt2(saCountResult[0]?.count);
+  const saCount = neo4jInt3(saCountResult[0]?.count);
   let saDeleted = 0;
   if (saCount > 1e5) {
     await graphWrite2(`
@@ -20884,7 +21200,7 @@ async function purgeGraphBloat() {
       DELETE r
     `);
     const saAfter = await graphRead3(`MATCH ()-[r:SHOULD_AWARE_OF]->() RETURN count(r) AS count`);
-    saDeleted = saCount - neo4jInt2(saAfter[0]?.count);
+    saDeleted = saCount - neo4jInt3(saAfter[0]?.count);
   }
   return {
     operation: "graph_bloat_purge",
@@ -20895,7 +21211,7 @@ async function purgeGraphBloat() {
     details: `Deleted ${totalDeleted} orphan RLMDecision, pruned ${Math.max(0, saDeleted)} stale SHOULD_AWARE_OF rels`
   };
 }
-async function runGraphHygiene() {
+async function runGraphHygiene2() {
   const t0 = Date.now();
   const operations = [];
   logger.info("Starting graph hygiene run (LIN-574)");
@@ -20944,7 +21260,7 @@ graphHygieneRouter.post("/run", async (_req, res) => {
   }
   hygieneInProgress = true;
   try {
-    const report = await runGraphHygiene();
+    const report = await runGraphHygiene2();
     res.json({ success: true, data: report });
   } catch (err) {
     logger.error({ err: String(err) }, "Graph hygiene run failed");
@@ -21197,12 +21513,15 @@ similarityRouter.get("/client/:id", async (req, res) => {
   res.json({ success: true, data: details });
 });
 
+// src/index.ts
+init_write_gate();
+
 // src/routes/governance.ts
 init_manifesto_governance();
 init_mcp_caller();
 init_logger();
 import { Router as Router32 } from "express";
-import { v4 as uuid22 } from "uuid";
+import { v4 as uuid23 } from "uuid";
 var governanceRouter = Router32();
 governanceRouter.get("/matrix", (_req, res) => {
   res.json({
@@ -21260,7 +21579,7 @@ RETURN p.name as name, p.status as status`,
               gap_remediation: p.gap_remediation ?? ""
             }
           },
-          callId: uuid22(),
+          callId: uuid23(),
           timeoutMs: 15e3
         });
         results.push({
@@ -21419,6 +21738,7 @@ app.get("/health", (_req, res) => {
     openclaw_healthy: isOpenClawHealthy(),
     librechat_url: config.libreChatUrl || null,
     slack_enabled: isSlackEnabled(),
+    write_gate_stats: getWriteGateStats(),
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   });
 });
