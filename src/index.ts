@@ -13,6 +13,7 @@
  *   GET  /health              — Health check (Railway)
  *   GET  /                    — Status dashboard (HTML)
  */
+import './tracing.js'  // OTel must be first (LIN-589)
 import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'

@@ -9,6 +9,54 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
+// src/tracing.ts
+import { trace, SpanStatusCode } from "@opentelemetry/api";
+async function withMcpSpan(toolName, callId, fn) {
+  return mcpTracer.startActiveSpan(`mcp.${toolName}`, async (span) => {
+    span.setAttribute("mcp.tool", toolName);
+    span.setAttribute("mcp.call_id", callId);
+    try {
+      const result = await fn(span);
+      span.setStatus({ code: SpanStatusCode.OK });
+      return result;
+    } catch (err) {
+      span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
+}
+var SERVICE_NAME, endpoint, mcpTracer;
+var init_tracing = __esm({
+  "src/tracing.ts"() {
+    "use strict";
+    SERVICE_NAME = process.env.OTEL_SERVICE_NAME ?? "widgetdc-orchestrator";
+    endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+    if (endpoint) {
+      Promise.all([
+        import("@opentelemetry/sdk-trace-node"),
+        import("@opentelemetry/exporter-trace-otlp-http"),
+        import("@opentelemetry/resources"),
+        import("@opentelemetry/semantic-conventions")
+      ]).then(([{ NodeTracerProvider, BatchSpanProcessor }, { OTLPTraceExporter }, { Resource }, semconv]) => {
+        const ATTR_SERVICE_NAME = semconv.ATTR_SERVICE_NAME ?? "service.name";
+        const provider = new NodeTracerProvider({
+          resource: new Resource({ [ATTR_SERVICE_NAME]: SERVICE_NAME })
+        });
+        provider.addSpanProcessor(
+          new BatchSpanProcessor(new OTLPTraceExporter({ url: `${endpoint}/v1/traces` }))
+        );
+        provider.register();
+        console.log(`\u{1F4E1} OTel tracing active \u2192 ${endpoint}`);
+      }).catch((err) => {
+        console.warn(`\u26A0\uFE0F OTel setup failed (non-fatal): ${err}`);
+      });
+    }
+    mcpTracer = trace.getTracer("mcp-caller", "1.0.0");
+  }
+});
+
 // src/config.ts
 var config_exports = {};
 __export(config_exports, {
@@ -60,7 +108,9 @@ var init_config = __esm({
       mcpTimeoutMs: parseInt(optional("MCP_TIMEOUT_MS", "60000"), 10),
       // Rate limiting: max concurrent tool calls per agent
       maxConcurrentPerAgent: parseInt(optional("MAX_CONCURRENT_PER_AGENT", "5"), 10),
-      agentOpenAccess: optional("AGENT_OPEN_ACCESS", "true") === "true"
+      agentOpenAccess: optional("AGENT_OPEN_ACCESS", "true") === "true",
+      // OpenTelemetry (LIN-589) — set OTEL_EXPORTER_OTLP_ENDPOINT to activate tracing
+      otelEnabled: !!process.env.OTEL_EXPORTER_OTLP_ENDPOINT
     };
   }
 });
@@ -845,53 +895,62 @@ var init_write_gate = __esm({
 
 // src/mcp-caller.ts
 async function callMcpTool(opts) {
-  const log = childLogger(opts.traceId ?? opts.callId);
-  const t0 = Date.now();
-  const timeoutMs = opts.timeoutMs ?? config.mcpTimeoutMs;
-  const url = `${config.backendUrl}/api/mcp/route`;
-  const { _force: _stripForce, ...wireArgs } = opts.args;
-  const body = JSON.stringify({ tool: opts.toolName, payload: wireArgs });
-  log.debug({ tool: opts.toolName, url }, "MCP call start");
-  if (opts.toolName === "graph.write_cypher") {
-    const query = typeof opts.args.query === "string" ? opts.args.query : "";
-    const params = opts.args.params ?? opts.args;
-    const force = opts.args._force === true;
-    const validation = validateBeforeMerge(query, params, force);
-    if (!validation.allowed) {
-      return {
-        call_id: opts.callId,
-        status: "error",
-        result: null,
-        error_message: `Write-path validation rejected: ${validation.reason}`,
-        error_code: "VALIDATION_REJECTED",
-        duration_ms: Date.now() - t0,
-        trace_id: opts.traceId ?? null,
-        completed_at: (/* @__PURE__ */ new Date()).toISOString()
-      };
+  return withMcpSpan(opts.toolName, opts.callId, async (span) => {
+    const log = childLogger(opts.traceId ?? opts.callId);
+    const t0 = Date.now();
+    const timeoutMs = opts.timeoutMs ?? config.mcpTimeoutMs;
+    const url = `${config.backendUrl}/api/mcp/route`;
+    const { _force: _stripForce, ...wireArgs } = opts.args;
+    const body = JSON.stringify({ tool: opts.toolName, payload: wireArgs });
+    log.debug({ tool: opts.toolName, url }, "MCP call start");
+    if (opts.toolName === "graph.write_cypher") {
+      const query = typeof opts.args.query === "string" ? opts.args.query : "";
+      const params = opts.args.params ?? opts.args;
+      const force = opts.args._force === true;
+      const validation = validateBeforeMerge(query, params, force);
+      if (!validation.allowed) {
+        span.setAttribute("mcp.write_gate", "rejected");
+        span.setAttribute("mcp.rejection_reason", validation.reason ?? "unknown");
+        return {
+          call_id: opts.callId,
+          status: "error",
+          result: null,
+          error_message: `Write-path validation rejected: ${validation.reason}`,
+          error_code: "VALIDATION_REJECTED",
+          duration_ms: Date.now() - t0,
+          trace_id: opts.traceId ?? null,
+          completed_at: (/* @__PURE__ */ new Date()).toISOString()
+        };
+      }
     }
-  }
-  let lastError = null;
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    if (attempt > 0) {
-      log.debug({ attempt, tool: opts.toolName }, "Retrying after transient error");
-      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
+    let lastError = null;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        span.setAttribute("mcp.retry_attempt", attempt);
+        log.debug({ attempt, tool: opts.toolName }, "Retrying after transient error");
+        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
+      }
+      const result = await callMcpToolOnce(opts, url, body, timeoutMs, log, t0);
+      if (result.status !== "error" || !result.error_message?.includes("503")) {
+        span.setAttribute("mcp.status", result.status);
+        span.setAttribute("mcp.duration_ms", result.duration_ms);
+        return result;
+      }
+      lastError = result.error_message;
     }
-    const result = await callMcpToolOnce(opts, url, body, timeoutMs, log, t0);
-    if (result.status !== "error" || !result.error_message?.includes("503")) {
-      return result;
-    }
-    lastError = result.error_message;
-  }
-  return {
-    call_id: opts.callId,
-    status: "error",
-    result: null,
-    error_message: `Failed after ${MAX_RETRIES + 1} attempts: ${lastError}`,
-    error_code: "BACKEND_ERROR",
-    duration_ms: Date.now() - t0,
-    trace_id: opts.traceId ?? null,
-    completed_at: (/* @__PURE__ */ new Date()).toISOString()
-  };
+    span.setAttribute("mcp.status", "error");
+    span.setAttribute("mcp.retries_exhausted", true);
+    return {
+      call_id: opts.callId,
+      status: "error",
+      result: null,
+      error_message: `Failed after ${MAX_RETRIES + 1} attempts: ${lastError}`,
+      error_code: "BACKEND_ERROR",
+      duration_ms: Date.now() - t0,
+      trace_id: opts.traceId ?? null,
+      completed_at: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  });
 }
 async function callMcpToolOnce(opts, url, body, timeoutMs, log, t0) {
   const controller = new AbortController();
@@ -1050,6 +1109,7 @@ var init_mcp_caller = __esm({
     init_config();
     init_logger();
     init_write_gate();
+    init_tracing();
     MAX_RETRIES = 2;
     RETRY_DELAY_MS = 1e3;
   }
@@ -5117,6 +5177,7 @@ var init_evolution_loop = __esm({
 });
 
 // src/index.ts
+init_tracing();
 init_config();
 init_logger();
 init_chat_broadcaster();

@@ -15,6 +15,7 @@ import type { OrchestratorToolResult } from '@widgetdc/contracts/orchestrator'
 import { config } from './config.js'
 import { childLogger } from './logger.js'
 import { validateBeforeMerge } from './write-gate.js'
+import { withMcpSpan } from './tracing.js'
 
 interface McpCallOptions {
   toolName: string
@@ -28,62 +29,71 @@ const MAX_RETRIES = 2
 const RETRY_DELAY_MS = 1000
 
 export async function callMcpTool(opts: McpCallOptions): Promise<OrchestratorToolResult> {
-  const log = childLogger(opts.traceId ?? opts.callId)
-  const t0 = Date.now()
-  const timeoutMs = opts.timeoutMs ?? config.mcpTimeoutMs
+  return withMcpSpan(opts.toolName, opts.callId, async (span) => {
+    const log = childLogger(opts.traceId ?? opts.callId)
+    const t0 = Date.now()
+    const timeoutMs = opts.timeoutMs ?? config.mcpTimeoutMs
 
-  const url = `${config.backendUrl}/api/mcp/route`
-  // Strip internal _force sentinel before sending to backend
-  const { _force: _stripForce, ...wireArgs } = opts.args
-  const body = JSON.stringify({ tool: opts.toolName, payload: wireArgs })
+    const url = `${config.backendUrl}/api/mcp/route`
+    // Strip internal _force sentinel before sending to backend
+    const { _force: _stripForce, ...wireArgs } = opts.args
+    const body = JSON.stringify({ tool: opts.toolName, payload: wireArgs })
 
-  log.debug({ tool: opts.toolName, url }, 'MCP call start')
+    log.debug({ tool: opts.toolName, url }, 'MCP call start')
 
-  // B-1: Write-path circuit breaker — intercept graph.write_cypher
-  if (opts.toolName === 'graph.write_cypher') {
-    const query = typeof opts.args.query === 'string' ? opts.args.query : ''
-    const params = (opts.args.params as Record<string, unknown>) ?? opts.args
-    const force = opts.args._force === true
-    const validation = validateBeforeMerge(query, params, force)
-    if (!validation.allowed) {
-      return {
-        call_id: opts.callId,
-        status: 'error',
-        result: null,
-        error_message: `Write-path validation rejected: ${validation.reason}`,
-        error_code: 'VALIDATION_REJECTED',
-        duration_ms: Date.now() - t0,
-        trace_id: opts.traceId ?? null,
-        completed_at: new Date().toISOString(),
+    // B-1: Write-path circuit breaker — intercept graph.write_cypher
+    if (opts.toolName === 'graph.write_cypher') {
+      const query = typeof opts.args.query === 'string' ? opts.args.query : ''
+      const params = (opts.args.params as Record<string, unknown>) ?? opts.args
+      const force = opts.args._force === true
+      const validation = validateBeforeMerge(query, params, force)
+      if (!validation.allowed) {
+        span.setAttribute('mcp.write_gate', 'rejected')
+        span.setAttribute('mcp.rejection_reason', validation.reason ?? 'unknown')
+        return {
+          call_id: opts.callId,
+          status: 'error',
+          result: null,
+          error_message: `Write-path validation rejected: ${validation.reason}`,
+          error_code: 'VALIDATION_REJECTED',
+          duration_ms: Date.now() - t0,
+          trace_id: opts.traceId ?? null,
+          completed_at: new Date().toISOString(),
+        }
       }
     }
-  }
 
-  // Retry loop for transient CDN 503 errors
-  let lastError: string | null = null
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    if (attempt > 0) {
-      log.debug({ attempt, tool: opts.toolName }, 'Retrying after transient error')
-      await new Promise(r => setTimeout(r, RETRY_DELAY_MS * attempt))
+    // Retry loop for transient CDN 503 errors
+    let lastError: string | null = null
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        span.setAttribute('mcp.retry_attempt', attempt)
+        log.debug({ attempt, tool: opts.toolName }, 'Retrying after transient error')
+        await new Promise(r => setTimeout(r, RETRY_DELAY_MS * attempt))
+      }
+
+      const result = await callMcpToolOnce(opts, url, body, timeoutMs, log, t0)
+      if (result.status !== 'error' || !result.error_message?.includes('503')) {
+        span.setAttribute('mcp.status', result.status)
+        span.setAttribute('mcp.duration_ms', result.duration_ms)
+        return result
+      }
+      lastError = result.error_message
     }
 
-    const result = await callMcpToolOnce(opts, url, body, timeoutMs, log, t0)
-    if (result.status !== 'error' || !result.error_message?.includes('503')) {
-      return result
+    span.setAttribute('mcp.status', 'error')
+    span.setAttribute('mcp.retries_exhausted', true)
+    return {
+      call_id: opts.callId,
+      status: 'error',
+      result: null,
+      error_message: `Failed after ${MAX_RETRIES + 1} attempts: ${lastError}`,
+      error_code: 'BACKEND_ERROR',
+      duration_ms: Date.now() - t0,
+      trace_id: opts.traceId ?? null,
+      completed_at: new Date().toISOString(),
     }
-    lastError = result.error_message
-  }
-
-  return {
-    call_id: opts.callId,
-    status: 'error',
-    result: null,
-    error_message: `Failed after ${MAX_RETRIES + 1} attempts: ${lastError}`,
-    error_code: 'BACKEND_ERROR',
-    duration_ms: Date.now() - t0,
-    trace_id: opts.traceId ?? null,
-    completed_at: new Date().toISOString(),
-  }
+  })
 }
 
 async function callMcpToolOnce(

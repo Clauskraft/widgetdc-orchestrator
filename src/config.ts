@@ -58,4 +58,7 @@ export const config = {
   // Rate limiting: max concurrent tool calls per agent
   maxConcurrentPerAgent: parseInt(optional('MAX_CONCURRENT_PER_AGENT', '5'), 10),
   agentOpenAccess: optional('AGENT_OPEN_ACCESS', 'true') === 'true',
+
+  // OpenTelemetry (LIN-589) — set OTEL_EXPORTER_OTLP_ENDPOINT to activate tracing
+  otelEnabled: !!process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
 } as const
