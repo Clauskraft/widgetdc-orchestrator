@@ -280,14 +280,30 @@ JSON format:
       return { entities: [], relations: [] }
     }
     const text = raw?.content ?? (typeof raw === 'string' ? raw : '')
+    logger.info({ textLen: String(text).length, textSnippet: String(text).slice(0, 150) }, 'Entity extraction: Mercury text to parse')
+
+    // Try direct JSON parse first
+    try {
+      const direct = JSON.parse(String(text))
+      if (Array.isArray(direct.entities)) {
+        logger.info({ count: direct.entities.length }, 'Entity extraction: direct parse OK')
+        return { entities: direct.entities.slice(0, 20), relations: Array.isArray(direct.relations) ? direct.relations.slice(0, 30) : [] }
+      }
+    } catch { /* try regex */ }
+
+    // Regex fallback
     const match = String(text).match(/\{[\s\S]*"entities"[\s\S]*\}/)
     if (match) {
-      const parsed = JSON.parse(match[0])
-      return {
-        entities: Array.isArray(parsed.entities) ? parsed.entities.slice(0, 20) : [],
-        relations: Array.isArray(parsed.relations) ? parsed.relations.slice(0, 30) : [],
+      try {
+        const parsed = JSON.parse(match[0])
+        logger.info({ count: parsed.entities?.length }, 'Entity extraction: regex parse OK')
+        return { entities: Array.isArray(parsed.entities) ? parsed.entities.slice(0, 20) : [], relations: Array.isArray(parsed.relations) ? parsed.relations.slice(0, 30) : [] }
+      } catch (e) {
+        logger.warn({ error: String(e) }, 'Entity extraction: regex match found but JSON parse failed')
       }
     }
+
+    logger.warn({ textLen: String(text).length, snippet: String(text).slice(0, 200) }, 'Entity extraction: NO entities found in Mercury response')
   } catch (err) {
     logger.warn({ error: String(err), filename }, 'Entity extraction failed')
   }
