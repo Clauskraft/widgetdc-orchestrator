@@ -801,11 +801,228 @@
         "evolution"
       ],
       "deprecated": false
+    },
+    {
+      "name": "ingest_document",
+      "namespace": "knowledge",
+      "version": "1.0",
+      "description": "Ingest a document into the knowledge graph. Parses content, extracts entities via LLM, MERGEs to Neo4j, and indexes for vector search. Supports markdown, text, and PDF (via Docling).",
+      "category": "knowledge",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "Document content (markdown, text, or base64 PDF)"
+          },
+          "filename": {
+            "type": "string",
+            "description": "Source filename"
+          },
+          "domain": {
+            "type": "string",
+            "description": "Target domain for classification"
+          },
+          "extract_entities": {
+            "type": "boolean",
+            "description": "Extract and link entities (default: true)"
+          }
+        },
+        "required": [
+          "content",
+          "filename"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 60000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "ingest",
+        "document"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "build_communities",
+      "namespace": "graph",
+      "version": "1.0",
+      "description": "Build hierarchical community summaries from the knowledge graph using Leiden community detection. Creates CommunitySummary nodes with LLM-generated summaries and MEMBER_OF relationships. Used for thematic retrieval.",
+      "category": "graph",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 120000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "build",
+        "communities"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "adaptive_rag_dashboard",
+      "namespace": "monitor",
+      "version": "1.0",
+      "description": "Get the Adaptive RAG dashboard showing current routing weights, per-strategy performance stats, compound intelligence metric (accuracy × quality × coverage), and training sample count.",
+      "category": "monitor",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 10000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "adaptive",
+        "rag",
+        "dashboard"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "graph_hygiene_run",
+      "namespace": "monitor",
+      "version": "1.0",
+      "description": "Run graph health check: 6 metrics (orphan ratio, avg rels, embedding coverage, domain count, stale nodes, pollution). Stores GraphHealthSnapshot and alerts on anomalies.",
+      "category": "monitor",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 30000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "graph",
+        "hygiene",
+        "run"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "critique_refine",
+      "namespace": "intelligence",
+      "version": "1.0",
+      "description": "Run Constitutional AI-inspired generate→critique→revise pipeline. Generates a response, critiques it against quality principles, then revises. Returns original, critique, and refined version.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "The query or task to process"
+          },
+          "provider": {
+            "type": "string",
+            "description": "LLM provider (default: deepseek)"
+          },
+          "principles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Custom critique principles (default: 5 standard)"
+          },
+          "max_rounds": {
+            "type": "number",
+            "description": "Max refine rounds (default: 1)"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 120000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "critique",
+        "refine"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "judge_response",
+      "namespace": "intelligence",
+      "version": "1.0",
+      "description": "Score an agent response on 5 PRISM dimensions (Precision, Reasoning, Information, Safety, Methodology). Returns 0-10 scores per dimension plus aggregate. Based on openevals prompt templates.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "The original query/task"
+          },
+          "response": {
+            "type": "string",
+            "description": "The agent response to evaluate"
+          },
+          "context": {
+            "type": "string",
+            "description": "Optional reference context or expected answer"
+          },
+          "provider": {
+            "type": "string",
+            "description": "LLM provider for judging (default: deepseek)"
+          }
+        },
+        "required": [
+          "query",
+          "response"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 60000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "judge",
+        "response"
+      ],
+      "deprecated": false
     }
   ],
   "protocols": {
     "openai": {
-      "count": 19,
+      "count": 25,
       "tools": [
         "search_knowledge",
         "reason_deeply",
@@ -825,11 +1042,17 @@
         "governance_matrix",
         "run_osint_scan",
         "list_tools",
-        "run_evolution"
+        "run_evolution",
+        "ingest_document",
+        "build_communities",
+        "adaptive_rag_dashboard",
+        "graph_hygiene_run",
+        "critique_refine",
+        "judge_response"
       ]
     },
     "mcp": {
-      "count": 19,
+      "count": 25,
       "tools": [
         "search_knowledge",
         "reason_deeply",
@@ -849,11 +1072,17 @@
         "governance_matrix",
         "run_osint_scan",
         "list_tools",
-        "run_evolution"
+        "run_evolution",
+        "ingest_document",
+        "build_communities",
+        "adaptive_rag_dashboard",
+        "graph_hygiene_run",
+        "critique_refine",
+        "judge_response"
       ]
     },
     "openapi": {
-      "count": 19,
+      "count": 25,
       "paths": [
         "/api/tools/search_knowledge",
         "/api/tools/reason_deeply",
@@ -873,25 +1102,32 @@
         "/api/tools/governance_matrix",
         "/api/tools/run_osint_scan",
         "/api/tools/list_tools",
-        "/api/tools/run_evolution"
+        "/api/tools/run_evolution",
+        "/api/tools/ingest_document",
+        "/api/tools/build_communities",
+        "/api/tools/adaptive_rag_dashboard",
+        "/api/tools/graph_hygiene_run",
+        "/api/tools/critique_refine",
+        "/api/tools/judge_response"
       ]
     }
   },
   "meta": {
-    "total_tools": 19,
+    "total_tools": 25,
     "namespaces": [
       "assembly",
       "chains",
       "cognitive",
       "compliance",
       "graph",
+      "intelligence",
       "knowledge",
       "linear",
       "mcp",
       "monitor"
     ],
     "deprecated_count": 0,
-    "generated_at": "2026-04-03T17:09:28.631Z",
+    "generated_at": "2026-04-03T19:15:53.212Z",
     "abi_version": "1.0"
   }
 }
