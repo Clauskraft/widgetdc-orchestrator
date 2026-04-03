@@ -3382,25 +3382,14 @@ async function tryDoclingParse(req) {
 async function extractEntities(content, filename, domain) {
   try {
     logger.info({ filename, domain, contentLen: content.length }, "Entity extraction: calling Mercury llm.generate");
+    const extractPrompt = `Extract named entities and relationships. Reply ONLY as JSON, no markdown.
+
+{"entities": [{"name": "...", "type": "Organization|Regulation|Technology|Framework|Service", "properties": {"domain": "..."}}], "relations": [{"from": "...", "to": "...", "type": "USES|COMPLIES_WITH|PART_OF"}]}
+
+Content: ${content.slice(0, 6e3)}`;
     const llmResult = await callMcpTool({
       toolName: "llm.generate",
-      args: {
-        prompt: `Extract named entities and relationships from this document. Reply ONLY as valid JSON, no markdown code blocks.
-
-DOCUMENT: "${filename}" (domain: ${domain ?? "general"})
-
-CONTENT:
-${content.slice(0, 8e3)}
-
-RULES:
-- Extract organizations, regulations, technologies, frameworks, methodologies, services
-- Extract relationships: USES, COMPLIES_WITH, COMPETES_WITH, PART_OF, RELATES_TO
-- Return ONLY entities that are specific and named (not generic concepts)
-- Limit to 20 most important entities
-
-JSON format:
-{"entities": [{"name": "Entity Name", "type": "Organization|Regulation|Technology|Framework|Service", "properties": {"domain": "...", "description": "..."}}], "relations": [{"from": "Entity A", "to": "Entity B", "type": "USES|COMPLIES_WITH|..."}]}`
-      },
+      args: { prompt: extractPrompt },
       callId: uuid7(),
       timeoutMs: 3e4
     });
