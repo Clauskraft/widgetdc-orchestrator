@@ -1538,19 +1538,25 @@ function hookAutoEnrichment(answer, query) {
 async function extractAndMerge(answer, query) {
   if (answer.length < 50) return;
   try {
-    const result = await callCognitive("analyze", {
-      prompt: `Extract specific named entities from this AI-generated answer that should be added to a knowledge graph. Only extract NAMED entities (organizations, regulations, technologies, frameworks) \u2014 not generic concepts.
+    const llmResult = await callMcpTool({
+      toolName: "llm.generate",
+      args: {
+        prompt: `Extract specific named entities from this AI-generated answer. Only NAMED entities (organizations, regulations, technologies, frameworks). Reply ONLY as JSON.
 
 QUERY: ${query}
-ANSWER: ${answer.slice(0, 3e3)}
+ANSWER: ${answer.slice(0, 2e3)}
 
-Reply as JSON: {"entities": [{"name": "...", "type": "Organization|Regulation|Technology|Framework", "domain": "..."}]}
-Return max 5 entities. If none are specific enough, return {"entities": []}`,
-      context: { source: "auto-enrichment" },
-      agent_id: "auto-enrichment"
-    }, 15e3);
-    const text = String(result ?? "");
-    const match = text.match(/\{[\s\S]*\}/);
+JSON: {"entities": [{"name": "...", "type": "Organization|Regulation|Technology|Framework", "domain": "..."}]}
+Max 5 entities. If none specific enough: {"entities": []}`,
+        provider: "deepseek"
+      },
+      callId: uuid2(),
+      timeoutMs: 15e3
+    });
+    if (llmResult.status !== "success") return;
+    const raw = llmResult.result;
+    const text = raw?.content ?? (typeof raw === "string" ? raw : JSON.stringify(raw));
+    const match = String(text).match(/\{[\s\S]*\}/);
     if (!match) return;
     const parsed = JSON.parse(match[0]);
     const entities = Array.isArray(parsed.entities) ? parsed.entities.slice(0, 5) : [];
@@ -1627,7 +1633,6 @@ var init_compound_hooks = __esm({
   "src/compound-hooks.ts"() {
     "use strict";
     init_mcp_caller();
-    init_cognitive_proxy();
     init_logger();
     init_redis();
   }
@@ -3370,13 +3375,15 @@ async function tryDoclingParse(req) {
 }
 async function extractEntities(content, filename, domain) {
   try {
-    const result = await callCognitive("analyze", {
-      prompt: `Extract named entities and relationships from this document.
+    const result = await callMcpTool({
+      toolName: "llm.generate",
+      args: {
+        prompt: `Extract named entities and relationships from this document. Reply ONLY as JSON.
 
 DOCUMENT: "${filename}" (domain: ${domain ?? "general"})
 
 CONTENT:
-${content.slice(0, 12e3)}
+${content.slice(0, 8e3)}
 
 RULES:
 - Extract organizations, regulations, technologies, frameworks, methodologies, services
@@ -3386,11 +3393,18 @@ RULES:
 
 Reply as JSON:
 {"entities": [{"name": "Entity Name", "type": "Organization|Regulation|Technology|Framework|Service", "properties": {"domain": "...", "description": "..."}}], "relations": [{"from": "Entity A", "to": "Entity B", "type": "USES|COMPLIES_WITH|..."}]}`,
-      context: { filename, domain: domain ?? "general", source: "document-intelligence" },
-      agent_id: "document-intelligence"
-    }, 3e4);
-    const text = String(result ?? "");
-    const match = text.match(/\{[\s\S]*\}/);
+        provider: "deepseek"
+      },
+      callId: uuid7(),
+      timeoutMs: 3e4
+    });
+    if (result.status !== "success") {
+      logger.warn({ error: result.error_message, filename }, "LLM entity extraction failed");
+      return { entities: [], relations: [] };
+    }
+    const raw = result.result;
+    const text = raw?.content ?? (typeof raw === "string" ? raw : JSON.stringify(raw));
+    const match = String(text).match(/\{[\s\S]*\}/);
     if (match) {
       const parsed = JSON.parse(match[0]);
       return {

@@ -11,7 +11,7 @@
  */
 import { v4 as uuid } from 'uuid'
 import { callMcpTool } from './mcp-caller.js'
-import { callCognitive } from './cognitive-proxy.js'
+// callCognitive removed — using llm.generate via callMcpTool for reliable JSON extraction
 import { logger } from './logger.js'
 import { getRedis } from './redis.js'
 
@@ -77,20 +77,26 @@ async function extractAndMerge(answer: string, query: string): Promise<void> {
   if (answer.length < 50) return
 
   try {
-    const result = await callCognitive('analyze', {
-      prompt: `Extract specific named entities from this AI-generated answer that should be added to a knowledge graph. Only extract NAMED entities (organizations, regulations, technologies, frameworks) — not generic concepts.
+    const llmResult = await callMcpTool({
+      toolName: 'llm.generate',
+      args: {
+        prompt: `Extract specific named entities from this AI-generated answer. Only NAMED entities (organizations, regulations, technologies, frameworks). Reply ONLY as JSON.
 
 QUERY: ${query}
-ANSWER: ${answer.slice(0, 3000)}
+ANSWER: ${answer.slice(0, 2000)}
 
-Reply as JSON: {"entities": [{"name": "...", "type": "Organization|Regulation|Technology|Framework", "domain": "..."}]}
-Return max 5 entities. If none are specific enough, return {"entities": []}`,
-      context: { source: 'auto-enrichment' },
-      agent_id: 'auto-enrichment',
-    }, 15000)
+JSON: {"entities": [{"name": "...", "type": "Organization|Regulation|Technology|Framework", "domain": "..."}]}
+Max 5 entities. If none specific enough: {"entities": []}`,
+        provider: 'deepseek',
+      },
+      callId: uuid(),
+      timeoutMs: 15000,
+    })
 
-    const text = String(result ?? '')
-    const match = text.match(/\{[\s\S]*\}/)
+    if (llmResult.status !== 'success') return
+    const raw = llmResult.result as any
+    const text = raw?.content ?? (typeof raw === 'string' ? raw : JSON.stringify(raw))
+    const match = String(text).match(/\{[\s\S]*\}/)
     if (!match) return
 
     const parsed = JSON.parse(match[0])

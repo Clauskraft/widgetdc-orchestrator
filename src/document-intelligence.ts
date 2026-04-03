@@ -230,13 +230,17 @@ async function extractEntities(
   domain?: string,
 ): Promise<{ entities: ExtractedEntity[]; relations: ExtractedRelation[] }> {
   try {
-    const result = await callCognitive('analyze', {
-      prompt: `Extract named entities and relationships from this document.
+    // Use llm.generate (raw LLM text) instead of callCognitive('analyze')
+    // which returns structured RLM objects, not parseable JSON text
+    const result = await callMcpTool({
+      toolName: 'llm.generate',
+      args: {
+        prompt: `Extract named entities and relationships from this document. Reply ONLY as JSON.
 
 DOCUMENT: "${filename}" (domain: ${domain ?? 'general'})
 
 CONTENT:
-${content.slice(0, 12000)}
+${content.slice(0, 8000)}
 
 RULES:
 - Extract organizations, regulations, technologies, frameworks, methodologies, services
@@ -246,12 +250,21 @@ RULES:
 
 Reply as JSON:
 {"entities": [{"name": "Entity Name", "type": "Organization|Regulation|Technology|Framework|Service", "properties": {"domain": "...", "description": "..."}}], "relations": [{"from": "Entity A", "to": "Entity B", "type": "USES|COMPLIES_WITH|..."}]}`,
-      context: { filename, domain: domain ?? 'general', source: 'document-intelligence' },
-      agent_id: 'document-intelligence',
-    }, 30000)
+        provider: 'deepseek',
+      },
+      callId: uuid(),
+      timeoutMs: 30000,
+    })
 
-    const text = String(result ?? '')
-    const match = text.match(/\{[\s\S]*\}/)
+    if (result.status !== 'success') {
+      logger.warn({ error: result.error_message, filename }, 'LLM entity extraction failed')
+      return { entities: [], relations: [] }
+    }
+
+    // Parse LLM response — extract JSON from content field
+    const raw = result.result as any
+    const text = raw?.content ?? (typeof raw === 'string' ? raw : JSON.stringify(raw))
+    const match = String(text).match(/\{[\s\S]*\}/)
     if (match) {
       const parsed = JSON.parse(match[0])
       return {
