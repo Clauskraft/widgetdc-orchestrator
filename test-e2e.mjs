@@ -1,5 +1,5 @@
 /**
- * test-e2e.mjs — 50 comprehensive end-to-end tests for WidgeTDC Command Center
+ * test-e2e.mjs — 80 comprehensive end-to-end tests for WidgeTDC Command Center
  *
  * Covers: Health, Dashboard, Agents, Chat, Chains, Cron, Cognitive, LLM,
  *         Audit, SSE, WebSocket, Auth, Frontend HTML/CSS/JS, Command Palette,
@@ -709,6 +709,74 @@ await test('72. GET /api/llm/providers returns available providers', async () =>
   assert(p.id, 'missing id')
   assert(p.name, 'missing name')
   assert(p.model, 'missing model')
+})
+
+// ═══════════════════════════════════════════════════════════════
+// SNOUT Wave 2 Tests (LIN-589, LIN-590, LIN-591, LIN-592)
+// ═══════════════════════════════════════════════════════════════
+
+// ── 73. Similarity select — validation rejects missing selected_match_id ──
+await test('73. POST /api/similarity/select rejects missing selected_match_id', async () => {
+  const r = await api('/api/similarity/select', { method: 'POST', body: JSON.stringify({ rejected_match_ids: ['a'] }) })
+  assert(r.status === 400, `expected 400, got ${r.status}`)
+  assert(r.body?.error?.code === 'VALIDATION_ERROR', `expected VALIDATION_ERROR, got ${r.body?.error?.code}`)
+})
+
+// ── 74. Similarity select — validation rejects empty rejected_match_ids ──
+await test('74. POST /api/similarity/select rejects empty rejected_match_ids', async () => {
+  const r = await api('/api/similarity/select', { method: 'POST', body: JSON.stringify({ selected_match_id: 'x', rejected_match_ids: [] }) })
+  assert(r.status === 400, `expected 400, got ${r.status}`)
+})
+
+// ── 75. Similarity select — validation rejects non-string array elements ──
+await test('75. POST /api/similarity/select rejects non-string elements', async () => {
+  const r = await api('/api/similarity/select', { method: 'POST', body: JSON.stringify({ selected_match_id: 'x', rejected_match_ids: [1, null] }) })
+  assert(r.status === 400, `expected 400, got ${r.status}`)
+  assert(r.body?.error?.message?.includes('non-empty strings'), `unexpected message: ${r.body?.error?.message}`)
+})
+
+// ── 76. Similarity select — accepts valid input ──
+await test('76. POST /api/similarity/select accepts valid preference', async () => {
+  const r = await api('/api/similarity/select', { method: 'POST', body: JSON.stringify({ selected_match_id: 'client-a', rejected_match_ids: ['client-b', 'client-c'] }) })
+  assert(r.ok, `expected 200, got ${r.status}`)
+  assert(r.body?.success === true, 'expected success: true')
+  assert(r.body?.data?.rejected_count === 2, `expected 2 rejected, got ${r.body?.data?.rejected_count}`)
+})
+
+// ── 77. Tool registry has 23+ tools ──
+await test('77. GET /api/tools lists 23+ registered tools', async () => {
+  const r = await api('/api/tools')
+  assert(r.ok, `HTTP ${r.status}`)
+  const tools = r.body?.data?.tools || r.body?.tools || []
+  assert(tools.length >= 23, `expected 23+ tools, got ${tools.length}`)
+  // Verify core tools exist
+  const names = tools.map(t => t.name)
+  assert(names.includes('search_knowledge'), 'search_knowledge tool missing')
+  assert(names.includes('generate_deliverable'), 'generate_deliverable tool missing')
+  assert(names.includes('graph_hygiene_run'), 'graph_hygiene_run tool missing')
+})
+
+// ── 78. Tool gateway — critique_refine rejects empty query ──
+await test('78. POST /api/tools/critique_refine rejects empty query', async () => {
+  const r = await api('/api/tools/critique_refine', { method: 'POST', body: JSON.stringify({ query: '' }) })
+  // Should return error (either 400 or 200 with error in body)
+  const hasError = !r.ok || (r.body?.data?.result ?? '').includes('Error')
+  assert(hasError, `expected error for empty query, got status ${r.status}`)
+})
+
+// ── 79. Tool gateway — judge_response rejects missing args ──
+await test('79. POST /api/tools/judge_response rejects missing args', async () => {
+  const r = await api('/api/tools/judge_response', { method: 'POST', body: JSON.stringify({}) })
+  const hasError = !r.ok || (r.body?.data?.result ?? '').includes('Error')
+  assert(hasError, `expected error for missing args, got status ${r.status}`)
+})
+
+// ── 80. Health endpoint includes write_gate_stats ──
+await test('80. GET /health includes write_gate_stats and version 3.0.0', async () => {
+  const r = await fetch(`${BASE}/health`).then(res => res.json())
+  assert(r.write_gate_stats !== undefined, 'missing write_gate_stats')
+  assert(r.version === '3.0.0', `expected version 3.0.0, got ${r.version}`)
+  assert(r.cron_jobs >= 20, `expected 20+ crons, got ${r.cron_jobs}`)
 })
 
 // ═══════════════════════════════════════════════════════════════
