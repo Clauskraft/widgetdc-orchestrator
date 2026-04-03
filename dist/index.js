@@ -969,231 +969,6 @@ var init_mcp_caller = __esm({
   }
 });
 
-// src/dual-rag.ts
-import { v4 as uuid } from "uuid";
-function classifyQuery(query) {
-  const q = query.toLowerCase();
-  if (/\b(?:how many|count|list all|list the|total|statistics|stats)\b/.test(q)) {
-    return "structured";
-  }
-  if (/\b(?:match|where|return|node|relationship|label)\b/.test(q)) {
-    return "structured";
-  }
-  if (/\b(?:compare|versus|difference|between|trade-?off|pros and cons)\b/.test(q)) {
-    return "multi_hop";
-  }
-  if (/\b(?:strategy|roadmap|architecture|impact|implication|recommend)\b/.test(q)) {
-    return "multi_hop";
-  }
-  if (/\b(?:why|how does|what if|should we|evaluate|assess|analyze)\b/.test(q)) {
-    return "multi_hop";
-  }
-  if (q.split(/\s+/).length > 12) {
-    return "multi_hop";
-  }
-  return "simple";
-}
-async function callGraphRAG(query, maxResults) {
-  const result = await callMcpTool({
-    toolName: "autonomous.graphrag",
-    args: { question: query, max_evidence: maxResults },
-    callId: uuid(),
-    timeoutMs: 6e4
-    // graphrag is slower but higher quality
-  });
-  if (result.status !== "success") {
-    logger.warn({ error: result.error_message }, "autonomous.graphrag failed");
-    return [];
-  }
-  const data = result.result;
-  const evidence = data?.evidence ?? data?.results ?? data?.chunks ?? [];
-  const answer = data?.answer ?? data?.synthesis ?? "";
-  const confidence = data?.confidence ?? 0.8;
-  const results = [];
-  if (answer && typeof answer === "string" && answer.length > 20) {
-    results.push({
-      source: "graphrag",
-      content: answer,
-      score: confidence,
-      metadata: { type: "synthesis", evidence_count: evidence.length }
-    });
-  }
-  if (Array.isArray(evidence)) {
-    for (const item of evidence.slice(0, maxResults - 1)) {
-      const content = item.content || item.text || item.chunk || (typeof item === "string" ? item : JSON.stringify(item).slice(0, 500));
-      results.push({
-        source: "graphrag",
-        content: typeof content === "string" ? content : String(content),
-        score: item.score ?? item.relevance ?? 0.75,
-        metadata: { title: item.title, node_type: item.label || item.type }
-      });
-    }
-  }
-  return results;
-}
-async function callSRAG(query, maxResults) {
-  const result = await callMcpTool({
-    toolName: "srag.query",
-    args: { query },
-    callId: uuid(),
-    timeoutMs: 45e3
-  });
-  if (result.status !== "success") return [];
-  const sragData = result.result;
-  const items = Array.isArray(sragData) ? sragData : sragData?.results ? sragData.results : sragData?.chunks ? sragData.chunks : [];
-  const results = [];
-  for (const item of items.slice(0, maxResults)) {
-    results.push({
-      source: "srag",
-      content: item.content || item.text || item.chunk || JSON.stringify(item).slice(0, 500),
-      score: item.score || item.similarity || 0.5,
-      metadata: { title: item.title, tags: item.tags }
-    });
-  }
-  return results;
-}
-async function callCypher(query, maxResults, depth) {
-  const result = await callMcpTool({
-    toolName: "graph.read_cypher",
-    args: { query: buildCypherQuery(query, depth) },
-    callId: uuid(),
-    timeoutMs: 2e4
-  });
-  if (result.status !== "success") return [];
-  const cypherData = result.result;
-  const rows = cypherData?.results || cypherData || [];
-  if (!Array.isArray(rows)) return [];
-  const results = [];
-  for (const row of rows.slice(0, maxResults)) {
-    const content = Object.values(row).map(
-      (v) => typeof v === "string" ? v : JSON.stringify(v)
-    ).join(" | ");
-    results.push({
-      source: "cypher",
-      content: content.slice(0, 500),
-      score: 0.7,
-      metadata: row
-    });
-  }
-  return results;
-}
-async function dualChannelRAG(query, options) {
-  const t0 = Date.now();
-  const maxResults = options?.maxResults ?? 10;
-  const depth = options?.cypherDepth ?? 2;
-  const complexity = classifyQuery(query);
-  logger.info({ query: query.slice(0, 80), complexity }, "Hybrid RAG: routing query");
-  const channels = options?.forceChannels ?? getChannelsForComplexity(complexity);
-  const channelPromises = [];
-  const channelsUsed = [];
-  if (channels.includes("graphrag")) {
-    channelPromises.push(callGraphRAG(query, maxResults));
-    channelsUsed.push("graphrag");
-  }
-  if (channels.includes("srag")) {
-    channelPromises.push(callSRAG(query, maxResults));
-    channelsUsed.push("srag");
-  }
-  if (channels.includes("cypher")) {
-    channelPromises.push(callCypher(query, maxResults, depth));
-    channelsUsed.push("cypher");
-  }
-  const channelResults = await Promise.allSettled(channelPromises);
-  let allResults = [];
-  for (const cr of channelResults) {
-    if (cr.status === "fulfilled") {
-      allResults.push(...cr.value);
-    }
-  }
-  if (allResults.filter((r) => r.source === "graphrag").length === 0 && !channels.includes("srag")) {
-    logger.info("Hybrid RAG: graphrag returned empty, falling back to srag");
-    const sragResults = await callSRAG(query, maxResults);
-    allResults.push(...sragResults);
-    channelsUsed.push("srag (fallback)");
-  }
-  let pollutionFiltered = 0;
-  allResults = allResults.filter((r) => {
-    if (isPolluted(r.content)) {
-      pollutionFiltered++;
-      logger.debug({ source: r.source, preview: r.content.slice(0, 60) }, "Filtered polluted result");
-      return false;
-    }
-    return true;
-  });
-  allResults.sort((a, b) => {
-    if (a.source === "graphrag" && a.metadata?.type === "synthesis") return -1;
-    if (b.source === "graphrag" && b.metadata?.type === "synthesis") return 1;
-    return b.score - a.score;
-  });
-  const topResults = allResults.slice(0, maxResults);
-  const merged = topResults.map(
-    (r, i) => `[${r.source.toUpperCase()} #${i + 1}${r.score >= 0.8 ? " \u2605" : ""}] ${r.content}`
-  ).join("\n\n");
-  const graphragCount = topResults.filter((r) => r.source === "graphrag").length;
-  const sragCount = topResults.filter((r) => r.source === "srag").length;
-  const cypherCount = topResults.filter((r) => r.source === "cypher").length;
-  const durationMs = Date.now() - t0;
-  logger.info({
-    query: query.slice(0, 60),
-    complexity,
-    graphragCount,
-    sragCount,
-    cypherCount,
-    pollutionFiltered,
-    ms: durationMs
-  }, "Hybrid RAG: complete");
-  return {
-    query,
-    results: topResults,
-    srag_count: sragCount,
-    cypher_count: cypherCount,
-    graphrag_count: graphragCount,
-    merged_context: merged,
-    duration_ms: durationMs,
-    route_strategy: complexity,
-    channels_used: channelsUsed,
-    pollution_filtered: pollutionFiltered
-  };
-}
-function getChannelsForComplexity(complexity) {
-  switch (complexity) {
-    case "simple":
-      return ["graphrag", "srag"];
-    case "multi_hop":
-      return ["graphrag", "cypher"];
-    case "structured":
-      return ["cypher", "graphrag"];
-  }
-}
-function buildCypherQuery(query, depth) {
-  const stopWords = /* @__PURE__ */ new Set(["the", "and", "for", "with", "that", "this", "from", "are", "was", "how", "what", "which", "where", "when", "why", "can", "does", "will", "not", "all", "has", "have", "been", "our", "their", "its"]);
-  const keywords = query.toLowerCase().replace(/[^a-zA-Z0-9æøåÆØÅ\s]/g, "").split(/\s+/).filter((w) => w.length >= 3 && !stopWords.has(w)).slice(0, 5);
-  if (keywords.length === 0) {
-    return "MATCH (n:StrategicInsight) RETURN n.title AS title, n.domain AS domain LIMIT 5";
-  }
-  const kwConditions = keywords.map(
-    (kw) => `toLower(coalesce(n.title, n.name, n.description, '')) CONTAINS '${kw}'`
-  ).join(" OR ");
-  return `MATCH (n) WHERE (n:StrategicInsight OR n:Pattern OR n:Lesson OR n:Knowledge OR n:Memory OR n:TDCDocument)
-AND (${kwConditions})
-WITH n, labels(n)[0] AS label
-OPTIONAL MATCH (n)-[r]-(m)
-RETURN label,
-       coalesce(n.title, n.name, n.filename) AS title,
-       substring(coalesce(n.description, n.content, n.value, ''), 0, 300) AS content,
-       type(r) AS rel,
-       labels(m)[0] AS connected_to
-LIMIT 15`;
-}
-var init_dual_rag = __esm({
-  "src/dual-rag.ts"() {
-    "use strict";
-    init_mcp_caller();
-    init_logger();
-    init_write_gate();
-  }
-});
-
 // src/cognitive-proxy.ts
 function isRlmAvailable() {
   return config.rlmUrl.length > 0;
@@ -1301,8 +1076,283 @@ var init_cognitive_proxy = __esm({
   }
 });
 
-// src/routing-engine.ts
+// src/hierarchical-intelligence.ts
+import { v4 as uuid } from "uuid";
+async function searchCommunitySummaries(query, maxResults = 5) {
+  try {
+    const result = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: `MATCH (c:CommunitySummary)
+WHERE toLower(c.summary) CONTAINS toLower($keyword)
+   OR toLower(c.domain) CONTAINS toLower($keyword)
+   OR toLower(c.name) CONTAINS toLower($keyword)
+RETURN c.id AS id, c.name AS name, c.summary AS summary, c.domain AS domain, c.member_count AS members
+ORDER BY c.member_count DESC
+LIMIT $limit`,
+        params: {
+          keyword: query.split(/\s+/).filter((w) => w.length >= 3).slice(0, 3).join(" "),
+          limit: maxResults
+        }
+      },
+      callId: uuid(),
+      timeoutMs: 1e4
+    });
+    if (result.status !== "success") return [];
+    const rows = result.result?.results ?? result.result;
+    if (!Array.isArray(rows)) return [];
+    return rows.map((r) => ({
+      source: "community",
+      content: `[Community: ${r.name}] ${r.summary}`,
+      score: 0.75,
+      // Community summaries are structurally relevant
+      metadata: { id: r.id, domain: r.domain, members: r.members }
+    }));
+  } catch {
+    return [];
+  }
+}
+var init_hierarchical_intelligence = __esm({
+  "src/hierarchical-intelligence.ts"() {
+    "use strict";
+    init_mcp_caller();
+    init_cognitive_proxy();
+    init_logger();
+  }
+});
+
+// src/dual-rag.ts
 import { v4 as uuid2 } from "uuid";
+function classifyQuery(query) {
+  const q = query.toLowerCase();
+  if (/\b(?:how many|count|list all|list the|total|statistics|stats)\b/.test(q)) {
+    return "structured";
+  }
+  if (/\b(?:match|where|return|node|relationship|label)\b/.test(q)) {
+    return "structured";
+  }
+  if (/\b(?:compare|versus|difference|between|trade-?off|pros and cons)\b/.test(q)) {
+    return "multi_hop";
+  }
+  if (/\b(?:strategy|roadmap|architecture|impact|implication|recommend)\b/.test(q)) {
+    return "multi_hop";
+  }
+  if (/\b(?:why|how does|what if|should we|evaluate|assess|analyze)\b/.test(q)) {
+    return "multi_hop";
+  }
+  if (q.split(/\s+/).length > 12) {
+    return "multi_hop";
+  }
+  return "simple";
+}
+async function callGraphRAG(query, maxResults) {
+  const result = await callMcpTool({
+    toolName: "autonomous.graphrag",
+    args: { question: query, max_evidence: maxResults },
+    callId: uuid2(),
+    timeoutMs: 6e4
+    // graphrag is slower but higher quality
+  });
+  if (result.status !== "success") {
+    logger.warn({ error: result.error_message }, "autonomous.graphrag failed");
+    return [];
+  }
+  const data = result.result;
+  const evidence = data?.evidence ?? data?.results ?? data?.chunks ?? [];
+  const answer = data?.answer ?? data?.synthesis ?? "";
+  const confidence = data?.confidence ?? 0.8;
+  const results = [];
+  if (answer && typeof answer === "string" && answer.length > 20) {
+    results.push({
+      source: "graphrag",
+      content: answer,
+      score: confidence,
+      metadata: { type: "synthesis", evidence_count: evidence.length }
+    });
+  }
+  if (Array.isArray(evidence)) {
+    for (const item of evidence.slice(0, maxResults - 1)) {
+      const content = item.content || item.text || item.chunk || (typeof item === "string" ? item : JSON.stringify(item).slice(0, 500));
+      results.push({
+        source: "graphrag",
+        content: typeof content === "string" ? content : String(content),
+        score: item.score ?? item.relevance ?? 0.75,
+        metadata: { title: item.title, node_type: item.label || item.type }
+      });
+    }
+  }
+  return results;
+}
+async function callSRAG(query, maxResults) {
+  const result = await callMcpTool({
+    toolName: "srag.query",
+    args: { query },
+    callId: uuid2(),
+    timeoutMs: 45e3
+  });
+  if (result.status !== "success") return [];
+  const sragData = result.result;
+  const items = Array.isArray(sragData) ? sragData : sragData?.results ? sragData.results : sragData?.chunks ? sragData.chunks : [];
+  const results = [];
+  for (const item of items.slice(0, maxResults)) {
+    results.push({
+      source: "srag",
+      content: item.content || item.text || item.chunk || JSON.stringify(item).slice(0, 500),
+      score: item.score || item.similarity || 0.5,
+      metadata: { title: item.title, tags: item.tags }
+    });
+  }
+  return results;
+}
+async function callCypher(query, maxResults, depth) {
+  const result = await callMcpTool({
+    toolName: "graph.read_cypher",
+    args: { query: buildCypherQuery(query, depth) },
+    callId: uuid2(),
+    timeoutMs: 2e4
+  });
+  if (result.status !== "success") return [];
+  const cypherData = result.result;
+  const rows = cypherData?.results || cypherData || [];
+  if (!Array.isArray(rows)) return [];
+  const results = [];
+  for (const row of rows.slice(0, maxResults)) {
+    const content = Object.values(row).map(
+      (v) => typeof v === "string" ? v : JSON.stringify(v)
+    ).join(" | ");
+    results.push({
+      source: "cypher",
+      content: content.slice(0, 500),
+      score: 0.7,
+      metadata: row
+    });
+  }
+  return results;
+}
+async function dualChannelRAG(query, options) {
+  const t0 = Date.now();
+  const maxResults = options?.maxResults ?? 10;
+  const depth = options?.cypherDepth ?? 2;
+  const complexity = classifyQuery(query);
+  logger.info({ query: query.slice(0, 80), complexity }, "Hybrid RAG: routing query");
+  const channels = options?.forceChannels ?? getChannelsForComplexity(complexity);
+  const channelPromises = [];
+  const channelsUsed = [];
+  if (channels.includes("graphrag")) {
+    channelPromises.push(callGraphRAG(query, maxResults));
+    channelsUsed.push("graphrag");
+  }
+  if (channels.includes("srag")) {
+    channelPromises.push(callSRAG(query, maxResults));
+    channelsUsed.push("srag");
+  }
+  if (channels.includes("cypher")) {
+    channelPromises.push(callCypher(query, maxResults, depth));
+    channelsUsed.push("cypher");
+  }
+  if (complexity === "multi_hop") {
+    channelPromises.push(searchCommunitySummaries(query, 3));
+    channelsUsed.push("community");
+  }
+  const channelResults = await Promise.allSettled(channelPromises);
+  let allResults = [];
+  for (const cr of channelResults) {
+    if (cr.status === "fulfilled") {
+      allResults.push(...cr.value);
+    }
+  }
+  if (allResults.filter((r) => r.source === "graphrag").length === 0 && !channels.includes("srag")) {
+    logger.info("Hybrid RAG: graphrag returned empty, falling back to srag");
+    const sragResults = await callSRAG(query, maxResults);
+    allResults.push(...sragResults);
+    channelsUsed.push("srag (fallback)");
+  }
+  let pollutionFiltered = 0;
+  allResults = allResults.filter((r) => {
+    if (isPolluted(r.content)) {
+      pollutionFiltered++;
+      logger.debug({ source: r.source, preview: r.content.slice(0, 60) }, "Filtered polluted result");
+      return false;
+    }
+    return true;
+  });
+  allResults.sort((a, b) => {
+    if (a.source === "graphrag" && a.metadata?.type === "synthesis") return -1;
+    if (b.source === "graphrag" && b.metadata?.type === "synthesis") return 1;
+    return b.score - a.score;
+  });
+  const topResults = allResults.slice(0, maxResults);
+  const merged = topResults.map(
+    (r, i) => `[${r.source.toUpperCase()} #${i + 1}${r.score >= 0.8 ? " \u2605" : ""}] ${r.content}`
+  ).join("\n\n");
+  const graphragCount = topResults.filter((r) => r.source === "graphrag").length;
+  const sragCount = topResults.filter((r) => r.source === "srag").length;
+  const cypherCount = topResults.filter((r) => r.source === "cypher").length;
+  const durationMs = Date.now() - t0;
+  logger.info({
+    query: query.slice(0, 60),
+    complexity,
+    graphragCount,
+    sragCount,
+    cypherCount,
+    pollutionFiltered,
+    ms: durationMs
+  }, "Hybrid RAG: complete");
+  return {
+    query,
+    results: topResults,
+    srag_count: sragCount,
+    cypher_count: cypherCount,
+    graphrag_count: graphragCount,
+    merged_context: merged,
+    duration_ms: durationMs,
+    route_strategy: complexity,
+    channels_used: channelsUsed,
+    pollution_filtered: pollutionFiltered
+  };
+}
+function getChannelsForComplexity(complexity) {
+  switch (complexity) {
+    case "simple":
+      return ["graphrag", "srag"];
+    case "multi_hop":
+      return ["graphrag", "cypher"];
+    case "structured":
+      return ["cypher", "graphrag"];
+  }
+}
+function buildCypherQuery(query, depth) {
+  const stopWords = /* @__PURE__ */ new Set(["the", "and", "for", "with", "that", "this", "from", "are", "was", "how", "what", "which", "where", "when", "why", "can", "does", "will", "not", "all", "has", "have", "been", "our", "their", "its"]);
+  const keywords = query.toLowerCase().replace(/[^a-zA-Z0-9æøåÆØÅ\s]/g, "").split(/\s+/).filter((w) => w.length >= 3 && !stopWords.has(w)).slice(0, 5);
+  if (keywords.length === 0) {
+    return "MATCH (n:StrategicInsight) RETURN n.title AS title, n.domain AS domain LIMIT 5";
+  }
+  const kwConditions = keywords.map(
+    (kw) => `toLower(coalesce(n.title, n.name, n.description, '')) CONTAINS '${kw}'`
+  ).join(" OR ");
+  return `MATCH (n) WHERE (n:StrategicInsight OR n:Pattern OR n:Lesson OR n:Knowledge OR n:Memory OR n:TDCDocument)
+AND (${kwConditions})
+WITH n, labels(n)[0] AS label
+OPTIONAL MATCH (n)-[r]-(m)
+RETURN label,
+       coalesce(n.title, n.name, n.filename) AS title,
+       substring(coalesce(n.description, n.content, n.value, ''), 0, 300) AS content,
+       type(r) AS rel,
+       labels(m)[0] AS connected_to
+LIMIT 15`;
+}
+var init_dual_rag = __esm({
+  "src/dual-rag.ts"() {
+    "use strict";
+    init_mcp_caller();
+    init_logger();
+    init_write_gate();
+    init_hierarchical_intelligence();
+  }
+});
+
+// src/routing-engine.ts
+import { v4 as uuid3 } from "uuid";
 function roundScore(value) {
   return Math.round(value * 1e3) / 1e3;
 }
@@ -1325,7 +1375,7 @@ function inferCapabilityFromMessage(message) {
 function buildIntent(capability, routeScope, operatorVisible) {
   const meta = CAPABILITY_META[capability];
   return {
-    intent_id: `intent-${uuid2().slice(0, 8)}`,
+    intent_id: `intent-${uuid3().slice(0, 8)}`,
     capability,
     task_domain: meta.taskDomain === "routing" ? "intake" : meta.taskDomain,
     flow_ref: meta.flowRef,
@@ -1418,13 +1468,13 @@ function resolveRoutingDecision(input) {
     fallbackAgents.map((agentId) => buildTrustProfile(agentId, capability, recentExecutions))
   );
   const selectedProfile = trustProfiles[0];
-  const workflowId = input.workflowId ?? `workflow-${uuid2().slice(0, 8)}`;
+  const workflowId = input.workflowId ?? `workflow-${uuid3().slice(0, 8)}`;
   const evidenceRefs = [
     ...summarizeEvidence(selectedProfile.agent_id, recentExecutions).evidenceRefs,
     `scorecard:LIN-261:${intent.capability}`
   ];
   const decision = {
-    decision_id: `route-${uuid2().slice(0, 8)}`,
+    decision_id: `route-${uuid3().slice(0, 8)}`,
     intent,
     selected_agent_id: selectedProfile.agent_id,
     selected_capability: capability,
@@ -1515,7 +1565,7 @@ var init_routing_engine = __esm({
 });
 
 // src/chain-engine.ts
-import { v4 as uuid3 } from "uuid";
+import { v4 as uuid4 } from "uuid";
 function persistExecution(exec) {
   executions.set(exec.execution_id, exec);
   const redis2 = getRedis();
@@ -1533,7 +1583,7 @@ function listExecutions() {
   return Array.from(executions.values()).sort((a, b) => b.started_at.localeCompare(a.started_at)).slice(0, 50);
 }
 async function executeStep(step, previousOutput) {
-  const stepId = step.id ?? uuid3().slice(0, 8);
+  const stepId = step.id ?? uuid4().slice(0, 8);
   const t0 = Date.now();
   const prevStr = typeof previousOutput === "string" ? previousOutput : JSON.stringify(previousOutput ?? "");
   try {
@@ -1558,7 +1608,7 @@ async function executeStep(step, previousOutput) {
       const result = await callMcpTool({
         toolName: step.tool_name,
         args,
-        callId: uuid3(),
+        callId: uuid4(),
         timeoutMs: step.timeout_ms ?? 3e4
       });
       if (result.status !== "success") {
@@ -1692,7 +1742,7 @@ async function loadFunnelState(executionId) {
   }
 }
 async function runFunnel(steps, entryStage = "signal", preloadedContext, executionId) {
-  const execId = executionId ?? uuid3();
+  const execId = executionId ?? uuid4();
   const entryIndex = FUNNEL_STAGES.indexOf(entryStage);
   let state = await loadFunnelState(execId);
   if (!state) {
@@ -1799,8 +1849,8 @@ async function resolveAutoSteps(def) {
   return { steps: resolvedSteps, routingDecisions, workflowEnvelope };
 }
 async function executeChain(def) {
-  const executionId = uuid3();
-  const chainId = def.chain_id ?? uuid3().slice(0, 12);
+  const executionId = uuid4();
+  const chainId = def.chain_id ?? uuid4().slice(0, 12);
   const t0 = Date.now();
   const execution = {
     execution_id: executionId,
@@ -1921,7 +1971,7 @@ __export(similarity_engine_exports, {
   findSimilarClients: () => findSimilarClients,
   getClientDetails: () => getClientDetails
 });
-import { v4 as uuid5 } from "uuid";
+import { v4 as uuid6 } from "uuid";
 async function findSimilarClients(req) {
   const t0 = Date.now();
   const maxResults = Math.min(Math.max(req.max_results ?? 5, 1), 20);
@@ -1970,7 +2020,7 @@ RETURN n.id AS id, labels(n) AS labels, coalesce(n.name, n.title) AS name
 LIMIT 1`,
         params: { q: query }
       },
-      callId: uuid5(),
+      callId: uuid6(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -2019,7 +2069,7 @@ RETURN other.id AS client_id,
     const result = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params: { sourceId: nodeId, relTypes } },
-      callId: uuid5(),
+      callId: uuid6(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return [];
@@ -2065,7 +2115,7 @@ async function computeSemanticSimilarity(query, maxResults) {
     const result = await callMcpTool({
       toolName: "srag.query",
       args: { query },
-      callId: uuid5(),
+      callId: uuid6(),
       timeoutMs: 2e4
     });
     if (result.status !== "success") return [];
@@ -2124,7 +2174,7 @@ RETURN n AS client,
        collect(DISTINCT {rel: type(r), target: coalesce(related.name, related.title), target_type: labels(related)[0]}) AS relationships`,
         params: { id: clientId }
       },
-      callId: uuid5(),
+      callId: uuid6(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -2163,7 +2213,7 @@ __export(deliverable_engine_exports, {
   getDeliverable: () => getDeliverable,
   listDeliverables: () => listDeliverables
 });
-import { v4 as uuid6 } from "uuid";
+import { v4 as uuid7 } from "uuid";
 async function persist(d) {
   deliverableCache.set(d.$id, d);
   if (deliverableCache.size > CACHE_MAX_SIZE) {
@@ -2215,7 +2265,7 @@ async function generateDeliverable(req) {
   }
   activeGenerations++;
   const t0 = Date.now();
-  const deliverableId = `widgetdc:deliverable:${uuid6()}`;
+  const deliverableId = `widgetdc:deliverable:${uuid7()}`;
   const format = req.format ?? "markdown";
   const maxSections = Math.min(Math.max(req.max_sections ?? 5, 2), 8);
   const deliverable = {
@@ -2466,7 +2516,7 @@ async function renderPDF(deliverable) {
         content: deliverable.markdown,
         template: deliverable.type
       },
-      callId: uuid6(),
+      callId: uuid7(),
       timeoutMs: 45e3
     });
     if (result.status === "success" && result.result) {
@@ -2669,7 +2719,7 @@ __export(osint_scanner_exports, {
   getOsintStatus: () => getOsintStatus,
   runOsintScan: () => runOsintScan
 });
-import { v4 as uuid7 } from "uuid";
+import { v4 as uuid8 } from "uuid";
 async function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -2694,7 +2744,7 @@ async function checkToolAvailability() {
     const result = await callMcpTool({
       toolName: "the_snout.domain_intel",
       args: { domain: "borger.dk", type: "basic" },
-      callId: uuid7(),
+      callId: uuid8(),
       timeoutMs: 1e4
     });
     return result.status === "success";
@@ -2711,7 +2761,7 @@ async function scanCTForDomain(domain, toolsAvailable) {
       const result = await callMcpTool({
         toolName: "the_snout.ct_transparency",
         args: { domain },
-        callId: uuid7(),
+        callId: uuid8(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (result.status === "success" && result.result) {
@@ -2726,7 +2776,7 @@ async function scanCTForDomain(domain, toolsAvailable) {
       const fallbackResult = await callMcpTool({
         toolName: "the_snout.domain_intel",
         args: { domain, type: "ct" },
-        callId: uuid7(),
+        callId: uuid8(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (fallbackResult.status === "success" && fallbackResult.result) {
@@ -2771,7 +2821,7 @@ async function scanDMARCForDomain(domain, toolsAvailable) {
       const result = await callMcpTool({
         toolName: "the_snout.domain_intel",
         args: { domain, type: "dmarc" },
-        callId: uuid7(),
+        callId: uuid8(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (result.status === "success" && result.result) {
@@ -2850,7 +2900,7 @@ async function ingestCTResults(ctResults) {
             },
             _force: true
           },
-          callId: uuid7(),
+          callId: uuid8(),
           timeoutMs: 15e3
         });
         if (result.status === "success") {
@@ -2909,7 +2959,7 @@ async function ingestDMARCResults(dmarcResults) {
             },
             _force: true
           },
-          callId: uuid7(),
+          callId: uuid8(),
           timeoutMs: 15e3
         });
         if (result.status === "success") {
@@ -2944,7 +2994,7 @@ async function persistScanResult(result) {
   }
 }
 async function runOsintScan(options) {
-  const scanId = uuid7();
+  const scanId = uuid8();
   const startedAt = (/* @__PURE__ */ new Date()).toISOString();
   const t0 = Date.now();
   const domains = options?.domains ?? [...DK_PUBLIC_DOMAINS];
@@ -3089,7 +3139,7 @@ __export(evolution_loop_exports, {
   getEvolutionStatus: () => getEvolutionStatus,
   runEvolutionLoop: () => runEvolutionLoop
 });
-import { v4 as uuid8 } from "uuid";
+import { v4 as uuid9 } from "uuid";
 async function persistCycle(cycle) {
   const redis2 = getRedis();
   if (!redis2) return;
@@ -3138,7 +3188,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (n) RETURN labels(n)[0] AS label, count(*) AS count ORDER BY count DESC LIMIT 15"
       },
-      callId: uuid8(),
+      callId: uuid9(),
       timeoutMs: 1e4
     }),
     callMcpTool({
@@ -3146,7 +3196,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (f:FailureMemory) WHERE f.last_seen > datetime() - duration('P7D') RETURN f.category AS category, f.pattern AS pattern, f.hit_count AS hits ORDER BY f.hit_count DESC LIMIT 10"
       },
-      callId: uuid8(),
+      callId: uuid9(),
       timeoutMs: 1e4
     }),
     callMcpTool({
@@ -3154,7 +3204,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (l:Lesson) WHERE l.created_at > datetime() - duration('P7D') RETURN l.agent_id AS agent, l.lesson AS lesson, l.context AS context ORDER BY l.created_at DESC LIMIT 10"
       },
-      callId: uuid8(),
+      callId: uuid9(),
       timeoutMs: 1e4
     })
   ]);
@@ -3210,7 +3260,7 @@ async function stageOrient(observeResult, focusArea) {
         RETURN labels(b)[0] AS label, coalesce(b.name, b.title, b.id) AS name, b.status AS status, b.quality_score AS quality
         ORDER BY coalesce(b.quality_score, 0) ASC LIMIT 10`
     },
-    callId: uuid8(),
+    callId: uuid9(),
     timeoutMs: 1e4
   });
   const blocks = blocksResult.status === "success" ? Array.isArray(blocksResult.result) ? blocksResult.result : blocksResult.result?.results ?? [] : [];
@@ -3332,7 +3382,7 @@ async function stageLearn(cycleId, observeResult, orientResult, actResult) {
           estimated_impact: orientResult.estimated_impact
         }
       },
-      callId: uuid8(),
+      callId: uuid9(),
       timeoutMs: 15e3
     });
     if (writeResult.status === "success") {
@@ -3362,7 +3412,7 @@ async function stageLearn(cycleId, observeResult, orientResult, actResult) {
             cycle_id: cycleId
           }
         },
-        callId: uuid8(),
+        callId: uuid9(),
         timeoutMs: 1e4
       });
       if (lessonResult.status === "success") {
@@ -3379,7 +3429,7 @@ async function runEvolutionLoop(opts) {
     throw new Error("Evolution loop already running. Only 1 concurrent cycle allowed.");
   }
   isRunning = true;
-  const cycleId = uuid8().slice(0, 12);
+  const cycleId = uuid9().slice(0, 12);
   const startedAt = (/* @__PURE__ */ new Date()).toISOString();
   const t0 = Date.now();
   const focusArea = opts?.focus_area;
@@ -12673,7 +12723,7 @@ init_chain_engine();
 // src/verification-gate.ts
 init_logger();
 init_mcp_caller();
-import { v4 as uuid4 } from "uuid";
+import { v4 as uuid5 } from "uuid";
 async function verifyChainOutput(chainOutput, config2) {
   const maxRetries = config2.max_retries ?? 3;
   const start = Date.now();
@@ -12719,7 +12769,7 @@ async function runChecksParallel(checks, chainOutput) {
         const result = await callMcpTool({
           toolName: check.tool_name,
           args,
-          callId: `verify-${uuid4().substring(0, 8)}`,
+          callId: `verify-${uuid5().substring(0, 8)}`,
           timeoutMs: 15e3
         });
         let passed = true;
@@ -12968,7 +13018,7 @@ async function runInvestigation(topic) {
 
 // src/tool-executor.ts
 init_logger();
-import { v4 as uuid9 } from "uuid";
+import { v4 as uuid10 } from "uuid";
 
 // src/tool-registry.ts
 import { z } from "zod";
@@ -13406,7 +13456,7 @@ function buildToolFallback(toolName, error) {
   }
 }
 async function executeToolUnified(toolName, args, opts) {
-  const callId = opts?.call_id ?? uuid9();
+  const callId = opts?.call_id ?? uuid10();
   const t0 = Date.now();
   try {
     const rawResult = await executeToolByName(toolName, args);
@@ -13472,7 +13522,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher, params: args.params ?? {} },
-        callId: uuid9(),
+        callId: uuid10(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
@@ -13493,7 +13543,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher },
-        callId: uuid9(),
+        callId: uuid10(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Task query failed: ${result.error_message}`;
@@ -13505,7 +13555,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: args.tool_name,
         args: args.payload ?? {},
-        callId: uuid9(),
+        callId: uuid10(),
         timeoutMs: 3e4
       });
       if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
@@ -13513,8 +13563,8 @@ ${result.merged_context}`;
     }
     case "get_platform_health": {
       const [backendHealth, graphHealth] = await Promise.allSettled([
-        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid9(), timeoutMs: 1e4 }),
-        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid9(), timeoutMs: 1e4 })
+        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid10(), timeoutMs: 1e4 }),
+        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid10(), timeoutMs: 1e4 })
       ]);
       const parts = [];
       if (backendHealth.status === "fulfilled" && backendHealth.value.status === "success") {
@@ -13530,7 +13580,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: args.query },
-        callId: uuid9(),
+        callId: uuid10(),
         timeoutMs: 2e4
       });
       if (result.status !== "success") return `Document search failed: ${result.error_message}`;
@@ -13548,7 +13598,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issues",
         args: payload,
-        callId: uuid9(),
+        callId: uuid10(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
@@ -13564,7 +13614,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issue_get",
         args: { identifier },
-        callId: uuid9(),
+        callId: uuid10(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
@@ -15128,12 +15178,12 @@ import cron from "node-cron";
 // src/graph-self-correct.ts
 init_mcp_caller();
 init_logger();
-import { v4 as uuid10 } from "uuid";
+import { v4 as uuid11 } from "uuid";
 async function graphRead(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid10(),
+    callId: uuid11(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -15144,7 +15194,7 @@ async function graphWrite(cypher, params) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { parameters: params } : {} },
-    callId: uuid10(),
+    callId: uuid11(),
     timeoutMs: 15e3
   });
   return result.status === "success";
@@ -15357,7 +15407,7 @@ init_redis();
 init_mcp_caller();
 init_logger();
 init_sse();
-import { v4 as uuid11 } from "uuid";
+import { v4 as uuid12 } from "uuid";
 function categorizeFailure(error) {
   const lower = error.toLowerCase();
   if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) return "timeout";
@@ -15390,7 +15440,7 @@ async function harvestFailures(windowHours = 24) {
           const failedSteps = exec.results?.filter((r) => r.status === "error") ?? [];
           const errorMsg = exec.error ?? failedSteps.map((s) => String(s.output)).join("; ") ?? "unknown";
           events.push({
-            $id: `failure-event:${uuid11()}`,
+            $id: `failure-event:${uuid12()}`,
             execution_id: execId,
             chain_name: exec.name,
             category: categorizeFailure(errorMsg),
@@ -15436,7 +15486,7 @@ async function persistToGraph(events) {
             timestamp: evt.timestamp
           }
         },
-        callId: uuid11(),
+        callId: uuid12(),
         timeoutMs: 1e4
       });
       persisted++;
@@ -15456,7 +15506,7 @@ async function persistToGraph(events) {
           `,
           params: {}
         },
-        callId: uuid11(),
+        callId: uuid12(),
         timeoutMs: 1e4
       });
       await callMcpTool({
@@ -15469,7 +15519,7 @@ async function persistToGraph(events) {
           `,
           params: {}
         },
-        callId: uuid11(),
+        callId: uuid12(),
         timeoutMs: 1e4
       });
     } catch {
@@ -15527,7 +15577,7 @@ async function runFailureHarvest(windowHours = 24) {
 // src/competitive-crawler.ts
 init_redis();
 init_mcp_caller();
-import { v4 as uuid12 } from "uuid";
+import { v4 as uuid13 } from "uuid";
 init_logger();
 init_sse();
 var COMPETITOR_TARGETS = [
@@ -15629,7 +15679,7 @@ async function extractCapabilities(target) {
         const cap = line.replace(/^[\s\-\*]+/, "").trim();
         if (cap.length > 10 && cap.length < 200) {
           capabilities.push({
-            $id: `capability:${target.slug}:${uuid12().slice(0, 8)}`,
+            $id: `capability:${target.slug}:${uuid13().slice(0, 8)}`,
             competitor: target.name,
             capability: cap,
             category: categorizeCapability(cap),
@@ -15679,7 +15729,7 @@ async function persistCapabilities(capabilities) {
             extracted_at: cap.extracted_at
           }
         },
-        callId: uuid12(),
+        callId: uuid13(),
         timeoutMs: 1e4
       });
       persisted++;
@@ -15703,7 +15753,7 @@ async function analyzeGaps(capabilities) {
     const result = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: "MATCH (t:Tool) RETURN t.name AS name LIMIT 200" },
-      callId: uuid12(),
+      callId: uuid13(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -15772,7 +15822,7 @@ init_redis();
 init_logger();
 init_mcp_caller();
 import { Router as Router6 } from "express";
-import { v4 as uuid13 } from "uuid";
+import { v4 as uuid14 } from "uuid";
 var adoptionRouter = Router6();
 var REDIS_KEY3 = "orchestrator:adoption-metrics";
 var REDIS_TRENDS_KEY = "orchestrator:adoption-trends";
@@ -15860,7 +15910,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (c:Conversation) WHERE c.createdAt > datetime() - duration('P1D') RETURN count(c) AS count"
       },
-      callId: uuid13(),
+      callId: uuid14(),
       timeoutMs: 1e4
     }),
     // Count artifacts from last 24h
@@ -15869,7 +15919,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (a:AnalysisArtifact) WHERE a.createdAt > datetime() - duration('P1D') RETURN count(a) AS count"
       },
-      callId: uuid13(),
+      callId: uuid14(),
       timeoutMs: 1e4
     }),
     // Count tool calls from audit trail
@@ -15878,7 +15928,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (e:AuditEvent) WHERE e.timestamp > datetime() - duration('P1D') AND e.action = 'tool_call' RETURN count(e) AS count"
       },
-      callId: uuid13(),
+      callId: uuid14(),
       timeoutMs: 1e4
     })
   ]);
@@ -15983,7 +16033,7 @@ SET m.conversations_24h = $conversations,
           featuresPct: snapshot.features_pct
         }
       },
-      callId: uuid13(),
+      callId: uuid14(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -16030,7 +16080,7 @@ init_logger();
 init_mcp_caller();
 init_sse();
 import { Router as Router7 } from "express";
-import { v4 as uuid14 } from "uuid";
+import { v4 as uuid15 } from "uuid";
 var looseEndsRouter = Router7();
 var REDIS_KEY4 = "orchestrator:loose-ends:latest";
 var REDIS_HISTORY = "orchestrator:loose-ends:history";
@@ -16044,7 +16094,7 @@ AND NOT (b)<-[:COMPOSED_OF]-(:Assembly)
 RETURN b.id AS id, b.name AS name, b.domain AS domain, labels(b)[0] AS type
 LIMIT 25`,
     buildFinding: (records) => records.map((r) => ({
-      id: `orphan-${r.id ?? uuid14().slice(0, 8)}`,
+      id: `orphan-${r.id ?? uuid15().slice(0, 8)}`,
       severity: "warning",
       category: "orphan_block",
       title: `Orphan block: ${r.name ?? r.id}`,
@@ -16062,7 +16112,7 @@ AND NOT (a)<-[:BASED_ON]-(:Decision)
 RETURN a.id AS id, a.name AS name, a.composite AS score
 LIMIT 15`,
     buildFinding: (records) => records.map((r) => ({
-      id: `dangling-asm-${r.id ?? uuid14().slice(0, 8)}`,
+      id: `dangling-asm-${r.id ?? uuid15().slice(0, 8)}`,
       severity: "warning",
       category: "dangling_assembly",
       title: `Accepted assembly without decision: ${r.name ?? r.id}`,
@@ -16080,7 +16130,7 @@ AND NOT (d)-[:DERIVES_FROM]->()
 RETURN d.id AS id, d.title AS title, d.certified_at AS certified_at
 LIMIT 10`,
     buildFinding: (records) => records.map((r) => ({
-      id: `no-lineage-${r.id ?? uuid14().slice(0, 8)}`,
+      id: `no-lineage-${r.id ?? uuid15().slice(0, 8)}`,
       severity: "critical",
       category: "missing_lineage",
       title: `Decision without lineage: ${r.title ?? r.id}`,
@@ -16098,7 +16148,7 @@ AND NOT (n)-[]-()
 RETURN n.id AS id, labels(n)[0] AS type, n.domain AS domain, n.insight AS title
 LIMIT 20`,
     buildFinding: (records) => records.map((r) => ({
-      id: `disconnected-${r.id ?? uuid14().slice(0, 8)}`,
+      id: `disconnected-${r.id ?? uuid15().slice(0, 8)}`,
       severity: "info",
       category: "disconnected_node",
       title: `Disconnected ${r.type}: ${(r.title ?? r.id ?? "").toString().slice(0, 60)}`,
@@ -16116,7 +16166,7 @@ AND d.created_at < datetime() - duration('P7D')
 RETURN d.id AS id, d.title AS title, d.created_at AS created_at
 LIMIT 10`,
     buildFinding: (records) => records.map((r) => ({
-      id: `stale-decision-${r.id ?? uuid14().slice(0, 8)}`,
+      id: `stale-decision-${r.id ?? uuid15().slice(0, 8)}`,
       severity: "warning",
       category: "unresolved_decision",
       title: `Stale draft decision: ${r.title ?? r.id}`,
@@ -16127,7 +16177,7 @@ LIMIT 10`,
   }
 ];
 async function runLooseEndScan() {
-  const scanId = uuid14();
+  const scanId = uuid15();
   const t0 = Date.now();
   const findings = [];
   logger.info({ scan_id: scanId }, "Loose-end scan started");
@@ -16137,7 +16187,7 @@ async function runLooseEndScan() {
         const result = await callMcpTool({
           toolName: "graph.read_cypher",
           args: { query: dq.cypher },
-          callId: uuid14(),
+          callId: uuid15(),
           timeoutMs: 15e3
         });
         if (result.status !== "success") return [];
@@ -16198,7 +16248,7 @@ SET s.scanned_at = datetime(), s.duration_ms = $duration,
           total: summary.total
         }
       },
-      callId: uuid14(),
+      callId: uuid15(),
       timeoutMs: 1e4
     });
   } catch {
@@ -16273,7 +16323,7 @@ looseEndsRouter.get("/history", async (req, res) => {
 init_mcp_caller();
 init_logger();
 init_sse();
-import { v4 as uuid15 } from "uuid";
+import { v4 as uuid16 } from "uuid";
 var THRESHOLDS = {
   orphan_ratio: { max: 0.05 },
   avg_rels_per_node: { min: 2, max: 50 },
@@ -16292,7 +16342,7 @@ async function queryMetric(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid15(),
+    callId: uuid16(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -16403,7 +16453,7 @@ SET s.orphan_ratio = $orphan_ratio,
         _force: true
         // Infrastructure write — bypass validation
       },
-      callId: uuid15(),
+      callId: uuid16(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -16416,7 +16466,7 @@ SET s.orphan_ratio = $orphan_ratio,
         query: `MATCH (s:GraphHealthSnapshot) WHERE s.timestamp < datetime() - duration('P90D') DETACH DELETE s`,
         _force: true
       },
-      callId: uuid15(),
+      callId: uuid16(),
       timeoutMs: 1e4
     });
   } catch {
@@ -18284,7 +18334,7 @@ init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router15 } from "express";
 import { randomUUID as randomUUID2 } from "crypto";
-import { v4 as uuid16 } from "uuid";
+import { v4 as uuid17 } from "uuid";
 var notebookRouter = Router15();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
@@ -18324,7 +18374,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query, params: {} },
-        callId: uuid16(),
+        callId: uuid17(),
         timeoutMs: 15e3
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -18332,7 +18382,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "kg_rag.query",
         args: { question: query, max_evidence: 10 },
-        callId: uuid16(),
+        callId: uuid17(),
         timeoutMs: 2e4
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -19008,13 +19058,13 @@ ${compressed}`,
 init_chain_engine();
 init_cognitive_proxy();
 init_logger();
-import { v4 as uuid17 } from "uuid";
+import { v4 as uuid18 } from "uuid";
 var monitorRouter = Router17();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid17(),
+    callId: uuid18(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];
@@ -19231,7 +19281,7 @@ init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router18 } from "express";
-import { v4 as uuid18 } from "uuid";
+import { v4 as uuid19 } from "uuid";
 var assemblyRouter = Router18();
 var REDIS_PREFIX3 = "orchestrator:assembly:";
 var REDIS_INDEX2 = "orchestrator:assemblies:index";
@@ -19295,7 +19345,7 @@ ORDER BY b.domain, b.name LIMIT 50`;
     const graphResult = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 15e3
     });
     if (graphResult.status === "success" && graphResult.result) {
@@ -19361,7 +19411,7 @@ Reply as JSON:
   const assemblies = [];
   const now = (/* @__PURE__ */ new Date()).toISOString();
   for (const candidate of analysis.candidates.slice(0, maxCandidates)) {
-    const assemblyId = `widgetdc:assembly:${uuid18()}`;
+    const assemblyId = `widgetdc:assembly:${uuid19()}`;
     const selectedBlocks = blocks.filter((b) => candidate.block_ids.includes(b.block_id));
     const conflictCount = candidate.conflicts?.length ?? 0;
     const coherence = Math.max(0, Math.min(1, candidate.coherence ?? 0.5));
@@ -19420,7 +19470,7 @@ MERGE (a)-[:COMPOSED_OF]->(b)`,
             blockIds: selectedBlocks.map((b) => b.block_id)
           }
         },
-        callId: uuid18(),
+        callId: uuid19(),
         timeoutMs: 1e4
       });
     } catch (err) {
@@ -19510,7 +19560,7 @@ assemblyRouter.put("/:id", async (req, res) => {
         query: "MATCH (a:Assembly {id: $id}) SET a.status = $status, a.updated_at = datetime()",
         params: { id: assembly.$id, status: assembly.status }
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 5e3
     });
   } catch {
@@ -19525,7 +19575,7 @@ init_mcp_caller();
 init_cognitive_proxy();
 init_sse();
 import { Router as Router19 } from "express";
-import { v4 as uuid19 } from "uuid";
+import { v4 as uuid20 } from "uuid";
 var decisionsRouter = Router19();
 var REDIS_PREFIX4 = "orchestrator:decision:";
 var REDIS_INDEX3 = "orchestrator:decisions:index";
@@ -19578,7 +19628,7 @@ RETURN a.id AS asm_id, a.name AS asm_name, a.created_at AS asm_ts,
 ORDER BY b.name`,
         params: { assemblyId }
       },
-      callId: uuid19(),
+      callId: uuid20(),
       timeoutMs: 15e3
     });
     if (result.status === "success") {
@@ -19637,7 +19687,7 @@ decisionsRouter.post("/certify", async (req, res) => {
   const assemblyId = String(body.assembly_id);
   const title = String(body.title);
   const now = (/* @__PURE__ */ new Date()).toISOString();
-  const decisionId = `widgetdc:decision:${uuid19()}`;
+  const decisionId = `widgetdc:decision:${uuid20()}`;
   const lineageChain = await buildLineageChain(assemblyId);
   let rationale = String(body.rationale ?? "");
   let summary = String(body.summary ?? "");
@@ -19740,7 +19790,7 @@ CREATE (d)-[:CERTIFIED_BY_EVIDENCE]->(e)`,
           // Cap for query size
         }
       },
-      callId: uuid19(),
+      callId: uuid20(),
       timeoutMs: 15e3
     });
   } catch (err) {
@@ -19963,9 +20013,9 @@ async function listPlans() {
 // src/harvest-pipeline.ts
 init_logger();
 init_mcp_caller();
-import { v4 as uuid20 } from "uuid";
+import { v4 as uuid21 } from "uuid";
 async function extract(domain) {
-  const callId = `harvest-extract-${uuid20().substring(0, 8)}`;
+  const callId = `harvest-extract-${uuid21().substring(0, 8)}`;
   try {
     const result = await callMcpTool({
       toolName: "srag.query",
@@ -19991,7 +20041,7 @@ function generalize(items, domain) {
     if (content.length > 2e3 || name.toLowerCase().includes("framework")) tier = "framework";
     else if (content.length > 500 || name.toLowerCase().includes("template")) tier = "template";
     return {
-      id: `harvest-${uuid20().substring(0, 12)}`,
+      id: `harvest-${uuid21().substring(0, 12)}`,
       name,
       tier,
       description: content.substring(0, 300),
@@ -20008,7 +20058,7 @@ function generalize(items, domain) {
 }
 async function store(components) {
   if (components.length === 0) return 0;
-  const callId = `harvest-store-${uuid20().substring(0, 8)}`;
+  const callId = `harvest-store-${uuid21().substring(0, 8)}`;
   const labelMap = {
     framework: "Framework",
     template: "Template",
@@ -20060,7 +20110,7 @@ async function verify(components) {
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: `${comp.tier} for ${comp.industries[0]}: ${comp.name}` },
-        callId: `harvest-verify-${uuid20().substring(0, 8)}`,
+        callId: `harvest-verify-${uuid21().substring(0, 8)}`,
         timeoutMs: 15e3
       });
       const resultStr = JSON.stringify(result).toLowerCase();
@@ -20113,7 +20163,7 @@ async function runFullHarvest() {
 import { Router as Router21 } from "express";
 init_logger();
 init_config();
-import { v4 as uuid21 } from "uuid";
+import { v4 as uuid22 } from "uuid";
 var MAX_TOOL_ROUNDS = 2;
 var MAX_TOOL_ROUNDS_ASSISTANT = 4;
 var TOOL_CATEGORIES = [
@@ -20323,7 +20373,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     return;
   }
   const { model, messages, stream, temperature, max_tokens } = req.body;
-  const requestId = `chatcmpl-${uuid21().substring(0, 12)}`;
+  const requestId = `chatcmpl-${uuid22().substring(0, 12)}`;
   const assistant = ASSISTANT_MAP.get(model);
   const resolvedModel = assistant ? assistant.baseModel : model;
   const mapping = MODEL_TO_PROVIDER[resolvedModel] || MODEL_TO_PROVIDER["gemini-flash"];
@@ -21285,7 +21335,7 @@ import { Router as Router24 } from "express";
 init_mcp_caller();
 init_config();
 init_logger();
-import { v4 as uuid22 } from "uuid";
+import { v4 as uuid23 } from "uuid";
 var mcpGatewayRouter = Router24();
 var backendToolsCache = [];
 var backendToolsCacheTime = 0;
@@ -21367,7 +21417,7 @@ async function handleToolsCall(id, params) {
   if (isOrchestratorTool) {
     try {
       const results = await executeToolCalls([{
-        id: uuid22(),
+        id: uuid23(),
         function: { name: toolName, arguments: JSON.stringify(args) }
       }]);
       const result = results[0];
@@ -21395,7 +21445,7 @@ async function handleToolsCall(id, params) {
     const mcpResult = await callMcpTool({
       toolName: backendName,
       args,
-      callId: uuid22(),
+      callId: uuid23(),
       timeoutMs: 3e4
     });
     if (mcpResult.status !== "success") {
@@ -21500,7 +21550,7 @@ mcpGatewayRouter.delete("/", (_req, res) => {
 // src/routes/tool-gateway.ts
 import { Router as Router25 } from "express";
 init_logger();
-import { v4 as uuid23 } from "uuid";
+import { v4 as uuid24 } from "uuid";
 var toolGatewayRouter = Router25();
 toolGatewayRouter.post("/:name", async (req, res) => {
   const { name } = req.params;
@@ -21517,7 +21567,7 @@ toolGatewayRouter.post("/:name", async (req, res) => {
     });
     return;
   }
-  const callId = req.body?.call_id ?? uuid23();
+  const callId = req.body?.call_id ?? uuid24();
   const args = req.body ?? {};
   logger.info({ tool: name, call_id: callId }, "REST tool gateway call");
   const result = await executeToolUnified(name, args, {
@@ -22080,12 +22130,12 @@ import { Router as Router29 } from "express";
 init_mcp_caller();
 init_logger();
 init_sse();
-import { v4 as uuid24 } from "uuid";
+import { v4 as uuid25 } from "uuid";
 async function graphRead3(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid24(),
+    callId: uuid25(),
     timeoutMs: 3e4
   });
   if (result.status !== "success") return [];
@@ -22096,7 +22146,7 @@ async function graphWrite2(cypher, params) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {} },
-    callId: uuid24(),
+    callId: uuid25(),
     timeoutMs: 6e4
   });
   return result.status === "success";
@@ -22579,7 +22629,7 @@ init_manifesto_governance();
 init_mcp_caller();
 init_logger();
 import { Router as Router32 } from "express";
-import { v4 as uuid25 } from "uuid";
+import { v4 as uuid26 } from "uuid";
 var governanceRouter = Router32();
 governanceRouter.get("/matrix", (_req, res) => {
   res.json({
@@ -22637,7 +22687,7 @@ RETURN p.name as name, p.status as status`,
               gap_remediation: p.gap_remediation ?? ""
             }
           },
-          callId: uuid25(),
+          callId: uuid26(),
           timeoutMs: 15e3
         });
         results.push({
