@@ -256,7 +256,15 @@ JSON format:
       timeoutMs: 30000,
     })
 
-    logger.info({ mcpStatus: llmResult.status, hasResult: !!llmResult.result, resultType: typeof llmResult.result }, 'Entity extraction: Mercury response received')
+    const rawResult = llmResult.result
+    logger.info({
+      mcpStatus: llmResult.status,
+      resultType: typeof rawResult,
+      resultKeys: rawResult && typeof rawResult === 'object' ? Object.keys(rawResult as object) : null,
+      innerSuccess: (rawResult as any)?.success,
+      hasContent: !!(rawResult as any)?.content,
+      contentPreview: String((rawResult as any)?.content ?? '').slice(0, 100),
+    }, 'Entity extraction: Mercury response debug')
 
     if (llmResult.status !== 'success') {
       logger.warn({ error: llmResult.error_message }, 'Mercury entity extraction: MCP call failed')
