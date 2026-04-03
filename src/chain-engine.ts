@@ -622,6 +622,17 @@ export async function executeChain(def: ChainDefinition): Promise<ChainExecution
     ms: execution.duration_ms,
   }, 'Chain execution complete')
 
+  // F4: Mandatory compound hook — auto-enrich from chain output (flywheel)
+  if (execution.status === 'completed' && execution.final_output) {
+    try {
+      const { hookAutoEnrichment } = await import('./compound-hooks.js')
+      const outputStr = typeof execution.final_output === 'string'
+        ? execution.final_output
+        : JSON.stringify(execution.final_output).slice(0, 3000)
+      hookAutoEnrichment(outputStr, def.name)
+    } catch { /* non-blocking */ }
+  }
+
   // Broadcast completion
   broadcastMessage({
     from: 'Orchestrator',

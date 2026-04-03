@@ -478,6 +478,11 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
         maxResults: (args.max_results as number) ?? 10,
       })
       if (result.merged_context.length === 0) return 'No results found for this query.'
+      // F4: Auto-enrichment hook — extract new entities from RAG answer (non-blocking)
+      try {
+        const { hookAutoEnrichment } = await import('./compound-hooks.js')
+        hookAutoEnrichment(result.merged_context, args.query as string)
+      } catch { /* non-blocking */ }
       const header = `[${result.route_strategy}] ${result.graphrag_count} graphrag + ${result.srag_count} semantic + ${result.cypher_count} graph (${result.duration_ms}ms, channels: ${result.channels_used.join(',')}${result.pollution_filtered > 0 ? `, ${result.pollution_filtered} polluted filtered` : ''}):`
       return `${header}\n\n${result.merged_context}`
     }
@@ -731,6 +736,64 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
         return JSON.stringify(result, null, 2).slice(0, 800)
       } catch (err) {
         return `Verification failed: ${err}`
+      }
+    }
+
+    case 'ingest_document': {
+      const content = args.content as string
+      const filename = args.filename as string
+      if (!content || content.length < 20) return 'Error: content required (min 20 chars)'
+      if (!filename) return 'Error: filename required'
+      try {
+        const { ingestDocument } = await import('./document-intelligence.js')
+        const result = await ingestDocument({
+          content, filename,
+          domain: args.domain as string,
+          extract_entities: args.extract_entities !== false,
+        })
+        return `Ingested "${result.filename}": ${result.entities_extracted} entities, ${result.nodes_merged} nodes merged, ${result.tables_found} tables (${result.parsing_method}, ${result.duration_ms}ms)`
+      } catch (err) {
+        return `Document ingestion failed: ${err}`
+      }
+    }
+
+    case 'build_communities': {
+      try {
+        const { buildCommunitySummaries } = await import('./hierarchical-intelligence.js')
+        const result = await buildCommunitySummaries()
+        return `Communities built: ${result.communities_created} communities, ${result.summaries_generated} summaries, ${result.relationships_created} rels (${result.method}, ${result.duration_ms}ms)`
+      } catch (err) {
+        return `Community build failed: ${err}`
+      }
+    }
+
+    case 'adaptive_rag_dashboard': {
+      try {
+        const { getAdaptiveRAGDashboard } = await import('./adaptive-rag.js')
+        const d = await getAdaptiveRAGDashboard()
+        const lines = [
+          `Compound Metric: ${d.compound_metric.score} (accuracy=${d.compound_metric.accuracy}, quality=${d.compound_metric.quality}, coverage=${d.compound_metric.coverage})`,
+          `Training samples: ${d.outcome_count}`,
+          `Weights updated: ${d.weights.updated_at}`,
+          ...d.stats.map(s => `  ${s.strategy}: ${s.total_queries} queries, confidence=${s.avg_confidence.toFixed(2)}, zero-result=${(s.zero_result_rate * 100).toFixed(0)}%`),
+        ]
+        return lines.join('\n')
+      } catch (err) {
+        return `Adaptive RAG dashboard failed: ${err}`
+      }
+    }
+
+    case 'graph_hygiene_run': {
+      try {
+        const { runGraphHygiene } = await import('./graph-hygiene-cron.js')
+        const result = await runGraphHygiene()
+        const m = result.metrics
+        const alertStr = result.alerts.length > 0
+          ? `\nALERTS: ${result.alerts.map(a => a.message).join('; ')}`
+          : '\nNo alerts — all metrics within thresholds.'
+        return `Graph Health (${result.duration_ms}ms):\n  Orphan ratio: ${(m.orphan_ratio * 100).toFixed(1)}%\n  Avg rels/node: ${m.avg_rels_per_node.toFixed(1)}\n  Embedding coverage: ${(m.embedding_coverage * 100).toFixed(1)}%\n  Domains: ${m.domain_count}\n  Stale nodes: ${m.stale_node_count}\n  Pollution: ${m.pollution_count}${alertStr}`
+      } catch (err) {
+        return `Graph hygiene failed: ${err}`
       }
     }
 

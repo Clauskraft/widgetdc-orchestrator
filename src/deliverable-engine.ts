@@ -235,6 +235,13 @@ export async function generateDeliverable(req: DeliverableRequest): Promise<Deli
     deliverable.status = 'completed'
     deliverable.completed_at = new Date().toISOString()
 
+    // F4: Compound hook — write citations back to graph (flywheel)
+    try {
+      const { hookDeliverableToKnowledge } = await import('./compound-hooks.js')
+      const allCits = sections.flatMap(s => s.citations)
+      hookDeliverableToKnowledge(deliverableId, deliverable.title, allCits).catch(() => {})
+    } catch { /* non-blocking */ }
+
     logger.info({
       id: deliverableId,
       sections: sections.length,

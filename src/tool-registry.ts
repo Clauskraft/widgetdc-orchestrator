@@ -394,6 +394,49 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     timeoutMs: 300000,
     outputDescription: 'Evolution cycle results with observations, actions taken, and lessons learned',
   }),
+
+  // ─── v3.0 Adoption Sprint 1: Missing tools ────────────────────────────────
+
+  defineTool({
+    name: 'ingest_document',
+    namespace: 'knowledge',
+    description: 'Ingest a document into the knowledge graph. Parses content, extracts entities via LLM, MERGEs to Neo4j, and indexes for vector search. Supports markdown, text, and PDF (via Docling).',
+    input: z.object({
+      content: z.string().describe('Document content (markdown, text, or base64 PDF)'),
+      filename: z.string().describe('Source filename'),
+      domain: z.string().optional().describe('Target domain for classification'),
+      extract_entities: z.boolean().optional().describe('Extract and link entities (default: true)'),
+    }),
+    timeoutMs: 60000,
+    outputDescription: 'Ingestion result with entities extracted, nodes merged, and parsing method',
+  }),
+
+  defineTool({
+    name: 'build_communities',
+    namespace: 'graph',
+    description: 'Build hierarchical community summaries from the knowledge graph using Leiden community detection. Creates CommunitySummary nodes with LLM-generated summaries and MEMBER_OF relationships. Used for thematic retrieval.',
+    input: z.object({}),
+    timeoutMs: 120000,
+    outputDescription: 'Community build result with count, summaries generated, and method used',
+  }),
+
+  defineTool({
+    name: 'adaptive_rag_dashboard',
+    namespace: 'monitor',
+    description: 'Get the Adaptive RAG dashboard showing current routing weights, per-strategy performance stats, compound intelligence metric (accuracy × quality × coverage), and training sample count.',
+    input: z.object({}),
+    timeoutMs: 10000,
+    outputDescription: 'Adaptive RAG weights, strategy stats, and compound metric',
+  }),
+
+  defineTool({
+    name: 'graph_hygiene_run',
+    namespace: 'monitor',
+    description: 'Run graph health check: 6 metrics (orphan ratio, avg rels, embedding coverage, domain count, stale nodes, pollution). Stores GraphHealthSnapshot and alerts on anomalies.',
+    input: z.object({}),
+    timeoutMs: 30000,
+    outputDescription: 'Health metrics with alerts if thresholds are crossed',
+  }),
 ]
 
 // ─── Protocol Compilers ─────────────────────────────────────────────────────

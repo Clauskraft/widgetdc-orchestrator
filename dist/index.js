@@ -645,6 +645,91 @@ var init_agent_registry = __esm({
   }
 });
 
+// src/slack.ts
+function isSlackEnabled() {
+  return Boolean(config.backendUrl) && Boolean(config.backendApiKey);
+}
+async function postToSlack(payload) {
+  if (!isSlackEnabled()) return;
+  try {
+    const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${config.backendApiKey}`
+      },
+      body: JSON.stringify({
+        tool: "slack.channel.post",
+        payload
+      })
+    });
+    if (!res.ok) {
+      logger.warn({ status: res.status }, "Slack MCP post failed");
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Slack MCP post error");
+  }
+}
+function notifyAgentRegistered(agentId, displayName, namespaces) {
+  postToSlack({
+    text: `Agent *${displayName}* (\`${agentId}\`) registered
+Namespaces: ${namespaces.join(", ")}`,
+    level: "info",
+    title: `Agent Registered: ${displayName}`,
+    source: "orchestrator",
+    channel: "#ops-alerts"
+  });
+}
+function notifyToolCall(agentId, toolName, status, durationMs, errorMessage) {
+  const emoji = status === "success" ? ":white_check_mark:" : ":x:";
+  const level = status === "success" ? "info" : "error";
+  const errorLine = errorMessage ? `
+Error: \`${errorMessage.slice(0, 200)}\`` : "";
+  postToSlack({
+    text: `${emoji} \`${agentId}\` called \`${toolName}\` \u2192 *${status}* (${durationMs}ms)${errorLine}
+Orchestrator: \`${config.orchestratorId}\``,
+    level,
+    title: `Tool Call: ${toolName} \u2192 ${status}`,
+    source: "orchestrator",
+    channel: "#ops-alerts"
+  });
+}
+function notifyChatMessage(from, to, message) {
+  postToSlack({
+    text: `*${from}* \u2192 *${to}*
+${message.slice(0, 500)}`,
+    level: "info",
+    title: `Chat: ${from} \u2192 ${to}`,
+    source: "orchestrator",
+    channel: "#ops-alerts"
+  });
+}
+function notifyAdoptionDigest(digest) {
+  const trendEmoji2 = digest.trend === "up" ? ":chart_with_upwards_trend:" : digest.trend === "down" ? ":chart_with_downwards_trend:" : ":bar_chart:";
+  postToSlack({
+    text: [
+      `${trendEmoji2} *Weekly Adoption Report* (${digest.period})`,
+      "",
+      `*Conversations:* ${digest.conversations} | *Pipelines:* ${digest.pipelines} | *Artifacts:* ${digest.artifacts}`,
+      `*Active Agents:* ${digest.agents} | *Tool Calls:* ${digest.toolCalls} | *Chains:* ${digest.chains}`,
+      `*Feature Adoption:* ${digest.featuresPct}%`,
+      "",
+      `Trend: ${digest.trend === "up" ? "Growing" : digest.trend === "down" ? "Declining" : "Stable"}`
+    ].join("\n"),
+    level: "info",
+    title: `Weekly Adoption Digest \u2014 ${digest.period}`,
+    source: "orchestrator",
+    channel: "#ops-status"
+  });
+}
+var init_slack = __esm({
+  "src/slack.ts"() {
+    "use strict";
+    init_config();
+    init_logger();
+  }
+});
+
 // src/write-gate.ts
 function isPolluted(text) {
   if (!text || text.length < 20) return false;
@@ -1077,6 +1162,11 @@ var init_cognitive_proxy = __esm({
 });
 
 // src/hierarchical-intelligence.ts
+var hierarchical_intelligence_exports = {};
+__export(hierarchical_intelligence_exports, {
+  buildCommunitySummaries: () => buildCommunitySummaries,
+  searchCommunitySummaries: () => searchCommunitySummaries
+});
 import { v4 as uuid } from "uuid";
 async function buildCommunitySummaries() {
   const t0 = Date.now();
@@ -1333,7 +1423,96 @@ var init_hierarchical_intelligence = __esm({
 });
 
 // src/compound-hooks.ts
+var compound_hooks_exports = {};
+__export(compound_hooks_exports, {
+  hookAutoEnrichment: () => hookAutoEnrichment,
+  hookDeliverableToKnowledge: () => hookDeliverableToKnowledge,
+  hookQualitySignal: () => hookQualitySignal,
+  hookSimilarityPreference: () => hookSimilarityPreference
+});
 import { v4 as uuid2 } from "uuid";
+async function hookDeliverableToKnowledge(deliverableId, title, citations) {
+  if (citations.length === 0) return 0;
+  let linked = 0;
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (d:Deliverable {id: $deliverableId})
+SET d.title = $title, d.createdAt = datetime()
+WITH d
+UNWIND $citations AS cit
+MATCH (n) WHERE coalesce(n.title, n.name) CONTAINS cit.title
+WITH d, n LIMIT 20
+MERGE (n)-[:CITED_IN]->(d)
+RETURN count(*) AS linked`,
+        params: {
+          deliverableId,
+          title: title.slice(0, 200),
+          citations: citations.slice(0, 15).map((c) => ({ title: c.title.slice(0, 80) }))
+        },
+        _force: true
+      },
+      callId: uuid2(),
+      timeoutMs: 1e4
+    });
+    linked = citations.length;
+  } catch (err) {
+    logger.debug({ error: String(err) }, "Deliverable\u2192Knowledge hook failed");
+  }
+  logger.info({ deliverableId, citations: citations.length, linked }, "Hook: Deliverable\u2192Knowledge");
+  return linked;
+}
+function hookAutoEnrichment(answer, query) {
+  extractAndMerge(answer, query).catch(
+    (err) => logger.debug({ error: String(err) }, "Auto-enrichment hook failed (non-blocking)")
+  );
+}
+async function extractAndMerge(answer, query) {
+  if (answer.length < 50) return;
+  try {
+    const result = await callCognitive("analyze", {
+      prompt: `Extract specific named entities from this AI-generated answer that should be added to a knowledge graph. Only extract NAMED entities (organizations, regulations, technologies, frameworks) \u2014 not generic concepts.
+
+QUERY: ${query}
+ANSWER: ${answer.slice(0, 3e3)}
+
+Reply as JSON: {"entities": [{"name": "...", "type": "Organization|Regulation|Technology|Framework", "domain": "..."}]}
+Return max 5 entities. If none are specific enough, return {"entities": []}`,
+      context: { source: "auto-enrichment" },
+      agent_id: "auto-enrichment"
+    }, 15e3);
+    const text = String(result ?? "");
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) return;
+    const parsed = JSON.parse(match[0]);
+    const entities = Array.isArray(parsed.entities) ? parsed.entities.slice(0, 5) : [];
+    for (const entity of entities) {
+      if (!entity.name || entity.name.length < 3) continue;
+      try {
+        await callMcpTool({
+          toolName: "graph.write_cypher",
+          args: {
+            query: `MERGE (n:${entity.type ?? "Knowledge"} {name: $name})
+ON CREATE SET n.domain = $domain, n.source = 'auto-enrichment', n.createdAt = datetime()
+SET n.updatedAt = datetime()`,
+            params: {
+              name: entity.name,
+              domain: entity.domain ?? "general"
+            }
+          },
+          callId: uuid2(),
+          timeoutMs: 5e3
+        });
+      } catch {
+      }
+    }
+    if (entities.length > 0) {
+      logger.info({ count: entities.length }, "Hook: Auto-enrichment \u2014 new entities merged");
+    }
+  } catch {
+  }
+}
 async function hookQualitySignal(query, strategy, channels, resultCount, confidenceAvg) {
   const redis2 = getRedis();
   if (!redis2) return;
@@ -1351,6 +1530,31 @@ async function hookQualitySignal(query, strategy, channels, resultCount, confide
   } catch {
   }
 }
+async function hookSimilarityPreference(queryId, selectedMatchId, rejectedMatchIds) {
+  if (!selectedMatchId || rejectedMatchIds.length === 0) return;
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MATCH (selected {id: $selectedId})
+UNWIND $rejectedIds AS rejId
+MATCH (rejected {id: rejId})
+MERGE (selected)-[p:PREFERRED_OVER]->(rejected)
+ON CREATE SET p.count = 1, p.firstSeen = datetime()
+SET p.count = coalesce(p.count, 0) + 1, p.lastSeen = datetime()`,
+        params: {
+          selectedId: selectedMatchId,
+          rejectedIds: rejectedMatchIds.slice(0, 5)
+        },
+        _force: true
+      },
+      callId: uuid2(),
+      timeoutMs: 5e3
+    });
+    logger.info({ selected: selectedMatchId, rejected: rejectedMatchIds.length }, "Hook: Similarity preference logged");
+  } catch {
+  }
+}
 var init_compound_hooks = __esm({
   "src/compound-hooks.ts"() {
     "use strict";
@@ -1362,6 +1566,14 @@ var init_compound_hooks = __esm({
 });
 
 // src/adaptive-rag.ts
+var adaptive_rag_exports = {};
+__export(adaptive_rag_exports, {
+  calculateCompoundMetric: () => calculateCompoundMetric,
+  getAdaptiveRAGDashboard: () => getAdaptiveRAGDashboard,
+  getAdaptiveWeights: () => getAdaptiveWeights,
+  retrainRoutingWeights: () => retrainRoutingWeights,
+  sendQLearningReward: () => sendQLearningReward
+});
 async function getAdaptiveWeights() {
   const now = Date.now();
   if (now - weightsCacheTime < CACHE_TTL_MS) return cachedWeights;
@@ -2369,6 +2581,14 @@ async function executeChain(def) {
     steps: execution.steps_completed,
     ms: execution.duration_ms
   }, "Chain execution complete");
+  if (execution.status === "completed" && execution.final_output) {
+    try {
+      const { hookAutoEnrichment: hookAutoEnrichment3 } = await Promise.resolve().then(() => (init_compound_hooks(), compound_hooks_exports));
+      const outputStr = typeof execution.final_output === "string" ? execution.final_output : JSON.stringify(execution.final_output).slice(0, 3e3);
+      hookAutoEnrichment3(outputStr, def.name);
+    } catch {
+    }
+  }
   broadcastMessage({
     from: "Orchestrator",
     to: "All",
@@ -2796,8 +3016,459 @@ var init_tool_registry = __esm({
         }),
         timeoutMs: 3e5,
         outputDescription: "Evolution cycle results with observations, actions taken, and lessons learned"
+      }),
+      // ─── v3.0 Adoption Sprint 1: Missing tools ────────────────────────────────
+      defineTool({
+        name: "ingest_document",
+        namespace: "knowledge",
+        description: "Ingest a document into the knowledge graph. Parses content, extracts entities via LLM, MERGEs to Neo4j, and indexes for vector search. Supports markdown, text, and PDF (via Docling).",
+        input: z.object({
+          content: z.string().describe("Document content (markdown, text, or base64 PDF)"),
+          filename: z.string().describe("Source filename"),
+          domain: z.string().optional().describe("Target domain for classification"),
+          extract_entities: z.boolean().optional().describe("Extract and link entities (default: true)")
+        }),
+        timeoutMs: 6e4,
+        outputDescription: "Ingestion result with entities extracted, nodes merged, and parsing method"
+      }),
+      defineTool({
+        name: "build_communities",
+        namespace: "graph",
+        description: "Build hierarchical community summaries from the knowledge graph using Leiden community detection. Creates CommunitySummary nodes with LLM-generated summaries and MEMBER_OF relationships. Used for thematic retrieval.",
+        input: z.object({}),
+        timeoutMs: 12e4,
+        outputDescription: "Community build result with count, summaries generated, and method used"
+      }),
+      defineTool({
+        name: "adaptive_rag_dashboard",
+        namespace: "monitor",
+        description: "Get the Adaptive RAG dashboard showing current routing weights, per-strategy performance stats, compound intelligence metric (accuracy \xD7 quality \xD7 coverage), and training sample count.",
+        input: z.object({}),
+        timeoutMs: 1e4,
+        outputDescription: "Adaptive RAG weights, strategy stats, and compound metric"
+      }),
+      defineTool({
+        name: "graph_hygiene_run",
+        namespace: "monitor",
+        description: "Run graph health check: 6 metrics (orphan ratio, avg rels, embedding coverage, domain count, stale nodes, pollution). Stores GraphHealthSnapshot and alerts on anomalies.",
+        input: z.object({}),
+        timeoutMs: 3e4,
+        outputDescription: "Health metrics with alerts if thresholds are crossed"
       })
     ];
+  }
+});
+
+// src/document-intelligence.ts
+var document_intelligence_exports = {};
+__export(document_intelligence_exports, {
+  batchIngest: () => batchIngest,
+  ingestDocument: () => ingestDocument
+});
+import { v4 as uuid7 } from "uuid";
+async function persistResult(result) {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    await redis2.set(`${REDIS_PREFIX}${result.$id}`, JSON.stringify(result), "EX", 604800);
+  } catch {
+  }
+}
+async function ingestDocument(req) {
+  const t0 = Date.now();
+  const ingestionId = `widgetdc:ingestion:${uuid7()}`;
+  logger.info({
+    id: ingestionId,
+    filename: req.filename,
+    content_length: req.content.length
+  }, "Document intelligence: starting ingestion");
+  const result = {
+    $id: ingestionId,
+    filename: req.filename,
+    status: "completed",
+    content_length: req.content.length,
+    sections_found: 0,
+    tables_found: 0,
+    entities_extracted: 0,
+    relations_extracted: 0,
+    nodes_merged: 0,
+    duration_ms: 0,
+    parsing_method: "text-fallback"
+  };
+  try {
+    let markdown;
+    let tables = [];
+    const doclingResult = await tryDoclingParse(req);
+    if (doclingResult) {
+      markdown = doclingResult.markdown;
+      tables = doclingResult.tables;
+      result.parsing_method = "docling";
+    } else {
+      markdown = req.content;
+      result.parsing_method = req.content_type === "application/pdf" ? "text-fallback" : "text-fallback";
+    }
+    result.sections_found = (markdown.match(/^#{1,3}\s/gm) ?? []).length;
+    result.tables_found = tables.length + (markdown.match(/\|.*\|.*\|/g) ?? []).length;
+    let processableContent = markdown;
+    if (markdown.length > 3e4) {
+      try {
+        const folded = await callCognitive("fold", {
+          prompt: markdown,
+          context: { strategy: "entity_preserving", max_tokens: 8e3 },
+          agent_id: "document-intelligence"
+        }, 3e4);
+        processableContent = typeof folded === "string" ? folded : JSON.stringify(folded);
+        logger.info({ original: markdown.length, folded: processableContent.length }, "Document folded for entity extraction");
+      } catch {
+        processableContent = markdown.slice(0, 3e4);
+      }
+    }
+    if (req.extract_entities !== false) {
+      const extraction = await extractEntities(processableContent, req.filename, req.domain);
+      result.entities_extracted = extraction.entities.length;
+      result.relations_extracted = extraction.relations.length;
+      if (extraction.entities.length > 0) {
+        const merged = await mergeToGraph(extraction.entities, extraction.relations, req);
+        result.nodes_merged = merged;
+      }
+    }
+    if (req.generate_embeddings !== false) {
+      try {
+        await callMcpTool({
+          toolName: "vidensarkiv.add",
+          args: {
+            title: req.filename,
+            content: markdown.slice(0, 1e4),
+            source: req.source_url ?? req.filename,
+            domain: req.domain ?? "general"
+          },
+          callId: uuid7(),
+          timeoutMs: 2e4
+        });
+      } catch {
+        logger.warn({ filename: req.filename }, "SRAG ingest failed \u2014 entities still in graph");
+      }
+    }
+  } catch (err) {
+    result.status = "failed";
+    result.error = err instanceof Error ? err.message : String(err);
+    logger.error({ id: ingestionId, error: result.error }, "Document intelligence: failed");
+  }
+  result.duration_ms = Date.now() - t0;
+  await persistResult(result);
+  logger.info({
+    id: ingestionId,
+    method: result.parsing_method,
+    entities: result.entities_extracted,
+    nodes: result.nodes_merged,
+    ms: result.duration_ms
+  }, "Document intelligence: complete");
+  return result;
+}
+async function tryDoclingParse(req) {
+  const doclingUrl = process.env.DOCLING_URL;
+  if (!doclingUrl) return null;
+  try {
+    const res = await fetch(`${doclingUrl}/convert`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: req.content,
+        filename: req.filename,
+        output_format: "markdown"
+      }),
+      signal: AbortSignal.timeout(6e4)
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.markdown) {
+      return { markdown: data.markdown, tables: data.tables ?? [] };
+    }
+  } catch {
+    logger.debug("Docling-serve not available \u2014 using fallback");
+  }
+  return null;
+}
+async function extractEntities(content, filename, domain) {
+  try {
+    const result = await callCognitive("analyze", {
+      prompt: `Extract named entities and relationships from this document.
+
+DOCUMENT: "${filename}" (domain: ${domain ?? "general"})
+
+CONTENT:
+${content.slice(0, 12e3)}
+
+RULES:
+- Extract organizations, regulations, technologies, frameworks, methodologies, services
+- Extract relationships: USES, COMPLIES_WITH, COMPETES_WITH, PART_OF, RELATES_TO
+- Return ONLY entities that are specific and named (not generic concepts)
+- Limit to 20 most important entities
+
+Reply as JSON:
+{"entities": [{"name": "Entity Name", "type": "Organization|Regulation|Technology|Framework|Service", "properties": {"domain": "...", "description": "..."}}], "relations": [{"from": "Entity A", "to": "Entity B", "type": "USES|COMPLIES_WITH|..."}]}`,
+      context: { filename, domain: domain ?? "general", source: "document-intelligence" },
+      agent_id: "document-intelligence"
+    }, 3e4);
+    const text = String(result ?? "");
+    const match = text.match(/\{[\s\S]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      return {
+        entities: Array.isArray(parsed.entities) ? parsed.entities.slice(0, 20) : [],
+        relations: Array.isArray(parsed.relations) ? parsed.relations.slice(0, 30) : []
+      };
+    }
+  } catch (err) {
+    logger.warn({ error: String(err), filename }, "Entity extraction failed");
+  }
+  return { entities: [], relations: [] };
+}
+async function mergeToGraph(entities, relations, req) {
+  let merged = 0;
+  for (const entity of entities) {
+    try {
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `MERGE (n:${entity.type} {name: $name})
+SET n.domain = $domain, n.source = $source, n.updatedAt = datetime()
+WITH n
+MERGE (d:TDCDocument {filename: $filename})
+MERGE (n)-[:EXTRACTED_FROM]->(d)`,
+          params: {
+            name: entity.name,
+            domain: entity.properties?.domain ?? req.domain ?? "general",
+            source: req.source_url ?? req.filename,
+            filename: req.filename
+          }
+        },
+        callId: uuid7(),
+        timeoutMs: 1e4
+      });
+      merged++;
+    } catch (err) {
+      logger.debug({ entity: entity.name, error: String(err) }, "Entity MERGE failed");
+    }
+  }
+  for (const rel of relations) {
+    try {
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `MATCH (a {name: $from}), (b {name: $to})
+MERGE (a)-[:${rel.type.replace(/[^A-Z_]/g, "_")}]->(b)`,
+          params: { from: rel.from, to: rel.to }
+        },
+        callId: uuid7(),
+        timeoutMs: 5e3
+      });
+    } catch {
+    }
+  }
+  return merged;
+}
+async function batchIngest(documents) {
+  const BATCH_SIZE = 5;
+  const results = [];
+  for (let i = 0; i < documents.length; i += BATCH_SIZE) {
+    const batch = documents.slice(i, i + BATCH_SIZE);
+    const batchResults = await Promise.allSettled(batch.map((d) => ingestDocument(d)));
+    for (const r of batchResults) {
+      if (r.status === "fulfilled") results.push(r.value);
+    }
+  }
+  return results;
+}
+var REDIS_PREFIX;
+var init_document_intelligence = __esm({
+  "src/document-intelligence.ts"() {
+    "use strict";
+    init_mcp_caller();
+    init_cognitive_proxy();
+    init_logger();
+    init_redis();
+    REDIS_PREFIX = "orchestrator:ingestion:";
+  }
+});
+
+// src/graph-hygiene-cron.ts
+var graph_hygiene_cron_exports = {};
+__export(graph_hygiene_cron_exports, {
+  runGraphHygiene: () => runGraphHygiene
+});
+import { v4 as uuid8 } from "uuid";
+function neo4jInt(val) {
+  if (typeof val === "number") return val;
+  if (val && typeof val === "object" && "low" in val) return val.low;
+  return Number(val) || 0;
+}
+async function queryMetric(cypher) {
+  const result = await callMcpTool({
+    toolName: "graph.read_cypher",
+    args: { query: cypher },
+    callId: uuid8(),
+    timeoutMs: 15e3
+  });
+  if (result.status !== "success") return [];
+  const data = result.result;
+  return data?.results ?? (Array.isArray(data) ? data : []);
+}
+async function runGraphHygiene() {
+  const t0 = Date.now();
+  logger.info("Graph hygiene cron: starting health check");
+  const [orphanData, relData, embedData, domainData, staleData, pollutionData] = await Promise.allSettled([
+    // 1. Orphan ratio
+    queryMetric(`
+      MATCH (n) WITH count(n) AS total
+      MATCH (o) WHERE NOT (o)-[]-()
+      RETURN toFloat(count(o)) / total AS orphan_ratio, count(o) AS orphan_count, total
+    `),
+    // 2. Average rels per node
+    queryMetric(`
+      MATCH (n) OPTIONAL MATCH (n)-[r]-()
+      RETURN toFloat(count(r)) / count(DISTINCT n) AS avg_rels
+    `),
+    // 3. Embedding coverage (nodes with embedding property)
+    queryMetric(`
+      MATCH (n) WHERE n.embedding IS NOT NULL
+      WITH count(n) AS with_emb
+      MATCH (m) RETURN toFloat(with_emb) / count(m) AS coverage, with_emb
+    `),
+    // 4. Domain count
+    queryMetric(`MATCH (d:Domain) RETURN count(d) AS domain_count`),
+    // 5. Stale nodes (>90 days since update)
+    queryMetric(`
+      MATCH (n) WHERE n.updatedAt IS NOT NULL AND n.updatedAt < datetime() - duration('P90D')
+      RETURN count(n) AS stale_count
+    `),
+    // 6. Pollution probe
+    queryMetric(`
+      MATCH (n) WHERE n.content IS NOT NULL
+        AND (toLower(n.content) CONTAINS 'you are a helpful'
+          OR toLower(n.content) CONTAINS 'as an ai language model'
+          OR toLower(n.content) CONTAINS 'your task is to')
+      RETURN count(n) AS pollution_count
+    `)
+  ]);
+  const metrics2 = {
+    orphan_ratio: 0,
+    avg_rels_per_node: 0,
+    embedding_coverage: 0,
+    domain_count: 0,
+    stale_node_count: 0,
+    pollution_count: 0
+  };
+  if (orphanData.status === "fulfilled" && orphanData.value[0]) {
+    metrics2.orphan_ratio = Number(orphanData.value[0].orphan_ratio) || 0;
+  }
+  if (relData.status === "fulfilled" && relData.value[0]) {
+    metrics2.avg_rels_per_node = Number(relData.value[0].avg_rels) || 0;
+  }
+  if (embedData.status === "fulfilled" && embedData.value[0]) {
+    metrics2.embedding_coverage = Number(embedData.value[0].coverage) || 0;
+  }
+  if (domainData.status === "fulfilled" && domainData.value[0]) {
+    metrics2.domain_count = neo4jInt(domainData.value[0].domain_count);
+  }
+  if (staleData.status === "fulfilled" && staleData.value[0]) {
+    metrics2.stale_node_count = neo4jInt(staleData.value[0].stale_count);
+  }
+  if (pollutionData.status === "fulfilled" && pollutionData.value[0]) {
+    metrics2.pollution_count = neo4jInt(pollutionData.value[0].pollution_count);
+  }
+  const alerts = [];
+  if (metrics2.orphan_ratio > (THRESHOLDS.orphan_ratio.max ?? 1)) {
+    alerts.push({ metric: "orphan_ratio", value: metrics2.orphan_ratio, threshold: 0.05, message: `Orphan ratio ${(metrics2.orphan_ratio * 100).toFixed(1)}% exceeds 5% threshold` });
+  }
+  if (metrics2.avg_rels_per_node < (THRESHOLDS.avg_rels_per_node.min ?? 0)) {
+    alerts.push({ metric: "avg_rels_per_node", value: metrics2.avg_rels_per_node, threshold: 2, message: `Avg rels/node ${metrics2.avg_rels_per_node.toFixed(1)} below minimum 2` });
+  }
+  if (metrics2.embedding_coverage < (THRESHOLDS.embedding_coverage.min ?? 0)) {
+    alerts.push({ metric: "embedding_coverage", value: metrics2.embedding_coverage, threshold: 0.5, message: `Embedding coverage ${(metrics2.embedding_coverage * 100).toFixed(1)}% below 50% threshold` });
+  }
+  if (metrics2.domain_count !== (THRESHOLDS.domain_count.exact ?? 15)) {
+    alerts.push({ metric: "domain_count", value: metrics2.domain_count, threshold: 15, message: `Domain count ${metrics2.domain_count} \u2260 expected 15 (drift detected)` });
+  }
+  if (metrics2.pollution_count > (THRESHOLDS.pollution_count.max ?? 0)) {
+    alerts.push({ metric: "pollution_count", value: metrics2.pollution_count, threshold: 0, message: `${metrics2.pollution_count} polluted nodes detected \u2014 write-gate may have been bypassed` });
+  }
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (s:GraphHealthSnapshot {date: date()})
+SET s.orphan_ratio = $orphan_ratio,
+    s.avg_rels = $avg_rels,
+    s.embedding_coverage = $embedding_coverage,
+    s.domain_count = $domain_count,
+    s.stale_count = $stale_count,
+    s.pollution_count = $pollution_count,
+    s.alert_count = $alert_count,
+    s.timestamp = datetime()`,
+        params: {
+          orphan_ratio: metrics2.orphan_ratio,
+          avg_rels: metrics2.avg_rels_per_node,
+          embedding_coverage: metrics2.embedding_coverage,
+          domain_count: metrics2.domain_count,
+          stale_count: metrics2.stale_node_count,
+          pollution_count: metrics2.pollution_count,
+          alert_count: alerts.length
+        },
+        _force: true
+        // Infrastructure write — bypass validation
+      },
+      callId: uuid8(),
+      timeoutMs: 1e4
+    });
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Graph hygiene: failed to store snapshot in Neo4j");
+  }
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MATCH (s:GraphHealthSnapshot) WHERE s.timestamp < datetime() - duration('P90D') DETACH DELETE s`,
+        _force: true
+      },
+      callId: uuid8(),
+      timeoutMs: 1e4
+    });
+  } catch {
+  }
+  if (alerts.length > 0) {
+    const alertMsg = alerts.map((a) => `${a.metric}: ${a.message}`).join("\n");
+    broadcastSSE("graph-health-alert", { metrics: metrics2, alerts });
+    if (isSlackEnabled()) {
+      logger.info(`Slack alert: Graph Health Alert (${alerts.length} issues)`);
+    }
+    logger.warn({ alerts: alerts.length }, `Graph hygiene: ${alerts.length} alerts triggered`);
+  }
+  const duration_ms = Date.now() - t0;
+  logger.info({
+    ...metrics2,
+    alerts: alerts.length,
+    ms: duration_ms
+  }, "Graph hygiene cron: complete");
+  return { metrics: metrics2, alerts, duration_ms };
+}
+var THRESHOLDS;
+var init_graph_hygiene_cron = __esm({
+  "src/graph-hygiene-cron.ts"() {
+    "use strict";
+    init_mcp_caller();
+    init_logger();
+    init_sse();
+    init_slack();
+    THRESHOLDS = {
+      orphan_ratio: { max: 0.05 },
+      avg_rels_per_node: { min: 2, max: 50 },
+      embedding_coverage: { min: 0.5 },
+      domain_count: { exact: 15 },
+      stale_node_count: { max: 0.1 },
+      // ratio
+      pollution_count: { max: 0 }
+    };
   }
 });
 
@@ -2807,7 +3478,7 @@ __export(similarity_engine_exports, {
   findSimilarClients: () => findSimilarClients,
   getClientDetails: () => getClientDetails
 });
-import { v4 as uuid7 } from "uuid";
+import { v4 as uuid9 } from "uuid";
 async function findSimilarClients(req) {
   const t0 = Date.now();
   const maxResults = Math.min(Math.max(req.max_results ?? 5, 1), 20);
@@ -2856,7 +3527,7 @@ RETURN n.id AS id, labels(n) AS labels, coalesce(n.name, n.title) AS name
 LIMIT 1`,
         params: { q: query }
       },
-      callId: uuid7(),
+      callId: uuid9(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -2905,7 +3576,7 @@ RETURN other.id AS client_id,
     const result = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params: { sourceId: nodeId, relTypes } },
-      callId: uuid7(),
+      callId: uuid9(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return [];
@@ -2951,7 +3622,7 @@ async function computeSemanticSimilarity(query, maxResults) {
     const result = await callMcpTool({
       toolName: "srag.query",
       args: { query },
-      callId: uuid7(),
+      callId: uuid9(),
       timeoutMs: 2e4
     });
     if (result.status !== "success") return [];
@@ -3010,7 +3681,7 @@ RETURN n AS client,
        collect(DISTINCT {rel: type(r), target: coalesce(related.name, related.title), target_type: labels(related)[0]}) AS relationships`,
         params: { id: clientId }
       },
-      callId: uuid7(),
+      callId: uuid9(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -3049,7 +3720,7 @@ __export(deliverable_engine_exports, {
   getDeliverable: () => getDeliverable,
   listDeliverables: () => listDeliverables
 });
-import { v4 as uuid8 } from "uuid";
+import { v4 as uuid10 } from "uuid";
 async function persist(d) {
   deliverableCache.set(d.$id, d);
   if (deliverableCache.size > CACHE_MAX_SIZE) {
@@ -3060,7 +3731,7 @@ async function persist(d) {
   const redis2 = getRedis();
   if (!redis2) return;
   try {
-    await redis2.set(`${REDIS_PREFIX}${d.$id}`, JSON.stringify(d), "EX", TTL_SECONDS2);
+    await redis2.set(`${REDIS_PREFIX2}${d.$id}`, JSON.stringify(d), "EX", TTL_SECONDS2);
     await redis2.sadd(REDIS_INDEX, d.$id);
   } catch {
   }
@@ -3070,7 +3741,7 @@ async function getDeliverable(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX2}${id}`);
     if (raw) {
       const d = JSON.parse(raw);
       deliverableCache.set(id, d);
@@ -3101,7 +3772,7 @@ async function generateDeliverable(req) {
   }
   activeGenerations++;
   const t0 = Date.now();
-  const deliverableId = `widgetdc:deliverable:${uuid8()}`;
+  const deliverableId = `widgetdc:deliverable:${uuid10()}`;
   const format = req.format ?? "markdown";
   const maxSections = Math.min(Math.max(req.max_sections ?? 5, 2), 8);
   const deliverable = {
@@ -3169,6 +3840,13 @@ async function generateDeliverable(req) {
     };
     deliverable.status = "completed";
     deliverable.completed_at = (/* @__PURE__ */ new Date()).toISOString();
+    try {
+      const { hookDeliverableToKnowledge: hookDeliverableToKnowledge2 } = await Promise.resolve().then(() => (init_compound_hooks(), compound_hooks_exports));
+      const allCits = sections.flatMap((s) => s.citations);
+      hookDeliverableToKnowledge2(deliverableId, deliverable.title, allCits).catch(() => {
+      });
+    } catch {
+    }
     logger.info({
       id: deliverableId,
       sections: sections.length,
@@ -3352,7 +4030,7 @@ async function renderPDF(deliverable) {
         content: deliverable.markdown,
         template: deliverable.type
       },
-      callId: uuid8(),
+      callId: uuid10(),
       timeoutMs: 45e3
     });
     if (result.status === "success" && result.result) {
@@ -3364,7 +4042,7 @@ async function renderPDF(deliverable) {
     deliverable.format = "markdown";
   }
 }
-var REDIS_PREFIX, REDIS_INDEX, TTL_SECONDS2, deliverableCache, CACHE_MAX_SIZE, activeGenerations, MAX_CONCURRENT, TYPE_PROMPTS;
+var REDIS_PREFIX2, REDIS_INDEX, TTL_SECONDS2, deliverableCache, CACHE_MAX_SIZE, activeGenerations, MAX_CONCURRENT, TYPE_PROMPTS;
 var init_deliverable_engine = __esm({
   "src/deliverable-engine.ts"() {
     "use strict";
@@ -3373,7 +4051,7 @@ var init_deliverable_engine = __esm({
     init_dual_rag();
     init_redis();
     init_logger();
-    REDIS_PREFIX = "orchestrator:deliverable:";
+    REDIS_PREFIX2 = "orchestrator:deliverable:";
     REDIS_INDEX = "orchestrator:deliverables:index";
     TTL_SECONDS2 = 604800;
     deliverableCache = /* @__PURE__ */ new Map();
@@ -3555,7 +4233,7 @@ __export(osint_scanner_exports, {
   getOsintStatus: () => getOsintStatus,
   runOsintScan: () => runOsintScan
 });
-import { v4 as uuid9 } from "uuid";
+import { v4 as uuid11 } from "uuid";
 async function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -3580,7 +4258,7 @@ async function checkToolAvailability() {
     const result = await callMcpTool({
       toolName: "the_snout.domain_intel",
       args: { domain: "borger.dk", type: "basic" },
-      callId: uuid9(),
+      callId: uuid11(),
       timeoutMs: 1e4
     });
     return result.status === "success";
@@ -3597,7 +4275,7 @@ async function scanCTForDomain(domain, toolsAvailable) {
       const result = await callMcpTool({
         toolName: "the_snout.ct_transparency",
         args: { domain },
-        callId: uuid9(),
+        callId: uuid11(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (result.status === "success" && result.result) {
@@ -3612,7 +4290,7 @@ async function scanCTForDomain(domain, toolsAvailable) {
       const fallbackResult = await callMcpTool({
         toolName: "the_snout.domain_intel",
         args: { domain, type: "ct" },
-        callId: uuid9(),
+        callId: uuid11(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (fallbackResult.status === "success" && fallbackResult.result) {
@@ -3657,7 +4335,7 @@ async function scanDMARCForDomain(domain, toolsAvailable) {
       const result = await callMcpTool({
         toolName: "the_snout.domain_intel",
         args: { domain, type: "dmarc" },
-        callId: uuid9(),
+        callId: uuid11(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (result.status === "success" && result.result) {
@@ -3740,7 +4418,7 @@ async function ingestCTResults(ctResults) {
             },
             _force: true
           },
-          callId: uuid9(),
+          callId: uuid11(),
           timeoutMs: 15e3
         });
         if (result.status === "success") {
@@ -3803,7 +4481,7 @@ async function ingestDMARCResults(dmarcResults) {
             },
             _force: true
           },
-          callId: uuid9(),
+          callId: uuid11(),
           timeoutMs: 15e3
         });
         if (result.status === "success") {
@@ -3838,7 +4516,7 @@ async function persistScanResult(result) {
   }
 }
 async function runOsintScan(options) {
-  const scanId = uuid9();
+  const scanId = uuid11();
   const startedAt = (/* @__PURE__ */ new Date()).toISOString();
   const t0 = Date.now();
   const domains = options?.domains ?? [...DK_PUBLIC_DOMAINS];
@@ -3983,12 +4661,12 @@ __export(evolution_loop_exports, {
   getEvolutionStatus: () => getEvolutionStatus,
   runEvolutionLoop: () => runEvolutionLoop
 });
-import { v4 as uuid10 } from "uuid";
+import { v4 as uuid12 } from "uuid";
 async function persistCycle(cycle) {
   const redis2 = getRedis();
   if (!redis2) return;
   try {
-    await redis2.set(`${REDIS_PREFIX2}${cycle.cycle_id}`, JSON.stringify(cycle), "EX", REDIS_TTL);
+    await redis2.set(`${REDIS_PREFIX3}${cycle.cycle_id}`, JSON.stringify(cycle), "EX", REDIS_TTL);
     await redis2.lpush(REDIS_HISTORY_KEY, JSON.stringify(cycle));
     await redis2.ltrim(REDIS_HISTORY_KEY, 0, 19);
     await redis2.expire(REDIS_HISTORY_KEY, REDIS_TTL);
@@ -4032,7 +4710,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (n) RETURN labels(n)[0] AS label, count(*) AS count ORDER BY count DESC LIMIT 15"
       },
-      callId: uuid10(),
+      callId: uuid12(),
       timeoutMs: 1e4
     }),
     callMcpTool({
@@ -4040,7 +4718,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (f:FailureMemory) WHERE f.last_seen > datetime() - duration('P7D') RETURN f.category AS category, f.pattern AS pattern, f.hit_count AS hits ORDER BY f.hit_count DESC LIMIT 10"
       },
-      callId: uuid10(),
+      callId: uuid12(),
       timeoutMs: 1e4
     }),
     callMcpTool({
@@ -4048,7 +4726,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (l:Lesson) WHERE l.created_at > datetime() - duration('P7D') RETURN l.agent_id AS agent, l.lesson AS lesson, l.context AS context ORDER BY l.created_at DESC LIMIT 10"
       },
-      callId: uuid10(),
+      callId: uuid12(),
       timeoutMs: 1e4
     })
   ]);
@@ -4104,7 +4782,7 @@ async function stageOrient(observeResult, focusArea) {
         RETURN labels(b)[0] AS label, coalesce(b.name, b.title, b.id) AS name, b.status AS status, b.quality_score AS quality
         ORDER BY coalesce(b.quality_score, 0) ASC LIMIT 10`
     },
-    callId: uuid10(),
+    callId: uuid12(),
     timeoutMs: 1e4
   });
   const blocks = blocksResult.status === "success" ? Array.isArray(blocksResult.result) ? blocksResult.result : blocksResult.result?.results ?? [] : [];
@@ -4226,7 +4904,7 @@ async function stageLearn(cycleId, observeResult, orientResult, actResult) {
           estimated_impact: orientResult.estimated_impact
         }
       },
-      callId: uuid10(),
+      callId: uuid12(),
       timeoutMs: 15e3
     });
     if (writeResult.status === "success") {
@@ -4256,7 +4934,7 @@ async function stageLearn(cycleId, observeResult, orientResult, actResult) {
             cycle_id: cycleId
           }
         },
-        callId: uuid10(),
+        callId: uuid12(),
         timeoutMs: 1e4
       });
       if (lessonResult.status === "success") {
@@ -4273,7 +4951,7 @@ async function runEvolutionLoop(opts) {
     throw new Error("Evolution loop already running. Only 1 concurrent cycle allowed.");
   }
   isRunning = true;
-  const cycleId = uuid10();
+  const cycleId = uuid12();
   const startedAt = (/* @__PURE__ */ new Date()).toISOString();
   const t0 = Date.now();
   const focusArea = opts?.focus_area?.slice(0, 200);
@@ -4405,7 +5083,7 @@ async function getEvolutionHistory(limit = 10) {
     return lastCycle ? [lastCycle] : [];
   }
 }
-var isRunning, currentStage, lastCycle, totalCycles, STAGE_TIMEOUT_MS, TOTAL_TIMEOUT_MS, REDIS_PREFIX2, REDIS_HISTORY_KEY, REDIS_TTL;
+var isRunning, currentStage, lastCycle, totalCycles, STAGE_TIMEOUT_MS, TOTAL_TIMEOUT_MS, REDIS_PREFIX3, REDIS_HISTORY_KEY, REDIS_TTL;
 var init_evolution_loop = __esm({
   "src/evolution-loop.ts"() {
     "use strict";
@@ -4420,7 +5098,7 @@ var init_evolution_loop = __esm({
     totalCycles = 0;
     STAGE_TIMEOUT_MS = 5 * 60 * 1e3;
     TOTAL_TIMEOUT_MS = 20 * 60 * 1e3;
-    REDIS_PREFIX2 = "orchestrator:evolution:";
+    REDIS_PREFIX3 = "orchestrator:evolution:";
     REDIS_HISTORY_KEY = "orchestrator:evolution:history";
     REDIS_TTL = 7 * 86400;
   }
@@ -4441,87 +5119,8 @@ import { fileURLToPath as fileURLToPath2 } from "url";
 
 // src/routes/agents.ts
 init_agent_registry();
+init_slack();
 import { Router } from "express";
-
-// src/slack.ts
-init_config();
-init_logger();
-function isSlackEnabled() {
-  return Boolean(config.backendUrl) && Boolean(config.backendApiKey);
-}
-async function postToSlack(payload) {
-  if (!isSlackEnabled()) return;
-  try {
-    const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${config.backendApiKey}`
-      },
-      body: JSON.stringify({
-        tool: "slack.channel.post",
-        payload
-      })
-    });
-    if (!res.ok) {
-      logger.warn({ status: res.status }, "Slack MCP post failed");
-    }
-  } catch (err) {
-    logger.warn({ err: String(err) }, "Slack MCP post error");
-  }
-}
-function notifyAgentRegistered(agentId, displayName, namespaces) {
-  postToSlack({
-    text: `Agent *${displayName}* (\`${agentId}\`) registered
-Namespaces: ${namespaces.join(", ")}`,
-    level: "info",
-    title: `Agent Registered: ${displayName}`,
-    source: "orchestrator",
-    channel: "#ops-alerts"
-  });
-}
-function notifyToolCall(agentId, toolName, status, durationMs, errorMessage) {
-  const emoji = status === "success" ? ":white_check_mark:" : ":x:";
-  const level = status === "success" ? "info" : "error";
-  const errorLine = errorMessage ? `
-Error: \`${errorMessage.slice(0, 200)}\`` : "";
-  postToSlack({
-    text: `${emoji} \`${agentId}\` called \`${toolName}\` \u2192 *${status}* (${durationMs}ms)${errorLine}
-Orchestrator: \`${config.orchestratorId}\``,
-    level,
-    title: `Tool Call: ${toolName} \u2192 ${status}`,
-    source: "orchestrator",
-    channel: "#ops-alerts"
-  });
-}
-function notifyChatMessage(from, to, message) {
-  postToSlack({
-    text: `*${from}* \u2192 *${to}*
-${message.slice(0, 500)}`,
-    level: "info",
-    title: `Chat: ${from} \u2192 ${to}`,
-    source: "orchestrator",
-    channel: "#ops-alerts"
-  });
-}
-function notifyAdoptionDigest(digest) {
-  const trendEmoji2 = digest.trend === "up" ? ":chart_with_upwards_trend:" : digest.trend === "down" ? ":chart_with_downwards_trend:" : ":bar_chart:";
-  postToSlack({
-    text: [
-      `${trendEmoji2} *Weekly Adoption Report* (${digest.period})`,
-      "",
-      `*Conversations:* ${digest.conversations} | *Pipelines:* ${digest.pipelines} | *Artifacts:* ${digest.artifacts}`,
-      `*Active Agents:* ${digest.agents} | *Tool Calls:* ${digest.toolCalls} | *Chains:* ${digest.chains}`,
-      `*Feature Adoption:* ${digest.featuresPct}%`,
-      "",
-      `Trend: ${digest.trend === "up" ? "Growing" : digest.trend === "down" ? "Declining" : "Stable"}`
-    ].join("\n"),
-    level: "info",
-    title: `Weekly Adoption Digest \u2014 ${digest.period}`,
-    source: "orchestrator",
-    channel: "#ops-status"
-  });
-}
 
 // node_modules/@sinclair/typebox/build/esm/value/guard/guard.mjs
 function IsAsyncIterator(value) {
@@ -13561,6 +14160,7 @@ init_mcp_caller();
 init_chat_broadcaster();
 init_config();
 init_logger();
+init_slack();
 import { Router as Router2 } from "express";
 init_redis();
 
@@ -13869,7 +14469,7 @@ async function runInvestigation(topic) {
 // src/tool-executor.ts
 init_logger();
 init_tool_registry();
-import { v4 as uuid11 } from "uuid";
+import { v4 as uuid13 } from "uuid";
 var ORCHESTRATOR_TOOLS = toOpenAITools();
 var totalTokensSaved = 0;
 var totalFoldingCalls = 0;
@@ -13964,7 +14564,7 @@ function buildToolFallback(toolName, error) {
   }
 }
 async function executeToolUnified(toolName, args, opts) {
-  const callId = opts?.call_id ?? uuid11();
+  const callId = opts?.call_id ?? uuid13();
   const t0 = Date.now();
   let deprecation_notice;
   const toolDef = getTool(toolName);
@@ -14021,6 +14621,11 @@ async function executeToolByName(name, args) {
         maxResults: args.max_results ?? 10
       });
       if (result.merged_context.length === 0) return "No results found for this query.";
+      try {
+        const { hookAutoEnrichment: hookAutoEnrichment3 } = await Promise.resolve().then(() => (init_compound_hooks(), compound_hooks_exports));
+        hookAutoEnrichment3(result.merged_context, args.query);
+      } catch {
+      }
       const header = `[${result.route_strategy}] ${result.graphrag_count} graphrag + ${result.srag_count} semantic + ${result.cypher_count} graph (${result.duration_ms}ms, channels: ${result.channels_used.join(",")}${result.pollution_filtered > 0 ? `, ${result.pollution_filtered} polluted filtered` : ""}):`;
       return `${header}
 
@@ -14047,7 +14652,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher, params: args.params ?? {} },
-        callId: uuid11(),
+        callId: uuid13(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
@@ -14068,7 +14673,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher },
-        callId: uuid11(),
+        callId: uuid13(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Task query failed: ${result.error_message}`;
@@ -14080,7 +14685,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: args.tool_name,
         args: args.payload ?? {},
-        callId: uuid11(),
+        callId: uuid13(),
         timeoutMs: 3e4
       });
       if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
@@ -14088,8 +14693,8 @@ ${result.merged_context}`;
     }
     case "get_platform_health": {
       const [backendHealth, graphHealth] = await Promise.allSettled([
-        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid11(), timeoutMs: 1e4 }),
-        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid11(), timeoutMs: 1e4 })
+        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid13(), timeoutMs: 1e4 }),
+        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid13(), timeoutMs: 1e4 })
       ]);
       const parts = [];
       if (backendHealth.status === "fulfilled" && backendHealth.value.status === "success") {
@@ -14105,7 +14710,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: args.query },
-        callId: uuid11(),
+        callId: uuid13(),
         timeoutMs: 2e4
       });
       if (result.status !== "success") return `Document search failed: ${result.error_message}`;
@@ -14123,7 +14728,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issues",
         args: payload,
-        callId: uuid11(),
+        callId: uuid13(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
@@ -14139,7 +14744,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issue_get",
         args: { identifier },
-        callId: uuid11(),
+        callId: uuid13(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
@@ -14252,6 +14857,66 @@ Markdown: /api/notebooks/${encodeURIComponent(nb.$id)}.md`;
         return JSON.stringify(result, null, 2).slice(0, 800);
       } catch (err) {
         return `Verification failed: ${err}`;
+      }
+    }
+    case "ingest_document": {
+      const content = args.content;
+      const filename = args.filename;
+      if (!content || content.length < 20) return "Error: content required (min 20 chars)";
+      if (!filename) return "Error: filename required";
+      try {
+        const { ingestDocument: ingestDocument2 } = await Promise.resolve().then(() => (init_document_intelligence(), document_intelligence_exports));
+        const result = await ingestDocument2({
+          content,
+          filename,
+          domain: args.domain,
+          extract_entities: args.extract_entities !== false
+        });
+        return `Ingested "${result.filename}": ${result.entities_extracted} entities, ${result.nodes_merged} nodes merged, ${result.tables_found} tables (${result.parsing_method}, ${result.duration_ms}ms)`;
+      } catch (err) {
+        return `Document ingestion failed: ${err}`;
+      }
+    }
+    case "build_communities": {
+      try {
+        const { buildCommunitySummaries: buildCommunitySummaries2 } = await Promise.resolve().then(() => (init_hierarchical_intelligence(), hierarchical_intelligence_exports));
+        const result = await buildCommunitySummaries2();
+        return `Communities built: ${result.communities_created} communities, ${result.summaries_generated} summaries, ${result.relationships_created} rels (${result.method}, ${result.duration_ms}ms)`;
+      } catch (err) {
+        return `Community build failed: ${err}`;
+      }
+    }
+    case "adaptive_rag_dashboard": {
+      try {
+        const { getAdaptiveRAGDashboard: getAdaptiveRAGDashboard2 } = await Promise.resolve().then(() => (init_adaptive_rag(), adaptive_rag_exports));
+        const d = await getAdaptiveRAGDashboard2();
+        const lines = [
+          `Compound Metric: ${d.compound_metric.score} (accuracy=${d.compound_metric.accuracy}, quality=${d.compound_metric.quality}, coverage=${d.compound_metric.coverage})`,
+          `Training samples: ${d.outcome_count}`,
+          `Weights updated: ${d.weights.updated_at}`,
+          ...d.stats.map((s) => `  ${s.strategy}: ${s.total_queries} queries, confidence=${s.avg_confidence.toFixed(2)}, zero-result=${(s.zero_result_rate * 100).toFixed(0)}%`)
+        ];
+        return lines.join("\n");
+      } catch (err) {
+        return `Adaptive RAG dashboard failed: ${err}`;
+      }
+    }
+    case "graph_hygiene_run": {
+      try {
+        const { runGraphHygiene: runGraphHygiene3 } = await Promise.resolve().then(() => (init_graph_hygiene_cron(), graph_hygiene_cron_exports));
+        const result = await runGraphHygiene3();
+        const m = result.metrics;
+        const alertStr = result.alerts.length > 0 ? `
+ALERTS: ${result.alerts.map((a) => a.message).join("; ")}` : "\nNo alerts \u2014 all metrics within thresholds.";
+        return `Graph Health (${result.duration_ms}ms):
+  Orphan ratio: ${(m.orphan_ratio * 100).toFixed(1)}%
+  Avg rels/node: ${m.avg_rels_per_node.toFixed(1)}
+  Embedding coverage: ${(m.embedding_coverage * 100).toFixed(1)}%
+  Domains: ${m.domain_count}
+  Stale nodes: ${m.stale_node_count}
+  Pollution: ${m.pollution_count}${alertStr}`;
+      } catch (err) {
+        return `Graph hygiene failed: ${err}`;
       }
     }
     case "precedent_search": {
@@ -14536,6 +15201,7 @@ toolsRouter.get("/catalog", async (_req, res) => {
 // src/routes/chat.ts
 init_chat_broadcaster();
 init_logger();
+init_slack();
 import { Router as Router3 } from "express";
 init_chat_store();
 init_config();
@@ -15719,12 +16385,12 @@ import cron from "node-cron";
 // src/graph-self-correct.ts
 init_mcp_caller();
 init_logger();
-import { v4 as uuid12 } from "uuid";
+import { v4 as uuid14 } from "uuid";
 async function graphRead(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid12(),
+    callId: uuid14(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -15735,7 +16401,7 @@ async function graphWrite(cypher, params) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { parameters: params } : {} },
-    callId: uuid12(),
+    callId: uuid14(),
     timeoutMs: 15e3
   });
   return result.status === "success";
@@ -15948,7 +16614,7 @@ init_redis();
 init_mcp_caller();
 init_logger();
 init_sse();
-import { v4 as uuid13 } from "uuid";
+import { v4 as uuid15 } from "uuid";
 function categorizeFailure(error) {
   const lower = error.toLowerCase();
   if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) return "timeout";
@@ -15981,7 +16647,7 @@ async function harvestFailures(windowHours = 24) {
           const failedSteps = exec.results?.filter((r) => r.status === "error") ?? [];
           const errorMsg = exec.error ?? failedSteps.map((s) => String(s.output)).join("; ") ?? "unknown";
           events.push({
-            $id: `failure-event:${uuid13()}`,
+            $id: `failure-event:${uuid15()}`,
             execution_id: execId,
             chain_name: exec.name,
             category: categorizeFailure(errorMsg),
@@ -16027,7 +16693,7 @@ async function persistToGraph(events) {
             timestamp: evt.timestamp
           }
         },
-        callId: uuid13(),
+        callId: uuid15(),
         timeoutMs: 1e4
       });
       persisted++;
@@ -16047,7 +16713,7 @@ async function persistToGraph(events) {
           `,
           params: {}
         },
-        callId: uuid13(),
+        callId: uuid15(),
         timeoutMs: 1e4
       });
       await callMcpTool({
@@ -16060,7 +16726,7 @@ async function persistToGraph(events) {
           `,
           params: {}
         },
-        callId: uuid13(),
+        callId: uuid15(),
         timeoutMs: 1e4
       });
     } catch {
@@ -16118,7 +16784,7 @@ async function runFailureHarvest(windowHours = 24) {
 // src/competitive-crawler.ts
 init_redis();
 init_mcp_caller();
-import { v4 as uuid14 } from "uuid";
+import { v4 as uuid16 } from "uuid";
 init_logger();
 init_sse();
 var COMPETITOR_TARGETS = [
@@ -16220,7 +16886,7 @@ async function extractCapabilities(target) {
         const cap = line.replace(/^[\s\-\*]+/, "").trim();
         if (cap.length > 10 && cap.length < 200) {
           capabilities.push({
-            $id: `capability:${target.slug}:${uuid14().slice(0, 8)}`,
+            $id: `capability:${target.slug}:${uuid16().slice(0, 8)}`,
             competitor: target.name,
             capability: cap,
             category: categorizeCapability(cap),
@@ -16270,7 +16936,7 @@ async function persistCapabilities(capabilities) {
             extracted_at: cap.extracted_at
           }
         },
-        callId: uuid14(),
+        callId: uuid16(),
         timeoutMs: 1e4
       });
       persisted++;
@@ -16294,7 +16960,7 @@ async function analyzeGaps(capabilities) {
     const result = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: "MATCH (t:Tool) RETURN t.name AS name LIMIT 200" },
-      callId: uuid14(),
+      callId: uuid16(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -16363,7 +17029,7 @@ init_redis();
 init_logger();
 init_mcp_caller();
 import { Router as Router6 } from "express";
-import { v4 as uuid15 } from "uuid";
+import { v4 as uuid17 } from "uuid";
 var adoptionRouter = Router6();
 var REDIS_KEY3 = "orchestrator:adoption-metrics";
 var REDIS_TRENDS_KEY = "orchestrator:adoption-trends";
@@ -16451,7 +17117,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (c:Conversation) WHERE c.createdAt > datetime() - duration('P1D') RETURN count(c) AS count"
       },
-      callId: uuid15(),
+      callId: uuid17(),
       timeoutMs: 1e4
     }),
     // Count artifacts from last 24h
@@ -16460,7 +17126,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (a:AnalysisArtifact) WHERE a.createdAt > datetime() - duration('P1D') RETURN count(a) AS count"
       },
-      callId: uuid15(),
+      callId: uuid17(),
       timeoutMs: 1e4
     }),
     // Count tool calls from audit trail
@@ -16469,7 +17135,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (e:AuditEvent) WHERE e.timestamp > datetime() - duration('P1D') AND e.action = 'tool_call' RETURN count(e) AS count"
       },
-      callId: uuid15(),
+      callId: uuid17(),
       timeoutMs: 1e4
     })
   ]);
@@ -16574,7 +17240,7 @@ SET m.conversations_24h = $conversations,
           featuresPct: snapshot.features_pct
         }
       },
-      callId: uuid15(),
+      callId: uuid17(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -16621,7 +17287,7 @@ init_logger();
 init_mcp_caller();
 init_sse();
 import { Router as Router7 } from "express";
-import { v4 as uuid16 } from "uuid";
+import { v4 as uuid18 } from "uuid";
 var looseEndsRouter = Router7();
 var REDIS_KEY4 = "orchestrator:loose-ends:latest";
 var REDIS_HISTORY = "orchestrator:loose-ends:history";
@@ -16635,7 +17301,7 @@ AND NOT (b)<-[:COMPOSED_OF]-(:Assembly)
 RETURN b.id AS id, b.name AS name, b.domain AS domain, labels(b)[0] AS type
 LIMIT 25`,
     buildFinding: (records) => records.map((r) => ({
-      id: `orphan-${r.id ?? uuid16().slice(0, 8)}`,
+      id: `orphan-${r.id ?? uuid18().slice(0, 8)}`,
       severity: "warning",
       category: "orphan_block",
       title: `Orphan block: ${r.name ?? r.id}`,
@@ -16653,7 +17319,7 @@ AND NOT (a)<-[:BASED_ON]-(:Decision)
 RETURN a.id AS id, a.name AS name, a.composite AS score
 LIMIT 15`,
     buildFinding: (records) => records.map((r) => ({
-      id: `dangling-asm-${r.id ?? uuid16().slice(0, 8)}`,
+      id: `dangling-asm-${r.id ?? uuid18().slice(0, 8)}`,
       severity: "warning",
       category: "dangling_assembly",
       title: `Accepted assembly without decision: ${r.name ?? r.id}`,
@@ -16671,7 +17337,7 @@ AND NOT (d)-[:DERIVES_FROM]->()
 RETURN d.id AS id, d.title AS title, d.certified_at AS certified_at
 LIMIT 10`,
     buildFinding: (records) => records.map((r) => ({
-      id: `no-lineage-${r.id ?? uuid16().slice(0, 8)}`,
+      id: `no-lineage-${r.id ?? uuid18().slice(0, 8)}`,
       severity: "critical",
       category: "missing_lineage",
       title: `Decision without lineage: ${r.title ?? r.id}`,
@@ -16689,7 +17355,7 @@ AND NOT (n)-[]-()
 RETURN n.id AS id, labels(n)[0] AS type, n.domain AS domain, n.insight AS title
 LIMIT 20`,
     buildFinding: (records) => records.map((r) => ({
-      id: `disconnected-${r.id ?? uuid16().slice(0, 8)}`,
+      id: `disconnected-${r.id ?? uuid18().slice(0, 8)}`,
       severity: "info",
       category: "disconnected_node",
       title: `Disconnected ${r.type}: ${(r.title ?? r.id ?? "").toString().slice(0, 60)}`,
@@ -16707,7 +17373,7 @@ AND d.created_at < datetime() - duration('P7D')
 RETURN d.id AS id, d.title AS title, d.created_at AS created_at
 LIMIT 10`,
     buildFinding: (records) => records.map((r) => ({
-      id: `stale-decision-${r.id ?? uuid16().slice(0, 8)}`,
+      id: `stale-decision-${r.id ?? uuid18().slice(0, 8)}`,
       severity: "warning",
       category: "unresolved_decision",
       title: `Stale draft decision: ${r.title ?? r.id}`,
@@ -16718,7 +17384,7 @@ LIMIT 10`,
   }
 ];
 async function runLooseEndScan() {
-  const scanId = uuid16();
+  const scanId = uuid18();
   const t0 = Date.now();
   const findings = [];
   logger.info({ scan_id: scanId }, "Loose-end scan started");
@@ -16728,7 +17394,7 @@ async function runLooseEndScan() {
         const result = await callMcpTool({
           toolName: "graph.read_cypher",
           args: { query: dq.cypher },
-          callId: uuid16(),
+          callId: uuid18(),
           timeoutMs: 15e3
         });
         if (result.status !== "success") return [];
@@ -16789,7 +17455,7 @@ SET s.scanned_at = datetime(), s.duration_ms = $duration,
           total: summary.total
         }
       },
-      callId: uuid16(),
+      callId: uuid18(),
       timeoutMs: 1e4
     });
   } catch {
@@ -16860,176 +17526,9 @@ looseEndsRouter.get("/history", async (req, res) => {
   }
 });
 
-// src/graph-hygiene-cron.ts
-init_mcp_caller();
-init_logger();
-init_sse();
-import { v4 as uuid17 } from "uuid";
-var THRESHOLDS = {
-  orphan_ratio: { max: 0.05 },
-  avg_rels_per_node: { min: 2, max: 50 },
-  embedding_coverage: { min: 0.5 },
-  domain_count: { exact: 15 },
-  stale_node_count: { max: 0.1 },
-  // ratio
-  pollution_count: { max: 0 }
-};
-function neo4jInt(val) {
-  if (typeof val === "number") return val;
-  if (val && typeof val === "object" && "low" in val) return val.low;
-  return Number(val) || 0;
-}
-async function queryMetric(cypher) {
-  const result = await callMcpTool({
-    toolName: "graph.read_cypher",
-    args: { query: cypher },
-    callId: uuid17(),
-    timeoutMs: 15e3
-  });
-  if (result.status !== "success") return [];
-  const data = result.result;
-  return data?.results ?? (Array.isArray(data) ? data : []);
-}
-async function runGraphHygiene() {
-  const t0 = Date.now();
-  logger.info("Graph hygiene cron: starting health check");
-  const [orphanData, relData, embedData, domainData, staleData, pollutionData] = await Promise.allSettled([
-    // 1. Orphan ratio
-    queryMetric(`
-      MATCH (n) WITH count(n) AS total
-      MATCH (o) WHERE NOT (o)-[]-()
-      RETURN toFloat(count(o)) / total AS orphan_ratio, count(o) AS orphan_count, total
-    `),
-    // 2. Average rels per node
-    queryMetric(`
-      MATCH (n) OPTIONAL MATCH (n)-[r]-()
-      RETURN toFloat(count(r)) / count(DISTINCT n) AS avg_rels
-    `),
-    // 3. Embedding coverage (nodes with embedding property)
-    queryMetric(`
-      MATCH (n) WHERE n.embedding IS NOT NULL
-      WITH count(n) AS with_emb
-      MATCH (m) RETURN toFloat(with_emb) / count(m) AS coverage, with_emb
-    `),
-    // 4. Domain count
-    queryMetric(`MATCH (d:Domain) RETURN count(d) AS domain_count`),
-    // 5. Stale nodes (>90 days since update)
-    queryMetric(`
-      MATCH (n) WHERE n.updatedAt IS NOT NULL AND n.updatedAt < datetime() - duration('P90D')
-      RETURN count(n) AS stale_count
-    `),
-    // 6. Pollution probe
-    queryMetric(`
-      MATCH (n) WHERE n.content IS NOT NULL
-        AND (toLower(n.content) CONTAINS 'you are a helpful'
-          OR toLower(n.content) CONTAINS 'as an ai language model'
-          OR toLower(n.content) CONTAINS 'your task is to')
-      RETURN count(n) AS pollution_count
-    `)
-  ]);
-  const metrics2 = {
-    orphan_ratio: 0,
-    avg_rels_per_node: 0,
-    embedding_coverage: 0,
-    domain_count: 0,
-    stale_node_count: 0,
-    pollution_count: 0
-  };
-  if (orphanData.status === "fulfilled" && orphanData.value[0]) {
-    metrics2.orphan_ratio = Number(orphanData.value[0].orphan_ratio) || 0;
-  }
-  if (relData.status === "fulfilled" && relData.value[0]) {
-    metrics2.avg_rels_per_node = Number(relData.value[0].avg_rels) || 0;
-  }
-  if (embedData.status === "fulfilled" && embedData.value[0]) {
-    metrics2.embedding_coverage = Number(embedData.value[0].coverage) || 0;
-  }
-  if (domainData.status === "fulfilled" && domainData.value[0]) {
-    metrics2.domain_count = neo4jInt(domainData.value[0].domain_count);
-  }
-  if (staleData.status === "fulfilled" && staleData.value[0]) {
-    metrics2.stale_node_count = neo4jInt(staleData.value[0].stale_count);
-  }
-  if (pollutionData.status === "fulfilled" && pollutionData.value[0]) {
-    metrics2.pollution_count = neo4jInt(pollutionData.value[0].pollution_count);
-  }
-  const alerts = [];
-  if (metrics2.orphan_ratio > (THRESHOLDS.orphan_ratio.max ?? 1)) {
-    alerts.push({ metric: "orphan_ratio", value: metrics2.orphan_ratio, threshold: 0.05, message: `Orphan ratio ${(metrics2.orphan_ratio * 100).toFixed(1)}% exceeds 5% threshold` });
-  }
-  if (metrics2.avg_rels_per_node < (THRESHOLDS.avg_rels_per_node.min ?? 0)) {
-    alerts.push({ metric: "avg_rels_per_node", value: metrics2.avg_rels_per_node, threshold: 2, message: `Avg rels/node ${metrics2.avg_rels_per_node.toFixed(1)} below minimum 2` });
-  }
-  if (metrics2.embedding_coverage < (THRESHOLDS.embedding_coverage.min ?? 0)) {
-    alerts.push({ metric: "embedding_coverage", value: metrics2.embedding_coverage, threshold: 0.5, message: `Embedding coverage ${(metrics2.embedding_coverage * 100).toFixed(1)}% below 50% threshold` });
-  }
-  if (metrics2.domain_count !== (THRESHOLDS.domain_count.exact ?? 15)) {
-    alerts.push({ metric: "domain_count", value: metrics2.domain_count, threshold: 15, message: `Domain count ${metrics2.domain_count} \u2260 expected 15 (drift detected)` });
-  }
-  if (metrics2.pollution_count > (THRESHOLDS.pollution_count.max ?? 0)) {
-    alerts.push({ metric: "pollution_count", value: metrics2.pollution_count, threshold: 0, message: `${metrics2.pollution_count} polluted nodes detected \u2014 write-gate may have been bypassed` });
-  }
-  try {
-    await callMcpTool({
-      toolName: "graph.write_cypher",
-      args: {
-        query: `MERGE (s:GraphHealthSnapshot {date: date()})
-SET s.orphan_ratio = $orphan_ratio,
-    s.avg_rels = $avg_rels,
-    s.embedding_coverage = $embedding_coverage,
-    s.domain_count = $domain_count,
-    s.stale_count = $stale_count,
-    s.pollution_count = $pollution_count,
-    s.alert_count = $alert_count,
-    s.timestamp = datetime()`,
-        params: {
-          orphan_ratio: metrics2.orphan_ratio,
-          avg_rels: metrics2.avg_rels_per_node,
-          embedding_coverage: metrics2.embedding_coverage,
-          domain_count: metrics2.domain_count,
-          stale_count: metrics2.stale_node_count,
-          pollution_count: metrics2.pollution_count,
-          alert_count: alerts.length
-        },
-        _force: true
-        // Infrastructure write — bypass validation
-      },
-      callId: uuid17(),
-      timeoutMs: 1e4
-    });
-  } catch (err) {
-    logger.warn({ error: String(err) }, "Graph hygiene: failed to store snapshot in Neo4j");
-  }
-  try {
-    await callMcpTool({
-      toolName: "graph.write_cypher",
-      args: {
-        query: `MATCH (s:GraphHealthSnapshot) WHERE s.timestamp < datetime() - duration('P90D') DETACH DELETE s`,
-        _force: true
-      },
-      callId: uuid17(),
-      timeoutMs: 1e4
-    });
-  } catch {
-  }
-  if (alerts.length > 0) {
-    const alertMsg = alerts.map((a) => `${a.metric}: ${a.message}`).join("\n");
-    broadcastSSE("graph-health-alert", { metrics: metrics2, alerts });
-    if (isSlackEnabled()) {
-      logger.info(`Slack alert: Graph Health Alert (${alerts.length} issues)`);
-    }
-    logger.warn({ alerts: alerts.length }, `Graph hygiene: ${alerts.length} alerts triggered`);
-  }
-  const duration_ms = Date.now() - t0;
-  logger.info({
-    ...metrics2,
-    alerts: alerts.length,
-    ms: duration_ms
-  }, "Graph hygiene cron: complete");
-  return { metrics: metrics2, alerts, duration_ms };
-}
-
 // src/cron-scheduler.ts
+init_slack();
+init_graph_hygiene_cron();
 init_hierarchical_intelligence();
 init_adaptive_rag();
 var jobs = /* @__PURE__ */ new Map();
@@ -18957,7 +19456,7 @@ init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router15 } from "express";
 import { randomUUID as randomUUID2 } from "crypto";
-import { v4 as uuid18 } from "uuid";
+import { v4 as uuid19 } from "uuid";
 var notebookRouter = Router15();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
@@ -18997,7 +19496,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query, params: {} },
-        callId: uuid18(),
+        callId: uuid19(),
         timeoutMs: 15e3
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -19005,7 +19504,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "kg_rag.query",
         args: { question: query, max_evidence: 10 },
-        callId: uuid18(),
+        callId: uuid19(),
         timeoutMs: 2e4
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -19681,13 +20180,13 @@ ${compressed}`,
 init_chain_engine();
 init_cognitive_proxy();
 init_logger();
-import { v4 as uuid19 } from "uuid";
+import { v4 as uuid20 } from "uuid";
 var monitorRouter = Router17();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid19(),
+    callId: uuid20(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];
@@ -19904,16 +20403,16 @@ init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router18 } from "express";
-import { v4 as uuid20 } from "uuid";
+import { v4 as uuid21 } from "uuid";
 var assemblyRouter = Router18();
-var REDIS_PREFIX3 = "orchestrator:assembly:";
+var REDIS_PREFIX4 = "orchestrator:assembly:";
 var REDIS_INDEX2 = "orchestrator:assemblies:index";
 var TTL_SECONDS6 = 2592e3;
 async function storeAssembly(assembly) {
   const redis2 = getRedis();
   if (!redis2) return false;
   try {
-    await redis2.set(`${REDIS_PREFIX3}${assembly.$id}`, JSON.stringify(assembly), "EX", TTL_SECONDS6);
+    await redis2.set(`${REDIS_PREFIX4}${assembly.$id}`, JSON.stringify(assembly), "EX", TTL_SECONDS6);
     await redis2.sadd(REDIS_INDEX2, assembly.$id);
     return true;
   } catch (err) {
@@ -19925,7 +20424,7 @@ async function loadAssembly(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX3}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX4}${id}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -19968,7 +20467,7 @@ ORDER BY b.domain, b.name LIMIT 50`;
     const graphResult = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params },
-      callId: uuid20(),
+      callId: uuid21(),
       timeoutMs: 15e3
     });
     if (graphResult.status === "success" && graphResult.result) {
@@ -20034,7 +20533,7 @@ Reply as JSON:
   const assemblies = [];
   const now = (/* @__PURE__ */ new Date()).toISOString();
   for (const candidate of analysis.candidates.slice(0, maxCandidates)) {
-    const assemblyId = `widgetdc:assembly:${uuid20()}`;
+    const assemblyId = `widgetdc:assembly:${uuid21()}`;
     const selectedBlocks = blocks.filter((b) => candidate.block_ids.includes(b.block_id));
     const conflictCount = candidate.conflicts?.length ?? 0;
     const coherence = Math.max(0, Math.min(1, candidate.coherence ?? 0.5));
@@ -20093,7 +20592,7 @@ MERGE (a)-[:COMPOSED_OF]->(b)`,
             blockIds: selectedBlocks.map((b) => b.block_id)
           }
         },
-        callId: uuid20(),
+        callId: uuid21(),
         timeoutMs: 1e4
       });
     } catch (err) {
@@ -20129,7 +20628,7 @@ assemblyRouter.get("/", async (req, res) => {
   try {
     const pipeline = redis2.pipeline();
     for (const id of allIds) {
-      pipeline.get(`${REDIS_PREFIX3}${id}`);
+      pipeline.get(`${REDIS_PREFIX4}${id}`);
     }
     const results = await pipeline.exec();
     if (results) {
@@ -20183,7 +20682,7 @@ assemblyRouter.put("/:id", async (req, res) => {
         query: "MATCH (a:Assembly {id: $id}) SET a.status = $status, a.updated_at = datetime()",
         params: { id: assembly.$id, status: assembly.status }
       },
-      callId: uuid20(),
+      callId: uuid21(),
       timeoutMs: 5e3
     });
   } catch {
@@ -20198,16 +20697,16 @@ init_mcp_caller();
 init_cognitive_proxy();
 init_sse();
 import { Router as Router19 } from "express";
-import { v4 as uuid21 } from "uuid";
+import { v4 as uuid22 } from "uuid";
 var decisionsRouter = Router19();
-var REDIS_PREFIX4 = "orchestrator:decision:";
+var REDIS_PREFIX5 = "orchestrator:decision:";
 var REDIS_INDEX3 = "orchestrator:decisions:index";
 var TTL_SECONDS7 = 7776e3;
 async function storeDecision(decision) {
   const redis2 = getRedis();
   if (!redis2) return false;
   try {
-    await redis2.set(`${REDIS_PREFIX4}${decision.$id}`, JSON.stringify(decision), "EX", TTL_SECONDS7);
+    await redis2.set(`${REDIS_PREFIX5}${decision.$id}`, JSON.stringify(decision), "EX", TTL_SECONDS7);
     await redis2.sadd(REDIS_INDEX3, decision.$id);
     return true;
   } catch (err) {
@@ -20219,7 +20718,7 @@ async function loadDecision(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX4}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX5}${id}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -20251,7 +20750,7 @@ RETURN a.id AS asm_id, a.name AS asm_name, a.created_at AS asm_ts,
 ORDER BY b.name`,
         params: { assemblyId }
       },
-      callId: uuid21(),
+      callId: uuid22(),
       timeoutMs: 15e3
     });
     if (result.status === "success") {
@@ -20310,7 +20809,7 @@ decisionsRouter.post("/certify", async (req, res) => {
   const assemblyId = String(body.assembly_id);
   const title = String(body.title);
   const now = (/* @__PURE__ */ new Date()).toISOString();
-  const decisionId = `widgetdc:decision:${uuid21()}`;
+  const decisionId = `widgetdc:decision:${uuid22()}`;
   const lineageChain = await buildLineageChain(assemblyId);
   let rationale = String(body.rationale ?? "");
   let summary = String(body.summary ?? "");
@@ -20413,7 +20912,7 @@ CREATE (d)-[:CERTIFIED_BY_EVIDENCE]->(e)`,
           // Cap for query size
         }
       },
-      callId: uuid21(),
+      callId: uuid22(),
       timeoutMs: 15e3
     });
   } catch (err) {
@@ -20447,7 +20946,7 @@ decisionsRouter.get("/", async (req, res) => {
   try {
     const pipeline = redis2.pipeline();
     for (const id of allIds) {
-      pipeline.get(`${REDIS_PREFIX4}${id}`);
+      pipeline.get(`${REDIS_PREFIX5}${id}`);
     }
     const results = await pipeline.exec();
     if (results) {
@@ -20609,6 +21108,7 @@ function requireApiKey(req, res, next) {
 }
 
 // src/index.ts
+init_slack();
 init_cognitive_proxy();
 init_chain_engine();
 
@@ -20636,9 +21136,9 @@ async function listPlans() {
 // src/harvest-pipeline.ts
 init_logger();
 init_mcp_caller();
-import { v4 as uuid22 } from "uuid";
+import { v4 as uuid23 } from "uuid";
 async function extract(domain) {
-  const callId = `harvest-extract-${uuid22().substring(0, 8)}`;
+  const callId = `harvest-extract-${uuid23().substring(0, 8)}`;
   try {
     const result = await callMcpTool({
       toolName: "srag.query",
@@ -20664,7 +21164,7 @@ function generalize(items, domain) {
     if (content.length > 2e3 || name.toLowerCase().includes("framework")) tier = "framework";
     else if (content.length > 500 || name.toLowerCase().includes("template")) tier = "template";
     return {
-      id: `harvest-${uuid22().substring(0, 12)}`,
+      id: `harvest-${uuid23().substring(0, 12)}`,
       name,
       tier,
       description: content.substring(0, 300),
@@ -20681,7 +21181,7 @@ function generalize(items, domain) {
 }
 async function store(components) {
   if (components.length === 0) return 0;
-  const callId = `harvest-store-${uuid22().substring(0, 8)}`;
+  const callId = `harvest-store-${uuid23().substring(0, 8)}`;
   const labelMap = {
     framework: "Framework",
     template: "Template",
@@ -20733,7 +21233,7 @@ async function verify(components) {
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: `${comp.tier} for ${comp.industries[0]}: ${comp.name}` },
-        callId: `harvest-verify-${uuid22().substring(0, 8)}`,
+        callId: `harvest-verify-${uuid23().substring(0, 8)}`,
         timeoutMs: 15e3
       });
       const resultStr = JSON.stringify(result).toLowerCase();
@@ -20786,7 +21286,7 @@ async function runFullHarvest() {
 import { Router as Router21 } from "express";
 init_logger();
 init_config();
-import { v4 as uuid23 } from "uuid";
+import { v4 as uuid24 } from "uuid";
 var MAX_TOOL_ROUNDS = 2;
 var MAX_TOOL_ROUNDS_ASSISTANT = 4;
 var TOOL_CATEGORIES = [
@@ -20996,7 +21496,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     return;
   }
   const { model, messages, stream, temperature, max_tokens } = req.body;
-  const requestId = `chatcmpl-${uuid23().substring(0, 12)}`;
+  const requestId = `chatcmpl-${uuid24().substring(0, 12)}`;
   const assistant = ASSISTANT_MAP.get(model);
   const resolvedModel = assistant ? assistant.baseModel : model;
   const mapping = MODEL_TO_PROVIDER[resolvedModel] || MODEL_TO_PROVIDER["gemini-flash"];
@@ -21960,7 +22460,7 @@ init_tool_registry();
 init_mcp_caller();
 init_config();
 init_logger();
-import { v4 as uuid24 } from "uuid";
+import { v4 as uuid25 } from "uuid";
 var mcpGatewayRouter = Router24();
 var backendToolsCache = [];
 var backendToolsCacheTime = 0;
@@ -22042,7 +22542,7 @@ async function handleToolsCall(id, params) {
   if (isOrchestratorTool) {
     try {
       const results = await executeToolCalls([{
-        id: uuid24(),
+        id: uuid25(),
         function: { name: toolName, arguments: JSON.stringify(args) }
       }]);
       const result = results[0];
@@ -22070,7 +22570,7 @@ async function handleToolsCall(id, params) {
     const mcpResult = await callMcpTool({
       toolName: backendName,
       args,
-      callId: uuid24(),
+      callId: uuid25(),
       timeoutMs: 3e4
     });
     if (mcpResult.status !== "success") {
@@ -22176,7 +22676,7 @@ mcpGatewayRouter.delete("/", (_req, res) => {
 import { Router as Router25 } from "express";
 init_tool_registry();
 init_logger();
-import { v4 as uuid25 } from "uuid";
+import { v4 as uuid26 } from "uuid";
 var toolGatewayRouter = Router25();
 toolGatewayRouter.post("/:name", async (req, res) => {
   const { name } = req.params;
@@ -22193,7 +22693,7 @@ toolGatewayRouter.post("/:name", async (req, res) => {
     });
     return;
   }
-  const callId = req.body?.call_id ?? uuid25();
+  const callId = req.body?.call_id ?? uuid26();
   const args = req.body ?? {};
   logger.info({ tool: name, call_id: callId }, "REST tool gateway call");
   const result = await executeToolUnified(name, args, {
@@ -22598,12 +23098,12 @@ init_logger();
 import { Router as Router28 } from "express";
 var foldRouter = Router28();
 var DAILY_LIMIT = 100;
-var REDIS_PREFIX5 = "caas:usage:";
+var REDIS_PREFIX6 = "caas:usage:";
 async function getUsageCount(apiKey) {
   const redis2 = getRedis();
   if (!redis2) return 0;
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  const key = `${REDIS_PREFIX5}${today}:${apiKey}`;
+  const key = `${REDIS_PREFIX6}${today}:${apiKey}`;
   const count = await redis2.get(key);
   return parseInt(count ?? "0", 10);
 }
@@ -22611,7 +23111,7 @@ async function incrementUsage(apiKey) {
   const redis2 = getRedis();
   if (!redis2) return;
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  const key = `${REDIS_PREFIX5}${today}:${apiKey}`;
+  const key = `${REDIS_PREFIX6}${today}:${apiKey}`;
   await redis2.incr(key);
   await redis2.expire(key, 86400 * 2);
 }
@@ -22756,12 +23256,12 @@ import { Router as Router29 } from "express";
 init_mcp_caller();
 init_logger();
 init_sse();
-import { v4 as uuid26 } from "uuid";
+import { v4 as uuid27 } from "uuid";
 async function graphRead3(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid26(),
+    callId: uuid27(),
     timeoutMs: 3e4
   });
   if (result.status !== "success") return [];
@@ -22772,7 +23272,7 @@ async function graphWrite2(cypher, params) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {} },
-    callId: uuid26(),
+    callId: uuid27(),
     timeoutMs: 6e4
   });
   return result.status === "success";
@@ -23251,223 +23751,13 @@ similarityRouter.get("/client/:id", async (req, res) => {
 init_write_gate();
 
 // src/routes/intelligence.ts
-import { Router as Router32 } from "express";
-
-// src/document-intelligence.ts
-init_mcp_caller();
-init_cognitive_proxy();
-init_logger();
-init_redis();
-import { v4 as uuid27 } from "uuid";
-var REDIS_PREFIX6 = "orchestrator:ingestion:";
-async function persistResult(result) {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  try {
-    await redis2.set(`${REDIS_PREFIX6}${result.$id}`, JSON.stringify(result), "EX", 604800);
-  } catch {
-  }
-}
-async function ingestDocument(req) {
-  const t0 = Date.now();
-  const ingestionId = `widgetdc:ingestion:${uuid27()}`;
-  logger.info({
-    id: ingestionId,
-    filename: req.filename,
-    content_length: req.content.length
-  }, "Document intelligence: starting ingestion");
-  const result = {
-    $id: ingestionId,
-    filename: req.filename,
-    status: "completed",
-    content_length: req.content.length,
-    sections_found: 0,
-    tables_found: 0,
-    entities_extracted: 0,
-    relations_extracted: 0,
-    nodes_merged: 0,
-    duration_ms: 0,
-    parsing_method: "text-fallback"
-  };
-  try {
-    let markdown;
-    let tables = [];
-    const doclingResult = await tryDoclingParse(req);
-    if (doclingResult) {
-      markdown = doclingResult.markdown;
-      tables = doclingResult.tables;
-      result.parsing_method = "docling";
-    } else {
-      markdown = req.content;
-      result.parsing_method = req.content_type === "application/pdf" ? "text-fallback" : "text-fallback";
-    }
-    result.sections_found = (markdown.match(/^#{1,3}\s/gm) ?? []).length;
-    result.tables_found = tables.length + (markdown.match(/\|.*\|.*\|/g) ?? []).length;
-    let processableContent = markdown;
-    if (markdown.length > 3e4) {
-      try {
-        const folded = await callCognitive("fold", {
-          prompt: markdown,
-          context: { strategy: "entity_preserving", max_tokens: 8e3 },
-          agent_id: "document-intelligence"
-        }, 3e4);
-        processableContent = typeof folded === "string" ? folded : JSON.stringify(folded);
-        logger.info({ original: markdown.length, folded: processableContent.length }, "Document folded for entity extraction");
-      } catch {
-        processableContent = markdown.slice(0, 3e4);
-      }
-    }
-    if (req.extract_entities !== false) {
-      const extraction = await extractEntities(processableContent, req.filename, req.domain);
-      result.entities_extracted = extraction.entities.length;
-      result.relations_extracted = extraction.relations.length;
-      if (extraction.entities.length > 0) {
-        const merged = await mergeToGraph(extraction.entities, extraction.relations, req);
-        result.nodes_merged = merged;
-      }
-    }
-    if (req.generate_embeddings !== false) {
-      try {
-        await callMcpTool({
-          toolName: "vidensarkiv.add",
-          args: {
-            title: req.filename,
-            content: markdown.slice(0, 1e4),
-            source: req.source_url ?? req.filename,
-            domain: req.domain ?? "general"
-          },
-          callId: uuid27(),
-          timeoutMs: 2e4
-        });
-      } catch {
-        logger.warn({ filename: req.filename }, "SRAG ingest failed \u2014 entities still in graph");
-      }
-    }
-  } catch (err) {
-    result.status = "failed";
-    result.error = err instanceof Error ? err.message : String(err);
-    logger.error({ id: ingestionId, error: result.error }, "Document intelligence: failed");
-  }
-  result.duration_ms = Date.now() - t0;
-  await persistResult(result);
-  logger.info({
-    id: ingestionId,
-    method: result.parsing_method,
-    entities: result.entities_extracted,
-    nodes: result.nodes_merged,
-    ms: result.duration_ms
-  }, "Document intelligence: complete");
-  return result;
-}
-async function tryDoclingParse(req) {
-  const doclingUrl = process.env.DOCLING_URL;
-  if (!doclingUrl) return null;
-  try {
-    const res = await fetch(`${doclingUrl}/convert`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        content: req.content,
-        filename: req.filename,
-        output_format: "markdown"
-      }),
-      signal: AbortSignal.timeout(6e4)
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (data.markdown) {
-      return { markdown: data.markdown, tables: data.tables ?? [] };
-    }
-  } catch {
-    logger.debug("Docling-serve not available \u2014 using fallback");
-  }
-  return null;
-}
-async function extractEntities(content, filename, domain) {
-  try {
-    const result = await callCognitive("analyze", {
-      prompt: `Extract named entities and relationships from this document.
-
-DOCUMENT: "${filename}" (domain: ${domain ?? "general"})
-
-CONTENT:
-${content.slice(0, 12e3)}
-
-RULES:
-- Extract organizations, regulations, technologies, frameworks, methodologies, services
-- Extract relationships: USES, COMPLIES_WITH, COMPETES_WITH, PART_OF, RELATES_TO
-- Return ONLY entities that are specific and named (not generic concepts)
-- Limit to 20 most important entities
-
-Reply as JSON:
-{"entities": [{"name": "Entity Name", "type": "Organization|Regulation|Technology|Framework|Service", "properties": {"domain": "...", "description": "..."}}], "relations": [{"from": "Entity A", "to": "Entity B", "type": "USES|COMPLIES_WITH|..."}]}`,
-      context: { filename, domain: domain ?? "general", source: "document-intelligence" },
-      agent_id: "document-intelligence"
-    }, 3e4);
-    const text = String(result ?? "");
-    const match = text.match(/\{[\s\S]*\}/);
-    if (match) {
-      const parsed = JSON.parse(match[0]);
-      return {
-        entities: Array.isArray(parsed.entities) ? parsed.entities.slice(0, 20) : [],
-        relations: Array.isArray(parsed.relations) ? parsed.relations.slice(0, 30) : []
-      };
-    }
-  } catch (err) {
-    logger.warn({ error: String(err), filename }, "Entity extraction failed");
-  }
-  return { entities: [], relations: [] };
-}
-async function mergeToGraph(entities, relations, req) {
-  let merged = 0;
-  for (const entity of entities) {
-    try {
-      await callMcpTool({
-        toolName: "graph.write_cypher",
-        args: {
-          query: `MERGE (n:${entity.type} {name: $name})
-SET n.domain = $domain, n.source = $source, n.updatedAt = datetime()
-WITH n
-MERGE (d:TDCDocument {filename: $filename})
-MERGE (n)-[:EXTRACTED_FROM]->(d)`,
-          params: {
-            name: entity.name,
-            domain: entity.properties?.domain ?? req.domain ?? "general",
-            source: req.source_url ?? req.filename,
-            filename: req.filename
-          }
-        },
-        callId: uuid27(),
-        timeoutMs: 1e4
-      });
-      merged++;
-    } catch (err) {
-      logger.debug({ entity: entity.name, error: String(err) }, "Entity MERGE failed");
-    }
-  }
-  for (const rel of relations) {
-    try {
-      await callMcpTool({
-        toolName: "graph.write_cypher",
-        args: {
-          query: `MATCH (a {name: $from}), (b {name: $to})
-MERGE (a)-[:${rel.type.replace(/[^A-Z_]/g, "_")}]->(b)`,
-          params: { from: rel.from, to: rel.to }
-        },
-        callId: uuid27(),
-        timeoutMs: 5e3
-      });
-    } catch {
-    }
-  }
-  return merged;
-}
-
-// src/routes/intelligence.ts
+init_document_intelligence();
 init_hierarchical_intelligence();
+init_graph_hygiene_cron();
 init_write_gate();
 init_adaptive_rag();
 init_logger();
+import { Router as Router32 } from "express";
 var intelligenceRouter = Router32();
 intelligenceRouter.post("/ingest", async (req, res) => {
   const body = req.body;
