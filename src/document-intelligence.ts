@@ -14,6 +14,7 @@
 import { v4 as uuid } from 'uuid'
 import { callMcpTool } from './mcp-caller.js'
 import { callCognitive } from './cognitive-proxy.js'
+import { chatLLM } from './llm-proxy.js'
 import { logger } from './logger.js'
 import { getRedis } from './redis.js'
 
@@ -230,10 +231,12 @@ async function extractEntities(
   domain?: string,
 ): Promise<{ entities: ExtractedEntity[]; relations: ExtractedRelation[] }> {
   try {
-    // Use callCognitive('reason') which returns recommendation/reasoning text
-    // (not 'analyze' which returns structured objects without LLM text)
-    const result = await callCognitive('reason', {
-      prompt: `You are an entity extraction engine. Extract named entities and relationships from this document.
+    // Use Mercury 2 via backend MCP llm.generate — ultra-fast entity extraction
+    // NOT callCognitive (RLM ignores input, uses its own RAG context — wrong for extraction)
+    const llmResult = await callMcpTool({
+      toolName: 'llm.generate',
+      args: {
+        prompt: `Extract named entities and relationships from this document. Reply ONLY as valid JSON, no markdown code blocks.
 
 DOCUMENT: "${filename}" (domain: ${domain ?? 'general'})
 
@@ -246,33 +249,26 @@ RULES:
 - Return ONLY entities that are specific and named (not generic concepts)
 - Limit to 20 most important entities
 
-YOU MUST reply as JSON and nothing else:
+JSON format:
 {"entities": [{"name": "Entity Name", "type": "Organization|Regulation|Technology|Framework|Service", "properties": {"domain": "...", "description": "..."}}], "relations": [{"from": "Entity A", "to": "Entity B", "type": "USES|COMPLIES_WITH|..."}]}`,
-      context: { filename, domain: domain ?? 'general', source: 'document-intelligence' },
-      agent_id: 'document-intelligence',
-    }, 30000)
+      },
+      callId: uuid(),
+      timeoutMs: 30000,
+    })
 
-    // RLM /reason returns {recommendation, reasoning, ...} — extract JSON from any text field
-    const resultObj = result as any
-    const textParts = [
-      resultObj?.recommendation,
-      resultObj?.reasoning,
-      typeof result === 'string' ? result : null,
-      JSON.stringify(result),
-    ].filter(Boolean)
+    if (llmResult.status !== 'success') {
+      logger.warn({ error: llmResult.error_message }, 'Mercury entity extraction failed')
+      return { entities: [], relations: [] }
+    }
 
-    for (const text of textParts) {
-      const match = String(text).match(/\{[\s\S]*"entities"[\s\S]*\}/)
-      if (match) {
-        try {
-          const parsed = JSON.parse(match[0])
-          if (Array.isArray(parsed.entities) && parsed.entities.length > 0) {
-            return {
-              entities: parsed.entities.slice(0, 20),
-              relations: Array.isArray(parsed.relations) ? parsed.relations.slice(0, 30) : [],
-            }
-          }
-        } catch { /* try next text part */ }
+    const raw = llmResult.result as any
+    const text = raw?.content ?? (typeof raw === 'string' ? raw : '')
+    const match = String(text).match(/\{[\s\S]*"entities"[\s\S]*\}/)
+    if (match) {
+      const parsed = JSON.parse(match[0])
+      return {
+        entities: Array.isArray(parsed.entities) ? parsed.entities.slice(0, 20) : [],
+        relations: Array.isArray(parsed.relations) ? parsed.relations.slice(0, 30) : [],
       }
     }
   } catch (err) {

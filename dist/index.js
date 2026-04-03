@@ -1538,27 +1538,26 @@ function hookAutoEnrichment(answer, query) {
 async function extractAndMerge(answer, query) {
   if (answer.length < 50) return;
   try {
-    const result = await callCognitive("reason", {
-      prompt: `Extract specific named entities from this AI-generated answer. Only NAMED entities. Reply ONLY as JSON: {"entities":[{"name":"...","type":"Organization|Regulation|Technology|Framework","domain":"..."}]}. Max 5.
+    const llmResult = await callMcpTool({
+      toolName: "llm.generate",
+      args: {
+        prompt: `Extract specific named entities from this AI-generated answer. Only NAMED entities (organizations, regulations, technologies, frameworks). Reply ONLY as valid JSON, no markdown.
 
 QUERY: ${query}
-ANSWER: ${answer.slice(0, 2e3)}`,
-      context: { source: "auto-enrichment" },
-      agent_id: "auto-enrichment"
-    }, 15e3);
-    const resultObj = result;
-    const texts = [resultObj?.recommendation, resultObj?.reasoning, typeof result === "string" ? result : JSON.stringify(result)].filter(Boolean);
-    let parsed = { entities: [] };
-    for (const text of texts) {
-      const match = String(text).match(/\{[\s\S]*"entities"[\s\S]*\}/);
-      if (match) {
-        try {
-          parsed = JSON.parse(match[0]);
-          break;
-        } catch {
-        }
-      }
-    }
+ANSWER: ${answer.slice(0, 2e3)}
+
+JSON: {"entities": [{"name": "...", "type": "Organization|Regulation|Technology|Framework", "domain": "..."}]}
+Max 5 entities. If none specific enough: {"entities": []}`
+      },
+      callId: uuid2(),
+      timeoutMs: 15e3
+    });
+    if (llmResult.status !== "success") return;
+    const raw = llmResult.result;
+    const text = raw?.content ?? (typeof raw === "string" ? raw : "");
+    const match = String(text).match(/\{[\s\S]*"entities"[\s\S]*\}/);
+    if (!match) return;
+    const parsed = JSON.parse(match[0]);
     if (!parsed.entities?.length) return;
     const entities = Array.isArray(parsed.entities) ? parsed.entities.slice(0, 5) : [];
     for (const entity of entities) {
@@ -1634,7 +1633,6 @@ var init_compound_hooks = __esm({
   "src/compound-hooks.ts"() {
     "use strict";
     init_mcp_caller();
-    init_cognitive_proxy();
     init_logger();
     init_redis();
   }
@@ -3377,8 +3375,10 @@ async function tryDoclingParse(req) {
 }
 async function extractEntities(content, filename, domain) {
   try {
-    const result = await callCognitive("reason", {
-      prompt: `You are an entity extraction engine. Extract named entities and relationships from this document.
+    const llmResult = await callMcpTool({
+      toolName: "llm.generate",
+      args: {
+        prompt: `Extract named entities and relationships from this document. Reply ONLY as valid JSON, no markdown code blocks.
 
 DOCUMENT: "${filename}" (domain: ${domain ?? "general"})
 
@@ -3391,32 +3391,25 @@ RULES:
 - Return ONLY entities that are specific and named (not generic concepts)
 - Limit to 20 most important entities
 
-YOU MUST reply as JSON and nothing else:
-{"entities": [{"name": "Entity Name", "type": "Organization|Regulation|Technology|Framework|Service", "properties": {"domain": "...", "description": "..."}}], "relations": [{"from": "Entity A", "to": "Entity B", "type": "USES|COMPLIES_WITH|..."}]}`,
-      context: { filename, domain: domain ?? "general", source: "document-intelligence" },
-      agent_id: "document-intelligence"
-    }, 3e4);
-    const resultObj = result;
-    const textParts = [
-      resultObj?.recommendation,
-      resultObj?.reasoning,
-      typeof result === "string" ? result : null,
-      JSON.stringify(result)
-    ].filter(Boolean);
-    for (const text of textParts) {
-      const match = String(text).match(/\{[\s\S]*"entities"[\s\S]*\}/);
-      if (match) {
-        try {
-          const parsed = JSON.parse(match[0]);
-          if (Array.isArray(parsed.entities) && parsed.entities.length > 0) {
-            return {
-              entities: parsed.entities.slice(0, 20),
-              relations: Array.isArray(parsed.relations) ? parsed.relations.slice(0, 30) : []
-            };
-          }
-        } catch {
-        }
-      }
+JSON format:
+{"entities": [{"name": "Entity Name", "type": "Organization|Regulation|Technology|Framework|Service", "properties": {"domain": "...", "description": "..."}}], "relations": [{"from": "Entity A", "to": "Entity B", "type": "USES|COMPLIES_WITH|..."}]}`
+      },
+      callId: uuid7(),
+      timeoutMs: 3e4
+    });
+    if (llmResult.status !== "success") {
+      logger.warn({ error: llmResult.error_message }, "Mercury entity extraction failed");
+      return { entities: [], relations: [] };
+    }
+    const raw = llmResult.result;
+    const text = raw?.content ?? (typeof raw === "string" ? raw : "");
+    const match = String(text).match(/\{[\s\S]*"entities"[\s\S]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      return {
+        entities: Array.isArray(parsed.entities) ? parsed.entities.slice(0, 20) : [],
+        relations: Array.isArray(parsed.relations) ? parsed.relations.slice(0, 30) : []
+      };
     }
   } catch (err) {
     logger.warn({ error: String(err), filename }, "Entity extraction failed");
