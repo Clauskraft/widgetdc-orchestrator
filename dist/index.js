@@ -19291,7 +19291,8 @@ async function runCronJob(jobId) {
       }
       return;
     }
-    if (job.id === "data-lifecycle" || job.id === "graph-overflow" || job.id === "skill-forge") {
+    if (job.id === "data-lifecycle" || job.id === "graph-overflow" || job.id === "skill-forge" || // Fase 3 TECH-9: 6 additional backend cron proxies (Fase 2 TECH-6)
+    job.id === "adoption-maintenance" || job.id === "synergy" || job.id === "embedding-reindex" || job.id === "consulting-activation" || job.id === "autonomous-linear-loop" || job.id === "lesson-delivery") {
       try {
         const endpoint2 = `${config.backendUrl}/api/cron/${job.id}`;
         const res = await fetch(endpoint2, {
@@ -25381,6 +25382,666 @@ similarityRouter.get("/client/:id", async (req, res) => {
   }
 });
 
+// src/routes/engagements.ts
+import { Router as Router32 } from "express";
+
+// src/engagement-engine.ts
+init_mcp_caller();
+init_cognitive_proxy();
+init_dual_rag();
+init_redis();
+init_logger();
+init_adaptive_rag();
+import { v4 as uuid30 } from "uuid";
+var REDIS_PREFIX8 = "orchestrator:engagement:";
+var REDIS_INDEX4 = "orchestrator:engagements:index";
+var REDIS_PLAN_PREFIX = "orchestrator:engagement:plan:";
+var TTL_SECONDS8 = 60 * 60 * 24 * 30;
+var engagementCache = /* @__PURE__ */ new Map();
+async function saveEngagement(e) {
+  engagementCache.set(e.$id, e);
+  const redis2 = getRedis();
+  if (redis2) {
+    try {
+      await redis2.set(`${REDIS_PREFIX8}${e.$id}`, JSON.stringify(e), "EX", TTL_SECONDS8);
+      await redis2.zadd(REDIS_INDEX4, Date.now(), e.$id);
+    } catch (err) {
+      logger.warn({ error: String(err) }, "Engagement: Redis save failed");
+    }
+  }
+}
+async function getEngagement(id) {
+  const cached = engagementCache.get(id);
+  if (cached) return cached;
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${REDIS_PREFIX8}${id}`);
+    if (!raw) return null;
+    const e = JSON.parse(raw);
+    engagementCache.set(id, e);
+    return e;
+  } catch {
+    return null;
+  }
+}
+async function listEngagements(limit = 20) {
+  const redis2 = getRedis();
+  if (!redis2) return Array.from(engagementCache.values()).slice(0, limit);
+  try {
+    const ids = await redis2.zrevrange(REDIS_INDEX4, 0, limit - 1);
+    const out = [];
+    for (const id of ids) {
+      const e = await getEngagement(id);
+      if (e) out.push(e);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+async function mergeEngagementNode(e) {
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (eng:Engagement {id: $id})
+SET eng.client = $client,
+    eng.domain = $domain,
+    eng.objective = $objective,
+    eng.startDate = $startDate,
+    eng.targetEndDate = $targetEndDate,
+    eng.status = $status,
+    eng.budgetDkk = $budgetDkk,
+    eng.teamSize = $teamSize,
+    eng.updatedAt = datetime(),
+    eng.createdAt = coalesce(eng.createdAt, datetime())
+WITH eng
+UNWIND $methodologyRefs AS mref
+MERGE (m {title: mref})
+MERGE (eng)-[:USES_METHODOLOGY]->(m)`,
+        params: {
+          id: e.$id,
+          client: e.client,
+          domain: e.domain,
+          objective: e.objective.slice(0, 500),
+          startDate: e.start_date,
+          targetEndDate: e.target_end_date,
+          status: e.status,
+          budgetDkk: e.budget_dkk ?? 0,
+          teamSize: e.team_size ?? 0,
+          methodologyRefs: (e.methodology_refs ?? []).slice(0, 10)
+        },
+        _force: true
+      },
+      callId: uuid30(),
+      timeoutMs: 1e4
+    });
+  } catch (err) {
+    logger.warn({ id: e.$id, error: String(err) }, "Engagement: Neo4j MERGE failed (non-fatal)");
+  }
+}
+async function mergeOutcomeNode(o) {
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MATCH (eng:Engagement {id: $engId})
+MERGE (out:EngagementOutcome {engagementId: $engId})
+SET out.grade = $grade,
+    out.completedAt = datetime($completedAt),
+    out.actualEndDate = $actualEndDate,
+    out.whatWentWell = $wellText,
+    out.whatWentWrong = $wrongText,
+    out.precedentAccuracy = $precAcc,
+    out.recordedBy = $recordedBy,
+    out.updatedAt = datetime()
+MERGE (eng)-[:HAS_OUTCOME]->(out)
+SET eng.status = 'completed'`,
+        params: {
+          engId: o.engagement_id,
+          grade: o.grade,
+          completedAt: o.completed_at,
+          actualEndDate: o.actual_end_date,
+          wellText: o.what_went_well.slice(0, 1e3),
+          wrongText: o.what_went_wrong.slice(0, 1e3),
+          precAcc: o.precedent_match_accuracy,
+          recordedBy: o.recorded_by
+        },
+        _force: true
+      },
+      callId: uuid30(),
+      timeoutMs: 1e4
+    });
+  } catch (err) {
+    logger.warn({ id: o.engagement_id, error: String(err) }, "Engagement outcome: Neo4j MERGE failed");
+  }
+}
+async function indexEngagementForPrecedent(e) {
+  const content = `Consulting engagement: ${e.objective}. Client domain: ${e.domain}. Duration: ${e.start_date} to ${e.target_end_date}. Team size: ${e.team_size ?? "unspecified"}. Methodologies: ${(e.methodology_refs ?? []).join(", ") || "none specified"}.`;
+  try {
+    await callMcpTool({
+      toolName: "raptor.index",
+      args: {
+        content,
+        metadata: {
+          title: `Engagement: ${e.client} \u2014 ${e.objective.slice(0, 60)}`,
+          domain: "Engagement",
+          engagement_id: e.$id,
+          type: "engagement"
+        },
+        orgId: "default",
+        _force: true
+      },
+      callId: uuid30(),
+      timeoutMs: 15e3
+    });
+  } catch (err) {
+    logger.warn({ id: e.$id, error: String(err) }, "Engagement: raptor.index failed (non-fatal)");
+  }
+}
+async function createEngagement(req) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const e = {
+    $id: `eng-${uuid30()}`,
+    $schema: "https://widgetdc.io/schemas/engagement/v1",
+    client: req.client.slice(0, 120),
+    domain: req.domain.slice(0, 60),
+    objective: req.objective.slice(0, 500),
+    start_date: req.start_date,
+    target_end_date: req.target_end_date,
+    budget_dkk: req.budget_dkk,
+    team_size: req.team_size,
+    status: "draft",
+    methodology_refs: (req.methodology_refs ?? []).slice(0, 10),
+    created_at: now,
+    updated_at: now
+  };
+  await saveEngagement(e);
+  mergeEngagementNode(e).catch(() => {
+  });
+  indexEngagementForPrecedent(e).catch(() => {
+  });
+  logger.info({ id: e.$id, client: e.client, domain: e.domain }, "Engagement: created");
+  return e;
+}
+async function matchPrecedents(req) {
+  const t0 = Date.now();
+  const maxResults = Math.min(req.max_results ?? 5, 20);
+  const query = `${req.domain} consulting engagement: ${req.objective}`;
+  let rag;
+  try {
+    rag = await dualChannelRAG(query, { maxResults: maxResults * 2, queryType: "multi_hop" });
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Engagement match: dualChannelRAG failed");
+    return { matches: [], query_ms: Date.now() - t0 };
+  }
+  const matches = rag.results.filter((r) => r.score >= 0.3).slice(0, maxResults).map((r) => ({
+    engagement_id: r.source,
+    title: r.content.slice(0, 120),
+    domain: req.domain,
+    similarity: Number(r.score.toFixed(3)),
+    match_reasoning: `Graph similarity ${(r.score * 100).toFixed(0)}% via ${r.source.startsWith("eng-") ? "engagement precedent" : "methodology knowledge"}`,
+    stale: false
+    // TODO: compare against createdAt once outcome data exists
+  }));
+  logger.info({ query: req.objective.slice(0, 60), count: matches.length, ms: Date.now() - t0 }, "Engagement: precedents matched");
+  return { matches, query_ms: Date.now() - t0 };
+}
+async function generatePlan(req) {
+  const t0 = Date.now();
+  const engagementId = req.engagement_id ?? `eng-${uuid30()}`;
+  const [precedents, methodologyBundle, riskBundle] = await Promise.all([
+    matchPrecedents({ objective: req.objective, domain: req.domain, max_results: 5 }),
+    dualChannelRAG(`consulting methodology framework for ${req.domain} ${req.objective}`, { maxResults: 5 }),
+    dualChannelRAG(`risks challenges pitfalls for ${req.domain} consulting engagement ${req.objective}`, { maxResults: 5 })
+  ]);
+  const methodologyEvidence = methodologyBundle.results.map((r) => r.content).join("\n\n").slice(0, 3500);
+  const riskEvidence = riskBundle.results.map((r) => r.content).join("\n\n").slice(0, 2500);
+  const precedentText = precedents.matches.map((m, i) => `[${i + 1}] ${m.title} (similarity: ${m.similarity})`).join("\n");
+  const totalCitations = precedents.matches.length + methodologyBundle.results.length + riskBundle.results.length;
+  const avgConfidence = [
+    ...methodologyBundle.results.map((r) => r.score),
+    ...riskBundle.results.map((r) => r.score),
+    ...precedents.matches.map((m) => m.similarity)
+  ].reduce((s, x) => s + x, 0) / Math.max(
+    1,
+    methodologyBundle.results.length + riskBundle.results.length + precedents.matches.length
+  ) || 0;
+  const planPrompt = `You are planning a ${req.duration_weeks}-week consulting engagement.
+
+OBJECTIVE: ${req.objective}
+DOMAIN: ${req.domain}
+TEAM SIZE: ${req.team_size}
+${req.budget_dkk ? `BUDGET: ${req.budget_dkk} DKK` : ""}
+
+METHODOLOGY EVIDENCE FROM KNOWLEDGE GRAPH:
+${methodologyEvidence || "[limited evidence]"}
+
+RISK EVIDENCE FROM KNOWLEDGE GRAPH:
+${riskEvidence || "[limited evidence]"}
+
+SIMILAR PRECEDENT ENGAGEMENTS:
+${precedentText || "[no precedents \u2014 cold start]"}
+
+OUTPUT STRICT JSON with this schema:
+{
+  "phases": [
+    {"name": "...", "duration_weeks": N, "deliverables": ["...", "..."], "methodology": "..."}
+  ],
+  "risks": [
+    {"description": "...", "severity": "high|medium|low", "mitigation": "..."}
+  ],
+  "required_skills": ["skill1", "skill2", ...]
+}
+
+Rules:
+- Phase durations must sum to ${req.duration_weeks}
+- Include 3-6 phases, 3-8 risks, 5-12 skills
+- Be concrete and cite evidence where possible
+- Return ONLY JSON, no markdown fences, no commentary`;
+  let phases = [];
+  let risks = [];
+  let skills = [];
+  try {
+    const result = await callCognitive(
+      "plan",
+      {
+        prompt: planPrompt,
+        context: {
+          engagement_id: engagementId,
+          domain: req.domain,
+          evidence_count: totalCitations
+        },
+        agent_id: "engagement-planner"
+      },
+      45e3
+    );
+    const text = typeof result === "string" ? result : JSON.stringify(result);
+    const parsed = parsePlanJSON(text);
+    phases = parsed.phases;
+    risks = parsed.risks;
+    skills = parsed.required_skills;
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Engagement plan: cognitive generation failed");
+  }
+  if (phases.length === 0) {
+    phases = synthesizeFallbackPhases(req.duration_weeks);
+  }
+  if (risks.length === 0) {
+    risks = [
+      { description: "Scope creep beyond initial objectives", severity: "medium", mitigation: "Weekly steering committee with change control board" },
+      { description: "Stakeholder alignment drift", severity: "medium", mitigation: "Bi-weekly alignment sessions with documented decisions" }
+    ];
+  }
+  if (skills.length === 0) {
+    skills = ["Strategic consulting", "Stakeholder management", "Data analysis", req.domain];
+  }
+  const plan = {
+    engagement_id: engagementId,
+    generated_at: (/* @__PURE__ */ new Date()).toISOString(),
+    phases,
+    risks,
+    required_skills: skills,
+    precedents_used: precedents.matches,
+    total_citations: totalCitations,
+    avg_confidence: Number(avgConfidence.toFixed(3)),
+    generation_ms: Date.now() - t0
+  };
+  const redis2 = getRedis();
+  if (redis2) {
+    try {
+      await redis2.set(`${REDIS_PLAN_PREFIX}${engagementId}`, JSON.stringify(plan), "EX", TTL_SECONDS8);
+    } catch {
+    }
+  }
+  logger.info(
+    {
+      engagement_id: engagementId,
+      phases: phases.length,
+      risks: risks.length,
+      citations: totalCitations,
+      confidence: plan.avg_confidence,
+      ms: plan.generation_ms
+    },
+    "Engagement: plan generated"
+  );
+  return plan;
+}
+function parsePlanJSON(text) {
+  const cleaned = text.replace(/```json\s*/g, "").replace(/```\s*/g, "").trim();
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+  if (firstBrace < 0 || lastBrace < 0) {
+    return { phases: [], risks: [], required_skills: [] };
+  }
+  const jsonSlice = cleaned.slice(firstBrace, lastBrace + 1);
+  try {
+    const obj = JSON.parse(jsonSlice);
+    const phases = Array.isArray(obj.phases) ? obj.phases.slice(0, 10).map((p) => ({
+      name: String(p.name ?? "Unnamed phase"),
+      duration_weeks: Number(p.duration_weeks ?? 1),
+      deliverables: Array.isArray(p.deliverables) ? p.deliverables.map(String).slice(0, 8) : [],
+      methodology: String(p.methodology ?? "")
+    })) : [];
+    const risks = Array.isArray(obj.risks) ? obj.risks.slice(0, 10).map((r) => ({
+      description: String(r.description ?? ""),
+      severity: ["high", "medium", "low"].includes(String(r.severity)) ? r.severity : "medium",
+      mitigation: String(r.mitigation ?? "")
+    })) : [];
+    const skills = Array.isArray(obj.required_skills) ? obj.required_skills.map(String).slice(0, 15) : [];
+    return { phases, risks, required_skills: skills };
+  } catch {
+    return { phases: [], risks: [], required_skills: [] };
+  }
+}
+function synthesizeFallbackPhases(totalWeeks) {
+  const w = Math.max(1, Math.floor(totalWeeks / 4));
+  return [
+    { name: "Discover", duration_weeks: w, deliverables: ["Stakeholder map", "Current state assessment"], methodology: "McKinsey 7-step problem solving" },
+    { name: "Diagnose", duration_weeks: w, deliverables: ["Root cause analysis", "Opportunity sizing"], methodology: "MECE issue tree decomposition" },
+    { name: "Design", duration_weeks: w, deliverables: ["Target operating model", "Implementation roadmap"], methodology: "Capability-based planning" },
+    { name: "Deploy", duration_weeks: Math.max(1, totalWeeks - 3 * w), deliverables: ["Pilot rollout", "Change management plan"], methodology: "Kotter 8-step change" }
+  ];
+}
+async function recordOutcome(req) {
+  const engagement = await getEngagement(req.engagement_id);
+  if (!engagement) {
+    throw new Error(`Engagement ${req.engagement_id} not found`);
+  }
+  const outcome = {
+    engagement_id: req.engagement_id,
+    completed_at: (/* @__PURE__ */ new Date()).toISOString(),
+    actual_end_date: req.actual_end_date,
+    grade: req.grade,
+    deliverables_shipped: req.deliverables_shipped.slice(0, 20),
+    what_went_well: req.what_went_well.slice(0, 2e3),
+    what_went_wrong: req.what_went_wrong.slice(0, 2e3),
+    precedent_match_accuracy: Math.min(1, Math.max(0, req.precedent_match_accuracy ?? 0.5)),
+    recorded_by: req.recorded_by
+  };
+  engagement.status = "completed";
+  engagement.updated_at = (/* @__PURE__ */ new Date()).toISOString();
+  await saveEngagement(engagement);
+  const redis2 = getRedis();
+  if (redis2) {
+    try {
+      await redis2.set(`${REDIS_PREFIX8}outcome:${req.engagement_id}`, JSON.stringify(outcome), "EX", TTL_SECONDS8);
+    } catch {
+    }
+  }
+  mergeOutcomeNode(outcome).catch(() => {
+  });
+  const reward = gradeToReward(outcome.grade) * outcome.precedent_match_accuracy;
+  sendQLearningReward(
+    { query_type: "multi_hop", channels_used: ["graphrag", "srag", "cypher"], result_count: 5 },
+    { strategy: "engagement-precedent-match", confidence_threshold: 0.4 },
+    reward
+  ).catch(() => {
+  });
+  logger.info(
+    { engagement_id: req.engagement_id, grade: req.grade, reward },
+    "Engagement: outcome recorded, Q-learning reward sent"
+  );
+  return outcome;
+}
+function gradeToReward(grade) {
+  switch (grade) {
+    case "exceeded":
+      return 1;
+    case "met":
+      return 0.8;
+    case "partial":
+      return 0.4;
+    case "missed":
+      return 0.1;
+  }
+}
+async function getOutcome(engagementId) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${REDIS_PREFIX8}outcome:${engagementId}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+async function getPlan(engagementId) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${REDIS_PLAN_PREFIX}${engagementId}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+// src/routes/engagements.ts
+init_logger();
+var engagementsRouter = Router32();
+var VALID_GRADES = ["exceeded", "met", "partial", "missed"];
+var rateLimitMap3 = /* @__PURE__ */ new Map();
+var RATE_LIMIT2 = 20;
+var RATE_WINDOW_MS2 = 6e4;
+function isRateLimited2(key) {
+  const now = Date.now();
+  if (rateLimitMap3.size > 100) {
+    for (const [k, v] of rateLimitMap3) {
+      if (now - v.windowStart > RATE_WINDOW_MS2 * 2) rateLimitMap3.delete(k);
+    }
+  }
+  const entry = rateLimitMap3.get(key);
+  if (!entry || now - entry.windowStart > RATE_WINDOW_MS2) {
+    rateLimitMap3.set(key, { count: 1, windowStart: now });
+    return false;
+  }
+  entry.count++;
+  return entry.count > RATE_LIMIT2;
+}
+function badRequest(res, message) {
+  res.status(400).json({
+    success: false,
+    error: { code: "VALIDATION_ERROR", message, status_code: 400 }
+  });
+}
+function isIsoDate(s) {
+  return typeof s === "string" && !Number.isNaN(Date.parse(s));
+}
+engagementsRouter.post("/", async (req, res) => {
+  const apiKey = (req.headers.authorization ?? "").replace("Bearer ", "") || "anon";
+  if (isRateLimited2(apiKey)) {
+    res.status(429).json({
+      success: false,
+      error: { code: "RATE_LIMITED", message: "Rate limit exceeded", status_code: 429 }
+    });
+    return;
+  }
+  const body = req.body;
+  const client = body.client;
+  const domain = body.domain;
+  const objective = body.objective;
+  const startDate = body.start_date;
+  const targetEndDate = body.target_end_date;
+  if (!client || typeof client !== "string" || client.length < 2) return badRequest(res, "client required (min 2 chars)");
+  if (!domain || typeof domain !== "string") return badRequest(res, "domain required");
+  if (!objective || typeof objective !== "string" || objective.length < 10) return badRequest(res, "objective required (min 10 chars)");
+  if (!isIsoDate(startDate)) return badRequest(res, "start_date must be ISO date");
+  if (!isIsoDate(targetEndDate)) return badRequest(res, "target_end_date must be ISO date");
+  if (new Date(targetEndDate) <= new Date(startDate)) return badRequest(res, "target_end_date must be after start_date");
+  const request = {
+    client,
+    domain,
+    objective,
+    start_date: startDate,
+    target_end_date: targetEndDate,
+    budget_dkk: typeof body.budget_dkk === "number" && body.budget_dkk >= 0 ? body.budget_dkk : void 0,
+    team_size: typeof body.team_size === "number" && body.team_size > 0 && body.team_size < 500 ? body.team_size : void 0,
+    methodology_refs: Array.isArray(body.methodology_refs) ? body.methodology_refs.filter((x) => typeof x === "string").map(String) : void 0
+  };
+  try {
+    const engagement = await createEngagement(request);
+    res.status(201).json({ success: true, data: engagement });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn({ error: message }, "Engagement create failed");
+    res.status(500).json({
+      success: false,
+      error: { code: "CREATE_FAILED", message, status_code: 500 }
+    });
+  }
+});
+engagementsRouter.get("/", async (req, res) => {
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "20")), 1), 100);
+  try {
+    const engagements = await listEngagements(limit);
+    res.json({ success: true, data: engagements, total: engagements.length });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: { code: "LIST_FAILED", message: err instanceof Error ? err.message : String(err), status_code: 500 }
+    });
+  }
+});
+engagementsRouter.post("/match", async (req, res) => {
+  const apiKey = (req.headers.authorization ?? "").replace("Bearer ", "") || "anon";
+  if (isRateLimited2(apiKey)) {
+    res.status(429).json({
+      success: false,
+      error: { code: "RATE_LIMITED", message: "Rate limit exceeded", status_code: 429 }
+    });
+    return;
+  }
+  const body = req.body;
+  const objective = body.objective;
+  const domain = body.domain;
+  if (!objective || typeof objective !== "string" || objective.length < 5) return badRequest(res, "objective required (min 5 chars)");
+  if (!domain || typeof domain !== "string") return badRequest(res, "domain required");
+  const rawMax = body.max_results;
+  const maxResults = typeof rawMax === "number" && rawMax > 0 && rawMax <= 20 ? rawMax : 5;
+  const request = { objective, domain, max_results: maxResults };
+  try {
+    const result = await matchPrecedents(request);
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: { code: "MATCH_FAILED", message: err instanceof Error ? err.message : String(err), status_code: 500 }
+    });
+  }
+});
+engagementsRouter.post("/plan", async (req, res) => {
+  const apiKey = (req.headers.authorization ?? "").replace("Bearer ", "") || "anon";
+  if (isRateLimited2(apiKey)) {
+    res.status(429).json({
+      success: false,
+      error: { code: "RATE_LIMITED", message: "Rate limit exceeded", status_code: 429 }
+    });
+    return;
+  }
+  const body = req.body;
+  const objective = body.objective;
+  const domain = body.domain;
+  const durationWeeks = body.duration_weeks;
+  const teamSize = body.team_size;
+  if (!objective || typeof objective !== "string" || objective.length < 10) return badRequest(res, "objective required (min 10 chars)");
+  if (!domain || typeof domain !== "string") return badRequest(res, "domain required");
+  if (typeof durationWeeks !== "number" || durationWeeks < 1 || durationWeeks > 104) return badRequest(res, "duration_weeks must be 1-104");
+  if (typeof teamSize !== "number" || teamSize < 1 || teamSize > 100) return badRequest(res, "team_size must be 1-100");
+  const request = {
+    engagement_id: typeof body.engagement_id === "string" ? body.engagement_id : void 0,
+    objective,
+    domain,
+    duration_weeks: durationWeeks,
+    team_size: teamSize,
+    budget_dkk: typeof body.budget_dkk === "number" ? body.budget_dkk : void 0
+  };
+  try {
+    const plan = await generatePlan(request);
+    res.json({ success: true, data: plan });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn({ error: message }, "Engagement plan failed");
+    res.status(500).json({
+      success: false,
+      error: { code: "PLAN_FAILED", message, status_code: 500 }
+    });
+  }
+});
+engagementsRouter.get("/:id", async (req, res) => {
+  const id = decodeURIComponent(req.params.id);
+  const engagement = await getEngagement(id);
+  if (!engagement) {
+    res.status(404).json({
+      success: false,
+      error: { code: "NOT_FOUND", message: "Engagement not found", status_code: 404 }
+    });
+    return;
+  }
+  res.json({ success: true, data: engagement });
+});
+engagementsRouter.get("/:id/plan", async (req, res) => {
+  const id = decodeURIComponent(req.params.id);
+  const plan = await getPlan(id);
+  if (!plan) {
+    res.status(404).json({
+      success: false,
+      error: { code: "NOT_FOUND", message: "Plan not found \u2014 call POST /plan first", status_code: 404 }
+    });
+    return;
+  }
+  res.json({ success: true, data: plan });
+});
+engagementsRouter.post("/:id/outcome", async (req, res) => {
+  const id = decodeURIComponent(req.params.id);
+  const body = req.body;
+  const grade = body.grade;
+  const actualEndDate = body.actual_end_date;
+  const whatWentWell = body.what_went_well;
+  const whatWentWrong = body.what_went_wrong;
+  const recordedBy = body.recorded_by;
+  if (!VALID_GRADES.includes(grade)) return badRequest(res, `grade must be one of: ${VALID_GRADES.join(", ")}`);
+  if (!isIsoDate(actualEndDate)) return badRequest(res, "actual_end_date must be ISO date");
+  if (!whatWentWell || typeof whatWentWell !== "string") return badRequest(res, "what_went_well required");
+  if (!whatWentWrong || typeof whatWentWrong !== "string") return badRequest(res, "what_went_wrong required");
+  if (!recordedBy || typeof recordedBy !== "string") return badRequest(res, "recorded_by required");
+  const deliverablesShipped = Array.isArray(body.deliverables_shipped) ? body.deliverables_shipped.filter((x) => typeof x === "string").map(String) : [];
+  const request = {
+    engagement_id: id,
+    actual_end_date: actualEndDate,
+    grade,
+    deliverables_shipped: deliverablesShipped,
+    what_went_well: whatWentWell,
+    what_went_wrong: whatWentWrong,
+    precedent_match_accuracy: typeof body.precedent_match_accuracy === "number" ? body.precedent_match_accuracy : void 0,
+    recorded_by: recordedBy
+  };
+  try {
+    const outcome = await recordOutcome(request);
+    res.status(201).json({ success: true, data: outcome });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const status = message.includes("not found") ? 404 : 500;
+    res.status(status).json({
+      success: false,
+      error: { code: status === 404 ? "NOT_FOUND" : "OUTCOME_FAILED", message, status_code: status }
+    });
+  }
+});
+engagementsRouter.get("/:id/outcome", async (req, res) => {
+  const id = decodeURIComponent(req.params.id);
+  const outcome = await getOutcome(id);
+  if (!outcome) {
+    res.status(404).json({
+      success: false,
+      error: { code: "NOT_FOUND", message: "Outcome not recorded", status_code: 404 }
+    });
+    return;
+  }
+  res.json({ success: true, data: outcome });
+});
+
 // src/index.ts
 init_write_gate();
 init_mcp_caller();
@@ -25392,8 +26053,8 @@ init_graph_hygiene_cron();
 init_write_gate();
 init_adaptive_rag();
 init_logger();
-import { Router as Router32 } from "express";
-var intelligenceRouter = Router32();
+import { Router as Router33 } from "express";
+var intelligenceRouter = Router33();
 intelligenceRouter.post("/ingest", async (req, res) => {
   const body = req.body;
   const content = body.content;
@@ -25470,7 +26131,7 @@ intelligenceRouter.post("/adaptive-rag/retrain", async (_req, res) => {
 });
 intelligenceRouter.post("/extract-test", async (req, res) => {
   const { callMcpTool: callMcpTool2 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
-  const { v4: uuid31 } = await import("uuid");
+  const { v4: uuid32 } = await import("uuid");
   const content = req.body?.content ?? "CSRD regulation, ATP pension fund, GRI framework";
   try {
     const llmResult = await callMcpTool2({
@@ -25480,7 +26141,7 @@ intelligenceRouter.post("/extract-test", async (req, res) => {
 
 Content: ${content.slice(0, 2e3)}`
       },
-      callId: uuid31(),
+      callId: uuid32(),
       timeoutMs: 3e4
     });
     const raw = llmResult.result;
@@ -25519,9 +26180,9 @@ intelligenceRouter.get("/health", async (_req, res) => {
 init_manifesto_governance();
 init_mcp_caller();
 init_logger();
-import { Router as Router33 } from "express";
-import { v4 as uuid30 } from "uuid";
-var governanceRouter = Router33();
+import { Router as Router34 } from "express";
+import { v4 as uuid31 } from "uuid";
+var governanceRouter = Router34();
 governanceRouter.get("/matrix", (_req, res) => {
   res.json({
     success: true,
@@ -25578,7 +26239,7 @@ RETURN p.name as name, p.status as status`,
               gap_remediation: p.gap_remediation ?? ""
             }
           },
-          callId: uuid30(),
+          callId: uuid31(),
           timeoutMs: 15e3
         });
         results.push({
@@ -25611,8 +26272,8 @@ RETURN p.name as name, p.status as status`,
 // src/routes/osint.ts
 init_osint_scanner();
 init_logger();
-import { Router as Router34 } from "express";
-var osintRouter = Router34();
+import { Router as Router35 } from "express";
+var osintRouter = Router35();
 osintRouter.post("/scan", async (req, res) => {
   try {
     const body = req.body;
@@ -25747,8 +26408,8 @@ osintRouter.get("/domains", (_req, res) => {
 // src/routes/evolution.ts
 init_evolution_loop();
 init_logger();
-import { Router as Router35 } from "express";
-var evolutionRouter = Router35();
+import { Router as Router36 } from "express";
+var evolutionRouter = Router36();
 evolutionRouter.post("/run", async (req, res) => {
   const { focus_area, dry_run } = req.body ?? {};
   try {
@@ -25813,7 +26474,7 @@ evolutionRouter.get("/history", async (req, res) => {
 });
 
 // src/routes/memory.ts
-import { Router as Router36 } from "express";
+import { Router as Router37 } from "express";
 
 // src/working-memory.ts
 init_redis();
@@ -25888,7 +26549,7 @@ async function clearAgentMemory(agentId) {
 
 // src/routes/memory.ts
 init_logger();
-var memoryRouter = Router36();
+var memoryRouter = Router37();
 memoryRouter.post("/store", async (req, res) => {
   const body = req.body;
   const agentId = body.agent_id;
@@ -25945,9 +26606,9 @@ memoryRouter.delete("/:agent_id", async (req, res) => {
 
 // src/routes/abi-docs.ts
 init_tool_registry();
-import { Router as Router37 } from "express";
+import { Router as Router38 } from "express";
 init_logger();
-var abiDocsRouter = Router37();
+var abiDocsRouter = Router38();
 abiDocsRouter.get("/docs", (_req, res) => {
   const namespace = _req.query.namespace ?? void 0;
   const category = _req.query.category ?? void 0;
@@ -26089,12 +26750,12 @@ var CURATED_EXAMPLES = {
 // src/routes/abi-health.ts
 init_tool_registry();
 init_logger();
-import { Router as Router38 } from "express";
+import { Router as Router39 } from "express";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 var __dirname = path.dirname(fileURLToPath(import.meta.url));
-var abiHealthRouter = Router38();
+var abiHealthRouter = Router39();
 function getSnapshotPath() {
   const testPath = path.resolve(__dirname, "..", "..", "test", "snapshots", "abi-snapshot.json");
   if (existsSync(testPath)) return testPath;
@@ -26283,8 +26944,8 @@ abiHealthRouter.post("/snapshot", (_req, res) => {
 
 // src/routes/abi-versioning.ts
 init_tool_registry();
-import { Router as Router39 } from "express";
-var abiVersioningRouter = Router39();
+import { Router as Router40 } from "express";
+var abiVersioningRouter = Router40();
 abiVersioningRouter.get("/versions", (_req, res) => {
   const tools = TOOL_REGISTRY.map((t) => ({
     name: t.name,
@@ -26496,6 +27157,7 @@ app.use("/api/fold", requireApiKey, foldRouter);
 app.use("/api/graph-hygiene", requireApiKey, graphHygieneRouter);
 app.use("/api/deliverables", requireApiKey, deliverablesRouter);
 app.use("/api/similarity", requireApiKey, similarityRouter);
+app.use("/api/engagements", requireApiKey, engagementsRouter);
 app.use("/api/intelligence", requireApiKey, intelligenceRouter);
 app.use("/api/governance", requireApiKey, governanceRouter);
 app.use("/api/osint", requireApiKey, osintRouter);
