@@ -12392,6 +12392,84 @@ var init_tool_registry = __esm({
         input: z.object({}),
         timeoutMs: 6e4,
         outputDescription: "LooseEndScanResult with counts and findings by category"
+      }),
+      // ─── v4.0.6 — Ghost-tier sweep round 2 (LIN-618) ──────────────────────────
+      // 7 more tools from the audit — decisions (LIN-536), artifacts (G4.2-5),
+      // llm proxy, s1-s4 research pipeline. Drill stack deferred to v4.0.7 (stateful).
+      defineTool({
+        name: "llm_chat",
+        namespace: "llm",
+        description: "Direct LLM chat proxy supporting 6 providers (deepseek, qwen, openai, groq, gemini, claude). Returns provider/model/content.",
+        input: z.object({
+          provider: z.string().describe("LLM provider: deepseek|qwen|openai|groq|gemini|claude"),
+          messages: z.array(z.object({ role: z.string(), content: z.string() })).describe("Chat messages array"),
+          model: z.string().optional().describe("Model override (defaults per provider)"),
+          temperature: z.number().optional().describe("0-2 sampling temperature"),
+          max_tokens: z.number().optional().describe("Max tokens to generate")
+        }),
+        timeoutMs: 6e4,
+        outputDescription: "LLMResponse with provider, model, content, usage"
+      }),
+      defineTool({
+        name: "llm_providers",
+        namespace: "llm",
+        description: "List available LLM providers configured in the orchestrator with their default models.",
+        input: z.object({}),
+        timeoutMs: 5e3,
+        outputDescription: "Array of provider configs {name, defaultModel, baseUrl}"
+      }),
+      defineTool({
+        name: "decision_certify",
+        namespace: "decisions",
+        description: "Certify an assembly as an architecture decision (LIN-536). Traverses Assembly \u2192 Blocks \u2192 Patterns \u2192 Signals lineage, produces DecisionCertificate with full provenance trail stored in Redis.",
+        input: z.object({
+          assembly_id: z.string().describe("Source assembly ID"),
+          title: z.string().describe("Decision title"),
+          description: z.string().optional().describe("Decision description"),
+          decided_by: z.string().optional().describe("Decider agent/user ID")
+        }),
+        timeoutMs: 3e4,
+        outputDescription: "DecisionCertificate with $id, lineage chain, timestamps"
+      }),
+      defineTool({
+        name: "decision_list",
+        namespace: "decisions",
+        description: "List all certified decisions from the orchestrator Redis store. Returns decision metadata sorted by creation.",
+        input: z.object({
+          limit: z.number().optional().describe("Max decisions returned (default 50)")
+        }),
+        timeoutMs: 1e4,
+        outputDescription: "DecisionCertificate[] with id, title, decided_by, created_at"
+      }),
+      defineTool({
+        name: "decision_lineage",
+        namespace: "decisions",
+        description: "Build full lineage chain for a decision or assembly \u2014 traces from Assembly \u2192 Blocks \u2192 Patterns \u2192 Signals via Neo4j graph traversal. Used for audit and provenance (LIN-536).",
+        input: z.object({
+          assembly_id: z.string().describe("Assembly ID to trace lineage from")
+        }),
+        timeoutMs: 2e4,
+        outputDescription: "LineageEntry[] with stage (assembly/block/pattern/signal), node_id, node_type, name, timestamp"
+      }),
+      defineTool({
+        name: "artifact_list",
+        namespace: "assembly",
+        description: "List AnalysisArtifact objects from the broker (G4.2-5). Artifacts are Obsidian-Markdown exportable analysis outputs with blocks (text, table, chart, kpi_card, cypher, mermaid).",
+        input: z.object({
+          limit: z.number().optional().describe("Max artifacts returned (default 20)")
+        }),
+        timeoutMs: 1e4,
+        outputDescription: "AnalysisArtifact[] with id, title, status, blocks count"
+      }),
+      defineTool({
+        name: "artifact_get",
+        namespace: "assembly",
+        description: "Retrieve a specific AnalysisArtifact by ID with all blocks, graph refs, tags, and metadata.",
+        input: z.object({
+          artifact_id: z.string().describe("Artifact $id")
+        }),
+        timeoutMs: 5e3,
+        outputDescription: "Full AnalysisArtifact object"
       })
     ];
   }
@@ -16899,8 +16977,682 @@ LIMIT 10`,
   }
 });
 
-// src/tool-executor.ts
+// src/routes/decisions.ts
+var decisions_exports = {};
+__export(decisions_exports, {
+  buildLineageChain: () => buildLineageChain,
+  decisionsRouter: () => decisionsRouter,
+  listAllDecisionIds: () => listAllDecisionIds,
+  loadDecision: () => loadDecision,
+  storeDecision: () => storeDecision
+});
+import { Router as Router3 } from "express";
 import { v4 as uuid19 } from "uuid";
+async function storeDecision(decision) {
+  const redis2 = getRedis();
+  if (!redis2) return false;
+  try {
+    await redis2.set(`${REDIS_PREFIX6}${decision.$id}`, JSON.stringify(decision), "EX", TTL_SECONDS5);
+    await redis2.sadd(REDIS_INDEX3, decision.$id);
+    return true;
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Redis store failed for decision");
+    return false;
+  }
+}
+async function loadDecision(id) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${REDIS_PREFIX6}${id}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+async function listAllDecisionIds() {
+  const redis2 = getRedis();
+  if (!redis2) return [];
+  try {
+    return await redis2.smembers(REDIS_INDEX3);
+  } catch {
+    return [];
+  }
+}
+async function buildLineageChain(assemblyId) {
+  const lineage = [];
+  try {
+    const result = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: `MATCH (a:Assembly {id: $assemblyId})
+OPTIONAL MATCH (a)-[:COMPOSED_OF]->(b)
+WHERE b:Block OR b:ArchitectureBlock OR b:LegoBlock
+OPTIONAL MATCH (b)-[:DERIVED_FROM|EXTRACTED_FROM]->(p)
+WHERE p:Pattern OR p:Signal OR p:StrategicInsight
+RETURN a.id AS asm_id, a.name AS asm_name, a.created_at AS asm_ts,
+       b.id AS block_id, b.name AS block_name, labels(b)[0] AS block_type, b.created_at AS block_ts,
+       p.id AS source_id, p.name AS source_name, labels(p)[0] AS source_type, p.createdAt AS source_ts
+ORDER BY b.name`,
+        params: { assemblyId }
+      },
+      callId: uuid19(),
+      timeoutMs: 15e3
+    });
+    if (result.status === "success") {
+      const records = Array.isArray(result.result) ? result.result : Array.isArray(result.result?.records) ? result.result.records : [];
+      if (records.length > 0) {
+        const r = records[0];
+        lineage.push({
+          stage: "assembly",
+          node_id: String(r.asm_id ?? assemblyId),
+          node_type: "Assembly",
+          name: String(r.asm_name ?? assemblyId),
+          timestamp: r.asm_ts ? String(r.asm_ts) : void 0
+        });
+      }
+      const seenBlocks = /* @__PURE__ */ new Set();
+      const seenSources = /* @__PURE__ */ new Set();
+      for (const r of records) {
+        if (r.block_id && !seenBlocks.has(String(r.block_id))) {
+          seenBlocks.add(String(r.block_id));
+          lineage.push({
+            stage: "block",
+            node_id: String(r.block_id),
+            node_type: String(r.block_type ?? "Block"),
+            name: String(r.block_name ?? r.block_id),
+            timestamp: r.block_ts ? String(r.block_ts) : void 0
+          });
+        }
+        if (r.source_id && !seenSources.has(String(r.source_id))) {
+          seenSources.add(String(r.source_id));
+          const sourceType = String(r.source_type ?? "Unknown");
+          const stage = sourceType.includes("Signal") ? "signal" : sourceType.includes("Pattern") ? "pattern" : "signal";
+          lineage.push({
+            stage,
+            node_id: String(r.source_id),
+            node_type: sourceType,
+            name: String(r.source_name ?? r.source_id),
+            timestamp: r.source_ts ? String(r.source_ts) : void 0
+          });
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn({ err: String(err), assemblyId }, "Failed to build lineage chain");
+  }
+  return lineage;
+}
+var decisionsRouter, REDIS_PREFIX6, REDIS_INDEX3, TTL_SECONDS5;
+var init_decisions = __esm({
+  "src/routes/decisions.ts"() {
+    "use strict";
+    init_redis();
+    init_logger();
+    init_mcp_caller();
+    init_cognitive_proxy();
+    init_sse();
+    decisionsRouter = Router3();
+    REDIS_PREFIX6 = "orchestrator:decision:";
+    REDIS_INDEX3 = "orchestrator:decisions:index";
+    TTL_SECONDS5 = 7776e3;
+    decisionsRouter.post("/certify", async (req, res) => {
+      const body = req.body;
+      if (!body.assembly_id || !body.title) {
+        res.status(400).json({
+          success: false,
+          error: { code: "VALIDATION_ERROR", message: "Required: assembly_id, title", status_code: 400 }
+        });
+        return;
+      }
+      const assemblyId = String(body.assembly_id);
+      const title = String(body.title);
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const decisionId = `widgetdc:decision:${uuid19()}`;
+      const lineageChain = await buildLineageChain(assemblyId);
+      let rationale = String(body.rationale ?? "");
+      let summary = String(body.summary ?? "");
+      if (!rationale || !summary) {
+        try {
+          const result = await callCognitive("analyze", {
+            prompt: `You are a decision certifier for an architecture synthesis platform.
+
+Decision: "${title}"
+Assembly: ${assemblyId}
+Lineage: ${lineageChain.length} nodes traced (${lineageChain.map((l) => `${l.stage}:${l.name}`).join(" \u2192 ")})
+${body.context ? `Context: ${JSON.stringify(body.context)}` : ""}
+
+Generate:
+1. A concise summary (1-2 sentences)
+2. A rationale explaining why this decision was made based on the evidence chain
+
+Reply as JSON: {"summary": "...", "rationale": "..."}`,
+            context: { assembly_id: assemblyId, lineage: lineageChain },
+            agent_id: "orchestrator"
+          }, 2e4);
+          const text = String(result ?? "");
+          const match = text.match(/\{[\s\S]*\}/);
+          if (match) {
+            const parsed = JSON.parse(match[0]);
+            if (!summary) summary = parsed.summary ?? title;
+            if (!rationale) rationale = parsed.rationale ?? "Auto-certified based on assembly lineage";
+          }
+        } catch {
+          if (!summary) summary = title;
+          if (!rationale) rationale = "Certified from accepted assembly with verified lineage";
+        }
+      }
+      const proof = {
+        verified_at: now,
+        verified_by: String(body.certifier ?? "orchestrator:decision-engine")
+      };
+      try {
+        const [healthResult] = await Promise.allSettled([
+          fetch("https://orchestrator-production-c27e.up.railway.app/health", { signal: AbortSignal.timeout(5e3) }).then((r) => r.json())
+        ]);
+        if (healthResult.status === "fulfilled") {
+          const h = healthResult.value;
+          proof.service_health = {
+            orchestrator: String(h.status ?? "unknown"),
+            redis: h.redis_enabled ? "connected" : "disconnected",
+            rlm: h.rlm_available ? "available" : "unavailable"
+          };
+        }
+      } catch {
+      }
+      if (body.test_results && typeof body.test_results === "object") {
+        proof.test_results = body.test_results;
+      }
+      if (body.deploy_sha) proof.deploy_sha = String(body.deploy_sha);
+      const certificate = {
+        $id: decisionId,
+        $schema: "widgetdc:decision:v1",
+        title,
+        summary,
+        rationale,
+        assembly_id: assemblyId,
+        lineage_chain: lineageChain,
+        evidence_refs: Array.isArray(body.evidence_refs) ? body.evidence_refs : lineageChain.map((l) => l.node_id),
+        arbitration_outcome: String(body.arbitration_outcome ?? "accepted"),
+        production_proof: proof,
+        certified_at: now,
+        certifier_agent: String(body.certifier ?? "orchestrator:decision-engine"),
+        status: "certified",
+        tags: Array.isArray(body.tags) ? body.tags : []
+      };
+      await storeDecision(certificate);
+      try {
+        await callMcpTool({
+          toolName: "graph.write_cypher",
+          args: {
+            query: `CREATE (d:Decision {
+  id: $id, title: $title, summary: $summary, rationale: $rationale,
+  assembly_id: $assemblyId, status: 'certified',
+  certified_at: datetime(), certifier_agent: $certifier,
+  lineage_depth: $lineageDepth, evidence_count: $evidenceCount
+})
+WITH d
+MATCH (a:Assembly {id: $assemblyId})
+CREATE (d)-[:BASED_ON]->(a)
+WITH d
+UNWIND $evidenceIds AS eid
+MATCH (e) WHERE e.id = eid
+CREATE (d)-[:CERTIFIED_BY_EVIDENCE]->(e)`,
+            params: {
+              id: decisionId,
+              title,
+              summary,
+              rationale,
+              assemblyId,
+              certifier: certificate.certifier_agent,
+              lineageDepth: lineageChain.length,
+              evidenceCount: certificate.evidence_refs.length,
+              evidenceIds: certificate.evidence_refs.slice(0, 20)
+              // Cap for query size
+            }
+          },
+          callId: uuid19(),
+          timeoutMs: 15e3
+        });
+      } catch (err) {
+        logger.warn({ err: String(err), decision_id: decisionId }, "Failed to write decision to Neo4j");
+      }
+      broadcastSSE("decision-certified", {
+        decision_id: decisionId,
+        title,
+        assembly_id: assemblyId,
+        lineage_depth: lineageChain.length
+      });
+      logger.info({
+        decision_id: decisionId,
+        title,
+        assembly_id: assemblyId,
+        lineage_depth: lineageChain.length
+      }, "Decision certified");
+      res.status(201).json({ success: true, data: certificate });
+    });
+    decisionsRouter.get("/", async (req, res) => {
+      const statusFilter = req.query.status;
+      const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "50")), 1), 200);
+      const offset = Math.max(parseInt(String(req.query.offset ?? "0")), 0);
+      const allIds = await listAllDecisionIds();
+      const redis2 = getRedis();
+      if (!redis2 || allIds.length === 0) {
+        res.json({ decisions: [], total: 0, limit, offset });
+        return;
+      }
+      const decisions = [];
+      try {
+        const pipeline = redis2.pipeline();
+        for (const id of allIds) {
+          pipeline.get(`${REDIS_PREFIX6}${id}`);
+        }
+        const results = await pipeline.exec();
+        if (results) {
+          for (const [err, raw] of results) {
+            if (!err && typeof raw === "string") {
+              try {
+                decisions.push(JSON.parse(raw));
+              } catch {
+              }
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn({ err: String(err) }, "Redis pipeline failed for decisions list");
+      }
+      let filtered = decisions;
+      if (statusFilter) {
+        filtered = filtered.filter((d) => d.status === statusFilter);
+      }
+      filtered.sort((a, b) => b.certified_at.localeCompare(a.certified_at));
+      const total = filtered.length;
+      const page = filtered.slice(offset, offset + limit);
+      res.json({ decisions: page, total, limit, offset });
+    });
+    decisionsRouter.get("/:id", async (req, res) => {
+      const id = req.params.id;
+      if (id === "lineage") {
+        res.status(400).json({ success: false, error: "Provide a decision ID" });
+        return;
+      }
+      const decision = await loadDecision(id);
+      if (!decision) {
+        res.status(404).json({ success: false, error: "Decision not found" });
+        return;
+      }
+      res.json({ success: true, data: decision });
+    });
+    decisionsRouter.get("/:id/lineage", async (req, res) => {
+      const decision = await loadDecision(req.params.id);
+      if (!decision) {
+        res.status(404).json({ success: false, error: "Decision not found" });
+        return;
+      }
+      const stages = {};
+      for (const entry of decision.lineage_chain) {
+        if (!stages[entry.stage]) stages[entry.stage] = [];
+        stages[entry.stage].push(entry);
+      }
+      res.json({
+        success: true,
+        data: {
+          decision_id: decision.$id,
+          title: decision.title,
+          certified_at: decision.certified_at,
+          assembly_id: decision.assembly_id,
+          lineage_chain: decision.lineage_chain,
+          lineage_by_stage: stages,
+          depth: decision.lineage_chain.length,
+          stages_covered: Object.keys(stages),
+          production_proof: decision.production_proof
+        }
+      });
+    });
+  }
+});
+
+// src/routes/artifacts.ts
+var artifacts_exports = {};
+__export(artifacts_exports, {
+  artifactRouter: () => artifactRouter,
+  listAllArtifactIds: () => listAllArtifactIds,
+  loadArtifact: () => loadArtifact,
+  storeArtifact: () => storeArtifact
+});
+import { Router as Router4 } from "express";
+import { randomUUID } from "crypto";
+async function storeArtifact(artifact) {
+  const redis2 = getRedis();
+  if (!redis2) return false;
+  const key = `${ARTIFACT_PREFIX}${artifact.$id}`;
+  try {
+    await redis2.set(key, JSON.stringify(artifact), "EX", TTL_SECONDS6);
+    await redis2.sadd(ARTIFACT_INDEX, artifact.$id);
+    return true;
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Redis store failed for artifact");
+    return false;
+  }
+}
+async function loadArtifact(id) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${ARTIFACT_PREFIX}${id}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    logger.warn({ err: String(err), id }, "Redis load failed for artifact");
+    return null;
+  }
+}
+async function listAllArtifactIds() {
+  const redis2 = getRedis();
+  if (!redis2) return [];
+  try {
+    return await redis2.smembers(ARTIFACT_INDEX);
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Redis list failed for artifact index");
+    return [];
+  }
+}
+function trendEmoji(trend) {
+  if (trend === "up") return "\u2191";
+  if (trend === "down") return "\u2193";
+  return "\u2192";
+}
+function blockToMarkdown(block) {
+  const c = block.content;
+  switch (block.type) {
+    case "text":
+      return String(c.body ?? c.text ?? c ?? "");
+    case "table": {
+      const headers = c.headers ?? c.columns ?? [];
+      const rows = c.rows ?? c.data ?? [];
+      if (headers.length === 0) return "";
+      const headerLine = `| ${headers.join(" | ")} |`;
+      const separatorLine = `| ${headers.map(() => "---").join(" | ")} |`;
+      const dataLines = rows.map((r) => `| ${r.map(String).join(" | ")} |`);
+      return [headerLine, separatorLine, ...dataLines].join("\n");
+    }
+    case "chart":
+      return `\`\`\`widgetdc-query
+type: ${String(c.chart_type ?? c.type ?? "bar")}
+data: ${JSON.stringify(c.data ?? c)}
+\`\`\``;
+    case "cypher":
+      return `\`\`\`widgetdc-query
+cypher: ${String(c.query ?? c.cypher ?? c)}
+\`\`\``;
+    case "mermaid":
+      return "```mermaid\n" + String(c.diagram ?? c.code ?? c) + "\n```";
+    case "kpi_card": {
+      const label = String(c.label ?? block.label ?? "KPI");
+      const value = String(c.value ?? "");
+      const trend = trendEmoji(c.trend);
+      return `**${label}**: ${value} ${trend}`;
+    }
+    case "deep_link": {
+      const label = String(c.label ?? c.title ?? "Link");
+      const uri = String(c.uri ?? c.url ?? c.href ?? "#");
+      return `[${label}](${uri})`;
+    }
+    default:
+      return `<!-- unknown block type: ${block.type} -->
+${JSON.stringify(c, null, 2)}`;
+  }
+}
+async function renderMarkdown(req, res, id) {
+  const artifact = await loadArtifact(id);
+  if (!artifact) {
+    res.status(404).json({ success: false, error: "Artifact not found" });
+    return;
+  }
+  const lines = [];
+  lines.push(`# ${artifact.title}`);
+  lines.push("");
+  lines.push(`> Source: ${artifact.source} | Status: ${artifact.status} | Created: ${artifact.created_at}`);
+  if (artifact.tags?.length) {
+    lines.push(`> Tags: ${artifact.tags.map((t) => `#${t}`).join(" ")}`);
+  }
+  lines.push("");
+  for (const block of artifact.blocks) {
+    if (block.label) {
+      lines.push(`## ${block.label}`);
+      lines.push("");
+    }
+    lines.push(blockToMarkdown(block));
+    lines.push("");
+  }
+  if (artifact.graph_refs?.length) {
+    lines.push("---");
+    lines.push("## Graph References");
+    for (const ref of artifact.graph_refs) {
+      lines.push(`- \`${ref}\``);
+    }
+  }
+  res.type("text/markdown").send(lines.join("\n"));
+}
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function blockToHtml(block) {
+  const c = block.content;
+  const labelHtml = block.label ? `<h3>${escapeHtml(block.label)}</h3>
+` : "";
+  switch (block.type) {
+    case "text":
+      return `${labelHtml}<div class="wad-text">${escapeHtml(String(c.body ?? c.text ?? c ?? ""))}</div>`;
+    case "table": {
+      const headers = c.headers ?? c.columns ?? [];
+      const rows = c.rows ?? c.data ?? [];
+      const thRow = headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("");
+      const bodyRows = rows.map(
+        (r) => `<tr>${r.map((cell) => `<td>${escapeHtml(String(cell))}</td>`).join("")}</tr>`
+      ).join("\n");
+      return `${labelHtml}<table><thead><tr>${thRow}</tr></thead><tbody>
+${bodyRows}
+</tbody></table>`;
+    }
+    case "chart": {
+      const chartType = String(c.chart_type ?? c.type ?? "bar");
+      const config2 = JSON.stringify(c.data ?? c);
+      return `${labelHtml}<div class="wad-chart" data-type="${escapeHtml(chartType)}" data-config="${escapeHtml(config2)}">Chart: ${escapeHtml(chartType)}</div>`;
+    }
+    case "kpi_card": {
+      const label = String(c.label ?? block.label ?? "KPI");
+      const value = String(c.value ?? "");
+      const trend = trendEmoji(c.trend);
+      return `${labelHtml}<div class="wad-kpi"><span class="label">${escapeHtml(label)}</span><span class="value">${escapeHtml(value)}</span><span class="trend">${trend}</span></div>`;
+    }
+    case "cypher":
+      return `${labelHtml}<pre class="wad-cypher"><code>${escapeHtml(String(c.query ?? c.cypher ?? c))}</code></pre>`;
+    case "mermaid":
+      return `${labelHtml}<div class="wad-mermaid"><pre class="mermaid">${escapeHtml(String(c.diagram ?? c.code ?? c))}</pre></div>`;
+    case "deep_link": {
+      const label = String(c.label ?? c.title ?? "Link");
+      const uri = String(c.uri ?? c.url ?? c.href ?? "#");
+      return `${labelHtml}<a class="wad-link" href="${escapeHtml(uri)}">${escapeHtml(label)}</a>`;
+    }
+    default:
+      return `${labelHtml}<div class="wad-unknown"><pre>${escapeHtml(JSON.stringify(c, null, 2))}</pre></div>`;
+  }
+}
+async function renderHtml(_req, res, id) {
+  const artifact = await loadArtifact(id);
+  if (!artifact) {
+    res.status(404).json({ success: false, error: "Artifact not found" });
+    return;
+  }
+  const parts = [];
+  parts.push(`<article class="wad-artifact" data-id="${escapeHtml(artifact.$id)}" data-status="${artifact.status}">`);
+  parts.push(`  <h1>${escapeHtml(artifact.title)}</h1>`);
+  parts.push(`  <div class="wad-meta">Source: ${escapeHtml(artifact.source)} | Status: ${artifact.status} | ${artifact.created_at}</div>`);
+  if (artifact.tags?.length) {
+    parts.push(`  <div class="wad-tags">${artifact.tags.map((t) => `<span class="wad-tag">${escapeHtml(t)}</span>`).join(" ")}</div>`);
+  }
+  for (const block of artifact.blocks) {
+    parts.push(`  <section class="wad-block wad-block-${block.type}">`);
+    parts.push(`    ${blockToHtml(block)}`);
+    parts.push("  </section>");
+  }
+  if (artifact.graph_refs?.length) {
+    parts.push('  <footer class="wad-graph-refs">');
+    parts.push("    <h3>Graph References</h3>");
+    parts.push("    <ul>");
+    for (const ref of artifact.graph_refs) {
+      parts.push(`      <li><code>${escapeHtml(ref)}</code></li>`);
+    }
+    parts.push("    </ul>");
+    parts.push("  </footer>");
+  }
+  parts.push("</article>");
+  res.type("text/html").send(parts.join("\n"));
+}
+var artifactRouter, ARTIFACT_PREFIX, ARTIFACT_INDEX, TTL_SECONDS6;
+var init_artifacts = __esm({
+  "src/routes/artifacts.ts"() {
+    "use strict";
+    init_redis();
+    init_logger();
+    artifactRouter = Router4();
+    ARTIFACT_PREFIX = "orchestrator:artifact:";
+    ARTIFACT_INDEX = "orchestrator:artifacts:index";
+    TTL_SECONDS6 = 2592e3;
+    artifactRouter.post("/", async (req, res) => {
+      const body = req.body;
+      if (!body.title || !body.source || !Array.isArray(body.blocks) || !body.created_by) {
+        res.status(400).json({ success: false, error: "Missing required fields: title, source, blocks, created_by" });
+        return;
+      }
+      const id = `widgetdc:artifact:${randomUUID()}`;
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const artifact = {
+        $id: id,
+        $schema: "widgetdc:analysis:v1",
+        title: String(body.title),
+        source: String(body.source),
+        blocks: body.blocks,
+        graph_refs: Array.isArray(body.graph_refs) ? body.graph_refs : void 0,
+        tags: Array.isArray(body.tags) ? body.tags : void 0,
+        status: "draft",
+        created_by: String(body.created_by),
+        created_at: now,
+        updated_at: now
+      };
+      const stored = await storeArtifact(artifact);
+      if (!stored) {
+        res.status(503).json({ success: false, error: "Redis not available" });
+        return;
+      }
+      logger.info({ id: artifact.$id, title: artifact.title }, "Artifact created");
+      res.status(201).json({ success: true, artifact });
+    });
+    artifactRouter.get("/", async (req, res) => {
+      const statusFilter = req.query.status;
+      const tagFilter = req.query.tag;
+      const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 200);
+      const offset = Math.max(parseInt(req.query.offset) || 0, 0);
+      const allIds = await listAllArtifactIds();
+      const redis2 = getRedis();
+      if (!redis2) {
+        res.json({ artifacts: [], total: 0, limit, offset });
+        return;
+      }
+      const artifacts = [];
+      try {
+        const pipeline = redis2.pipeline();
+        for (const id of allIds) {
+          pipeline.get(`${ARTIFACT_PREFIX}${id}`);
+        }
+        const results = await pipeline.exec();
+        if (results) {
+          for (const [err, raw] of results) {
+            if (!err && typeof raw === "string") {
+              try {
+                artifacts.push(JSON.parse(raw));
+              } catch {
+              }
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn({ err: String(err) }, "Redis pipeline failed for artifact list");
+      }
+      let filtered = artifacts.filter((a) => a.status !== "archived");
+      if (statusFilter) {
+        filtered = filtered.filter((a) => a.status === statusFilter);
+      }
+      if (tagFilter) {
+        filtered = filtered.filter((a) => a.tags?.includes(tagFilter));
+      }
+      filtered.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+      const total = filtered.length;
+      const page = filtered.slice(offset, offset + limit);
+      res.json({ artifacts: page, total, limit, offset });
+    });
+    artifactRouter.get("/:id", async (req, res) => {
+      const id = req.params.id;
+      if (id.endsWith(".md")) {
+        return renderMarkdown(req, res, id.replace(/\.md$/, ""));
+      }
+      if (id.endsWith(".html")) {
+        return renderHtml(req, res, id.replace(/\.html$/, ""));
+      }
+      const artifact = await loadArtifact(id);
+      if (!artifact) {
+        res.status(404).json({ success: false, error: "Artifact not found" });
+        return;
+      }
+      res.json(artifact);
+    });
+    artifactRouter.put("/:id", async (req, res) => {
+      const id = req.params.id;
+      const existing = await loadArtifact(id);
+      if (!existing) {
+        res.status(404).json({ success: false, error: "Artifact not found" });
+        return;
+      }
+      const body = req.body;
+      if (body.title) existing.title = body.title;
+      if (body.source) existing.source = body.source;
+      if (body.blocks) existing.blocks = body.blocks;
+      if (body.graph_refs !== void 0) existing.graph_refs = body.graph_refs;
+      if (body.tags !== void 0) existing.tags = body.tags;
+      if (body.status && ["draft", "published", "archived"].includes(body.status)) {
+        existing.status = body.status;
+      }
+      existing.updated_at = (/* @__PURE__ */ new Date()).toISOString();
+      const stored = await storeArtifact(existing);
+      if (!stored) {
+        res.status(503).json({ success: false, error: "Redis not available" });
+        return;
+      }
+      logger.info({ id, title: existing.title }, "Artifact updated");
+      res.json({ success: true, artifact: existing });
+    });
+    artifactRouter.delete("/:id", async (req, res) => {
+      const id = req.params.id;
+      const existing = await loadArtifact(id);
+      if (!existing) {
+        res.status(404).json({ success: false, error: "Artifact not found" });
+        return;
+      }
+      existing.status = "archived";
+      existing.updated_at = (/* @__PURE__ */ new Date()).toISOString();
+      const stored = await storeArtifact(existing);
+      if (!stored) {
+        res.status(503).json({ success: false, error: "Redis not available" });
+        return;
+      }
+      logger.info({ id }, "Artifact archived");
+      res.json({ success: true });
+    });
+  }
+});
+
+// src/tool-executor.ts
+import { v4 as uuid20 } from "uuid";
 function getTokenSavings() {
   return { totalTokensSaved, totalFoldingCalls, avgSavingsPerFold: totalFoldingCalls > 0 ? Math.round(totalTokensSaved / totalFoldingCalls) : 0 };
 }
@@ -16992,7 +17744,7 @@ function buildToolFallback(toolName, error) {
   }
 }
 async function executeToolUnified(toolName, args, opts) {
-  const callId = opts?.call_id ?? uuid19();
+  const callId = opts?.call_id ?? uuid20();
   const t0 = Date.now();
   let deprecation_notice;
   const toolDef = getTool(toolName);
@@ -17080,7 +17832,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher, params: args.params ?? {} },
-        callId: uuid19(),
+        callId: uuid20(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
@@ -17101,7 +17853,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher },
-        callId: uuid19(),
+        callId: uuid20(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Task query failed: ${result.error_message}`;
@@ -17113,7 +17865,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: args.tool_name,
         args: args.payload ?? {},
-        callId: uuid19(),
+        callId: uuid20(),
         timeoutMs: 3e4
       });
       if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
@@ -17121,8 +17873,8 @@ ${result.merged_context}`;
     }
     case "get_platform_health": {
       const [backendHealth, graphHealth] = await Promise.allSettled([
-        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid19(), timeoutMs: 1e4 }),
-        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid19(), timeoutMs: 1e4 })
+        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid20(), timeoutMs: 1e4 }),
+        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid20(), timeoutMs: 1e4 })
       ]);
       const parts = [];
       if (backendHealth.status === "fulfilled" && backendHealth.value.status === "success") {
@@ -17138,7 +17890,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: args.query },
-        callId: uuid19(),
+        callId: uuid20(),
         timeoutMs: 2e4
       });
       if (result.status !== "success") return `Document search failed: ${result.error_message}`;
@@ -17156,7 +17908,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issues",
         args: payload,
-        callId: uuid19(),
+        callId: uuid20(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
@@ -17172,7 +17924,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issue_get",
         args: { identifier },
-        callId: uuid19(),
+        callId: uuid20(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
@@ -17792,7 +18544,7 @@ ${entries.map((e) => `- ${e.key}`).join("\n")}`;
             max_tokens: budget,
             domain
           },
-          callId: uuid19(),
+          callId: uuid20(),
           timeoutMs: 25e3
         });
         if (result.status !== "success") return `Folding failed: ${result.error_message}`;
@@ -17835,6 +18587,120 @@ ${summary}`;
         }, null, 2);
       } catch (err) {
         return `Loose ends scan failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    // ─── v4.0.6 — Ghost-tier sweep round 2 (LIN-618) ───────────────────────
+    case "llm_chat": {
+      try {
+        const { chatLLM: chatLLM2 } = await Promise.resolve().then(() => (init_llm_proxy(), llm_proxy_exports));
+        const provider = String(args.provider ?? "deepseek");
+        const messages = Array.isArray(args.messages) ? args.messages : [];
+        if (messages.length === 0) return "Error: messages array required";
+        const result = await chatLLM2({
+          provider,
+          messages: messages.map((m) => ({ role: m.role, content: String(m.content) })),
+          model: typeof args.model === "string" ? args.model : void 0,
+          temperature: typeof args.temperature === "number" ? args.temperature : void 0,
+          max_tokens: typeof args.max_tokens === "number" ? args.max_tokens : void 0
+        });
+        return JSON.stringify({ provider: result.provider, model: result.model, content: result.content?.slice(0, 2e3) ?? "", usage: result.usage });
+      } catch (err) {
+        return `LLM chat failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "llm_providers": {
+      try {
+        const { listProviders: listProviders2 } = await Promise.resolve().then(() => (init_llm_proxy(), llm_proxy_exports));
+        const providers = listProviders2();
+        return JSON.stringify(providers, null, 2);
+      } catch (err) {
+        return `List providers failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "decision_certify": {
+      try {
+        const { storeDecision: storeDecision2, buildLineageChain: buildLineageChain2 } = await Promise.resolve().then(() => (init_decisions(), decisions_exports));
+        const assemblyId = String(args.assembly_id ?? "");
+        const title = String(args.title ?? "");
+        if (!assemblyId || !title) return "Error: assembly_id and title required";
+        const lineage = await buildLineageChain2(assemblyId);
+        const now = (/* @__PURE__ */ new Date()).toISOString();
+        const decision = {
+          $id: `widgetdc:decision:${uuid20()}`,
+          $schema: "https://widgetdc.io/schemas/decision/v1",
+          title,
+          description: typeof args.description === "string" ? args.description : "",
+          assembly_id: assemblyId,
+          lineage_chain: lineage,
+          decided_by: String(args.decided_by ?? "tool-executor"),
+          created_at: now,
+          updated_at: now,
+          status: "certified"
+        };
+        const stored = await storeDecision2(decision);
+        return JSON.stringify({ decision_id: decision.$id, title, lineage_depth: lineage.length, stored });
+      } catch (err) {
+        return `Decision certify failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "decision_list": {
+      try {
+        const { listAllDecisionIds: listAllDecisionIds2, loadDecision: loadDecision2 } = await Promise.resolve().then(() => (init_decisions(), decisions_exports));
+        const limit = typeof args.limit === "number" ? args.limit : 50;
+        const ids = await listAllDecisionIds2();
+        const sliced = ids.slice(0, Math.min(limit, 100));
+        const decisions = (await Promise.all(sliced.map((id) => loadDecision2(id)))).filter((d) => d !== null);
+        if (decisions.length === 0) return "No certified decisions found";
+        const lines = decisions.map(
+          (d, i) => `${i + 1}. ${d.title} (${d.$id}) \u2014 decided_by: ${d.decided_by}, at: ${d.created_at}`
+        );
+        return `${decisions.length} decisions:
+${lines.join("\n")}`;
+      } catch (err) {
+        return `Decision list failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "decision_lineage": {
+      try {
+        const { buildLineageChain: buildLineageChain2 } = await Promise.resolve().then(() => (init_decisions(), decisions_exports));
+        const assemblyId = String(args.assembly_id ?? "");
+        if (!assemblyId) return "Error: assembly_id required";
+        const lineage = await buildLineageChain2(assemblyId);
+        if (lineage.length === 0) return `No lineage found for ${assemblyId}`;
+        const lines = lineage.map((e, i) => `${i + 1}. [${e.stage}] ${e.node_type} \u2014 ${e.name} (${e.node_id})`);
+        return `Lineage chain (${lineage.length} entries):
+${lines.join("\n")}`;
+      } catch (err) {
+        return `Decision lineage failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "artifact_list": {
+      try {
+        const { listAllArtifactIds: listAllArtifactIds2, loadArtifact: loadArtifact2 } = await Promise.resolve().then(() => (init_artifacts(), artifacts_exports));
+        const limit = typeof args.limit === "number" ? args.limit : 20;
+        const ids = await listAllArtifactIds2();
+        const sliced = ids.slice(0, Math.min(limit, 100));
+        const artifacts = (await Promise.all(sliced.map((id) => loadArtifact2(id)))).filter((a) => a !== null);
+        if (artifacts.length === 0) return "No artifacts found";
+        const lines = artifacts.map(
+          (a, i) => `${i + 1}. ${a.title} (${a.$id}) \u2014 status: ${a.status}, blocks: ${a.blocks?.length ?? 0}, source: ${a.source}`
+        );
+        return `${artifacts.length} artifacts:
+${lines.join("\n")}`;
+      } catch (err) {
+        return `Artifact list failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "artifact_get": {
+      try {
+        const { loadArtifact: loadArtifact2 } = await Promise.resolve().then(() => (init_artifacts(), artifacts_exports));
+        const artifactId = String(args.artifact_id ?? "");
+        if (!artifactId) return "Error: artifact_id required";
+        const artifact = await loadArtifact2(artifactId);
+        if (!artifact) return `Artifact ${artifactId} not found`;
+        return JSON.stringify(artifact, null, 2);
+      } catch (err) {
+        return `Artifact get failed: ${err instanceof Error ? err.message : String(err)}`;
       }
     }
     default: {
@@ -22614,7 +23480,7 @@ init_chat_broadcaster();
 init_config();
 init_logger();
 init_slack();
-import { Router as Router3 } from "express";
+import { Router as Router5 } from "express";
 init_redis();
 init_tool_executor();
 
@@ -22735,7 +23601,7 @@ function pct(n, d) {
 }
 
 // src/routes/tools.ts
-var toolsRouter = Router3();
+var toolsRouter = Router5();
 toolsRouter.post("/call", async (req, res) => {
   const result = validate(validateToolCall, req.body);
   if (!result.ok) {
@@ -22903,7 +23769,7 @@ toolsRouter.get("/catalog", async (_req, res) => {
 init_chat_broadcaster();
 init_logger();
 init_slack();
-import { Router as Router4 } from "express";
+import { Router as Router6 } from "express";
 init_chat_store();
 init_config();
 init_chain_engine();
@@ -23053,7 +23919,7 @@ ${context}` },
     });
   }
 }
-var chatRouter = Router4();
+var chatRouter = Router6();
 function shouldRouteViaOrchestrator(target) {
   if (!target) return false;
   return target === "master" || target === "Orchestrator";
@@ -23637,8 +24503,8 @@ chatRouter.get("/ws-stats", (_req, res) => {
 // src/routes/chains.ts
 init_chain_engine();
 init_logger();
-import { Router as Router5 } from "express";
-var chainsRouter = Router5();
+import { Router as Router7 } from "express";
+var chainsRouter = Router7();
 chainsRouter.post("/execute", async (req, res) => {
   const body = req.body;
   const validModes = ["sequential", "parallel", "loop", "debate", "adaptive", "funnel"];
@@ -23745,8 +24611,8 @@ chainsRouter.get("/", (_req, res) => {
 // src/routes/cognitive.ts
 init_cognitive_proxy();
 init_logger();
-import { Router as Router6 } from "express";
-var cognitiveRouter = Router6();
+import { Router as Router8 } from "express";
+var cognitiveRouter = Router8();
 cognitiveRouter.post("/:action", async (req, res) => {
   const { action } = req.params;
   const body = req.body;
@@ -23796,7 +24662,7 @@ cognitiveRouter.get("/health", async (_req, res) => {
 });
 
 // src/routes/cron.ts
-import { Router as Router8 } from "express";
+import { Router as Router10 } from "express";
 
 // src/cron-scheduler.ts
 init_chain_engine();
@@ -23810,12 +24676,12 @@ import cron from "node-cron";
 // src/graph-self-correct.ts
 init_mcp_caller();
 init_logger();
-import { v4 as uuid20 } from "uuid";
+import { v4 as uuid21 } from "uuid";
 async function graphRead(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid20(),
+    callId: uuid21(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -23826,7 +24692,7 @@ async function graphWrite(cypher, params, force = true) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {}, _force: force },
-    callId: uuid20(),
+    callId: uuid21(),
     timeoutMs: 15e3
   });
   return result.status === "success";
@@ -24285,9 +25151,9 @@ init_competitive_crawler();
 init_redis();
 init_logger();
 init_mcp_caller();
-import { Router as Router7 } from "express";
-import { v4 as uuid21 } from "uuid";
-var adoptionRouter = Router7();
+import { Router as Router9 } from "express";
+import { v4 as uuid22 } from "uuid";
+var adoptionRouter = Router9();
 var REDIS_KEY4 = "orchestrator:adoption-metrics";
 var REDIS_TRENDS_KEY = "orchestrator:adoption-trends";
 var DEFAULT_METRICS = {
@@ -24383,7 +25249,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (c:Conversation) WHERE c.createdAt > datetime() - duration('P1D') RETURN count(c) AS count"
       },
-      callId: uuid21(),
+      callId: uuid22(),
       timeoutMs: 1e4
     }),
     // Count artifacts from last 24h
@@ -24392,7 +25258,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (a:AnalysisArtifact) WHERE a.createdAt > datetime() - duration('P1D') RETURN count(a) AS count"
       },
-      callId: uuid21(),
+      callId: uuid22(),
       timeoutMs: 1e4
     }),
     // Count tool calls from audit trail
@@ -24401,7 +25267,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (e:AuditEvent) WHERE e.timestamp > datetime() - duration('P1D') AND e.action = 'tool_call' RETURN count(e) AS count"
       },
-      callId: uuid21(),
+      callId: uuid22(),
       timeoutMs: 1e4
     })
   ]);
@@ -24506,7 +25372,7 @@ SET m.conversations_24h = $conversations,
           featuresPct: snapshot.features_pct
         }
       },
-      callId: uuid21(),
+      callId: uuid22(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -25653,7 +26519,7 @@ function registerDefaultLoops() {
 }
 
 // src/routes/cron.ts
-var cronRouter = Router8();
+var cronRouter = Router10();
 cronRouter.get("/", (_req, res) => {
   const jobs2 = listCronJobs();
   res.json({ success: true, data: { jobs: jobs2, total: jobs2.length } });
@@ -25722,14 +26588,14 @@ cronRouter.delete("/:id", (req, res) => {
 init_agent_registry();
 init_chat_broadcaster();
 init_chain_engine();
-import { Router as Router10 } from "express";
+import { Router as Router12 } from "express";
 init_cognitive_proxy();
 
 // src/routes/openclaw.ts
 init_config();
 init_logger();
-import { Router as Router9 } from "express";
-var openclawRouter = Router9();
+import { Router as Router11 } from "express";
+var openclawRouter = Router11();
 var healthStatus = {
   healthy: false,
   checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -25905,7 +26771,7 @@ openclawRouter.all("/proxy/*", async (req, res) => {
 init_config();
 init_routing_engine();
 init_redis();
-var dashboardRouter = Router10();
+var dashboardRouter = Router12();
 var CACHE_KEY = "orchestrator:dashboard-cache";
 var CACHE_TTL = 15;
 dashboardRouter.get("/data", async (_req, res) => {
@@ -25993,8 +26859,8 @@ init_llm_proxy();
 init_chat_broadcaster();
 init_chat_store();
 init_logger();
-import { Router as Router11 } from "express";
-var llmRouter = Router11();
+import { Router as Router13 } from "express";
+var llmRouter = Router13();
 llmRouter.get("/providers", (_req, res) => {
   res.json({ success: true, data: { providers: listProviders() } });
 });
@@ -26085,14 +26951,14 @@ llmRouter.post("/conversation", async (req, res) => {
 });
 
 // src/routes/audit.ts
-import { Router as Router12 } from "express";
+import { Router as Router14 } from "express";
 
 // src/audit.ts
 init_redis();
 init_logger();
 var REDIS_KEY5 = "orchestrator:audit";
 var MAX_ENTRIES = 1e3;
-var TTL_SECONDS5 = 30 * 24 * 3600;
+var TTL_SECONDS7 = 30 * 24 * 3600;
 var memoryAudit = [];
 async function logAudit(entry) {
   try {
@@ -26101,7 +26967,7 @@ async function logAudit(entry) {
       if (redis2) {
         await redis2.lpush(REDIS_KEY5, JSON.stringify(entry));
         await redis2.ltrim(REDIS_KEY5, 0, MAX_ENTRIES - 1);
-        await redis2.expire(REDIS_KEY5, TTL_SECONDS5);
+        await redis2.expire(REDIS_KEY5, TTL_SECONDS7);
         return;
       }
     }
@@ -26167,7 +27033,7 @@ function auditMiddleware(req, res, next) {
 }
 
 // src/routes/audit.ts
-var auditRouter = Router12();
+var auditRouter = Router14();
 auditRouter.get("/log", async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 100, 500);
   const offset = parseInt(req.query.offset) || 0;
@@ -26186,8 +27052,8 @@ auditRouter.get("/log", async (req, res) => {
 init_config();
 init_redis();
 init_logger();
-import { Router as Router13 } from "express";
-var knowledgeRouter = Router13();
+import { Router as Router15 } from "express";
+var knowledgeRouter = Router15();
 var FEED_CACHE_KEY = "orchestrator:knowledge-feed";
 var BRIEFING_CACHE_KEY = "orchestrator:knowledge-briefing-prompt";
 var FEED_TTL_SECONDS = 86400;
@@ -26343,350 +27209,27 @@ knowledgeRouter.get("/briefing", async (_req, res) => {
   }
 });
 
-// src/routes/artifacts.ts
-init_redis();
-init_logger();
-import { Router as Router14 } from "express";
-import { randomUUID } from "crypto";
-var artifactRouter = Router14();
-var ARTIFACT_PREFIX = "orchestrator:artifact:";
-var ARTIFACT_INDEX = "orchestrator:artifacts:index";
-var TTL_SECONDS6 = 2592e3;
-async function storeArtifact(artifact) {
-  const redis2 = getRedis();
-  if (!redis2) return false;
-  const key = `${ARTIFACT_PREFIX}${artifact.$id}`;
-  try {
-    await redis2.set(key, JSON.stringify(artifact), "EX", TTL_SECONDS6);
-    await redis2.sadd(ARTIFACT_INDEX, artifact.$id);
-    return true;
-  } catch (err) {
-    logger.warn({ err: String(err) }, "Redis store failed for artifact");
-    return false;
-  }
-}
-async function loadArtifact(id) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
-  try {
-    const raw = await redis2.get(`${ARTIFACT_PREFIX}${id}`);
-    return raw ? JSON.parse(raw) : null;
-  } catch (err) {
-    logger.warn({ err: String(err), id }, "Redis load failed for artifact");
-    return null;
-  }
-}
-async function listAllIds() {
-  const redis2 = getRedis();
-  if (!redis2) return [];
-  try {
-    return await redis2.smembers(ARTIFACT_INDEX);
-  } catch (err) {
-    logger.warn({ err: String(err) }, "Redis list failed for artifact index");
-    return [];
-  }
-}
-artifactRouter.post("/", async (req, res) => {
-  const body = req.body;
-  if (!body.title || !body.source || !Array.isArray(body.blocks) || !body.created_by) {
-    res.status(400).json({ success: false, error: "Missing required fields: title, source, blocks, created_by" });
-    return;
-  }
-  const id = `widgetdc:artifact:${randomUUID()}`;
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  const artifact = {
-    $id: id,
-    $schema: "widgetdc:analysis:v1",
-    title: String(body.title),
-    source: String(body.source),
-    blocks: body.blocks,
-    graph_refs: Array.isArray(body.graph_refs) ? body.graph_refs : void 0,
-    tags: Array.isArray(body.tags) ? body.tags : void 0,
-    status: "draft",
-    created_by: String(body.created_by),
-    created_at: now,
-    updated_at: now
-  };
-  const stored = await storeArtifact(artifact);
-  if (!stored) {
-    res.status(503).json({ success: false, error: "Redis not available" });
-    return;
-  }
-  logger.info({ id: artifact.$id, title: artifact.title }, "Artifact created");
-  res.status(201).json({ success: true, artifact });
-});
-artifactRouter.get("/", async (req, res) => {
-  const statusFilter = req.query.status;
-  const tagFilter = req.query.tag;
-  const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 200);
-  const offset = Math.max(parseInt(req.query.offset) || 0, 0);
-  const allIds = await listAllIds();
-  const redis2 = getRedis();
-  if (!redis2) {
-    res.json({ artifacts: [], total: 0, limit, offset });
-    return;
-  }
-  const artifacts = [];
-  try {
-    const pipeline = redis2.pipeline();
-    for (const id of allIds) {
-      pipeline.get(`${ARTIFACT_PREFIX}${id}`);
-    }
-    const results = await pipeline.exec();
-    if (results) {
-      for (const [err, raw] of results) {
-        if (!err && typeof raw === "string") {
-          try {
-            artifacts.push(JSON.parse(raw));
-          } catch {
-          }
-        }
-      }
-    }
-  } catch (err) {
-    logger.warn({ err: String(err) }, "Redis pipeline failed for artifact list");
-  }
-  let filtered = artifacts.filter((a) => a.status !== "archived");
-  if (statusFilter) {
-    filtered = filtered.filter((a) => a.status === statusFilter);
-  }
-  if (tagFilter) {
-    filtered = filtered.filter((a) => a.tags?.includes(tagFilter));
-  }
-  filtered.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-  const total = filtered.length;
-  const page = filtered.slice(offset, offset + limit);
-  res.json({ artifacts: page, total, limit, offset });
-});
-artifactRouter.get("/:id", async (req, res) => {
-  const id = req.params.id;
-  if (id.endsWith(".md")) {
-    return renderMarkdown(req, res, id.replace(/\.md$/, ""));
-  }
-  if (id.endsWith(".html")) {
-    return renderHtml(req, res, id.replace(/\.html$/, ""));
-  }
-  const artifact = await loadArtifact(id);
-  if (!artifact) {
-    res.status(404).json({ success: false, error: "Artifact not found" });
-    return;
-  }
-  res.json(artifact);
-});
-artifactRouter.put("/:id", async (req, res) => {
-  const id = req.params.id;
-  const existing = await loadArtifact(id);
-  if (!existing) {
-    res.status(404).json({ success: false, error: "Artifact not found" });
-    return;
-  }
-  const body = req.body;
-  if (body.title) existing.title = body.title;
-  if (body.source) existing.source = body.source;
-  if (body.blocks) existing.blocks = body.blocks;
-  if (body.graph_refs !== void 0) existing.graph_refs = body.graph_refs;
-  if (body.tags !== void 0) existing.tags = body.tags;
-  if (body.status && ["draft", "published", "archived"].includes(body.status)) {
-    existing.status = body.status;
-  }
-  existing.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-  const stored = await storeArtifact(existing);
-  if (!stored) {
-    res.status(503).json({ success: false, error: "Redis not available" });
-    return;
-  }
-  logger.info({ id, title: existing.title }, "Artifact updated");
-  res.json({ success: true, artifact: existing });
-});
-artifactRouter.delete("/:id", async (req, res) => {
-  const id = req.params.id;
-  const existing = await loadArtifact(id);
-  if (!existing) {
-    res.status(404).json({ success: false, error: "Artifact not found" });
-    return;
-  }
-  existing.status = "archived";
-  existing.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-  const stored = await storeArtifact(existing);
-  if (!stored) {
-    res.status(503).json({ success: false, error: "Redis not available" });
-    return;
-  }
-  logger.info({ id }, "Artifact archived");
-  res.json({ success: true });
-});
-function trendEmoji(trend) {
-  if (trend === "up") return "\u2191";
-  if (trend === "down") return "\u2193";
-  return "\u2192";
-}
-function blockToMarkdown(block) {
-  const c = block.content;
-  switch (block.type) {
-    case "text":
-      return String(c.body ?? c.text ?? c ?? "");
-    case "table": {
-      const headers = c.headers ?? c.columns ?? [];
-      const rows = c.rows ?? c.data ?? [];
-      if (headers.length === 0) return "";
-      const headerLine = `| ${headers.join(" | ")} |`;
-      const separatorLine = `| ${headers.map(() => "---").join(" | ")} |`;
-      const dataLines = rows.map((r) => `| ${r.map(String).join(" | ")} |`);
-      return [headerLine, separatorLine, ...dataLines].join("\n");
-    }
-    case "chart":
-      return `\`\`\`widgetdc-query
-type: ${String(c.chart_type ?? c.type ?? "bar")}
-data: ${JSON.stringify(c.data ?? c)}
-\`\`\``;
-    case "cypher":
-      return `\`\`\`widgetdc-query
-cypher: ${String(c.query ?? c.cypher ?? c)}
-\`\`\``;
-    case "mermaid":
-      return "```mermaid\n" + String(c.diagram ?? c.code ?? c) + "\n```";
-    case "kpi_card": {
-      const label = String(c.label ?? block.label ?? "KPI");
-      const value = String(c.value ?? "");
-      const trend = trendEmoji(c.trend);
-      return `**${label}**: ${value} ${trend}`;
-    }
-    case "deep_link": {
-      const label = String(c.label ?? c.title ?? "Link");
-      const uri = String(c.uri ?? c.url ?? c.href ?? "#");
-      return `[${label}](${uri})`;
-    }
-    default:
-      return `<!-- unknown block type: ${block.type} -->
-${JSON.stringify(c, null, 2)}`;
-  }
-}
-async function renderMarkdown(req, res, id) {
-  const artifact = await loadArtifact(id);
-  if (!artifact) {
-    res.status(404).json({ success: false, error: "Artifact not found" });
-    return;
-  }
-  const lines = [];
-  lines.push(`# ${artifact.title}`);
-  lines.push("");
-  lines.push(`> Source: ${artifact.source} | Status: ${artifact.status} | Created: ${artifact.created_at}`);
-  if (artifact.tags?.length) {
-    lines.push(`> Tags: ${artifact.tags.map((t) => `#${t}`).join(" ")}`);
-  }
-  lines.push("");
-  for (const block of artifact.blocks) {
-    if (block.label) {
-      lines.push(`## ${block.label}`);
-      lines.push("");
-    }
-    lines.push(blockToMarkdown(block));
-    lines.push("");
-  }
-  if (artifact.graph_refs?.length) {
-    lines.push("---");
-    lines.push("## Graph References");
-    for (const ref of artifact.graph_refs) {
-      lines.push(`- \`${ref}\``);
-    }
-  }
-  res.type("text/markdown").send(lines.join("\n"));
-}
-function escapeHtml(s) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
-function blockToHtml(block) {
-  const c = block.content;
-  const labelHtml = block.label ? `<h3>${escapeHtml(block.label)}</h3>
-` : "";
-  switch (block.type) {
-    case "text":
-      return `${labelHtml}<div class="wad-text">${escapeHtml(String(c.body ?? c.text ?? c ?? ""))}</div>`;
-    case "table": {
-      const headers = c.headers ?? c.columns ?? [];
-      const rows = c.rows ?? c.data ?? [];
-      const thRow = headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("");
-      const bodyRows = rows.map(
-        (r) => `<tr>${r.map((cell) => `<td>${escapeHtml(String(cell))}</td>`).join("")}</tr>`
-      ).join("\n");
-      return `${labelHtml}<table><thead><tr>${thRow}</tr></thead><tbody>
-${bodyRows}
-</tbody></table>`;
-    }
-    case "chart": {
-      const chartType = String(c.chart_type ?? c.type ?? "bar");
-      const config2 = JSON.stringify(c.data ?? c);
-      return `${labelHtml}<div class="wad-chart" data-type="${escapeHtml(chartType)}" data-config="${escapeHtml(config2)}">Chart: ${escapeHtml(chartType)}</div>`;
-    }
-    case "kpi_card": {
-      const label = String(c.label ?? block.label ?? "KPI");
-      const value = String(c.value ?? "");
-      const trend = trendEmoji(c.trend);
-      return `${labelHtml}<div class="wad-kpi"><span class="label">${escapeHtml(label)}</span><span class="value">${escapeHtml(value)}</span><span class="trend">${trend}</span></div>`;
-    }
-    case "cypher":
-      return `${labelHtml}<pre class="wad-cypher"><code>${escapeHtml(String(c.query ?? c.cypher ?? c))}</code></pre>`;
-    case "mermaid":
-      return `${labelHtml}<div class="wad-mermaid"><pre class="mermaid">${escapeHtml(String(c.diagram ?? c.code ?? c))}</pre></div>`;
-    case "deep_link": {
-      const label = String(c.label ?? c.title ?? "Link");
-      const uri = String(c.uri ?? c.url ?? c.href ?? "#");
-      return `${labelHtml}<a class="wad-link" href="${escapeHtml(uri)}">${escapeHtml(label)}</a>`;
-    }
-    default:
-      return `${labelHtml}<div class="wad-unknown"><pre>${escapeHtml(JSON.stringify(c, null, 2))}</pre></div>`;
-  }
-}
-async function renderHtml(_req, res, id) {
-  const artifact = await loadArtifact(id);
-  if (!artifact) {
-    res.status(404).json({ success: false, error: "Artifact not found" });
-    return;
-  }
-  const parts = [];
-  parts.push(`<article class="wad-artifact" data-id="${escapeHtml(artifact.$id)}" data-status="${artifact.status}">`);
-  parts.push(`  <h1>${escapeHtml(artifact.title)}</h1>`);
-  parts.push(`  <div class="wad-meta">Source: ${escapeHtml(artifact.source)} | Status: ${artifact.status} | ${artifact.created_at}</div>`);
-  if (artifact.tags?.length) {
-    parts.push(`  <div class="wad-tags">${artifact.tags.map((t) => `<span class="wad-tag">${escapeHtml(t)}</span>`).join(" ")}</div>`);
-  }
-  for (const block of artifact.blocks) {
-    parts.push(`  <section class="wad-block wad-block-${block.type}">`);
-    parts.push(`    ${blockToHtml(block)}`);
-    parts.push("  </section>");
-  }
-  if (artifact.graph_refs?.length) {
-    parts.push('  <footer class="wad-graph-refs">');
-    parts.push("    <h3>Graph References</h3>");
-    parts.push("    <ul>");
-    for (const ref of artifact.graph_refs) {
-      parts.push(`      <li><code>${escapeHtml(ref)}</code></li>`);
-    }
-    parts.push("    </ul>");
-    parts.push("  </footer>");
-  }
-  parts.push("</article>");
-  res.type("text/html").send(parts.join("\n"));
-}
+// src/index.ts
+init_artifacts();
 
 // src/routes/notebooks.ts
 init_redis();
 init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
-import { Router as Router15 } from "express";
+import { Router as Router16 } from "express";
 import { randomUUID as randomUUID2 } from "crypto";
-import { v4 as uuid22 } from "uuid";
-var notebookRouter = Router15();
+import { v4 as uuid23 } from "uuid";
+var notebookRouter = Router16();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
-var TTL_SECONDS7 = 2592e3;
+var TTL_SECONDS8 = 2592e3;
 async function storeNotebook(notebook) {
   const redis2 = getRedis();
   if (!redis2) return false;
   const key = `${NOTEBOOK_PREFIX}${notebook.$id}`;
   try {
-    await redis2.set(key, JSON.stringify(notebook), "EX", TTL_SECONDS7);
+    await redis2.set(key, JSON.stringify(notebook), "EX", TTL_SECONDS8);
     await redis2.sadd(NOTEBOOK_INDEX, notebook.$id);
     return true;
   } catch (err) {
@@ -26716,7 +27259,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query, params: {} },
-        callId: uuid22(),
+        callId: uuid23(),
         timeoutMs: 15e3
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -26724,7 +27267,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "kg_rag.query",
         args: { question: query, max_evidence: 10 },
-        callId: uuid22(),
+        callId: uuid23(),
         timeoutMs: 2e4
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -26932,9 +27475,9 @@ async function renderNotebookMarkdown(_req, res, id) {
 init_redis();
 init_config();
 init_logger();
-import { Router as Router16 } from "express";
+import { Router as Router17 } from "express";
 import { randomUUID as randomUUID3 } from "crypto";
-var drillRouter = Router16();
+var drillRouter = Router17();
 var DRILL_PREFIX = "orchestrator:drill:";
 var SESSION_TTL = 3600;
 var MCP_TIMEOUT_MS2 = 12e3;
@@ -27274,7 +27817,7 @@ function trendArrow(trend) {
 
 // src/routes/monitor.ts
 init_mcp_caller();
-import { Router as Router17 } from "express";
+import { Router as Router18 } from "express";
 
 // src/context-compress.ts
 init_cognitive_proxy();
@@ -27400,13 +27943,13 @@ ${compressed}`,
 init_chain_engine();
 init_cognitive_proxy();
 init_logger();
-import { v4 as uuid23 } from "uuid";
-var monitorRouter = Router17();
+import { v4 as uuid24 } from "uuid";
+var monitorRouter = Router18();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid23(),
+    callId: uuid24(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];
@@ -27622,18 +28165,18 @@ init_redis();
 init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
-import { Router as Router18 } from "express";
-import { v4 as uuid24 } from "uuid";
-var assemblyRouter = Router18();
-var REDIS_PREFIX6 = "orchestrator:assembly:";
-var REDIS_INDEX3 = "orchestrator:assemblies:index";
-var TTL_SECONDS8 = 2592e3;
+import { Router as Router19 } from "express";
+import { v4 as uuid25 } from "uuid";
+var assemblyRouter = Router19();
+var REDIS_PREFIX7 = "orchestrator:assembly:";
+var REDIS_INDEX4 = "orchestrator:assemblies:index";
+var TTL_SECONDS9 = 2592e3;
 async function storeAssembly(assembly) {
   const redis2 = getRedis();
   if (!redis2) return false;
   try {
-    await redis2.set(`${REDIS_PREFIX6}${assembly.$id}`, JSON.stringify(assembly), "EX", TTL_SECONDS8);
-    await redis2.sadd(REDIS_INDEX3, assembly.$id);
+    await redis2.set(`${REDIS_PREFIX7}${assembly.$id}`, JSON.stringify(assembly), "EX", TTL_SECONDS9);
+    await redis2.sadd(REDIS_INDEX4, assembly.$id);
     return true;
   } catch (err) {
     logger.warn({ err: String(err) }, "Redis store failed for assembly");
@@ -27644,17 +28187,17 @@ async function loadAssembly(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX6}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX7}${id}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
 }
-async function listAllIds2() {
+async function listAllIds() {
   const redis2 = getRedis();
   if (!redis2) return [];
   try {
-    return await redis2.smembers(REDIS_INDEX3);
+    return await redis2.smembers(REDIS_INDEX4);
   } catch {
     return [];
   }
@@ -27687,7 +28230,7 @@ ORDER BY b.domain, b.name LIMIT 50`;
     const graphResult = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params },
-      callId: uuid24(),
+      callId: uuid25(),
       timeoutMs: 15e3
     });
     if (graphResult.status === "success" && graphResult.result) {
@@ -27753,7 +28296,7 @@ Reply as JSON:
   const assemblies = [];
   const now = (/* @__PURE__ */ new Date()).toISOString();
   for (const candidate of analysis.candidates.slice(0, maxCandidates)) {
-    const assemblyId = `widgetdc:assembly:${uuid24()}`;
+    const assemblyId = `widgetdc:assembly:${uuid25()}`;
     const selectedBlocks = blocks.filter((b) => candidate.block_ids.includes(b.block_id));
     const conflictCount = candidate.conflicts?.length ?? 0;
     const coherence = Math.max(0, Math.min(1, candidate.coherence ?? 0.5));
@@ -27812,7 +28355,7 @@ MERGE (a)-[:COMPOSED_OF]->(b)`,
             blockIds: selectedBlocks.map((b) => b.block_id)
           }
         },
-        callId: uuid24(),
+        callId: uuid25(),
         timeoutMs: 1e4
       });
     } catch (err) {
@@ -27838,7 +28381,7 @@ assemblyRouter.get("/", async (req, res) => {
   const statusFilter = req.query.status;
   const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "50")), 1), 200);
   const offset = Math.max(parseInt(String(req.query.offset ?? "0")), 0);
-  const allIds = await listAllIds2();
+  const allIds = await listAllIds();
   const redis2 = getRedis();
   if (!redis2 || allIds.length === 0) {
     res.json({ assemblies: [], total: 0, limit, offset });
@@ -27848,7 +28391,7 @@ assemblyRouter.get("/", async (req, res) => {
   try {
     const pipeline = redis2.pipeline();
     for (const id of allIds) {
-      pipeline.get(`${REDIS_PREFIX6}${id}`);
+      pipeline.get(`${REDIS_PREFIX7}${id}`);
     }
     const results = await pipeline.exec();
     if (results) {
@@ -27902,7 +28445,7 @@ assemblyRouter.put("/:id", async (req, res) => {
         query: "MATCH (a:Assembly {id: $id}) SET a.status = $status, a.updated_at = datetime()",
         params: { id: assembly.$id, status: assembly.status }
       },
-      callId: uuid24(),
+      callId: uuid25(),
       timeoutMs: 5e3
     });
   } catch {
@@ -27912,327 +28455,7 @@ assemblyRouter.put("/:id", async (req, res) => {
 
 // src/index.ts
 init_loose_ends();
-
-// src/routes/decisions.ts
-init_redis();
-init_logger();
-init_mcp_caller();
-init_cognitive_proxy();
-init_sse();
-import { Router as Router19 } from "express";
-import { v4 as uuid25 } from "uuid";
-var decisionsRouter = Router19();
-var REDIS_PREFIX7 = "orchestrator:decision:";
-var REDIS_INDEX4 = "orchestrator:decisions:index";
-var TTL_SECONDS9 = 7776e3;
-async function storeDecision(decision) {
-  const redis2 = getRedis();
-  if (!redis2) return false;
-  try {
-    await redis2.set(`${REDIS_PREFIX7}${decision.$id}`, JSON.stringify(decision), "EX", TTL_SECONDS9);
-    await redis2.sadd(REDIS_INDEX4, decision.$id);
-    return true;
-  } catch (err) {
-    logger.warn({ err: String(err) }, "Redis store failed for decision");
-    return false;
-  }
-}
-async function loadDecision(id) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
-  try {
-    const raw = await redis2.get(`${REDIS_PREFIX7}${id}`);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-async function listAllIds3() {
-  const redis2 = getRedis();
-  if (!redis2) return [];
-  try {
-    return await redis2.smembers(REDIS_INDEX4);
-  } catch {
-    return [];
-  }
-}
-async function buildLineageChain(assemblyId) {
-  const lineage = [];
-  try {
-    const result = await callMcpTool({
-      toolName: "graph.read_cypher",
-      args: {
-        query: `MATCH (a:Assembly {id: $assemblyId})
-OPTIONAL MATCH (a)-[:COMPOSED_OF]->(b)
-WHERE b:Block OR b:ArchitectureBlock OR b:LegoBlock
-OPTIONAL MATCH (b)-[:DERIVED_FROM|EXTRACTED_FROM]->(p)
-WHERE p:Pattern OR p:Signal OR p:StrategicInsight
-RETURN a.id AS asm_id, a.name AS asm_name, a.created_at AS asm_ts,
-       b.id AS block_id, b.name AS block_name, labels(b)[0] AS block_type, b.created_at AS block_ts,
-       p.id AS source_id, p.name AS source_name, labels(p)[0] AS source_type, p.createdAt AS source_ts
-ORDER BY b.name`,
-        params: { assemblyId }
-      },
-      callId: uuid25(),
-      timeoutMs: 15e3
-    });
-    if (result.status === "success") {
-      const records = Array.isArray(result.result) ? result.result : Array.isArray(result.result?.records) ? result.result.records : [];
-      if (records.length > 0) {
-        const r = records[0];
-        lineage.push({
-          stage: "assembly",
-          node_id: String(r.asm_id ?? assemblyId),
-          node_type: "Assembly",
-          name: String(r.asm_name ?? assemblyId),
-          timestamp: r.asm_ts ? String(r.asm_ts) : void 0
-        });
-      }
-      const seenBlocks = /* @__PURE__ */ new Set();
-      const seenSources = /* @__PURE__ */ new Set();
-      for (const r of records) {
-        if (r.block_id && !seenBlocks.has(String(r.block_id))) {
-          seenBlocks.add(String(r.block_id));
-          lineage.push({
-            stage: "block",
-            node_id: String(r.block_id),
-            node_type: String(r.block_type ?? "Block"),
-            name: String(r.block_name ?? r.block_id),
-            timestamp: r.block_ts ? String(r.block_ts) : void 0
-          });
-        }
-        if (r.source_id && !seenSources.has(String(r.source_id))) {
-          seenSources.add(String(r.source_id));
-          const sourceType = String(r.source_type ?? "Unknown");
-          const stage = sourceType.includes("Signal") ? "signal" : sourceType.includes("Pattern") ? "pattern" : "signal";
-          lineage.push({
-            stage,
-            node_id: String(r.source_id),
-            node_type: sourceType,
-            name: String(r.source_name ?? r.source_id),
-            timestamp: r.source_ts ? String(r.source_ts) : void 0
-          });
-        }
-      }
-    }
-  } catch (err) {
-    logger.warn({ err: String(err), assemblyId }, "Failed to build lineage chain");
-  }
-  return lineage;
-}
-decisionsRouter.post("/certify", async (req, res) => {
-  const body = req.body;
-  if (!body.assembly_id || !body.title) {
-    res.status(400).json({
-      success: false,
-      error: { code: "VALIDATION_ERROR", message: "Required: assembly_id, title", status_code: 400 }
-    });
-    return;
-  }
-  const assemblyId = String(body.assembly_id);
-  const title = String(body.title);
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  const decisionId = `widgetdc:decision:${uuid25()}`;
-  const lineageChain = await buildLineageChain(assemblyId);
-  let rationale = String(body.rationale ?? "");
-  let summary = String(body.summary ?? "");
-  if (!rationale || !summary) {
-    try {
-      const result = await callCognitive("analyze", {
-        prompt: `You are a decision certifier for an architecture synthesis platform.
-
-Decision: "${title}"
-Assembly: ${assemblyId}
-Lineage: ${lineageChain.length} nodes traced (${lineageChain.map((l) => `${l.stage}:${l.name}`).join(" \u2192 ")})
-${body.context ? `Context: ${JSON.stringify(body.context)}` : ""}
-
-Generate:
-1. A concise summary (1-2 sentences)
-2. A rationale explaining why this decision was made based on the evidence chain
-
-Reply as JSON: {"summary": "...", "rationale": "..."}`,
-        context: { assembly_id: assemblyId, lineage: lineageChain },
-        agent_id: "orchestrator"
-      }, 2e4);
-      const text = String(result ?? "");
-      const match = text.match(/\{[\s\S]*\}/);
-      if (match) {
-        const parsed = JSON.parse(match[0]);
-        if (!summary) summary = parsed.summary ?? title;
-        if (!rationale) rationale = parsed.rationale ?? "Auto-certified based on assembly lineage";
-      }
-    } catch {
-      if (!summary) summary = title;
-      if (!rationale) rationale = "Certified from accepted assembly with verified lineage";
-    }
-  }
-  const proof = {
-    verified_at: now,
-    verified_by: String(body.certifier ?? "orchestrator:decision-engine")
-  };
-  try {
-    const [healthResult] = await Promise.allSettled([
-      fetch("https://orchestrator-production-c27e.up.railway.app/health", { signal: AbortSignal.timeout(5e3) }).then((r) => r.json())
-    ]);
-    if (healthResult.status === "fulfilled") {
-      const h = healthResult.value;
-      proof.service_health = {
-        orchestrator: String(h.status ?? "unknown"),
-        redis: h.redis_enabled ? "connected" : "disconnected",
-        rlm: h.rlm_available ? "available" : "unavailable"
-      };
-    }
-  } catch {
-  }
-  if (body.test_results && typeof body.test_results === "object") {
-    proof.test_results = body.test_results;
-  }
-  if (body.deploy_sha) proof.deploy_sha = String(body.deploy_sha);
-  const certificate = {
-    $id: decisionId,
-    $schema: "widgetdc:decision:v1",
-    title,
-    summary,
-    rationale,
-    assembly_id: assemblyId,
-    lineage_chain: lineageChain,
-    evidence_refs: Array.isArray(body.evidence_refs) ? body.evidence_refs : lineageChain.map((l) => l.node_id),
-    arbitration_outcome: String(body.arbitration_outcome ?? "accepted"),
-    production_proof: proof,
-    certified_at: now,
-    certifier_agent: String(body.certifier ?? "orchestrator:decision-engine"),
-    status: "certified",
-    tags: Array.isArray(body.tags) ? body.tags : []
-  };
-  await storeDecision(certificate);
-  try {
-    await callMcpTool({
-      toolName: "graph.write_cypher",
-      args: {
-        query: `CREATE (d:Decision {
-  id: $id, title: $title, summary: $summary, rationale: $rationale,
-  assembly_id: $assemblyId, status: 'certified',
-  certified_at: datetime(), certifier_agent: $certifier,
-  lineage_depth: $lineageDepth, evidence_count: $evidenceCount
-})
-WITH d
-MATCH (a:Assembly {id: $assemblyId})
-CREATE (d)-[:BASED_ON]->(a)
-WITH d
-UNWIND $evidenceIds AS eid
-MATCH (e) WHERE e.id = eid
-CREATE (d)-[:CERTIFIED_BY_EVIDENCE]->(e)`,
-        params: {
-          id: decisionId,
-          title,
-          summary,
-          rationale,
-          assemblyId,
-          certifier: certificate.certifier_agent,
-          lineageDepth: lineageChain.length,
-          evidenceCount: certificate.evidence_refs.length,
-          evidenceIds: certificate.evidence_refs.slice(0, 20)
-          // Cap for query size
-        }
-      },
-      callId: uuid25(),
-      timeoutMs: 15e3
-    });
-  } catch (err) {
-    logger.warn({ err: String(err), decision_id: decisionId }, "Failed to write decision to Neo4j");
-  }
-  broadcastSSE("decision-certified", {
-    decision_id: decisionId,
-    title,
-    assembly_id: assemblyId,
-    lineage_depth: lineageChain.length
-  });
-  logger.info({
-    decision_id: decisionId,
-    title,
-    assembly_id: assemblyId,
-    lineage_depth: lineageChain.length
-  }, "Decision certified");
-  res.status(201).json({ success: true, data: certificate });
-});
-decisionsRouter.get("/", async (req, res) => {
-  const statusFilter = req.query.status;
-  const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "50")), 1), 200);
-  const offset = Math.max(parseInt(String(req.query.offset ?? "0")), 0);
-  const allIds = await listAllIds3();
-  const redis2 = getRedis();
-  if (!redis2 || allIds.length === 0) {
-    res.json({ decisions: [], total: 0, limit, offset });
-    return;
-  }
-  const decisions = [];
-  try {
-    const pipeline = redis2.pipeline();
-    for (const id of allIds) {
-      pipeline.get(`${REDIS_PREFIX7}${id}`);
-    }
-    const results = await pipeline.exec();
-    if (results) {
-      for (const [err, raw] of results) {
-        if (!err && typeof raw === "string") {
-          try {
-            decisions.push(JSON.parse(raw));
-          } catch {
-          }
-        }
-      }
-    }
-  } catch (err) {
-    logger.warn({ err: String(err) }, "Redis pipeline failed for decisions list");
-  }
-  let filtered = decisions;
-  if (statusFilter) {
-    filtered = filtered.filter((d) => d.status === statusFilter);
-  }
-  filtered.sort((a, b) => b.certified_at.localeCompare(a.certified_at));
-  const total = filtered.length;
-  const page = filtered.slice(offset, offset + limit);
-  res.json({ decisions: page, total, limit, offset });
-});
-decisionsRouter.get("/:id", async (req, res) => {
-  const id = req.params.id;
-  if (id === "lineage") {
-    res.status(400).json({ success: false, error: "Provide a decision ID" });
-    return;
-  }
-  const decision = await loadDecision(id);
-  if (!decision) {
-    res.status(404).json({ success: false, error: "Decision not found" });
-    return;
-  }
-  res.json({ success: true, data: decision });
-});
-decisionsRouter.get("/:id/lineage", async (req, res) => {
-  const decision = await loadDecision(req.params.id);
-  if (!decision) {
-    res.status(404).json({ success: false, error: "Decision not found" });
-    return;
-  }
-  const stages = {};
-  for (const entry of decision.lineage_chain) {
-    if (!stages[entry.stage]) stages[entry.stage] = [];
-    stages[entry.stage].push(entry);
-  }
-  res.json({
-    success: true,
-    data: {
-      decision_id: decision.$id,
-      title: decision.title,
-      certified_at: decision.certified_at,
-      assembly_id: decision.assembly_id,
-      lineage_chain: decision.lineage_chain,
-      lineage_by_stage: stages,
-      depth: decision.lineage_chain.length,
-      stages_covered: Object.keys(stages),
-      production_proof: decision.production_proof
-    }
-  });
-});
+init_decisions();
 
 // src/routes/s1-s4.ts
 init_chain_engine();

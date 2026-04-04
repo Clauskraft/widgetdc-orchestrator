@@ -711,6 +711,92 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     timeoutMs: 60000,
     outputDescription: 'LooseEndScanResult with counts and findings by category',
   }),
+
+  // ─── v4.0.6 — Ghost-tier sweep round 2 (LIN-618) ──────────────────────────
+  // 7 more tools from the audit — decisions (LIN-536), artifacts (G4.2-5),
+  // llm proxy, s1-s4 research pipeline. Drill stack deferred to v4.0.7 (stateful).
+
+  defineTool({
+    name: 'llm_chat',
+    namespace: 'llm',
+    description: 'Direct LLM chat proxy supporting 6 providers (deepseek, qwen, openai, groq, gemini, claude). Returns provider/model/content.',
+    input: z.object({
+      provider: z.string().describe('LLM provider: deepseek|qwen|openai|groq|gemini|claude'),
+      messages: z.array(z.object({ role: z.string(), content: z.string() })).describe('Chat messages array'),
+      model: z.string().optional().describe('Model override (defaults per provider)'),
+      temperature: z.number().optional().describe('0-2 sampling temperature'),
+      max_tokens: z.number().optional().describe('Max tokens to generate'),
+    }),
+    timeoutMs: 60000,
+    outputDescription: 'LLMResponse with provider, model, content, usage',
+  }),
+
+  defineTool({
+    name: 'llm_providers',
+    namespace: 'llm',
+    description: 'List available LLM providers configured in the orchestrator with their default models.',
+    input: z.object({}),
+    timeoutMs: 5000,
+    outputDescription: 'Array of provider configs {name, defaultModel, baseUrl}',
+  }),
+
+  defineTool({
+    name: 'decision_certify',
+    namespace: 'decisions',
+    description: 'Certify an assembly as an architecture decision (LIN-536). Traverses Assembly → Blocks → Patterns → Signals lineage, produces DecisionCertificate with full provenance trail stored in Redis.',
+    input: z.object({
+      assembly_id: z.string().describe('Source assembly ID'),
+      title: z.string().describe('Decision title'),
+      description: z.string().optional().describe('Decision description'),
+      decided_by: z.string().optional().describe('Decider agent/user ID'),
+    }),
+    timeoutMs: 30000,
+    outputDescription: 'DecisionCertificate with $id, lineage chain, timestamps',
+  }),
+
+  defineTool({
+    name: 'decision_list',
+    namespace: 'decisions',
+    description: 'List all certified decisions from the orchestrator Redis store. Returns decision metadata sorted by creation.',
+    input: z.object({
+      limit: z.number().optional().describe('Max decisions returned (default 50)'),
+    }),
+    timeoutMs: 10000,
+    outputDescription: 'DecisionCertificate[] with id, title, decided_by, created_at',
+  }),
+
+  defineTool({
+    name: 'decision_lineage',
+    namespace: 'decisions',
+    description: 'Build full lineage chain for a decision or assembly — traces from Assembly → Blocks → Patterns → Signals via Neo4j graph traversal. Used for audit and provenance (LIN-536).',
+    input: z.object({
+      assembly_id: z.string().describe('Assembly ID to trace lineage from'),
+    }),
+    timeoutMs: 20000,
+    outputDescription: 'LineageEntry[] with stage (assembly/block/pattern/signal), node_id, node_type, name, timestamp',
+  }),
+
+  defineTool({
+    name: 'artifact_list',
+    namespace: 'assembly',
+    description: 'List AnalysisArtifact objects from the broker (G4.2-5). Artifacts are Obsidian-Markdown exportable analysis outputs with blocks (text, table, chart, kpi_card, cypher, mermaid).',
+    input: z.object({
+      limit: z.number().optional().describe('Max artifacts returned (default 20)'),
+    }),
+    timeoutMs: 10000,
+    outputDescription: 'AnalysisArtifact[] with id, title, status, blocks count',
+  }),
+
+  defineTool({
+    name: 'artifact_get',
+    namespace: 'assembly',
+    description: 'Retrieve a specific AnalysisArtifact by ID with all blocks, graph refs, tags, and metadata.',
+    input: z.object({
+      artifact_id: z.string().describe('Artifact $id'),
+    }),
+    timeoutMs: 5000,
+    outputDescription: 'Full AnalysisArtifact object',
+  }),
 ]
 
 // ─── Protocol Compilers ─────────────────────────────────────────────────────

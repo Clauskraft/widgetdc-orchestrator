@@ -1079,6 +1079,61 @@ Scan synthesis funnel for loose ends — unresolved dependencies, contradictions
 
 ---
 
+## v4.0.6 Ghost-Tier Sweep Round 2 (LIN-618)
+
+Seven additional tools from the ghost-tier audit. Continues closing the gap between feature routers and TOOL_REGISTRY compliance.
+
+### `llm_chat`
+**Namespace:** llm | **Timeout:** 60s | **Handler:** orchestrator
+
+Direct LLM chat proxy supporting 6 providers (deepseek, qwen, openai, groq, gemini, claude). Returns provider/model/content/usage.
+
+**Required:** `provider`, `messages` | **Optional:** `model`, `temperature`, `max_tokens`
+
+### `llm_providers`
+**Namespace:** llm | **Timeout:** 5s | **Handler:** orchestrator
+
+List available LLM providers configured in the orchestrator with their default models.
+
+**No parameters.**
+
+### `decision_certify`
+**Namespace:** decisions | **Timeout:** 30s | **Handler:** orchestrator | **LIN-536**
+
+Certify an assembly as an architecture decision. Traverses Assembly → Blocks → Patterns → Signals lineage, produces `DecisionCertificate` with full provenance trail.
+
+**Required:** `assembly_id`, `title` | **Optional:** `description`, `decided_by`
+
+### `decision_list`
+**Namespace:** decisions | **Timeout:** 10s | **Handler:** orchestrator
+
+List all certified decisions from Redis store sorted by creation.
+
+**Optional:** `limit` (default 50, max 100)
+
+### `decision_lineage`
+**Namespace:** decisions | **Timeout:** 20s | **Handler:** orchestrator | **LIN-536**
+
+Build full lineage chain for a decision or assembly via Neo4j graph traversal. Used for audit and provenance.
+
+**Required:** `assembly_id`
+
+### `artifact_list`
+**Namespace:** assembly | **Timeout:** 10s | **Handler:** orchestrator | **G4.2-5**
+
+List `AnalysisArtifact` objects from the broker. Artifacts are Obsidian-Markdown exportable outputs with blocks (text, table, chart, kpi_card, cypher, mermaid).
+
+**Optional:** `limit` (default 20)
+
+### `artifact_get`
+**Namespace:** assembly | **Timeout:** 5s | **Handler:** orchestrator | **G4.2-5**
+
+Retrieve a specific AnalysisArtifact by ID with all blocks, graph refs, tags, and metadata.
+
+**Required:** `artifact_id`
+
+---
+
 ## Adding a New Tool
 
 All protocols (REST, OpenAI, MCP) compile automatically from a single entry in `src/tool-registry.ts`:

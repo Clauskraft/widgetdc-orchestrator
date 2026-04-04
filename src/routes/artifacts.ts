@@ -41,7 +41,8 @@ interface AnalysisArtifact {
 
 /* ─── Helpers ─────────────────────────────────────────────────────────────── */
 
-async function storeArtifact(artifact: AnalysisArtifact): Promise<boolean> {
+// v4.0.6: export for tool-executor access (LIN-618)
+export async function storeArtifact(artifact: AnalysisArtifact): Promise<boolean> {
   const redis = getRedis()
   if (!redis) return false
   const key = `${ARTIFACT_PREFIX}${artifact.$id}`
@@ -55,7 +56,7 @@ async function storeArtifact(artifact: AnalysisArtifact): Promise<boolean> {
   }
 }
 
-async function loadArtifact(id: string): Promise<AnalysisArtifact | null> {
+export async function loadArtifact(id: string): Promise<AnalysisArtifact | null> {
   const redis = getRedis()
   if (!redis) return null
   try {
@@ -67,7 +68,7 @@ async function loadArtifact(id: string): Promise<AnalysisArtifact | null> {
   }
 }
 
-async function listAllIds(): Promise<string[]> {
+export async function listAllArtifactIds(): Promise<string[]> {
   const redis = getRedis()
   if (!redis) return []
   try {
@@ -123,7 +124,7 @@ artifactRouter.get('/', async (req: Request, res: Response) => {
   const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 50, 1), 200)
   const offset = Math.max(parseInt(req.query.offset as string) || 0, 0)
 
-  const allIds = await listAllIds()
+  const allIds = await listAllArtifactIds()
   const redis = getRedis()
 
   if (!redis) {

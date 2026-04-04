@@ -1167,6 +1167,59 @@ await test('122. POST /api/tools/loose_ends_scan responds', async () => {
 })
 
 // ═══════════════════════════════════════════════════════════════
+// Section 18: v4.0.6 LIN-618 — Ghost-tier sweep round 2
+// ═══════════════════════════════════════════════════════════════
+
+// ── 123. llm_providers — exists ──
+await test('123. POST /api/tools/llm_providers responds', async () => {
+  const r = await api('/api/tools/llm_providers', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `llm_providers not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'llm_providers', `wrong tool_name`)
+})
+
+// ── 124. llm_chat — exists ──
+await test('124. POST /api/tools/llm_chat responds', async () => {
+  const r = await api('/api/tools/llm_chat', { method: 'POST', body: JSON.stringify({ messages: [] }) })
+  assert(r.status !== 404, `llm_chat not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'llm_chat', `wrong tool_name`)
+})
+
+// ── 125. decision_list — exists ──
+await test('125. POST /api/tools/decision_list responds', async () => {
+  const r = await api('/api/tools/decision_list', { method: 'POST', body: JSON.stringify({ limit: 5 }) })
+  assert(r.status !== 404, `decision_list not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'decision_list', `wrong tool_name`)
+})
+
+// ── 126. decision_certify — exists ──
+await test('126. POST /api/tools/decision_certify responds', async () => {
+  const r = await api('/api/tools/decision_certify', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `decision_certify not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'decision_certify', `wrong tool_name`)
+})
+
+// ── 127. decision_lineage — exists ──
+await test('127. POST /api/tools/decision_lineage responds', async () => {
+  const r = await api('/api/tools/decision_lineage', { method: 'POST', body: JSON.stringify({ assembly_id: 'nonexistent' }) })
+  assert(r.status !== 404, `decision_lineage not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'decision_lineage', `wrong tool_name`)
+})
+
+// ── 128. artifact_list — exists ──
+await test('128. POST /api/tools/artifact_list responds', async () => {
+  const r = await api('/api/tools/artifact_list', { method: 'POST', body: JSON.stringify({ limit: 5 }) })
+  assert(r.status !== 404, `artifact_list not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'artifact_list', `wrong tool_name`)
+})
+
+// ── 129. artifact_get — exists ──
+await test('129. POST /api/tools/artifact_get responds', async () => {
+  const r = await api('/api/tools/artifact_get', { method: 'POST', body: JSON.stringify({ artifact_id: 'nonexistent' }) })
+  assert(r.status !== 404, `artifact_get not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'artifact_get', `wrong tool_name`)
+})
+
+// ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped
 console.log(`  RESULTS: ${passed} passed, ${failed} failed, ${skipped} skipped / ${total} total`)

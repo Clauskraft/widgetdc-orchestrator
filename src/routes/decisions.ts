@@ -60,7 +60,8 @@ interface DecisionCertificate {
 
 /* ─── Redis Helpers ──────────────────────────────────────────────────────── */
 
-async function storeDecision(decision: DecisionCertificate): Promise<boolean> {
+// v4.0.6: export for tool-executor access (LIN-618)
+export async function storeDecision(decision: DecisionCertificate): Promise<boolean> {
   const redis = getRedis()
   if (!redis) return false
   try {
@@ -73,7 +74,7 @@ async function storeDecision(decision: DecisionCertificate): Promise<boolean> {
   }
 }
 
-async function loadDecision(id: string): Promise<DecisionCertificate | null> {
+export async function loadDecision(id: string): Promise<DecisionCertificate | null> {
   const redis = getRedis()
   if (!redis) return null
   try {
@@ -84,7 +85,7 @@ async function loadDecision(id: string): Promise<DecisionCertificate | null> {
   }
 }
 
-async function listAllIds(): Promise<string[]> {
+export async function listAllDecisionIds(): Promise<string[]> {
   const redis = getRedis()
   if (!redis) return []
   try {
@@ -96,7 +97,7 @@ async function listAllIds(): Promise<string[]> {
 
 /* ─── Lineage Builder ────────────────────────────────────────────────────── */
 
-async function buildLineageChain(assemblyId: string): Promise<LineageEntry[]> {
+export async function buildLineageChain(assemblyId: string): Promise<LineageEntry[]> {
   const lineage: LineageEntry[] = []
 
   try {
@@ -343,7 +344,7 @@ decisionsRouter.get('/', async (req: Request, res: Response) => {
   const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '50')), 1), 200)
   const offset = Math.max(parseInt(String(req.query.offset ?? '0')), 0)
 
-  const allIds = await listAllIds()
+  const allIds = await listAllDecisionIds()
   const redis = getRedis()
 
   if (!redis || allIds.length === 0) {

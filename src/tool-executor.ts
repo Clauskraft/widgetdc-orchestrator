@@ -1268,6 +1268,125 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    // ─── v4.0.6 — Ghost-tier sweep round 2 (LIN-618) ───────────────────────
+
+    case 'llm_chat': {
+      try {
+        const { chatLLM } = await import('./llm-proxy.js')
+        const provider = String(args.provider ?? 'deepseek')
+        const messages = Array.isArray(args.messages) ? (args.messages as Array<{ role: string; content: string }>) : []
+        if (messages.length === 0) return 'Error: messages array required'
+        const result = await chatLLM({
+          provider,
+          messages: messages.map(m => ({ role: m.role as 'system' | 'user' | 'assistant', content: String(m.content) })),
+          model: typeof args.model === 'string' ? args.model : undefined,
+          temperature: typeof args.temperature === 'number' ? args.temperature : undefined,
+          max_tokens: typeof args.max_tokens === 'number' ? args.max_tokens : undefined,
+        })
+        return JSON.stringify({ provider: result.provider, model: result.model, content: result.content?.slice(0, 2000) ?? '', usage: result.usage })
+      } catch (err) {
+        return `LLM chat failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'llm_providers': {
+      try {
+        const { listProviders } = await import('./llm-proxy.js')
+        const providers = listProviders()
+        return JSON.stringify(providers, null, 2)
+      } catch (err) {
+        return `List providers failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'decision_certify': {
+      try {
+        const { storeDecision, buildLineageChain } = await import('./routes/decisions.js')
+        const assemblyId = String(args.assembly_id ?? '')
+        const title = String(args.title ?? '')
+        if (!assemblyId || !title) return 'Error: assembly_id and title required'
+        const lineage = await buildLineageChain(assemblyId)
+        const now = new Date().toISOString()
+        const decision = {
+          $id: `widgetdc:decision:${uuid()}`,
+          $schema: 'https://widgetdc.io/schemas/decision/v1',
+          title,
+          description: typeof args.description === 'string' ? args.description : '',
+          assembly_id: assemblyId,
+          lineage_chain: lineage,
+          decided_by: String(args.decided_by ?? 'tool-executor'),
+          created_at: now,
+          updated_at: now,
+          status: 'certified' as const,
+        }
+        const stored = await storeDecision(decision as any)
+        return JSON.stringify({ decision_id: decision.$id, title, lineage_depth: lineage.length, stored })
+      } catch (err) {
+        return `Decision certify failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'decision_list': {
+      try {
+        const { listAllDecisionIds, loadDecision } = await import('./routes/decisions.js')
+        const limit = typeof args.limit === 'number' ? args.limit : 50
+        const ids = await listAllDecisionIds()
+        const sliced = ids.slice(0, Math.min(limit, 100))
+        const decisions = (await Promise.all(sliced.map(id => loadDecision(id)))).filter(d => d !== null)
+        if (decisions.length === 0) return 'No certified decisions found'
+        const lines = decisions.map((d: any, i) =>
+          `${i + 1}. ${d.title} (${d.$id}) — decided_by: ${d.decided_by}, at: ${d.created_at}`,
+        )
+        return `${decisions.length} decisions:\n${lines.join('\n')}`
+      } catch (err) {
+        return `Decision list failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'decision_lineage': {
+      try {
+        const { buildLineageChain } = await import('./routes/decisions.js')
+        const assemblyId = String(args.assembly_id ?? '')
+        if (!assemblyId) return 'Error: assembly_id required'
+        const lineage = await buildLineageChain(assemblyId)
+        if (lineage.length === 0) return `No lineage found for ${assemblyId}`
+        const lines = lineage.map((e, i) => `${i + 1}. [${e.stage}] ${e.node_type} — ${e.name} (${e.node_id})`)
+        return `Lineage chain (${lineage.length} entries):\n${lines.join('\n')}`
+      } catch (err) {
+        return `Decision lineage failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'artifact_list': {
+      try {
+        const { listAllArtifactIds, loadArtifact } = await import('./routes/artifacts.js')
+        const limit = typeof args.limit === 'number' ? args.limit : 20
+        const ids = await listAllArtifactIds()
+        const sliced = ids.slice(0, Math.min(limit, 100))
+        const artifacts = (await Promise.all(sliced.map(id => loadArtifact(id)))).filter(a => a !== null)
+        if (artifacts.length === 0) return 'No artifacts found'
+        const lines = artifacts.map((a: any, i) =>
+          `${i + 1}. ${a.title} (${a.$id}) — status: ${a.status}, blocks: ${a.blocks?.length ?? 0}, source: ${a.source}`,
+        )
+        return `${artifacts.length} artifacts:\n${lines.join('\n')}`
+      } catch (err) {
+        return `Artifact list failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'artifact_get': {
+      try {
+        const { loadArtifact } = await import('./routes/artifacts.js')
+        const artifactId = String(args.artifact_id ?? '')
+        if (!artifactId) return 'Error: artifact_id required'
+        const artifact = await loadArtifact(artifactId)
+        if (!artifact) return `Artifact ${artifactId} not found`
+        return JSON.stringify(artifact, null, 2)
+      } catch (err) {
+        return `Artifact get failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
     default: {
       // Check forged tools before giving up
       try {
