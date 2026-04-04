@@ -6,6 +6,7 @@
  */
 import cron from 'node-cron'
 import { executeChain, type ChainDefinition } from './chain-engine.js'
+import { config } from './config.js'
 import { logger } from './logger.js'
 import { getRedis } from './redis.js'
 import { broadcastMessage } from './chat-broadcaster.js'
@@ -322,6 +323,52 @@ export async function runCronJob(jobId: string): Promise<void> {
         job.run_count++
         persistCronJobs()
         logger.error({ id: job.id, err: String(err) }, 'Community builder cron failed')
+      }
+      return
+    }
+
+    // ═══ Backend Cron Proxy Jobs (v2.8.0) ═══════════════════════════════
+    // These crons call WidgeTDC backend /api/cron/* endpoints via HTTP POST.
+    if (job.id === 'data-lifecycle' || job.id === 'graph-overflow' || job.id === 'skill-forge') {
+      try {
+        const endpoint = `${config.backendUrl}/api/cron/${job.id}`
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${config.backendApiKey}`,
+            'X-Call-Id': `cron-${job.id}-${Date.now()}`,
+          },
+          signal: AbortSignal.timeout(120_000),
+        })
+
+        const body = await res.json().catch(() => null) as Record<string, unknown> | null
+        job.last_run = new Date().toISOString()
+        job.last_status = res.ok ? 'completed' : `failed:${res.status}`
+        job.run_count++
+        persistCronJobs()
+
+        const status = res.ok ? '✅' : '❌'
+        broadcastMessage({
+          from: 'Orchestrator',
+          to: 'All',
+          source: 'orchestrator',
+          type: 'Message',
+          message: `${status} Backend cron "${job.name}": ${res.ok ? 'completed' : `HTTP ${res.status}`}${body?.summary ? ` — ${body.summary}` : ''}`,
+          timestamp: new Date().toISOString(),
+        })
+
+        if (res.ok) {
+          broadcastSSE(`cron-${job.id}`, { status: 'completed', result: body })
+        } else {
+          logger.warn({ id: job.id, status: res.status, body }, `Backend cron ${job.id} returned non-OK`)
+        }
+      } catch (err) {
+        job.last_run = new Date().toISOString()
+        job.last_status = 'failed'
+        job.run_count++
+        persistCronJobs()
+        logger.error({ id: job.id, err: String(err) }, `Backend cron ${job.id} failed`)
       }
       return
     }
@@ -1112,6 +1159,50 @@ export function registerDefaultLoops(): void {
     enabled: false,
     chain: {
       name: 'Evolution OODA Cycle',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // BACKEND CRON PROXIES (v2.8.0) — Call WidgeTDC backend /api/cron/* endpoints
+  // These crons trigger backend-side jobs via HTTP POST with auth.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // Data Lifecycle — retention policies, stale data cleanup
+  registerCronJob({
+    id: 'data-lifecycle',
+    name: 'Data Lifecycle (Retention Policies)',
+    schedule: '0 3 * * *', // Daily 03:00 UTC
+    enabled: true,
+    chain: {
+      name: 'Data Lifecycle',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
+  // Graph Overflow — quota monitoring, cold archival, growth tracking
+  registerCronJob({
+    id: 'graph-overflow',
+    name: 'Graph Overflow (Quota & Archival)',
+    schedule: '0 */6 * * *', // Every 6 hours
+    enabled: true,
+    chain: {
+      name: 'Graph Overflow',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
+  // Skill Forge — auto-generate composite MCP tools from usage patterns
+  registerCronJob({
+    id: 'skill-forge',
+    name: 'Skill Forge (Composite Tool Generation)',
+    schedule: '0 4 * * 0', // Sunday 04:00 UTC
+    enabled: true,
+    chain: {
+      name: 'Skill Forge',
       mode: 'sequential',
       steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
     },
