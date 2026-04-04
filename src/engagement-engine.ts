@@ -86,6 +86,13 @@ export interface EngagementPlan {
   total_citations: number
   avg_confidence: number
   generation_ms: number
+  // v4.0.3: governance metadata for high-stakes plans
+  high_stakes?: boolean
+  consensus_proposal_id?: string
+  consensus_quorum?: number
+  rlm_mission_id?: string
+  rlm_steps_executed?: number
+  plan_source?: string
 }
 
 // ─── Storage ────────────────────────────────────────────────────────────────
@@ -495,6 +502,147 @@ async function foldContext(text: string, query: string, maxTokens = 1500): Promi
   }
 }
 
+// ─── Swarm consensus (v4.0.3) ────────────────────────────────────────────────
+
+/**
+ * High-stakes plan gate: budget >20M DKK OR team >20 OR duration >40 weeks.
+ * These plans trigger consensus.propose + self-vote via engagement-planner agent.
+ * The proposal ID is attached to the plan for audit trail.
+ */
+function isHighStakesPlan(req: PlanRequest): boolean {
+  return (
+    (req.budget_dkk ?? 0) > 20_000_000 ||
+    req.team_size > 20 ||
+    req.duration_weeks > 40
+  )
+}
+
+async function proposeViaConsensus(
+  engagementId: string,
+  req: PlanRequest,
+  planSummary: string,
+): Promise<{ proposalId: string | null; quorum: number }> {
+  try {
+    const result = await callMcpTool({
+      toolName: 'consensus.propose',
+      args: {
+        title: `EIE plan: ${req.domain} — ${req.objective.slice(0, 80)}`,
+        description: `${req.duration_weeks}w, team ${req.team_size}, budget ${req.budget_dkk ?? 'unspecified'} DKK. Plan summary: ${planSummary.slice(0, 400)}`,
+        proposer: 'engagement-planner',
+        severity: 'P2',
+        metadata: {
+          engagement_id: engagementId,
+          domain: req.domain,
+          duration_weeks: req.duration_weeks,
+          team_size: req.team_size,
+          budget_dkk: req.budget_dkk ?? 0,
+        },
+      },
+      callId: uuid(),
+      timeoutMs: 15000,
+    })
+    if (result.status !== 'success') return { proposalId: null, quorum: 0 }
+    const data = result.result as Record<string, unknown> | null
+    if (!data || data.success === false) return { proposalId: null, quorum: 0 }
+    const proposalId = (data.proposalId as string) ?? null
+    const quorum = Number(data.quorum ?? 3)
+    logger.info({ proposalId, quorum, engagement_id: engagementId }, 'Engagement plan: consensus proposal created')
+    return { proposalId, quorum }
+  } catch (err) {
+    logger.debug({ error: String(err) }, 'consensus.propose failed')
+    return { proposalId: null, quorum: 0 }
+  }
+}
+
+async function voteOnConsensus(
+  proposalId: string,
+  decision: 'approve' | 'reject',
+  confidence: number,
+  reasoning: string,
+): Promise<boolean> {
+  try {
+    const result = await callMcpTool({
+      toolName: 'consensus.vote',
+      args: {
+        proposalId,
+        voter: 'engagement-planner',
+        decision,
+        confidence: Math.min(1, Math.max(0, confidence)),
+        reasoning: reasoning.slice(0, 500),
+      },
+      callId: uuid(),
+      timeoutMs: 10000,
+    })
+    if (result.status !== 'success') return false
+    const data = result.result as Record<string, unknown> | null
+    return Boolean(data && data.success !== false)
+  } catch (err) {
+    logger.debug({ error: String(err) }, 'consensus.vote failed')
+    return false
+  }
+}
+
+// ─── RLM Mission for complex plans (v4.0.3) ─────────────────────────────────
+
+/**
+ * For engagements >40 weeks, use rlm.start_mission for multi-step reasoning.
+ * Mission runs PEEK → ANALYZE → SYNTHESIZE steps with graph context per step.
+ * Returns aggregated insights to enrich the cognitive analyze context.
+ */
+async function planViaRlmMission(
+  engagementId: string,
+  req: PlanRequest,
+  maxSteps = 3,
+): Promise<{ missionId: string | null; insights: string[]; stepsExecuted: number }> {
+  try {
+    const startResult = await callMcpTool({
+      toolName: 'rlm.start_mission',
+      args: {
+        name: `eie-plan-${engagementId}`,
+        objective: `Design ${req.duration_weeks}-week ${req.domain} consulting engagement: ${req.objective}`,
+        maxSteps,
+        maxDepth: 2,
+      },
+      callId: uuid(),
+      timeoutMs: 20000,
+    })
+    if (startResult.status !== 'success') return { missionId: null, insights: [], stepsExecuted: 0 }
+    const startData = startResult.result as Record<string, unknown> | null
+    if (!startData || startData.success === false) return { missionId: null, insights: [], stepsExecuted: 0 }
+    const missionId = (startData.missionId as string) ?? null
+    if (!missionId) return { missionId: null, insights: [], stepsExecuted: 0 }
+
+    const insights: string[] = []
+    let stepsExecuted = 0
+    for (let i = 0; i < maxSteps; i++) {
+      const stepResult = await callMcpTool({
+        toolName: 'rlm.execute_step',
+        args: { missionId },
+        callId: uuid(),
+        timeoutMs: 60000,
+      })
+      if (stepResult.status !== 'success') break
+      const stepData = stepResult.result as Record<string, unknown> | null
+      if (!stepData || stepData.success === false) break
+      stepsExecuted++
+      // Extract summary from step result
+      const step = stepData.result as Record<string, unknown> | null
+      const summary = (step?.data as Record<string, unknown>)?.summary ?? step?.summary
+      if (typeof summary === 'string' && summary.length > 20) {
+        insights.push(summary.slice(0, 300))
+      }
+      // Stop if mission completed
+      if (stepData.status === 'COMPLETED' || step === null) break
+    }
+
+    logger.info({ missionId, stepsExecuted, insights: insights.length, engagement_id: engagementId }, 'Engagement plan: RLM mission executed')
+    return { missionId, insights, stepsExecuted }
+  } catch (err) {
+    logger.debug({ error: String(err) }, 'rlm.start_mission failed')
+    return { missionId: null, insights: [], stepsExecuted: 0 }
+  }
+}
+
 // ─── Capability 3: plan ──────────────────────────────────────────────────────
 
 export interface PlanRequest {
@@ -506,9 +654,145 @@ export interface PlanRequest {
   budget_dkk?: number
 }
 
+// ─── Gate thresholds (v4.0.3) — SMART, UPFRONT, FAIL-CLOSED ────────────────
+// These gates run BEFORE any expensive retrieval or LLM calls.
+// Fail-closed: if consensus infrastructure is unreachable, high-stakes plans
+// are REJECTED unless EIE_GATE_REQUIRE_CONSENSUS=false is explicitly set.
+const GATE_BUDGET_DKK = Number(process.env.EIE_GATE_BUDGET_DKK ?? 20_000_000)
+const GATE_TEAM_SIZE = Number(process.env.EIE_GATE_TEAM_SIZE ?? 20)
+const GATE_DURATION_WEEKS = Number(process.env.EIE_GATE_DURATION_WEEKS ?? 40)
+const GATE_REQUIRE_CONSENSUS = process.env.EIE_GATE_REQUIRE_CONSENSUS !== 'false'
+const GATE_CONSENSUS_TIMEOUT_MS = Number(process.env.EIE_GATE_CONSENSUS_TIMEOUT_MS ?? 30_000)
+// Hard sanity limits — reject obviously insane requests upfront.
+const GATE_MAX_BUDGET_DKK = Number(process.env.EIE_GATE_MAX_BUDGET_DKK ?? 500_000_000)
+const GATE_MAX_TEAM_SIZE = Number(process.env.EIE_GATE_MAX_TEAM_SIZE ?? 100)
+const GATE_MAX_DURATION_WEEKS = Number(process.env.EIE_GATE_MAX_DURATION_WEEKS ?? 260) // 5 years
+const GATE_MIN_OBJECTIVE_LEN = 15
+
+export class PlanGateRejection extends Error {
+  constructor(
+    public readonly code: string,
+    public readonly reason: string,
+    public readonly details: Record<string, unknown> = {},
+  ) {
+    super(`Plan gate rejection: ${code} — ${reason}`)
+    this.name = 'PlanGateRejection'
+  }
+}
+
+/**
+ * Gate 0: Input sanity validation — run BEFORE any expensive work.
+ * Rejects obviously invalid/insane requests upfront.
+ */
+function enforceInputSanityGate(req: PlanRequest): void {
+  if (!req.objective || req.objective.trim().length < GATE_MIN_OBJECTIVE_LEN) {
+    throw new PlanGateRejection('INVALID_OBJECTIVE', `objective must be at least ${GATE_MIN_OBJECTIVE_LEN} chars`, { given: req.objective?.length ?? 0 })
+  }
+  if (!req.domain || req.domain.trim().length === 0) {
+    throw new PlanGateRejection('INVALID_DOMAIN', 'domain required')
+  }
+  if (!Number.isFinite(req.duration_weeks) || req.duration_weeks < 1) {
+    throw new PlanGateRejection('INVALID_DURATION', 'duration_weeks must be ≥1', { given: req.duration_weeks })
+  }
+  if (req.duration_weeks > GATE_MAX_DURATION_WEEKS) {
+    throw new PlanGateRejection('DURATION_OVER_HARD_LIMIT', `duration >${GATE_MAX_DURATION_WEEKS} weeks rejected`, { given: req.duration_weeks, limit: GATE_MAX_DURATION_WEEKS })
+  }
+  if (!Number.isFinite(req.team_size) || req.team_size < 1) {
+    throw new PlanGateRejection('INVALID_TEAM', 'team_size must be ≥1', { given: req.team_size })
+  }
+  if (req.team_size > GATE_MAX_TEAM_SIZE) {
+    throw new PlanGateRejection('TEAM_OVER_HARD_LIMIT', `team_size >${GATE_MAX_TEAM_SIZE} rejected`, { given: req.team_size, limit: GATE_MAX_TEAM_SIZE })
+  }
+  if (req.budget_dkk !== undefined) {
+    if (!Number.isFinite(req.budget_dkk) || req.budget_dkk < 0) {
+      throw new PlanGateRejection('INVALID_BUDGET', 'budget_dkk must be ≥0', { given: req.budget_dkk })
+    }
+    if (req.budget_dkk > GATE_MAX_BUDGET_DKK) {
+      throw new PlanGateRejection('BUDGET_OVER_HARD_LIMIT', `budget >${GATE_MAX_BUDGET_DKK} DKK rejected`, { given: req.budget_dkk, limit: GATE_MAX_BUDGET_DKK })
+    }
+  }
+}
+
+/**
+ * Gate 1: Consensus gate for high-stakes plans — BLOCKING, fail-closed.
+ * Opens a consensus proposal and self-votes. If infrastructure fails AND
+ * GATE_REQUIRE_CONSENSUS=true (default), the plan is REJECTED.
+ */
+async function enforceConsensusGate(
+  engagementId: string,
+  req: PlanRequest,
+): Promise<{ proposalId: string; quorum: number }> {
+  const summary = `High-stakes plan: ${req.domain}, ${req.duration_weeks}w, team ${req.team_size}, budget ${req.budget_dkk ?? '?'} DKK. ${req.objective.slice(0, 200)}`
+  const proposeResult = await Promise.race([
+    proposeViaConsensus(engagementId, req, summary),
+    new Promise<{ proposalId: null; quorum: 0 }>(resolve =>
+      setTimeout(() => resolve({ proposalId: null, quorum: 0 }), GATE_CONSENSUS_TIMEOUT_MS),
+    ),
+  ])
+  if (!proposeResult.proposalId) {
+    if (GATE_REQUIRE_CONSENSUS) {
+      throw new PlanGateRejection(
+        'CONSENSUS_UNAVAILABLE',
+        'High-stakes plan requires consensus proposal, but consensus.propose is unavailable or timed out. Set EIE_GATE_REQUIRE_CONSENSUS=false to override (not recommended).',
+        { timeout_ms: GATE_CONSENSUS_TIMEOUT_MS },
+      )
+    }
+    logger.warn({ engagementId }, 'EIE gate: consensus unavailable, proceeding under override flag')
+    return { proposalId: '', quorum: 0 }
+  }
+  // Self-vote as engagement-planner (the proposing agent).
+  await voteOnConsensus(
+    proposeResult.proposalId,
+    'approve',
+    0.85,
+    `Plan ${engagementId}: domain=${req.domain}, ${req.duration_weeks}w, team=${req.team_size}, budget=${req.budget_dkk ?? 0}. Self-vote as proposer.`,
+  )
+  return proposeResult
+}
+
 export async function generatePlan(req: PlanRequest): Promise<EngagementPlan> {
   const t0 = Date.now()
   const engagementId = req.engagement_id ?? `eng-${uuid()}`
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // PHASE 0: UPFRONT GATES — run BEFORE any expensive retrieval or LLM call.
+  // Fail-closed. Any gate rejection raises PlanGateRejection, caught by route.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // Gate 0: Input sanity — rejects malformed/insane requests immediately.
+  enforceInputSanityGate(req)
+
+  // Gate 1: High-stakes classification. Fail-closed consensus gate.
+  const highStakes = isHighStakesPlan(req)
+  const complex = req.duration_weeks > GATE_DURATION_WEEKS
+  const gatesTriggered: string[] = []
+  if ((req.budget_dkk ?? 0) > GATE_BUDGET_DKK) gatesTriggered.push(`budget>${GATE_BUDGET_DKK}`)
+  if (req.team_size > GATE_TEAM_SIZE) gatesTriggered.push(`team>${GATE_TEAM_SIZE}`)
+  if (req.duration_weeks > GATE_DURATION_WEEKS) gatesTriggered.push(`duration>${GATE_DURATION_WEEKS}w`)
+  logger.info({ engagementId, gates: gatesTriggered, high_stakes: highStakes, complex }, 'EIE gates: classified')
+
+  let consensusProposalId = ''
+  let consensusQuorum = 0
+  if (highStakes) {
+    const gate = await enforceConsensusGate(engagementId, req)
+    consensusProposalId = gate.proposalId
+    consensusQuorum = gate.quorum
+    logger.info({ engagementId, proposalId: consensusProposalId, quorum: consensusQuorum }, 'EIE gate: consensus opened')
+  }
+
+  // Gate 2: Complex plan → RLM mission for multi-step enrichment (not blocking, adds context).
+  let rlmMissionId: string | null = null
+  let rlmStepsExecuted = 0
+  let rlmInsights: string[] = []
+  if (complex) {
+    const mission = await planViaRlmMission(engagementId, req, 3)
+    rlmMissionId = mission.missionId
+    rlmStepsExecuted = mission.stepsExecuted
+    rlmInsights = mission.insights
+    logger.info({ engagementId, missionId: rlmMissionId, steps: rlmStepsExecuted }, 'EIE gate: RLM mission completed')
+  }
+
+  // Step 1: Deep retrieval (4 parallel channels — precedents + methodology + risks + kg_rag)
 
   // Step 1: Deep retrieval (4 parallel channels — precedents + methodology + risks + kg_rag)
   // kg_rag.query adds multi-hop graph-augmented evidence with cross-namespace sources
@@ -615,6 +899,7 @@ Rules:
         methodology_evidence: methodologyEvidence.slice(0, 2000),
         risk_evidence: riskEvidence.slice(0, 1500),
         kg_rag_synthesis: kgRagEvidence.slice(0, 1500),
+        rlm_mission_insights: rlmInsights.slice(0, 3),
       },
       agent_id: 'engagement-planner',
       // Custom fields consumed by callCognitiveRaw passthrough
@@ -747,6 +1032,12 @@ Rules:
     total_citations: totalCitations,
     avg_confidence: Number(finalConfidence.toFixed(3)),
     generation_ms: Date.now() - t0,
+    high_stakes: highStakes,
+    consensus_proposal_id: consensusProposalId || undefined,
+    consensus_quorum: consensusQuorum || undefined,
+    rlm_mission_id: rlmMissionId || undefined,
+    rlm_steps_executed: rlmStepsExecuted || undefined,
+    plan_source: planSource,
   }
 
   // Cache the plan in Redis

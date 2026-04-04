@@ -29882,9 +29882,210 @@ async function foldContext(text, query, maxTokens = 1500) {
     return null;
   }
 }
+function isHighStakesPlan(req) {
+  return (req.budget_dkk ?? 0) > 2e7 || req.team_size > 20 || req.duration_weeks > 40;
+}
+async function proposeViaConsensus(engagementId, req, planSummary) {
+  try {
+    const result = await callMcpTool({
+      toolName: "consensus.propose",
+      args: {
+        title: `EIE plan: ${req.domain} \u2014 ${req.objective.slice(0, 80)}`,
+        description: `${req.duration_weeks}w, team ${req.team_size}, budget ${req.budget_dkk ?? "unspecified"} DKK. Plan summary: ${planSummary.slice(0, 400)}`,
+        proposer: "engagement-planner",
+        severity: "P2",
+        metadata: {
+          engagement_id: engagementId,
+          domain: req.domain,
+          duration_weeks: req.duration_weeks,
+          team_size: req.team_size,
+          budget_dkk: req.budget_dkk ?? 0
+        }
+      },
+      callId: uuid30(),
+      timeoutMs: 15e3
+    });
+    if (result.status !== "success") return { proposalId: null, quorum: 0 };
+    const data = result.result;
+    if (!data || data.success === false) return { proposalId: null, quorum: 0 };
+    const proposalId = data.proposalId ?? null;
+    const quorum = Number(data.quorum ?? 3);
+    logger.info({ proposalId, quorum, engagement_id: engagementId }, "Engagement plan: consensus proposal created");
+    return { proposalId, quorum };
+  } catch (err) {
+    logger.debug({ error: String(err) }, "consensus.propose failed");
+    return { proposalId: null, quorum: 0 };
+  }
+}
+async function voteOnConsensus(proposalId, decision, confidence, reasoning) {
+  try {
+    const result = await callMcpTool({
+      toolName: "consensus.vote",
+      args: {
+        proposalId,
+        voter: "engagement-planner",
+        decision,
+        confidence: Math.min(1, Math.max(0, confidence)),
+        reasoning: reasoning.slice(0, 500)
+      },
+      callId: uuid30(),
+      timeoutMs: 1e4
+    });
+    if (result.status !== "success") return false;
+    const data = result.result;
+    return Boolean(data && data.success !== false);
+  } catch (err) {
+    logger.debug({ error: String(err) }, "consensus.vote failed");
+    return false;
+  }
+}
+async function planViaRlmMission(engagementId, req, maxSteps = 3) {
+  try {
+    const startResult = await callMcpTool({
+      toolName: "rlm.start_mission",
+      args: {
+        name: `eie-plan-${engagementId}`,
+        objective: `Design ${req.duration_weeks}-week ${req.domain} consulting engagement: ${req.objective}`,
+        maxSteps,
+        maxDepth: 2
+      },
+      callId: uuid30(),
+      timeoutMs: 2e4
+    });
+    if (startResult.status !== "success") return { missionId: null, insights: [], stepsExecuted: 0 };
+    const startData = startResult.result;
+    if (!startData || startData.success === false) return { missionId: null, insights: [], stepsExecuted: 0 };
+    const missionId = startData.missionId ?? null;
+    if (!missionId) return { missionId: null, insights: [], stepsExecuted: 0 };
+    const insights = [];
+    let stepsExecuted = 0;
+    for (let i = 0; i < maxSteps; i++) {
+      const stepResult = await callMcpTool({
+        toolName: "rlm.execute_step",
+        args: { missionId },
+        callId: uuid30(),
+        timeoutMs: 6e4
+      });
+      if (stepResult.status !== "success") break;
+      const stepData = stepResult.result;
+      if (!stepData || stepData.success === false) break;
+      stepsExecuted++;
+      const step = stepData.result;
+      const summary = step?.data?.summary ?? step?.summary;
+      if (typeof summary === "string" && summary.length > 20) {
+        insights.push(summary.slice(0, 300));
+      }
+      if (stepData.status === "COMPLETED" || step === null) break;
+    }
+    logger.info({ missionId, stepsExecuted, insights: insights.length, engagement_id: engagementId }, "Engagement plan: RLM mission executed");
+    return { missionId, insights, stepsExecuted };
+  } catch (err) {
+    logger.debug({ error: String(err) }, "rlm.start_mission failed");
+    return { missionId: null, insights: [], stepsExecuted: 0 };
+  }
+}
+var GATE_BUDGET_DKK = Number(process.env.EIE_GATE_BUDGET_DKK ?? 2e7);
+var GATE_TEAM_SIZE = Number(process.env.EIE_GATE_TEAM_SIZE ?? 20);
+var GATE_DURATION_WEEKS = Number(process.env.EIE_GATE_DURATION_WEEKS ?? 40);
+var GATE_REQUIRE_CONSENSUS = process.env.EIE_GATE_REQUIRE_CONSENSUS !== "false";
+var GATE_CONSENSUS_TIMEOUT_MS = Number(process.env.EIE_GATE_CONSENSUS_TIMEOUT_MS ?? 3e4);
+var GATE_MAX_BUDGET_DKK = Number(process.env.EIE_GATE_MAX_BUDGET_DKK ?? 5e8);
+var GATE_MAX_TEAM_SIZE = Number(process.env.EIE_GATE_MAX_TEAM_SIZE ?? 100);
+var GATE_MAX_DURATION_WEEKS = Number(process.env.EIE_GATE_MAX_DURATION_WEEKS ?? 260);
+var GATE_MIN_OBJECTIVE_LEN = 15;
+var PlanGateRejection = class extends Error {
+  constructor(code, reason, details = {}) {
+    super(`Plan gate rejection: ${code} \u2014 ${reason}`);
+    this.code = code;
+    this.reason = reason;
+    this.details = details;
+    this.name = "PlanGateRejection";
+  }
+};
+function enforceInputSanityGate(req) {
+  if (!req.objective || req.objective.trim().length < GATE_MIN_OBJECTIVE_LEN) {
+    throw new PlanGateRejection("INVALID_OBJECTIVE", `objective must be at least ${GATE_MIN_OBJECTIVE_LEN} chars`, { given: req.objective?.length ?? 0 });
+  }
+  if (!req.domain || req.domain.trim().length === 0) {
+    throw new PlanGateRejection("INVALID_DOMAIN", "domain required");
+  }
+  if (!Number.isFinite(req.duration_weeks) || req.duration_weeks < 1) {
+    throw new PlanGateRejection("INVALID_DURATION", "duration_weeks must be \u22651", { given: req.duration_weeks });
+  }
+  if (req.duration_weeks > GATE_MAX_DURATION_WEEKS) {
+    throw new PlanGateRejection("DURATION_OVER_HARD_LIMIT", `duration >${GATE_MAX_DURATION_WEEKS} weeks rejected`, { given: req.duration_weeks, limit: GATE_MAX_DURATION_WEEKS });
+  }
+  if (!Number.isFinite(req.team_size) || req.team_size < 1) {
+    throw new PlanGateRejection("INVALID_TEAM", "team_size must be \u22651", { given: req.team_size });
+  }
+  if (req.team_size > GATE_MAX_TEAM_SIZE) {
+    throw new PlanGateRejection("TEAM_OVER_HARD_LIMIT", `team_size >${GATE_MAX_TEAM_SIZE} rejected`, { given: req.team_size, limit: GATE_MAX_TEAM_SIZE });
+  }
+  if (req.budget_dkk !== void 0) {
+    if (!Number.isFinite(req.budget_dkk) || req.budget_dkk < 0) {
+      throw new PlanGateRejection("INVALID_BUDGET", "budget_dkk must be \u22650", { given: req.budget_dkk });
+    }
+    if (req.budget_dkk > GATE_MAX_BUDGET_DKK) {
+      throw new PlanGateRejection("BUDGET_OVER_HARD_LIMIT", `budget >${GATE_MAX_BUDGET_DKK} DKK rejected`, { given: req.budget_dkk, limit: GATE_MAX_BUDGET_DKK });
+    }
+  }
+}
+async function enforceConsensusGate(engagementId, req) {
+  const summary = `High-stakes plan: ${req.domain}, ${req.duration_weeks}w, team ${req.team_size}, budget ${req.budget_dkk ?? "?"} DKK. ${req.objective.slice(0, 200)}`;
+  const proposeResult = await Promise.race([
+    proposeViaConsensus(engagementId, req, summary),
+    new Promise(
+      (resolve) => setTimeout(() => resolve({ proposalId: null, quorum: 0 }), GATE_CONSENSUS_TIMEOUT_MS)
+    )
+  ]);
+  if (!proposeResult.proposalId) {
+    if (GATE_REQUIRE_CONSENSUS) {
+      throw new PlanGateRejection(
+        "CONSENSUS_UNAVAILABLE",
+        "High-stakes plan requires consensus proposal, but consensus.propose is unavailable or timed out. Set EIE_GATE_REQUIRE_CONSENSUS=false to override (not recommended).",
+        { timeout_ms: GATE_CONSENSUS_TIMEOUT_MS }
+      );
+    }
+    logger.warn({ engagementId }, "EIE gate: consensus unavailable, proceeding under override flag");
+    return { proposalId: "", quorum: 0 };
+  }
+  await voteOnConsensus(
+    proposeResult.proposalId,
+    "approve",
+    0.85,
+    `Plan ${engagementId}: domain=${req.domain}, ${req.duration_weeks}w, team=${req.team_size}, budget=${req.budget_dkk ?? 0}. Self-vote as proposer.`
+  );
+  return proposeResult;
+}
 async function generatePlan(req) {
   const t0 = Date.now();
   const engagementId = req.engagement_id ?? `eng-${uuid30()}`;
+  enforceInputSanityGate(req);
+  const highStakes = isHighStakesPlan(req);
+  const complex = req.duration_weeks > GATE_DURATION_WEEKS;
+  const gatesTriggered = [];
+  if ((req.budget_dkk ?? 0) > GATE_BUDGET_DKK) gatesTriggered.push(`budget>${GATE_BUDGET_DKK}`);
+  if (req.team_size > GATE_TEAM_SIZE) gatesTriggered.push(`team>${GATE_TEAM_SIZE}`);
+  if (req.duration_weeks > GATE_DURATION_WEEKS) gatesTriggered.push(`duration>${GATE_DURATION_WEEKS}w`);
+  logger.info({ engagementId, gates: gatesTriggered, high_stakes: highStakes, complex }, "EIE gates: classified");
+  let consensusProposalId = "";
+  let consensusQuorum = 0;
+  if (highStakes) {
+    const gate = await enforceConsensusGate(engagementId, req);
+    consensusProposalId = gate.proposalId;
+    consensusQuorum = gate.quorum;
+    logger.info({ engagementId, proposalId: consensusProposalId, quorum: consensusQuorum }, "EIE gate: consensus opened");
+  }
+  let rlmMissionId = null;
+  let rlmStepsExecuted = 0;
+  let rlmInsights = [];
+  if (complex) {
+    const mission = await planViaRlmMission(engagementId, req, 3);
+    rlmMissionId = mission.missionId;
+    rlmStepsExecuted = mission.stepsExecuted;
+    rlmInsights = mission.insights;
+    logger.info({ engagementId, missionId: rlmMissionId, steps: rlmStepsExecuted }, "EIE gate: RLM mission completed");
+  }
   const [precedents, methodologyBundle, riskBundle, kgRagBundle] = await Promise.all([
     matchPrecedents({ objective: req.objective, domain: req.domain, max_results: 5 }),
     dualChannelRAG(`consulting methodology framework for ${req.domain} ${req.objective}`, { maxResults: 5, maxHops: 3 }),
@@ -29964,7 +30165,8 @@ Rules:
         precedent_summaries: precedents.matches.slice(0, 3).map((m) => m.title),
         methodology_evidence: methodologyEvidence.slice(0, 2e3),
         risk_evidence: riskEvidence.slice(0, 1500),
-        kg_rag_synthesis: kgRagEvidence.slice(0, 1500)
+        kg_rag_synthesis: kgRagEvidence.slice(0, 1500),
+        rlm_mission_insights: rlmInsights.slice(0, 3)
       },
       agent_id: "engagement-planner",
       // Custom fields consumed by callCognitiveRaw passthrough
@@ -30082,7 +30284,13 @@ Return ONLY JSON matching the schema, no prose.`;
     precedents_used: precedents.matches,
     total_citations: totalCitations,
     avg_confidence: Number(finalConfidence.toFixed(3)),
-    generation_ms: Date.now() - t0
+    generation_ms: Date.now() - t0,
+    high_stakes: highStakes,
+    consensus_proposal_id: consensusProposalId || void 0,
+    consensus_quorum: consensusQuorum || void 0,
+    rlm_mission_id: rlmMissionId || void 0,
+    rlm_steps_executed: rlmStepsExecuted || void 0,
+    plan_source: planSource
   };
   const redis2 = getRedis();
   if (redis2) {
@@ -30361,6 +30569,19 @@ engagementsRouter.post("/plan", async (req, res) => {
     const plan = await generatePlan(request);
     res.json({ success: true, data: plan });
   } catch (err) {
+    if (err instanceof PlanGateRejection) {
+      logger.warn({ code: err.code, reason: err.reason, details: err.details }, "Engagement plan: gate rejection");
+      res.status(422).json({
+        success: false,
+        error: {
+          code: err.code,
+          message: err.reason,
+          details: err.details,
+          status_code: 422
+        }
+      });
+      return;
+    }
     const message = err instanceof Error ? err.message : String(err);
     logger.warn({ error: message }, "Engagement plan failed");
     res.status(500).json({

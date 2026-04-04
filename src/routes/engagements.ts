@@ -23,6 +23,7 @@ import {
   getPlan,
   recordOutcome,
   getOutcome,
+  PlanGateRejection,
   type CreateEngagementRequest,
   type MatchRequest,
   type PlanRequest,
@@ -204,6 +205,20 @@ engagementsRouter.post('/plan', async (req: Request, res: Response) => {
     const plan = await generatePlan(request)
     res.json({ success: true, data: plan })
   } catch (err) {
+    // v4.0.3: gate rejections map to 422 Unprocessable Entity with specific code.
+    if (err instanceof PlanGateRejection) {
+      logger.warn({ code: err.code, reason: err.reason, details: err.details }, 'Engagement plan: gate rejection')
+      res.status(422).json({
+        success: false,
+        error: {
+          code: err.code,
+          message: err.reason,
+          details: err.details,
+          status_code: 422,
+        },
+      })
+      return
+    }
     const message = err instanceof Error ? err.message : String(err)
     logger.warn({ error: message }, 'Engagement plan failed')
     res.status(500).json({
