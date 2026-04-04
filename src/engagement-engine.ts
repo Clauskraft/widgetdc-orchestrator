@@ -365,15 +365,13 @@ RETURN e.id AS id,
        e.objective AS objective,
        e.domain AS domain,
        e.startDate AS startDate,
-       e.targetEndDate AS targetEndDate,
        e.status AS status,
        o.grade AS outcomeGrade,
        o.precedentAccuracy AS precedentAccuracy,
-       methodologies,
-       duration.inDays(datetime(coalesce(e.startDate, datetime())), datetime()).days AS ageDays
+       methodologies
 ORDER BY
   CASE o.grade WHEN 'exceeded' THEN 0 WHEN 'met' THEN 1 WHEN 'partial' THEN 2 WHEN 'missed' THEN 3 ELSE 4 END,
-  ageDays ASC
+  e.startDate DESC
 LIMIT $limit`,
         params: { domain: req.domain, limit },
       },
@@ -386,12 +384,16 @@ LIMIT $limit`,
     if (!Array.isArray(rows) || rows.length === 0) return []
 
     const objectiveLower = req.objective.toLowerCase()
+    const now = Date.now()
     return rows.map(row => {
       const client = String(row.client ?? 'Unknown')
       const objective = String(row.objective ?? '')
       const grade = (row.outcomeGrade ?? null) as string | null
       const methodologies = (Array.isArray(row.methodologies) ? row.methodologies : []) as string[]
-      const ageDays = Number(row.ageDays ?? 0)
+      // Compute age client-side from ISO string startDate
+      const startDateStr = row.startDate ? String(row.startDate) : null
+      const startMs = startDateStr ? Date.parse(startDateStr) : now
+      const ageDays = Math.max(0, Math.floor((now - startMs) / 864e5))
       const stale = ageDays > STALE_PRECEDENT_DAYS
 
       // Similarity: grade weight (0.3 base) + keyword overlap (up to 0.5) + freshness (0.2)

@@ -29780,15 +29780,13 @@ RETURN e.id AS id,
        e.objective AS objective,
        e.domain AS domain,
        e.startDate AS startDate,
-       e.targetEndDate AS targetEndDate,
        e.status AS status,
        o.grade AS outcomeGrade,
        o.precedentAccuracy AS precedentAccuracy,
-       methodologies,
-       duration.inDays(datetime(coalesce(e.startDate, datetime())), datetime()).days AS ageDays
+       methodologies
 ORDER BY
   CASE o.grade WHEN 'exceeded' THEN 0 WHEN 'met' THEN 1 WHEN 'partial' THEN 2 WHEN 'missed' THEN 3 ELSE 4 END,
-  ageDays ASC
+  e.startDate DESC
 LIMIT $limit`,
         params: { domain: req.domain, limit }
       },
@@ -29800,12 +29798,15 @@ LIMIT $limit`,
     const rows = data?.results ?? data?.rows ?? data ?? [];
     if (!Array.isArray(rows) || rows.length === 0) return [];
     const objectiveLower = req.objective.toLowerCase();
+    const now = Date.now();
     return rows.map((row) => {
       const client = String(row.client ?? "Unknown");
       const objective = String(row.objective ?? "");
       const grade = row.outcomeGrade ?? null;
       const methodologies = Array.isArray(row.methodologies) ? row.methodologies : [];
-      const ageDays = Number(row.ageDays ?? 0);
+      const startDateStr = row.startDate ? String(row.startDate) : null;
+      const startMs = startDateStr ? Date.parse(startDateStr) : now;
+      const ageDays = Math.max(0, Math.floor((now - startMs) / 864e5));
       const stale = ageDays > STALE_PRECEDENT_DAYS;
       const gradeWeight = grade === "exceeded" ? 0.3 : grade === "met" ? 0.25 : grade === "partial" ? 0.15 : grade === "missed" ? 0.05 : 0.1;
       const objWords = new Set(objectiveLower.split(/\W+/).filter((w) => w.length > 3));
