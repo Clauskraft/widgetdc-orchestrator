@@ -18,10 +18,10 @@
  */
 import { v4 as uuid } from 'uuid'
 import { callMcpTool } from './mcp-caller.js'
-import { callCognitive } from './cognitive-proxy.js'
 import { dualChannelRAG } from './dual-rag.js'
 import { getRedis } from './redis.js'
 import { logger } from './logger.js'
+import { config } from './config.js'
 import { sendQLearningReward } from './adaptive-rag.js'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -333,6 +333,73 @@ export async function matchPrecedents(req: MatchRequest): Promise<{
   return { matches, query_ms: Date.now() - t0 }
 }
 
+// ─── RLM Cognitive Analyze (direct call — bypasses cognitive-proxy unwrap bug) ──
+
+/**
+ * Direct fetch to RLM /cognitive/analyze. The cognitive-proxy.ts wrapper discards
+ * structured response fields (analysis/insights/recommendations) via its unwrap
+ * logic that only checks result/answer/reasoning/plan. We consume the raw response.
+ *
+ * Expected response shape (from production probing 2026-04-04):
+ * {
+ *   trace: { trace_id, total_duration_ms },
+ *   quality: { overall_score, parsability, relevance, completeness },
+ *   routing: { provider, model, domain, latency_ms, cost },
+ *   analysis: {
+ *     engagement_overview,
+ *     phase_breakdown: [{ phase_name, duration_weeks, objective, key_activities, deliverables }],
+ *     resource_allocation: { team_size, roles, budget_dkk, budget_allocation_estimate },
+ *     methodology_integration: { ... per-framework ... },
+ *     key_challenges_and_mitigations: [{ challenge, mitigation }]
+ *   },
+ *   insights: [string],
+ *   recommendations: [string],
+ *   confidence: number
+ * }
+ */
+async function callRlmAnalyze(
+  task: string,
+  context: Record<string, unknown>,
+  constraints: string[],
+  timeoutMs = 60000,
+): Promise<Record<string, unknown> | null> {
+  if (!config.rlmUrl) return null
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const res = await fetch(`${config.rlmUrl}/cognitive/analyze`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(config.backendApiKey ? { 'Authorization': `Bearer ${config.backendApiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        task,
+        context,
+        analysis_dimensions: [
+          'phase_breakdown',
+          'resource_allocation',
+          'methodology_integration',
+          'key_challenges_and_mitigations',
+        ],
+        constraints,
+        agent_id: 'engagement-planner',
+      }),
+      signal: controller.signal,
+    })
+    if (!res.ok) {
+      logger.warn({ status: res.status }, 'RLM /cognitive/analyze non-OK')
+      return null
+    }
+    return (await res.json()) as Record<string, unknown>
+  } catch (err) {
+    logger.debug({ error: String(err) }, 'RLM /cognitive/analyze failed')
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 // ─── Capability 3: plan ──────────────────────────────────────────────────────
 
 export interface PlanRequest {
@@ -412,29 +479,112 @@ Rules:
   let phases: EngagementPlan['phases'] = []
   let risks: EngagementPlan['risks'] = []
   let skills: string[] = []
+  let planSource: string = 'fallback-template'
+  let platformConfidence = 0
+  let routingMeta: Record<string, unknown> | null = null
 
-  try {
-    const result = await callCognitive(
-      'plan',
-      {
-        prompt: planPrompt,
-        context: {
-          engagement_id: engagementId,
-          domain: req.domain,
-          evidence_count: totalCitations,
+  // TIER 1: Direct call to RLM /cognitive/analyze — the platform's NATIVE engagement
+  // planning capability. Returns structured analysis.phase_breakdown, key_challenges_and_mitigations,
+  // resource_allocation, methodology_integration, insights, recommendations + self-scored confidence
+  // and quality. We bypass cognitive-proxy.ts::callCognitive because its unwrap logic
+  // (data.result ?? data.answer ?? data.reasoning ?? data.plan ?? data) discards the
+  // structured fields — latent platform-wide bug tracked separately (affects 8+ consumers).
+  const analyzed = await callRlmAnalyze(
+    `Design a ${req.duration_weeks}-week consulting engagement for: ${req.objective}`,
+    {
+      domain: req.domain,
+      team_size: req.team_size,
+      budget_dkk: req.budget_dkk,
+      precedent_summaries: precedents.matches.slice(0, 3).map(m => m.title),
+      methodology_evidence: methodologyEvidence.slice(0, 2000),
+      risk_evidence: riskEvidence.slice(0, 1500),
+    },
+    [
+      `duration: ${req.duration_weeks} weeks`,
+      `team: ${req.team_size} people`,
+      req.budget_dkk ? `budget: ${req.budget_dkk} DKK` : '',
+    ].filter(Boolean),
+  )
+
+  if (analyzed?.analysis) {
+    const a = analyzed.analysis as Record<string, unknown>
+    const phaseBreakdown = (a.phase_breakdown ?? a.phases) as Array<Record<string, unknown>> | undefined
+    const challenges = (a.key_challenges_and_mitigations ?? a.risks) as Array<Record<string, unknown>> | undefined
+    const resourceAlloc = a.resource_allocation as Record<string, unknown> | undefined
+
+    if (Array.isArray(phaseBreakdown) && phaseBreakdown.length > 0) {
+      phases = phaseBreakdown.slice(0, 10).map(p => ({
+        name: String(p.phase_name ?? p.name ?? 'Unnamed phase'),
+        duration_weeks: Number(p.duration_weeks ?? 1),
+        deliverables: Array.isArray(p.deliverables) ? (p.deliverables as unknown[]).map(String).slice(0, 8) : [],
+        methodology: String(p.objective ?? p.methodology ?? p.description ?? ''),
+      }))
+    }
+    if (Array.isArray(challenges) && challenges.length > 0) {
+      risks = challenges.slice(0, 10).map(c => ({
+        description: String(c.challenge ?? c.description ?? c.name ?? ''),
+        severity: (['high', 'medium', 'low'].includes(String(c.severity)) ? c.severity : 'medium') as 'high' | 'medium' | 'low',
+        mitigation: String(c.mitigation ?? ''),
+      }))
+    }
+    if (resourceAlloc && Array.isArray(resourceAlloc.roles)) {
+      skills = (resourceAlloc.roles as unknown[]).map(String).slice(0, 15)
+    } else if (Array.isArray(a.skills)) {
+      skills = (a.skills as Array<Record<string, unknown>>).map(s => String(s.name ?? s)).slice(0, 15)
+    }
+
+    // Platform self-scored confidence (use the higher of analysis confidence or quality score)
+    const analysisConfidence = typeof analyzed.confidence === 'number' ? analyzed.confidence : 0
+    const qualityScore = typeof (analyzed.quality as Record<string, unknown>)?.overall_score === 'number'
+      ? ((analyzed.quality as Record<string, unknown>).overall_score as number) : 0
+    platformConfidence = Math.max(analysisConfidence, qualityScore)
+
+    routingMeta = (analyzed.routing as Record<string, unknown>) ?? null
+    if (phases.length > 0 || risks.length > 0) {
+      planSource = 'rlm-cognitive-analyze'
+      logger.info(
+        {
+          phases: phases.length,
+          risks: risks.length,
+          skills: skills.length,
+          provider: routingMeta?.provider,
+          model: routingMeta?.model,
+          cost: routingMeta?.cost,
+          platform_confidence: platformConfidence,
         },
-        agent_id: 'engagement-planner',
-      },
-      45000,
-    )
+        'Engagement plan: RLM /cognitive/analyze OK',
+      )
+    }
+  }
 
-    const text = typeof result === 'string' ? result : JSON.stringify(result)
-    const parsed = parsePlanJSON(text)
-    phases = parsed.phases
-    risks = parsed.risks
-    skills = parsed.required_skills
-  } catch (err) {
-    logger.warn({ error: String(err) }, 'Engagement plan: cognitive generation failed')
+  // TIER 2: Mercury llm.generate via backend MCP (graceful degradation only)
+  if (phases.length === 0) {
+    logger.warn({ engagementId }, 'Engagement plan: /cognitive/analyze returned empty, trying llm.generate fallback')
+    try {
+      const mercuryPrompt = `${planPrompt}\n\nReturn ONLY JSON matching the schema, no prose.`
+      const r = await callMcpTool({
+        toolName: 'llm.generate',
+        args: { prompt: mercuryPrompt },
+        callId: uuid(),
+        timeoutMs: 30000,
+      })
+      if (r.status === 'success') {
+        const raw = r.result as Record<string, unknown> | null
+        const text = String(raw?.content ?? raw?.response ?? '')
+        if (text.length > 20) {
+          const parsed = parsePlanJSON(text)
+          if (parsed.phases.length > 0) {
+            phases = parsed.phases
+            risks = parsed.risks
+            skills = parsed.required_skills
+            planSource = 'mercury-llm-generate-fallback'
+            logger.info({ phases: phases.length }, 'Engagement plan: Mercury fallback OK')
+          }
+        }
+      }
+    } catch (err) {
+      logger.debug({ error: String(err) }, 'Engagement plan: Mercury fallback failed')
+    }
   }
 
   // Fallback: if LLM produced no phases, synthesize a minimal plan from methodology
@@ -451,6 +601,12 @@ Rules:
     skills = ['Strategic consulting', 'Stakeholder management', 'Data analysis', req.domain]
   }
 
+  // Final confidence: prefer platform self-scored confidence when available,
+  // fall back to retrieval-based avgConfidence. Platform score is more trustworthy.
+  const finalConfidence = platformConfidence > 0
+    ? Math.max(platformConfidence, avgConfidence)
+    : avgConfidence
+
   const plan: EngagementPlan = {
     engagement_id: engagementId,
     generated_at: new Date().toISOString(),
@@ -459,7 +615,7 @@ Rules:
     required_skills: skills,
     precedents_used: precedents.matches,
     total_citations: totalCitations,
-    avg_confidence: Number(avgConfidence.toFixed(3)),
+    avg_confidence: Number(finalConfidence.toFixed(3)),
     generation_ms: Date.now() - t0,
   }
 
@@ -476,9 +632,13 @@ Rules:
       engagement_id: engagementId,
       phases: phases.length,
       risks: risks.length,
+      skills: skills.length,
       citations: totalCitations,
       confidence: plan.avg_confidence,
       ms: plan.generation_ms,
+      plan_source: planSource,
+      provider: routingMeta?.provider ?? null,
+      cost: routingMeta?.cost ?? null,
     },
     'Engagement: plan generated',
   )

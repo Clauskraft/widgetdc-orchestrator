@@ -16,6 +16,7 @@ import { AgentRegistry } from './agent-registry.js'
 import { executeChain, type ChainDefinition } from './chain-engine.js'
 import { chatLLM } from './llm-proxy.js'
 import { logger } from './logger.js'
+import { createBlackboard } from './blackboard.js'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -206,8 +207,23 @@ export async function routeMoA(request: MoARequest): Promise<MoAResult> {
   const provider = request.provider ?? 'deepseek'
   const maxAgents = request.max_agents ?? 3
 
+  // LIN-593: Blackboard for shared agent state (TypeBox-validated)
+  const taskId = `moa-${uuid()}`
+  const board = createBlackboard(taskId)
+
   // Step 1: Classify
   const classification = await classifyQuery(request.query, provider)
+
+  // Blackboard: write observations (classification is the MoA observation)
+  await board.write('observations', {
+    items: [
+      `complexity: ${classification.complexity}`,
+      `domains: ${classification.domains.join(', ')}`,
+    ],
+    confidence: 0.8,
+    source_agent: 'moa-router',
+    timestamp: new Date().toISOString(),
+  }, 'moa-router').catch(() => { /* non-critical */ })
 
   // Step 2: Select agents
   let agents: AgentCandidate[]
@@ -249,8 +265,28 @@ export async function routeMoA(request: MoARequest): Promise<MoAResult> {
   // Step 3: Dispatch in parallel
   const responses = await dispatchAgents(request.query, agents)
 
+  // Blackboard: write result slot (aggregated dispatch outcome)
+  await board.write('result', {
+    outputs: responses.map(r => r.response),
+    passed: responses.filter(r => r.status === 'success').length,
+    failed: responses.filter(r => r.status !== 'success').length,
+    artifacts: [],
+    source_agent: 'moa-router',
+    timestamp: new Date().toISOString(),
+  }, 'moa-router').catch(() => { /* non-critical */ })
+
   // Step 4: Consensus merge
   const { consensus, confidence } = await mergeConsensus(request.query, responses, provider)
+
+  // Blackboard: write verdict (final consensus judgment)
+  await board.write('verdict', {
+    passed: confidence >= 0.5,
+    score: Math.round(confidence * 10),
+    issues: responses.filter(r => r.status !== 'success').map(r => `${r.agent_id}: ${r.status}`),
+    recommendation: confidence >= 0.7 ? 'approve' : confidence >= 0.4 ? 'revise' : 'reject',
+    source_agent: 'moa-router',
+    timestamp: new Date().toISOString(),
+  }, 'moa-router').catch(() => { /* non-critical */ })
 
   const result: MoAResult = {
     query: request.query,
