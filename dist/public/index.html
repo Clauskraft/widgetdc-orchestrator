@@ -325,6 +325,7 @@
       <div class="nav-item" data-panel="audit"><span class="icon">&#9998;</span><span>Audit Log</span></div>
       <div class="nav-item" data-panel="cost"><span class="icon">&#36;</span><span>Cost Intel</span></div>
       <div class="nav-item" data-panel="openclaw"><span class="icon">&#9783;</span><span>OpenClaw</span></div>
+      <div class="nav-item" data-panel="adoption"><span class="icon">&#9636;</span><span>Adoption</span></div>
     </div>
     <div class="sidebar-status">
       <span class="ws-dot disconnected" id="ws-indicator"></span>
@@ -577,6 +578,44 @@
         </div>
       </div>
     </div>
+
+    <!-- Adoption Panel (runtime telemetry + CI gate status) -->
+    <div class="panel" id="panel-adoption">
+      <div class="section-box">
+        <h2>SNOUT v3.0 Adoption Telemetry</h2>
+        <div style="display:flex;gap:8px;margin-bottom:16px">
+          <button onclick="fetchAdoptionTelemetry()">Refresh</button>
+          <span id="adoption-updated" style="color:var(--text-dim);font-size:12px;align-self:center"></span>
+        </div>
+
+        <!-- KPI Cards -->
+        <div id="adoption-kpis" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px"></div>
+
+        <!-- Hot Tools -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+          <div class="section-box">
+            <h3 style="margin-top:0;font-size:14px;color:var(--text-dim)">Hot Tools (top 10)</h3>
+            <div id="adoption-hot"></div>
+          </div>
+          <div class="section-box">
+            <h3 style="margin-top:0;font-size:14px;color:var(--text-dim)">Zero-Call Tools</h3>
+            <div id="adoption-zero"></div>
+          </div>
+        </div>
+
+        <!-- Stale Tools -->
+        <div class="section-box" style="margin-top:16px">
+          <h3 style="margin-top:0;font-size:14px;color:var(--text-dim)">Stale Tools (30+ days inactive)</h3>
+          <div id="adoption-stale"></div>
+        </div>
+
+        <!-- Full Tool Matrix -->
+        <div class="section-box" style="margin-top:16px">
+          <h3 style="margin-top:0;font-size:14px;color:var(--text-dim)">Full Tool Matrix</h3>
+          <div id="adoption-matrix" style="max-height:400px;overflow-y:auto"></div>
+        </div>
+      </div>
+    </div>
   </div>
 
 <script>
@@ -674,7 +713,7 @@ function connectWS() {
 }
 
 // ─── Navigation ─────────────────────────────────────────────────────────────
-const panelNames = { dashboard: 'Dashboard', agents: 'Agents', chat: 'Chat', chains: 'Chains', cron: 'Cron', omega: 'Omega SITREP', knowledge: 'Knowledge', cognitive: 'Cognitive', audit: 'Audit Log', cost: 'Cost Intel', openclaw: 'OpenClaw' }
+const panelNames = { dashboard: 'Dashboard', agents: 'Agents', chat: 'Chat', chains: 'Chains', cron: 'Cron', omega: 'Omega SITREP', knowledge: 'Knowledge', cognitive: 'Cognitive', audit: 'Audit Log', cost: 'Cost Intel', openclaw: 'OpenClaw', adoption: 'Adoption' }
 document.querySelectorAll('.nav-item').forEach(el => {
   el.addEventListener('click', () => {
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'))
@@ -683,6 +722,8 @@ document.querySelectorAll('.nav-item').forEach(el => {
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'))
     document.getElementById('panel-' + panel).classList.add('active')
     document.getElementById('header-panel-name').textContent = panelNames[panel] || panel
+    // Auto-load adoption panel on activation
+    if (panel === 'adoption') fetchAdoptionTelemetry()
   })
 })
 
@@ -2045,6 +2086,93 @@ async function fetchOpenClawHealth() {
     document.getElementById('openclaw-content').innerHTML = `<div class="section-box"><h2>OpenClaw Status</h2><pre style="font-size:0.82rem;white-space:pre-wrap">${h(JSON.stringify(result, null, 2))}</pre></div>`
   } catch (err) {
     document.getElementById('openclaw-content').innerHTML = `<div class="empty-state" style="color:var(--red)">OpenClaw unreachable: ${h(err.message)}</div>`
+  }
+}
+
+// ─── Adoption Telemetry Panel ──────────────────────────────────────────────
+async function fetchAdoptionTelemetry() {
+  const kpiEl = document.getElementById('adoption-kpis')
+  const hotEl = document.getElementById('adoption-hot')
+  const zeroEl = document.getElementById('adoption-zero')
+  const staleEl = document.getElementById('adoption-stale')
+  const matrixEl = document.getElementById('adoption-matrix')
+  const updatedEl = document.getElementById('adoption-updated')
+
+  kpiEl.innerHTML = '<div class="empty-state">Loading telemetry...</div>'
+
+  try {
+    const res = await api('/api/adoption/telemetry')
+    const d = res.data
+
+    updatedEl.textContent = 'Updated: ' + new Date(d.generated_at).toLocaleTimeString()
+
+    // KPI cards
+    const kpis = [
+      { label: 'Tools Called Ever', value: d.tools_called_ever + ' / ' + d.total_tools, color: 'var(--accent)' },
+      { label: 'Utilisation Rate', value: d.kpis.utilisation_rate_pct.toFixed(1) + '%', color: d.kpis.utilisation_rate_pct >= 80 ? 'var(--green)' : 'var(--yellow)' },
+      { label: 'Advanced Utilisation', value: d.kpis.advanced_utilisation_pct.toFixed(1) + '%', color: 'var(--accent)' },
+      { label: 'Zero-Call Rate', value: d.kpis.zero_call_rate_pct.toFixed(1) + '%', color: d.kpis.zero_call_rate_pct > 20 ? 'var(--red)' : 'var(--green)' },
+    ]
+    kpiEl.innerHTML = kpis.map(k =>
+      '<div class="section-box" style="text-align:center">' +
+        '<div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px">' + h(k.label) + '</div>' +
+        '<div style="font-size:24px;font-weight:700;color:' + k.color + ';margin-top:8px">' + h(k.value) + '</div>' +
+      '</div>'
+    ).join('')
+
+    // Hot tools
+    const hot = (d.hot_tools || []).filter(t => t.calls > 0).slice(0, 10)
+    if (hot.length === 0) {
+      hotEl.innerHTML = '<div class="empty-state">No tool calls tracked yet</div>'
+    } else {
+      hotEl.innerHTML = hot.map(t =>
+        '<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.05)">' +
+          '<span style="font-family:monospace;font-size:13px">' + h(t.tool) + '</span>' +
+          '<span style="color:var(--accent);font-weight:600">' + t.calls + '</span>' +
+        '</div>'
+      ).join('')
+    }
+
+    // Zero-call
+    const zero = d.zero_call_tools || []
+    if (zero.length === 0) {
+      zeroEl.innerHTML = '<div style="color:var(--green);font-size:13px">✓ All tools have been called</div>'
+    } else {
+      zeroEl.innerHTML = zero.map(t =>
+        '<div style="font-family:monospace;font-size:13px;padding:4px 0;color:var(--text-dim)">' + h(t) + '</div>'
+      ).join('')
+    }
+
+    // Stale tools
+    const stale = d.stale_tools || []
+    if (stale.length === 0) {
+      staleEl.innerHTML = '<div style="color:var(--green);font-size:13px">✓ No stale tools (all called within 30 days)</div>'
+    } else {
+      staleEl.innerHTML = stale.map(t =>
+        '<div style="font-family:monospace;font-size:13px;padding:4px 0;color:var(--yellow)">⚠ ' + h(t) + '</div>'
+      ).join('')
+    }
+
+    // Full matrix
+    const tools = d.tools || []
+    matrixEl.innerHTML =
+      '<table style="width:100%;font-size:12px;border-collapse:collapse">' +
+        '<thead><tr style="text-align:left;color:var(--text-dim);border-bottom:1px solid rgba(255,255,255,0.1)">' +
+          '<th style="padding:6px">Tool</th><th>Namespace</th><th style="text-align:right">Lifetime</th><th style="text-align:right">This Week</th><th>Status</th>' +
+        '</tr></thead><tbody>' +
+        tools.map(t =>
+          '<tr style="border-bottom:1px solid rgba(255,255,255,0.03)">' +
+            '<td style="padding:4px;font-family:monospace">' + h(t.tool) + (t.advanced ? ' <span style="color:var(--accent);font-size:10px">[adv]</span>' : '') + '</td>' +
+            '<td style="color:var(--text-dim)">' + h(t.namespace) + '</td>' +
+            '<td style="text-align:right;color:' + (t.lifetime_calls > 0 ? 'var(--green)' : 'var(--text-dim)') + '">' + t.lifetime_calls + '</td>' +
+            '<td style="text-align:right">' + t.weekly_calls + '</td>' +
+            '<td>' + (t.stale ? '<span style="color:var(--yellow)">stale</span>' : t.lifetime_calls === 0 ? '<span style="color:var(--text-dim)">idle</span>' : '<span style="color:var(--green)">active</span>') + '</td>' +
+          '</tr>'
+        ).join('') +
+      '</tbody></table>'
+
+  } catch (err) {
+    kpiEl.innerHTML = '<div class="empty-state" style="color:var(--red)">Failed to load telemetry: ' + h(err.message) + '</div>'
   }
 }
 
