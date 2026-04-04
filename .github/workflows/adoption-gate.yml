@@ -1,0 +1,59 @@
+name: Adoption Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'test-e2e.mjs'
+      - 'test/**'
+      - 'docs/TOOLS.md'
+      - 'scripts/ci-adoption-check.mjs'
+      - 'package.json'
+      - 'build.mjs'
+  push:
+    branches: [main]
+
+jobs:
+  adoption-gate:
+    name: Adoption Compliance Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout orchestrator
+        uses: actions/checkout@v4
+        with:
+          path: widgetdc-orchestrator
+
+      - name: Checkout contracts (required for build)
+        uses: actions/checkout@v4
+        with:
+          repository: Clauskraft/widgetdc-contracts
+          path: widgetdc-contracts
+          ref: main
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install contracts deps + build
+        working-directory: widgetdc-contracts
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install orchestrator deps
+        working-directory: widgetdc-orchestrator
+        run: npm ci
+
+      - name: Run adoption gate (5 checks)
+        working-directory: widgetdc-orchestrator
+        run: npm run test:ci
+
+      - name: Post results on failure
+        if: failure()
+        run: |
+          echo "::error::Adoption gate failed. See ci-adoption-check.mjs output above."
+          echo "::error::Fix: ensure all tools have registry + executor + test + docs"

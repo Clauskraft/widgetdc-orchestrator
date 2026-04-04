@@ -1,0 +1,85 @@
+name: Open WebUI Drift Check
+
+on:
+  schedule:
+    # Nightly at 06:00 UTC
+    - cron: '0 6 * * *'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'owui-tools/**'
+      - 'pipelines/widgetdc_*.py'
+      - 'scripts/check_owui_drift.py'
+  workflow_dispatch:
+
+jobs:
+  drift-check:
+    name: Open WebUI Tool Drift Detection
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run drift check
+        id: drift
+        env:
+          OWUI_URL: ${{ secrets.OWUI_URL }}
+          OWUI_TOKEN: ${{ secrets.OWUI_TOKEN }}
+          OWUI_EMAIL: ${{ secrets.OWUI_EMAIL }}
+          OWUI_PASSWORD: ${{ secrets.OWUI_PASSWORD }}
+        run: |
+          set +e
+          python scripts/check_owui_drift.py --json > drift-report.json
+          echo "EXIT_CODE=$?" >> $GITHUB_ENV
+          python scripts/check_owui_drift.py || true
+
+      - name: Upload drift report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owui-drift-report
+          path: drift-report.json
+          retention-days: 30
+
+      - name: Build PR comment body
+        if: github.event_name == 'pull_request' && env.EXIT_CODE != '0'
+        id: body
+        run: |
+          {
+            echo 'COMMENT<<EOF'
+            echo '## Open WebUI Drift Detected'
+            echo ''
+            python -c "import json; r=json.load(open('drift-report.json')); print(f'**Untracked (deployed but no git source):** {len(r[\"untracked_drift\"])}'); [print(f'- \`{t}\`') for t in r['untracked_drift']]; print(); print(f'**Missing deployment (in git but not deployed):** {len(r[\"missing_deployment\"])}'); [print(f'- \`{t}\`') for t in r['missing_deployment']]"
+            echo ''
+            echo 'See `scripts/check_owui_drift.py` for remediation.'
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
+
+      - name: Comment on PR (if drift detected)
+        if: github.event_name == 'pull_request' && env.EXIT_CODE != '0'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: ${{ steps.body.outputs.COMMENT }}
+
+      - name: Slack alert on drift (scheduled runs)
+        if: github.event_name == 'schedule' && env.EXIT_CODE != '0'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data "{\"text\":\"Open WebUI drift detected — workflow run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+              "$SLACK_WEBHOOK_URL"
+          fi
+
+      - name: Fail job if drift detected
+        if: env.EXIT_CODE != '0'
+        run: exit 1
