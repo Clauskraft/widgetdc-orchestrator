@@ -17,7 +17,7 @@ import { z } from 'zod'
 export type ToolCategory =
   | 'knowledge' | 'graph' | 'cognitive' | 'chains' | 'agents'
   | 'assembly' | 'decisions' | 'adoption' | 'linear' | 'compliance'
-  | 'llm' | 'monitor' | 'mcp' | 'engagement'
+  | 'llm' | 'monitor' | 'mcp' | 'engagement' | 'memory'
 
 export interface CanonicalTool {
   name: string
@@ -68,7 +68,7 @@ function inferCategory(namespace: string): ToolCategory {
     chains: 'chains', agents: 'agents', assembly: 'assembly',
     decisions: 'decisions', adoption: 'adoption', linear: 'linear',
     compliance: 'compliance', llm: 'llm', monitor: 'monitor', mcp: 'mcp',
-    engagement: 'engagement',
+    engagement: 'engagement', memory: 'memory',
   }
   return map[namespace] ?? 'mcp'
 }
@@ -636,6 +636,80 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     }),
     timeoutMs: 10000,
     outputDescription: 'Engagement[] sorted newest first',
+  }),
+
+  // ─── v4.0.5 — Ghost-tier feature registration (LIN-608 follow-up) ──────────
+  // Audit found 13 ghost-tier routers. These 6 tools register the highest-value
+  // features tied to known Linear issues (LIN-535/536/566/567/568/582) that
+  // shipped without TOOL_REGISTRY entries. Closes the Omega lesson loop.
+
+  defineTool({
+    name: 'memory_store',
+    namespace: 'memory',
+    description: 'Store an entry in agent working memory (8-layer memory system, LIN-582 SNOUT-4). Backed by Redis with optional TTL. Retrievable via memory_retrieve.',
+    input: z.object({
+      agent_id: z.string().describe('Agent identifier'),
+      key: z.string().describe('Memory key'),
+      value: z.unknown().describe('Memory value (any JSON-serializable)'),
+      ttl: z.number().optional().describe('TTL in seconds (default: 3600)'),
+    }),
+    timeoutMs: 5000,
+    outputDescription: 'Stored MemoryEntry with timestamp',
+  }),
+
+  defineTool({
+    name: 'memory_retrieve',
+    namespace: 'memory',
+    description: 'Retrieve a specific memory entry or list all entries for an agent (LIN-582). Working memory is the agent cognition layer.',
+    input: z.object({
+      agent_id: z.string().describe('Agent identifier'),
+      key: z.string().optional().describe('Specific key (omit to list all for agent)'),
+    }),
+    timeoutMs: 5000,
+    outputDescription: 'MemoryEntry or MemoryEntry[] if no key provided',
+  }),
+
+  defineTool({
+    name: 'failure_harvest',
+    namespace: 'intelligence',
+    description: 'Harvest recent orchestrator failures (timeouts, 502s, auth errors, MCP errors) for Red Queen learning loop (LIN-567). Returns categorized failure summary with counts and patterns.',
+    input: z.object({
+      window_hours: z.number().optional().describe('Lookback window in hours (default: 24)'),
+    }),
+    timeoutMs: 30000,
+    outputDescription: 'FailureSummary with categorized events and counts',
+  }),
+
+  defineTool({
+    name: 'context_fold',
+    namespace: 'cognitive',
+    description: 'Compress large context via RLM /cognitive/fold (LIN-568 CaaS Mercury). Auto-selects strategy (baseline/neural/deepseek). Rate limited 100 req/day per API key.',
+    input: z.object({
+      text: z.string().describe('Text to compress'),
+      query: z.string().optional().describe('Query context for attention-focused folding'),
+      budget: z.number().optional().describe('Target token budget (default 4000)'),
+      domain: z.string().optional().describe('Domain hint for strategy selection'),
+    }),
+    timeoutMs: 30000,
+    outputDescription: 'Folded text with compression ratio and strategy used',
+  }),
+
+  defineTool({
+    name: 'competitive_crawl',
+    namespace: 'intelligence',
+    description: 'Trigger competitive phagocytosis crawl (LIN-566). Fetches competitor docs, extracts capabilities via DeepSeek LLM, MERGEs into Neo4j as :Competitor + :Capability nodes, produces gap report.',
+    input: z.object({}),
+    timeoutMs: 180000,
+    outputDescription: 'GapReport with competitor capabilities and identified gaps',
+  }),
+
+  defineTool({
+    name: 'loose_ends_scan',
+    namespace: 'intelligence',
+    description: 'Scan synthesis funnel for loose ends — unresolved dependencies, contradictions, orphaned blocks (LIN-535). Returns scan result with categorized findings.',
+    input: z.object({}),
+    timeoutMs: 60000,
+    outputDescription: 'LooseEndScanResult with counts and findings by category',
   }),
 ]
 

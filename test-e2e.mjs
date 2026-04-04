@@ -1121,6 +1121,52 @@ await test('116. POST /api/tools/engagement_outcome responds', async () => {
 })
 
 // ═══════════════════════════════════════════════════════════════
+// Section 17: v4.0.5 LIN-609 — Ghost-tier feature registration
+// ═══════════════════════════════════════════════════════════════
+
+// ── 117. memory_store — exists ──
+await test('117. POST /api/tools/memory_store responds', async () => {
+  const r = await api('/api/tools/memory_store', { method: 'POST', body: JSON.stringify({ agent_id: 'test-e2e', key: 'probe', value: 'test' }) })
+  assert(r.status !== 404, `memory_store not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'memory_store', `wrong tool_name`)
+})
+
+// ── 118. memory_retrieve — exists ──
+await test('118. POST /api/tools/memory_retrieve responds', async () => {
+  const r = await api('/api/tools/memory_retrieve', { method: 'POST', body: JSON.stringify({ agent_id: 'test-e2e' }) })
+  assert(r.status !== 404, `memory_retrieve not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'memory_retrieve', `wrong tool_name`)
+})
+
+// ── 119. failure_harvest — exists ──
+await test('119. POST /api/tools/failure_harvest responds', async () => {
+  const r = await api('/api/tools/failure_harvest', { method: 'POST', body: JSON.stringify({ window_hours: 1 }) })
+  assert(r.status !== 404, `failure_harvest not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'failure_harvest', `wrong tool_name`)
+})
+
+// ── 120. context_fold — exists ──
+await test('120. POST /api/tools/context_fold responds', async () => {
+  const r = await api('/api/tools/context_fold', { method: 'POST', body: JSON.stringify({ text: 'short' }) })
+  assert(r.status !== 404, `context_fold not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'context_fold', `wrong tool_name`)
+})
+
+// ── 121. competitive_crawl — exists ──
+await test('121. POST /api/tools/competitive_crawl responds', async () => {
+  const r = await api('/api/tools/competitive_crawl', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `competitive_crawl not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'competitive_crawl', `wrong tool_name`)
+})
+
+// ── 122. loose_ends_scan — exists ──
+await test('122. POST /api/tools/loose_ends_scan responds', async () => {
+  const r = await api('/api/tools/loose_ends_scan', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `loose_ends_scan not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'loose_ends_scan', `wrong tool_name`)
+})
+
+// ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped
 console.log(`  RESULTS: ${passed} passed, ${failed} failed, ${skipped} skipped / ${total} total`)

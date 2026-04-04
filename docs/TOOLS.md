@@ -1031,6 +1031,54 @@ List recent engagements from Redis + Neo4j. Returns most recent first by `create
 
 ---
 
+## v4.0.5 Ghost-Tier Feature Registration (LIN-609)
+
+Six tools closing ghost-tier gaps found by the v4.0.5 audit. Each tool is tied to a known Linear issue that shipped without TOOL_REGISTRY compliance. Closing the Omega lesson loop.
+
+### `memory_store`
+**Namespace:** memory | **Timeout:** 5s | **Handler:** orchestrator | **LIN-582**
+
+Store an entry in agent working memory (8-layer memory system). Backed by Redis with optional TTL.
+
+**Required:** `agent_id`, `key`, `value` | **Optional:** `ttl` (seconds, default 3600)
+
+### `memory_retrieve`
+**Namespace:** memory | **Timeout:** 5s | **Handler:** orchestrator | **LIN-582**
+
+Retrieve a specific memory entry or list all entries for an agent.
+
+**Required:** `agent_id` | **Optional:** `key` (omit to list all)
+
+### `failure_harvest`
+**Namespace:** intelligence | **Timeout:** 30s | **Handler:** orchestrator | **LIN-567 Red Queen**
+
+Harvest recent orchestrator failures (timeouts, 502s, auth, MCP errors) for Red Queen learning loop. Returns categorized summary.
+
+**Optional:** `window_hours` (default 24)
+
+### `context_fold`
+**Namespace:** cognitive | **Timeout:** 30s | **Handler:** orchestrator | **LIN-568 CaaS Mercury**
+
+Compress large context via RLM `/cognitive/fold`. Auto-selects strategy (baseline/neural/deepseek). Rate limited 100 req/day per API key.
+
+**Required:** `text` | **Optional:** `query`, `budget`, `domain`
+
+### `competitive_crawl`
+**Namespace:** intelligence | **Timeout:** 180s | **Handler:** orchestrator | **LIN-566 Phagocytosis**
+
+Trigger competitive phagocytosis crawl. Fetches competitor docs, extracts capabilities via DeepSeek LLM, MERGEs into Neo4j, produces gap report.
+
+**No parameters.**
+
+### `loose_ends_scan`
+**Namespace:** intelligence | **Timeout:** 60s | **Handler:** orchestrator | **LIN-535**
+
+Scan synthesis funnel for loose ends — unresolved dependencies, contradictions, orphaned blocks.
+
+**No parameters.**
+
+---
+
 ## Adding a New Tool
 
 All protocols (REST, OpenAI, MCP) compile automatically from a single entry in `src/tool-registry.ts`:

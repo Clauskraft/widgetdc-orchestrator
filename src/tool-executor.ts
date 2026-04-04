@@ -1156,6 +1156,114 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    // ─── v4.0.5 — Ghost-tier feature registration (LIN-608 follow-up) ─────
+    // 6 tools closing known-feature gaps from LIN-535/536/566/567/568/582.
+
+    case 'memory_store': {
+      try {
+        const { storeMemory } = await import('./working-memory.js')
+        const agentId = String(args.agent_id ?? '')
+        const key = String(args.key ?? '')
+        if (!agentId || !key) return 'Error: agent_id and key required'
+        const ttl = typeof args.ttl === 'number' ? args.ttl : undefined
+        const entry = await storeMemory(agentId, key, args.value, ttl)
+        return JSON.stringify({ agent_id: entry.agent_id, key: entry.key, stored_at: entry.stored_at, ttl: entry.ttl })
+      } catch (err) {
+        return `Memory store failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'memory_retrieve': {
+      try {
+        const { retrieveMemory, listMemories } = await import('./working-memory.js')
+        const agentId = String(args.agent_id ?? '')
+        if (!agentId) return 'Error: agent_id required'
+        if (args.key) {
+          const entry = await retrieveMemory(agentId, String(args.key))
+          return entry ? JSON.stringify(entry) : `No memory found for ${agentId}/${args.key}`
+        }
+        const entries = await listMemories(agentId)
+        return `${entries.length} memories for ${agentId}:\n${entries.map(e => `- ${e.key}`).join('\n')}`
+      } catch (err) {
+        return `Memory retrieve failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'failure_harvest': {
+      try {
+        const { harvestFailures, buildFailureSummary } = await import('./failure-harvester.js')
+        const windowHours = typeof args.window_hours === 'number' ? args.window_hours : 24
+        const events = await harvestFailures(windowHours)
+        const summary = buildFailureSummary(events, windowHours)
+        return JSON.stringify({
+          window_hours: windowHours,
+          total_events: events.length,
+          by_category: summary.by_category,
+          top_patterns: summary.top_patterns?.slice(0, 5) ?? [],
+        }, null, 2)
+      } catch (err) {
+        return `Failure harvest failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'context_fold': {
+      try {
+        const text = String(args.text ?? '')
+        if (text.length < 50) return 'Error: text must be at least 50 chars to warrant folding'
+        const query = typeof args.query === 'string' ? args.query : 'summarize the following context'
+        const budget = typeof args.budget === 'number' ? args.budget : 4000
+        const domain = typeof args.domain === 'string' ? args.domain : 'general'
+        const result = await callMcpTool({
+          toolName: 'context_folding.fold',
+          args: {
+            task: query,
+            context: { text },
+            max_tokens: budget,
+            domain,
+          },
+          callId: uuid(),
+          timeoutMs: 25000,
+        })
+        if (result.status !== 'success') return `Folding failed: ${result.error_message}`
+        const data = result.result as Record<string, unknown> | null
+        const folded = data?.compressed_text ?? data?.folded_text ?? data?.result
+        const ratio = data?.compression_ratio ?? 'unknown'
+        const strategy = data?.strategy_used ?? 'auto'
+        return `Folded (${strategy}, ratio: ${ratio}):\n\n${typeof folded === 'string' ? folded : JSON.stringify(folded)}`
+      } catch (err) {
+        return `Context fold failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'competitive_crawl': {
+      try {
+        const { runCompetitiveCrawl } = await import('./competitive-crawler.js')
+        const report = await runCompetitiveCrawl()
+        return JSON.stringify({
+          competitors: report.competitors_crawled ?? 0,
+          capabilities: report.capabilities_extracted ?? 0,
+          gaps: report.gaps_identified ?? 0,
+          generated_at: report.generated_at,
+        }, null, 2)
+      } catch (err) {
+        return `Competitive crawl failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'loose_ends_scan': {
+      try {
+        const { runLooseEndScan } = await import('./routes/loose-ends.js')
+        const result = await runLooseEndScan()
+        return JSON.stringify({
+          total_findings: result.total_findings ?? 0,
+          by_category: result.by_category ?? {},
+          scanned_at: result.scanned_at,
+        }, null, 2)
+      } catch (err) {
+        return `Loose ends scan failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
     default: {
       // Check forged tools before giving up
       try {

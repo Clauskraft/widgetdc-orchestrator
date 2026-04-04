@@ -11736,7 +11736,8 @@ function inferCategory(namespace) {
     llm: "llm",
     monitor: "monitor",
     mcp: "mcp",
-    engagement: "engagement"
+    engagement: "engagement",
+    memory: "memory"
   };
   return map3[namespace] ?? "mcp";
 }
@@ -12324,6 +12325,73 @@ var init_tool_registry = __esm({
         }),
         timeoutMs: 1e4,
         outputDescription: "Engagement[] sorted newest first"
+      }),
+      // ─── v4.0.5 — Ghost-tier feature registration (LIN-608 follow-up) ──────────
+      // Audit found 13 ghost-tier routers. These 6 tools register the highest-value
+      // features tied to known Linear issues (LIN-535/536/566/567/568/582) that
+      // shipped without TOOL_REGISTRY entries. Closes the Omega lesson loop.
+      defineTool({
+        name: "memory_store",
+        namespace: "memory",
+        description: "Store an entry in agent working memory (8-layer memory system, LIN-582 SNOUT-4). Backed by Redis with optional TTL. Retrievable via memory_retrieve.",
+        input: z.object({
+          agent_id: z.string().describe("Agent identifier"),
+          key: z.string().describe("Memory key"),
+          value: z.unknown().describe("Memory value (any JSON-serializable)"),
+          ttl: z.number().optional().describe("TTL in seconds (default: 3600)")
+        }),
+        timeoutMs: 5e3,
+        outputDescription: "Stored MemoryEntry with timestamp"
+      }),
+      defineTool({
+        name: "memory_retrieve",
+        namespace: "memory",
+        description: "Retrieve a specific memory entry or list all entries for an agent (LIN-582). Working memory is the agent cognition layer.",
+        input: z.object({
+          agent_id: z.string().describe("Agent identifier"),
+          key: z.string().optional().describe("Specific key (omit to list all for agent)")
+        }),
+        timeoutMs: 5e3,
+        outputDescription: "MemoryEntry or MemoryEntry[] if no key provided"
+      }),
+      defineTool({
+        name: "failure_harvest",
+        namespace: "intelligence",
+        description: "Harvest recent orchestrator failures (timeouts, 502s, auth errors, MCP errors) for Red Queen learning loop (LIN-567). Returns categorized failure summary with counts and patterns.",
+        input: z.object({
+          window_hours: z.number().optional().describe("Lookback window in hours (default: 24)")
+        }),
+        timeoutMs: 3e4,
+        outputDescription: "FailureSummary with categorized events and counts"
+      }),
+      defineTool({
+        name: "context_fold",
+        namespace: "cognitive",
+        description: "Compress large context via RLM /cognitive/fold (LIN-568 CaaS Mercury). Auto-selects strategy (baseline/neural/deepseek). Rate limited 100 req/day per API key.",
+        input: z.object({
+          text: z.string().describe("Text to compress"),
+          query: z.string().optional().describe("Query context for attention-focused folding"),
+          budget: z.number().optional().describe("Target token budget (default 4000)"),
+          domain: z.string().optional().describe("Domain hint for strategy selection")
+        }),
+        timeoutMs: 3e4,
+        outputDescription: "Folded text with compression ratio and strategy used"
+      }),
+      defineTool({
+        name: "competitive_crawl",
+        namespace: "intelligence",
+        description: "Trigger competitive phagocytosis crawl (LIN-566). Fetches competitor docs, extracts capabilities via DeepSeek LLM, MERGEs into Neo4j as :Competitor + :Capability nodes, produces gap report.",
+        input: z.object({}),
+        timeoutMs: 18e4,
+        outputDescription: "GapReport with competitor capabilities and identified gaps"
+      }),
+      defineTool({
+        name: "loose_ends_scan",
+        namespace: "intelligence",
+        description: "Scan synthesis funnel for loose ends \u2014 unresolved dependencies, contradictions, orphaned blocks (LIN-535). Returns scan result with categorized findings.",
+        input: z.object({}),
+        timeoutMs: 6e4,
+        outputDescription: "LooseEndScanResult with counts and findings by category"
       })
     ];
   }
@@ -16052,8 +16120,787 @@ var init_engagement_engine = __esm({
   }
 });
 
-// src/tool-executor.ts
+// src/working-memory.ts
+var working_memory_exports = {};
+__export(working_memory_exports, {
+  clearAgentMemory: () => clearAgentMemory,
+  deleteMemory: () => deleteMemory,
+  listMemories: () => listMemories,
+  retrieveMemory: () => retrieveMemory,
+  storeMemory: () => storeMemory
+});
+async function storeMemory(agentId, key, value, ttlSeconds = DEFAULT_TTL) {
+  const redis2 = getRedis();
+  const redisKey = `${PREFIX}${agentId}:${key}`;
+  const entry = {
+    key,
+    value,
+    agent_id: agentId,
+    created_at: (/* @__PURE__ */ new Date()).toISOString(),
+    ttl_seconds: ttlSeconds
+  };
+  if (redis2) {
+    try {
+      await redis2.set(redisKey, JSON.stringify(entry), "EX", ttlSeconds);
+    } catch (err) {
+      logger.warn({ agentId, key, err: String(err) }, "Working memory store failed");
+    }
+  }
+  return entry;
+}
+async function retrieveMemory(agentId, key) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${PREFIX}${agentId}:${key}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+async function listMemories(agentId) {
+  const redis2 = getRedis();
+  if (!redis2) return [];
+  try {
+    const keys = await redis2.keys(`${PREFIX}${agentId}:*`);
+    const entries = [];
+    for (const k of keys.slice(0, 100)) {
+      const raw = await redis2.get(k);
+      if (raw) entries.push(JSON.parse(raw));
+    }
+    return entries.sort((a, b) => b.created_at.localeCompare(a.created_at));
+  } catch {
+    return [];
+  }
+}
+async function deleteMemory(agentId, key) {
+  const redis2 = getRedis();
+  if (!redis2) return false;
+  try {
+    const result = await redis2.del(`${PREFIX}${agentId}:${key}`);
+    return result > 0;
+  } catch {
+    return false;
+  }
+}
+async function clearAgentMemory(agentId) {
+  const redis2 = getRedis();
+  if (!redis2) return 0;
+  try {
+    const keys = await redis2.keys(`${PREFIX}${agentId}:*`);
+    if (keys.length === 0) return 0;
+    return await redis2.del(...keys);
+  } catch {
+    return 0;
+  }
+}
+var PREFIX, DEFAULT_TTL;
+var init_working_memory = __esm({
+  "src/working-memory.ts"() {
+    "use strict";
+    init_redis();
+    init_logger();
+    PREFIX = "wm:";
+    DEFAULT_TTL = 86400;
+  }
+});
+
+// src/failure-harvester.ts
+var failure_harvester_exports = {};
+__export(failure_harvester_exports, {
+  buildFailureSummary: () => buildFailureSummary,
+  harvestFailures: () => harvestFailures,
+  runFailureHarvest: () => runFailureHarvest
+});
 import { v4 as uuid16 } from "uuid";
+function categorizeFailure(error) {
+  const lower = error.toLowerCase();
+  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) return "timeout";
+  if (lower.includes("502") || lower.includes("bad gateway") || lower.includes("econnrefused")) return "502";
+  if (lower.includes("401") || lower.includes("403") || lower.includes("unauthorized") || lower.includes("forbidden")) return "auth";
+  if (lower.includes("validation") || lower.includes("invalid") || lower.includes("required")) return "validation";
+  if (lower.includes("mcp") || lower.includes("tool_not_found") || lower.includes("tool call")) return "mcp_error";
+  return "unknown";
+}
+async function harvestFailures(windowHours = 24) {
+  const redis2 = getRedis();
+  if (!redis2) {
+    logger.warn("Failure harvester: Redis not available");
+    return [];
+  }
+  const events = [];
+  const cutoff = new Date(Date.now() - windowHours * 36e5).toISOString();
+  try {
+    let cursor = "0";
+    do {
+      const [nextCursor, fields] = await redis2.hscan("orchestrator:chains", cursor, "COUNT", 200);
+      cursor = nextCursor;
+      for (let i = 0; i < fields.length; i += 2) {
+        const execId = fields[i];
+        const json = fields[i + 1];
+        try {
+          const exec = JSON.parse(json);
+          if (exec.status !== "failed") continue;
+          if (exec.started_at < cutoff) continue;
+          const failedSteps = exec.results?.filter((r) => r.status === "error") ?? [];
+          const errorMsg = exec.error ?? failedSteps.map((s) => String(s.output)).join("; ") ?? "unknown";
+          events.push({
+            $id: `failure-event:${uuid16()}`,
+            execution_id: execId,
+            chain_name: exec.name,
+            category: categorizeFailure(errorMsg),
+            error_message: errorMsg.slice(0, 500),
+            affected_tool: failedSteps[0]?.action ?? null,
+            affected_agent: failedSteps[0]?.agent_id ?? null,
+            timestamp: exec.started_at
+          });
+        } catch {
+        }
+      }
+    } while (cursor !== "0");
+    logger.info({ harvested: events.length, window_hours: windowHours }, "Failure harvester scan complete");
+  } catch (err) {
+    logger.error({ err: String(err) }, "Failure harvester scan failed");
+  }
+  return events;
+}
+async function persistToGraph(events) {
+  let persisted = 0;
+  for (const evt of events) {
+    try {
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `
+            MERGE (f:FailureEvent {execution_id: $execution_id})
+            SET f.chain_name = $chain_name,
+                f.category = $category,
+                f.error_message = $error_message,
+                f.affected_tool = $affected_tool,
+                f.affected_agent = $affected_agent,
+                f.timestamp = datetime($timestamp),
+                f.harvested_at = datetime()
+          `,
+          params: {
+            execution_id: evt.execution_id,
+            chain_name: evt.chain_name,
+            category: evt.category,
+            error_message: evt.error_message,
+            affected_tool: evt.affected_tool ?? "",
+            affected_agent: evt.affected_agent ?? "",
+            timestamp: evt.timestamp
+          }
+        },
+        callId: uuid16(),
+        timeoutMs: 1e4
+      });
+      persisted++;
+    } catch (err) {
+      logger.warn({ err: String(err), execution_id: evt.execution_id }, "Failed to persist failure event");
+    }
+  }
+  if (persisted > 0) {
+    try {
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `
+            MATCH (f:FailureEvent) WHERE f.affected_tool <> ''
+            MATCH (t:Tool {name: f.affected_tool})
+            MERGE (f)-[:AFFECTED_TOOL]->(t)
+          `,
+          params: {}
+        },
+        callId: uuid16(),
+        timeoutMs: 1e4
+      });
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `
+            MATCH (f:FailureEvent) WHERE f.affected_agent <> ''
+            MATCH (a:Agent {id: f.affected_agent})
+            MERGE (f)-[:AFFECTED_AGENT]->(a)
+          `,
+          params: {}
+        },
+        callId: uuid16(),
+        timeoutMs: 1e4
+      });
+    } catch {
+    }
+  }
+  return persisted;
+}
+function buildFailureSummary(events, windowHours = 24) {
+  const byCategory = {
+    timeout: 0,
+    "502": 0,
+    auth: 0,
+    validation: 0,
+    mcp_error: 0,
+    unknown: 0
+  };
+  const toolCounts = /* @__PURE__ */ new Map();
+  const agentCounts = /* @__PURE__ */ new Map();
+  for (const evt of events) {
+    byCategory[evt.category]++;
+    if (evt.affected_tool) toolCounts.set(evt.affected_tool, (toolCounts.get(evt.affected_tool) ?? 0) + 1);
+    if (evt.affected_agent) agentCounts.set(evt.affected_agent, (agentCounts.get(evt.affected_agent) ?? 0) + 1);
+  }
+  const topTools = [...toolCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([tool, count]) => ({ tool, count }));
+  const topAgents = [...agentCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([agent, count]) => ({ agent, count }));
+  return {
+    $id: `failure-summary:${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}`,
+    total_failures: events.length,
+    by_category: byCategory,
+    top_tools: topTools,
+    top_agents: topAgents,
+    recent: events.slice(-20),
+    harvested_at: (/* @__PURE__ */ new Date()).toISOString(),
+    window_hours: windowHours
+  };
+}
+async function runFailureHarvest(windowHours = 24) {
+  const events = await harvestFailures(windowHours);
+  const persisted = await persistToGraph(events);
+  const summary = buildFailureSummary(events, windowHours);
+  const redis2 = getRedis();
+  if (redis2) {
+    await redis2.set("orchestrator:failure-summary", JSON.stringify(summary), "EX", 3600).catch(() => {
+    });
+  }
+  broadcastSSE("failure-harvest", summary);
+  logger.info({
+    total: events.length,
+    persisted,
+    categories: summary.by_category
+  }, "Failure harvest cycle complete");
+  return summary;
+}
+var init_failure_harvester = __esm({
+  "src/failure-harvester.ts"() {
+    "use strict";
+    init_redis();
+    init_mcp_caller();
+    init_logger();
+    init_sse();
+  }
+});
+
+// src/competitive-crawler.ts
+var competitive_crawler_exports = {};
+__export(competitive_crawler_exports, {
+  COMPETITOR_TARGETS: () => COMPETITOR_TARGETS,
+  runCompetitiveCrawl: () => runCompetitiveCrawl
+});
+import { v4 as uuid17 } from "uuid";
+async function fetchPageText(url) {
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": "WidgeTDC-Research/1.0 (competitive analysis; public docs only)",
+      "Accept": "text/html,application/json,text/plain"
+    },
+    signal: AbortSignal.timeout(15e3),
+    redirect: "follow"
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  const contentType = res.headers.get("content-type") ?? "";
+  const raw = await res.text();
+  if (contentType.includes("html")) {
+    return raw.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "").replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "").replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, "").replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, "").replace(/<header[^>]*>[\s\S]*?<\/header>/gi, "").replace(/<[^>]+>/g, " ").replace(/\s{2,}/g, " ").replace(/&[a-z]+;/gi, " ").trim().slice(0, 15e3);
+  }
+  return raw.slice(0, 15e3);
+}
+async function extractCapabilities(target) {
+  const capabilities = [];
+  for (const url of target.urls) {
+    try {
+      logger.info({ competitor: target.name, url }, "Fetching competitor page");
+      const pageText = await fetchPageText(url);
+      if (pageText.length < 100) {
+        logger.warn({ competitor: target.name, url, length: pageText.length }, "Page too short \u2014 skipping");
+        continue;
+      }
+      const prompt = EXTRACTION_PROMPT.replace("{competitor}", target.name).replace("{url}", url).replace("{content}", pageText.slice(0, 12e3));
+      const llmResult = await chatLLM({
+        provider: "deepseek",
+        // cheap + fast for extraction
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.3,
+        max_tokens: 1500
+      });
+      if (!llmResult.content || llmResult.content.includes("NO_CAPABILITIES_FOUND")) {
+        logger.info({ competitor: target.name, url }, "No capabilities found on page");
+        continue;
+      }
+      const lines = llmResult.content.split("\n").filter((l) => l.trim().startsWith("-") || l.trim().startsWith("*"));
+      for (const line of lines.slice(0, 20)) {
+        const cap = line.replace(/^[\s\-\*]+/, "").trim();
+        if (cap.length > 10 && cap.length < 200) {
+          capabilities.push({
+            $id: `capability:${target.slug}:${uuid17().slice(0, 8)}`,
+            competitor: target.name,
+            capability: cap,
+            category: categorizeCapability(cap),
+            evidence_url: url,
+            extracted_at: (/* @__PURE__ */ new Date()).toISOString()
+          });
+        }
+      }
+      logger.info({ competitor: target.name, url, capabilities: lines.length }, "Extracted capabilities from page");
+    } catch (err) {
+      logger.warn({ competitor: target.name, url, err: String(err) }, "Capability extraction failed for URL");
+    }
+  }
+  return capabilities;
+}
+function categorizeCapability(cap) {
+  const lower = cap.toLowerCase();
+  if (lower.includes("api") || lower.includes("endpoint") || lower.includes("rest") || lower.includes("graphql")) return "api";
+  if (lower.includes("agent") || lower.includes("orchestrat") || lower.includes("workflow")) return "orchestration";
+  if (lower.includes("rag") || lower.includes("search") || lower.includes("retrieval") || lower.includes("knowledge")) return "knowledge";
+  if (lower.includes("security") || lower.includes("auth") || lower.includes("compliance") || lower.includes("rbac")) return "security";
+  if (lower.includes("llm") || lower.includes("model") || lower.includes("ai") || lower.includes("inference")) return "ai";
+  if (lower.includes("deploy") || lower.includes("scale") || lower.includes("monitor")) return "platform";
+  return "general";
+}
+async function persistCapabilities(capabilities) {
+  let persisted = 0;
+  for (const cap of capabilities) {
+    try {
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `
+            MERGE (c:CompetitorCapability {competitor: $competitor, capability: $capability})
+            SET c.category = $category,
+                c.evidence_url = $evidence_url,
+                c.extracted_at = datetime($extracted_at),
+                c.updated_at = datetime()
+            MERGE (comp:Competitor {name: $competitor})
+            MERGE (comp)-[:HAS_CAPABILITY]->(c)
+          `,
+          params: {
+            competitor: cap.competitor,
+            capability: cap.capability,
+            category: cap.category,
+            evidence_url: cap.evidence_url,
+            extracted_at: cap.extracted_at
+          }
+        },
+        callId: uuid17(),
+        timeoutMs: 1e4
+      });
+      persisted++;
+    } catch (err) {
+      logger.warn({ err: String(err), competitor: cap.competitor }, "Failed to persist capability");
+    }
+  }
+  return persisted;
+}
+async function analyzeGaps(capabilities) {
+  const byCompetitor = {};
+  const capMap = /* @__PURE__ */ new Map();
+  for (const cap of capabilities) {
+    byCompetitor[cap.competitor] = (byCompetitor[cap.competitor] ?? 0) + 1;
+    const existing = capMap.get(cap.capability) ?? [];
+    existing.push(cap.competitor);
+    capMap.set(cap.capability, existing);
+  }
+  let widgetdcTools = [];
+  try {
+    const result = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: { query: "MATCH (t:Tool) RETURN t.name AS name LIMIT 200" },
+      callId: uuid17(),
+      timeoutMs: 1e4
+    });
+    if (result.status === "success") {
+      const data = result.result;
+      widgetdcTools = (data?.results ?? []).map((r) => r.name.toLowerCase());
+    }
+  } catch {
+  }
+  const gaps = [];
+  for (const [capability, competitors] of capMap.entries()) {
+    const hasIt = widgetdcTools.some(
+      (t) => capability.toLowerCase().includes(t) || t.includes(capability.toLowerCase().slice(0, 15))
+    );
+    if (!hasIt && competitors.length >= 2) {
+      gaps.push({
+        capability,
+        competitors_with: competitors,
+        widgetdc_has: false
+      });
+    }
+  }
+  const strengths = [
+    "Triple-Protocol ABI (REST + MCP + OpenAPI)",
+    "Mercury Folding (context compression)",
+    "Neo4j Knowledge Graph with 17 domains",
+    "Self-correcting graph agent",
+    "Multi-agent chain engine (5 modes)"
+  ];
+  return {
+    $id: `gap-report:${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}`,
+    total_capabilities_found: capabilities.length,
+    by_competitor: byCompetitor,
+    gaps: gaps.slice(0, 30),
+    strengths,
+    generated_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+async function runCompetitiveCrawl() {
+  logger.info("Starting competitive phagocytosis crawl");
+  const allCapabilities = [];
+  for (const target of COMPETITOR_TARGETS) {
+    const caps = await extractCapabilities(target);
+    allCapabilities.push(...caps);
+    logger.info({ competitor: target.name, capabilities: caps.length }, "Extracted capabilities");
+  }
+  const persisted = await persistCapabilities(allCapabilities);
+  const report = await analyzeGaps(allCapabilities);
+  const redis2 = getRedis();
+  if (redis2 && allCapabilities.length > 0) {
+    await redis2.set("orchestrator:competitive-report", JSON.stringify(report), "EX", 604800).catch(() => {
+    });
+  } else if (redis2 && allCapabilities.length === 0) {
+    logger.warn("Competitive crawl returned zero capabilities \u2014 not caching empty report");
+  }
+  broadcastSSE("competitive-report", report);
+  logger.info({
+    total_capabilities: allCapabilities.length,
+    persisted,
+    gaps: report.gaps.length
+  }, "Competitive phagocytosis crawl complete");
+  return report;
+}
+var COMPETITOR_TARGETS, EXTRACTION_PROMPT;
+var init_competitive_crawler = __esm({
+  "src/competitive-crawler.ts"() {
+    "use strict";
+    init_redis();
+    init_mcp_caller();
+    init_llm_proxy();
+    init_logger();
+    init_sse();
+    COMPETITOR_TARGETS = [
+      {
+        name: "Palantir AIP",
+        slug: "palantir",
+        urls: [
+          "https://www.palantir.com/docs/foundry/api/",
+          "https://www.palantir.com/platforms/aip/"
+        ]
+      },
+      {
+        name: "Dust.tt",
+        slug: "dust",
+        urls: [
+          "https://docs.dust.tt/",
+          "https://dust.tt/changelog"
+        ]
+      },
+      {
+        name: "Glean",
+        slug: "glean",
+        urls: [
+          "https://developers.glean.com/docs/overview",
+          "https://www.glean.com/product"
+        ]
+      },
+      {
+        name: "LangGraph",
+        slug: "langgraph",
+        urls: [
+          "https://langchain-ai.github.io/langgraph/concepts/",
+          "https://langchain-ai.github.io/langgraph/how-tos/"
+        ]
+      },
+      {
+        name: "Copilot Studio",
+        slug: "copilot-studio",
+        urls: [
+          "https://learn.microsoft.com/en-us/microsoft-copilot-studio/fundamentals-what-is-copilot-studio"
+        ]
+      }
+    ];
+    EXTRACTION_PROMPT = `You are a competitive intelligence analyst. Given web page content from a competitor, extract specific technical capabilities they offer.
+
+Rules:
+- List ONLY capabilities explicitly mentioned in the content
+- Each capability must be a specific, concrete feature (not marketing fluff)
+- Focus on: APIs, agent/orchestration features, AI/LLM capabilities, security, knowledge management, integrations
+- Return as a bulleted list, one capability per line, starting with "- "
+- Maximum 20 capabilities per page
+- If the page has no relevant technical content, return "NO_CAPABILITIES_FOUND"
+
+Competitor: {competitor}
+URL: {url}
+Page content:
+{content}`;
+  }
+});
+
+// src/routes/loose-ends.ts
+var loose_ends_exports = {};
+__export(loose_ends_exports, {
+  looseEndsRouter: () => looseEndsRouter,
+  runLooseEndScan: () => runLooseEndScan
+});
+import { Router as Router2 } from "express";
+import { v4 as uuid18 } from "uuid";
+async function runLooseEndScan() {
+  const scanId = uuid18();
+  const t0 = Date.now();
+  const findings = [];
+  logger.info({ scan_id: scanId }, "Loose-end scan started");
+  const queryResults = await Promise.allSettled(
+    DETECTION_QUERIES.map(async (dq) => {
+      try {
+        const result = await callMcpTool({
+          toolName: "graph.read_cypher",
+          args: { query: dq.cypher },
+          callId: uuid18(),
+          timeoutMs: 15e3
+        });
+        if (result.status !== "success") return [];
+        const records = Array.isArray(result.result) ? result.result : Array.isArray(result.result?.records) ? result.result.records : [];
+        return dq.buildFinding(records);
+      } catch (err) {
+        logger.warn({ query: dq.name, err: String(err) }, "Loose-end detection query failed");
+        return [];
+      }
+    })
+  );
+  for (const qr of queryResults) {
+    if (qr.status === "fulfilled") {
+      findings.push(...qr.value);
+    }
+  }
+  const summary = {
+    critical: findings.filter((f) => f.severity === "critical").length,
+    warning: findings.filter((f) => f.severity === "warning").length,
+    info: findings.filter((f) => f.severity === "info").length,
+    total: findings.length
+  };
+  const scanResult = {
+    scan_id: scanId,
+    scanned_at: (/* @__PURE__ */ new Date()).toISOString(),
+    duration_ms: Date.now() - t0,
+    findings,
+    summary,
+    auto_fixed: 0
+  };
+  const redis2 = getRedis();
+  if (redis2) {
+    try {
+      await redis2.set(REDIS_KEY3, JSON.stringify(scanResult), "EX", 86400);
+      await redis2.zadd(REDIS_HISTORY, Date.now(), JSON.stringify(scanResult));
+      const count = await redis2.zcard(REDIS_HISTORY);
+      if (count > 30) {
+        await redis2.zremrangebyrank(REDIS_HISTORY, 0, count - 31);
+      }
+    } catch (err) {
+      logger.warn({ err: String(err) }, "Failed to persist loose-end scan");
+    }
+  }
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (s:LooseEndScan {id: $id})
+SET s.scanned_at = datetime(), s.duration_ms = $duration,
+    s.critical = $critical, s.warning = $warning, s.info = $info,
+    s.total = $total, s.auto_fixed = 0`,
+        params: {
+          id: scanId,
+          duration: scanResult.duration_ms,
+          critical: summary.critical,
+          warning: summary.warning,
+          info: summary.info,
+          total: summary.total
+        }
+      },
+      callId: uuid18(),
+      timeoutMs: 1e4
+    });
+  } catch {
+  }
+  broadcastSSE("loose-end-scan", {
+    scan_id: scanId,
+    summary,
+    duration_ms: scanResult.duration_ms
+  });
+  logger.info({
+    scan_id: scanId,
+    ...summary,
+    duration_ms: scanResult.duration_ms
+  }, "Loose-end scan complete");
+  return scanResult;
+}
+var looseEndsRouter, REDIS_KEY3, REDIS_HISTORY, DETECTION_QUERIES;
+var init_loose_ends = __esm({
+  "src/routes/loose-ends.ts"() {
+    "use strict";
+    init_redis();
+    init_logger();
+    init_mcp_caller();
+    init_sse();
+    looseEndsRouter = Router2();
+    REDIS_KEY3 = "orchestrator:loose-ends:latest";
+    REDIS_HISTORY = "orchestrator:loose-ends:history";
+    DETECTION_QUERIES = [
+      {
+        name: "Orphan Blocks (no assembly)",
+        category: "orphan_block",
+        severity: "warning",
+        cypher: `MATCH (b) WHERE (b:Block OR b:ArchitectureBlock OR b:LegoBlock)
+AND NOT (b)<-[:COMPOSED_OF]-(:Assembly)
+RETURN b.id AS id, b.name AS name, b.domain AS domain, labels(b)[0] AS type
+LIMIT 25`,
+        buildFinding: (records) => records.map((r) => ({
+          id: `orphan-${r.id ?? uuid18().slice(0, 8)}`,
+          severity: "warning",
+          category: "orphan_block",
+          title: `Orphan block: ${r.name ?? r.id}`,
+          description: `Block "${r.name}" (${r.type}, domain: ${r.domain}) is not part of any assembly`,
+          node_ids: [String(r.id)],
+          suggested_action: "Include in an assembly via POST /api/assembly/compose or archive if obsolete"
+        }))
+      },
+      {
+        name: "Assemblies without decisions",
+        category: "dangling_assembly",
+        severity: "warning",
+        cypher: `MATCH (a:Assembly) WHERE a.status = 'accepted'
+AND NOT (a)<-[:BASED_ON]-(:Decision)
+RETURN a.id AS id, a.name AS name, a.composite AS score
+LIMIT 15`,
+        buildFinding: (records) => records.map((r) => ({
+          id: `dangling-asm-${r.id ?? uuid18().slice(0, 8)}`,
+          severity: "warning",
+          category: "dangling_assembly",
+          title: `Accepted assembly without decision: ${r.name ?? r.id}`,
+          description: `Assembly "${r.name}" was accepted (score: ${r.score}) but no Decision node references it`,
+          node_ids: [String(r.id)],
+          suggested_action: "Create a Decision via POST /api/decisions/certify or reject the assembly"
+        }))
+      },
+      {
+        name: "Decisions without lineage",
+        category: "missing_lineage",
+        severity: "critical",
+        cypher: `MATCH (d:Decision) WHERE NOT (d)-[:BASED_ON]->(:Assembly)
+AND NOT (d)-[:DERIVES_FROM]->()
+RETURN d.id AS id, d.title AS title, d.certified_at AS certified_at
+LIMIT 10`,
+        buildFinding: (records) => records.map((r) => ({
+          id: `no-lineage-${r.id ?? uuid18().slice(0, 8)}`,
+          severity: "critical",
+          category: "missing_lineage",
+          title: `Decision without lineage: ${r.title ?? r.id}`,
+          description: `Decision "${r.title}" has no traceable lineage to assemblies or source signals`,
+          node_ids: [String(r.id)],
+          suggested_action: "Link decision to source assembly or re-certify with proper lineage"
+        }))
+      },
+      {
+        name: "Disconnected high-value nodes",
+        category: "disconnected_node",
+        severity: "info",
+        cypher: `MATCH (n) WHERE (n:StrategicInsight OR n:Pattern OR n:Signal)
+AND NOT (n)-[]-()
+RETURN n.id AS id, labels(n)[0] AS type, n.domain AS domain, n.insight AS title
+LIMIT 20`,
+        buildFinding: (records) => records.map((r) => ({
+          id: `disconnected-${r.id ?? uuid18().slice(0, 8)}`,
+          severity: "info",
+          category: "disconnected_node",
+          title: `Disconnected ${r.type}: ${(r.title ?? r.id ?? "").toString().slice(0, 60)}`,
+          description: `${r.type} node in domain "${r.domain}" has no relationships \u2014 may be a missed connection`,
+          node_ids: [String(r.id)],
+          suggested_action: "Review and connect to related blocks or mark as processed"
+        }))
+      },
+      {
+        name: "Unresolved decisions (stale drafts)",
+        category: "unresolved_decision",
+        severity: "warning",
+        cypher: `MATCH (d:Decision) WHERE d.status = 'draft'
+AND d.created_at < datetime() - duration('P7D')
+RETURN d.id AS id, d.title AS title, d.created_at AS created_at
+LIMIT 10`,
+        buildFinding: (records) => records.map((r) => ({
+          id: `stale-decision-${r.id ?? uuid18().slice(0, 8)}`,
+          severity: "warning",
+          category: "unresolved_decision",
+          title: `Stale draft decision: ${r.title ?? r.id}`,
+          description: `Decision "${r.title}" has been in draft for >7 days (created: ${r.created_at})`,
+          node_ids: [String(r.id)],
+          suggested_action: "Certify, reject, or archive the stale decision"
+        }))
+      }
+    ];
+    looseEndsRouter.post("/scan", async (_req, res) => {
+      try {
+        const result = await runLooseEndScan();
+        res.json({ success: true, data: result });
+      } catch (err) {
+        logger.error({ err: String(err) }, "Loose-end scan failed");
+        res.status(500).json({
+          success: false,
+          error: { code: "SCAN_ERROR", message: String(err), status_code: 500 }
+        });
+      }
+    });
+    looseEndsRouter.get("/", async (_req, res) => {
+      const redis2 = getRedis();
+      if (!redis2) {
+        res.json({ success: true, data: null, message: "No scan results available" });
+        return;
+      }
+      try {
+        const raw = await redis2.get(REDIS_KEY3);
+        if (!raw) {
+          res.json({ success: true, data: null, message: "No scan has been run yet" });
+          return;
+        }
+        res.json({ success: true, data: JSON.parse(raw) });
+      } catch (err) {
+        res.status(500).json({ success: false, error: String(err) });
+      }
+    });
+    looseEndsRouter.get("/history", async (req, res) => {
+      const redis2 = getRedis();
+      const limit = Math.min(parseInt(String(req.query.limit ?? "10")), 30);
+      if (!redis2) {
+        res.json({ success: true, data: { scans: [], total: 0 } });
+        return;
+      }
+      try {
+        const raw = await redis2.zrevrange(REDIS_HISTORY, 0, limit - 1);
+        const scans = raw.map((r) => {
+          const parsed = JSON.parse(r);
+          return {
+            scan_id: parsed.scan_id,
+            scanned_at: parsed.scanned_at,
+            duration_ms: parsed.duration_ms,
+            summary: parsed.summary,
+            auto_fixed: parsed.auto_fixed
+          };
+        });
+        res.json({ success: true, data: { scans, total: scans.length } });
+      } catch (err) {
+        res.status(500).json({ success: false, error: String(err) });
+      }
+    });
+  }
+});
+
+// src/tool-executor.ts
+import { v4 as uuid19 } from "uuid";
 function getTokenSavings() {
   return { totalTokensSaved, totalFoldingCalls, avgSavingsPerFold: totalFoldingCalls > 0 ? Math.round(totalTokensSaved / totalFoldingCalls) : 0 };
 }
@@ -16145,7 +16992,7 @@ function buildToolFallback(toolName, error) {
   }
 }
 async function executeToolUnified(toolName, args, opts) {
-  const callId = opts?.call_id ?? uuid16();
+  const callId = opts?.call_id ?? uuid19();
   const t0 = Date.now();
   let deprecation_notice;
   const toolDef = getTool(toolName);
@@ -16233,7 +17080,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher, params: args.params ?? {} },
-        callId: uuid16(),
+        callId: uuid19(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
@@ -16254,7 +17101,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher },
-        callId: uuid16(),
+        callId: uuid19(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Task query failed: ${result.error_message}`;
@@ -16266,7 +17113,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: args.tool_name,
         args: args.payload ?? {},
-        callId: uuid16(),
+        callId: uuid19(),
         timeoutMs: 3e4
       });
       if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
@@ -16274,8 +17121,8 @@ ${result.merged_context}`;
     }
     case "get_platform_health": {
       const [backendHealth, graphHealth] = await Promise.allSettled([
-        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid16(), timeoutMs: 1e4 }),
-        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid16(), timeoutMs: 1e4 })
+        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid19(), timeoutMs: 1e4 }),
+        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid19(), timeoutMs: 1e4 })
       ]);
       const parts = [];
       if (backendHealth.status === "fulfilled" && backendHealth.value.status === "success") {
@@ -16291,7 +17138,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: args.query },
-        callId: uuid16(),
+        callId: uuid19(),
         timeoutMs: 2e4
       });
       if (result.status !== "success") return `Document search failed: ${result.error_message}`;
@@ -16309,7 +17156,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issues",
         args: payload,
-        callId: uuid16(),
+        callId: uuid19(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
@@ -16325,7 +17172,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issue_get",
         args: { identifier },
-        callId: uuid16(),
+        callId: uuid19(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
@@ -16881,6 +17728,110 @@ Skills: ${result.required_skills.join(", ")}${gateInfo}`;
 ${lines.join("\n")}`;
       } catch (err) {
         return `Engagement list failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    // ─── v4.0.5 — Ghost-tier feature registration (LIN-608 follow-up) ─────
+    // 6 tools closing known-feature gaps from LIN-535/536/566/567/568/582.
+    case "memory_store": {
+      try {
+        const { storeMemory: storeMemory2 } = await Promise.resolve().then(() => (init_working_memory(), working_memory_exports));
+        const agentId = String(args.agent_id ?? "");
+        const key = String(args.key ?? "");
+        if (!agentId || !key) return "Error: agent_id and key required";
+        const ttl = typeof args.ttl === "number" ? args.ttl : void 0;
+        const entry = await storeMemory2(agentId, key, args.value, ttl);
+        return JSON.stringify({ agent_id: entry.agent_id, key: entry.key, stored_at: entry.stored_at, ttl: entry.ttl });
+      } catch (err) {
+        return `Memory store failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "memory_retrieve": {
+      try {
+        const { retrieveMemory: retrieveMemory2, listMemories: listMemories2 } = await Promise.resolve().then(() => (init_working_memory(), working_memory_exports));
+        const agentId = String(args.agent_id ?? "");
+        if (!agentId) return "Error: agent_id required";
+        if (args.key) {
+          const entry = await retrieveMemory2(agentId, String(args.key));
+          return entry ? JSON.stringify(entry) : `No memory found for ${agentId}/${args.key}`;
+        }
+        const entries = await listMemories2(agentId);
+        return `${entries.length} memories for ${agentId}:
+${entries.map((e) => `- ${e.key}`).join("\n")}`;
+      } catch (err) {
+        return `Memory retrieve failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "failure_harvest": {
+      try {
+        const { harvestFailures: harvestFailures2, buildFailureSummary: buildFailureSummary2 } = await Promise.resolve().then(() => (init_failure_harvester(), failure_harvester_exports));
+        const windowHours = typeof args.window_hours === "number" ? args.window_hours : 24;
+        const events = await harvestFailures2(windowHours);
+        const summary = buildFailureSummary2(events, windowHours);
+        return JSON.stringify({
+          window_hours: windowHours,
+          total_events: events.length,
+          by_category: summary.by_category,
+          top_patterns: summary.top_patterns?.slice(0, 5) ?? []
+        }, null, 2);
+      } catch (err) {
+        return `Failure harvest failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "context_fold": {
+      try {
+        const text = String(args.text ?? "");
+        if (text.length < 50) return "Error: text must be at least 50 chars to warrant folding";
+        const query = typeof args.query === "string" ? args.query : "summarize the following context";
+        const budget = typeof args.budget === "number" ? args.budget : 4e3;
+        const domain = typeof args.domain === "string" ? args.domain : "general";
+        const result = await callMcpTool({
+          toolName: "context_folding.fold",
+          args: {
+            task: query,
+            context: { text },
+            max_tokens: budget,
+            domain
+          },
+          callId: uuid19(),
+          timeoutMs: 25e3
+        });
+        if (result.status !== "success") return `Folding failed: ${result.error_message}`;
+        const data = result.result;
+        const folded = data?.compressed_text ?? data?.folded_text ?? data?.result;
+        const ratio = data?.compression_ratio ?? "unknown";
+        const strategy = data?.strategy_used ?? "auto";
+        return `Folded (${strategy}, ratio: ${ratio}):
+
+${typeof folded === "string" ? folded : JSON.stringify(folded)}`;
+      } catch (err) {
+        return `Context fold failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "competitive_crawl": {
+      try {
+        const { runCompetitiveCrawl: runCompetitiveCrawl2 } = await Promise.resolve().then(() => (init_competitive_crawler(), competitive_crawler_exports));
+        const report = await runCompetitiveCrawl2();
+        return JSON.stringify({
+          competitors: report.competitors_crawled ?? 0,
+          capabilities: report.capabilities_extracted ?? 0,
+          gaps: report.gaps_identified ?? 0,
+          generated_at: report.generated_at
+        }, null, 2);
+      } catch (err) {
+        return `Competitive crawl failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "loose_ends_scan": {
+      try {
+        const { runLooseEndScan: runLooseEndScan2 } = await Promise.resolve().then(() => (init_loose_ends(), loose_ends_exports));
+        const result = await runLooseEndScan2();
+        return JSON.stringify({
+          total_findings: result.total_findings ?? 0,
+          by_category: result.by_category ?? {},
+          scanned_at: result.scanned_at
+        }, null, 2);
+      } catch (err) {
+        return `Loose ends scan failed: ${err instanceof Error ? err.message : String(err)}`;
       }
     }
     default: {
@@ -21660,7 +22611,7 @@ init_chat_broadcaster();
 init_config();
 init_logger();
 init_slack();
-import { Router as Router2 } from "express";
+import { Router as Router3 } from "express";
 init_redis();
 init_tool_executor();
 
@@ -21781,7 +22732,7 @@ function pct(n, d) {
 }
 
 // src/routes/tools.ts
-var toolsRouter = Router2();
+var toolsRouter = Router3();
 toolsRouter.post("/call", async (req, res) => {
   const result = validate(validateToolCall, req.body);
   if (!result.ok) {
@@ -21949,7 +22900,7 @@ toolsRouter.get("/catalog", async (_req, res) => {
 init_chat_broadcaster();
 init_logger();
 init_slack();
-import { Router as Router3 } from "express";
+import { Router as Router4 } from "express";
 init_chat_store();
 init_config();
 init_chain_engine();
@@ -22099,7 +23050,7 @@ ${context}` },
     });
   }
 }
-var chatRouter = Router3();
+var chatRouter = Router4();
 function shouldRouteViaOrchestrator(target) {
   if (!target) return false;
   return target === "master" || target === "Orchestrator";
@@ -22683,8 +23634,8 @@ chatRouter.get("/ws-stats", (_req, res) => {
 // src/routes/chains.ts
 init_chain_engine();
 init_logger();
-import { Router as Router4 } from "express";
-var chainsRouter = Router4();
+import { Router as Router5 } from "express";
+var chainsRouter = Router5();
 chainsRouter.post("/execute", async (req, res) => {
   const body = req.body;
   const validModes = ["sequential", "parallel", "loop", "debate", "adaptive", "funnel"];
@@ -22791,8 +23742,8 @@ chainsRouter.get("/", (_req, res) => {
 // src/routes/cognitive.ts
 init_cognitive_proxy();
 init_logger();
-import { Router as Router5 } from "express";
-var cognitiveRouter = Router5();
+import { Router as Router6 } from "express";
+var cognitiveRouter = Router6();
 cognitiveRouter.post("/:action", async (req, res) => {
   const { action } = req.params;
   const body = req.body;
@@ -22856,12 +23807,12 @@ import cron from "node-cron";
 // src/graph-self-correct.ts
 init_mcp_caller();
 init_logger();
-import { v4 as uuid17 } from "uuid";
+import { v4 as uuid20 } from "uuid";
 async function graphRead(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid17(),
+    callId: uuid20(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -22872,7 +23823,7 @@ async function graphWrite(cypher, params, force = true) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {}, _force: force },
-    callId: uuid17(),
+    callId: uuid20(),
     timeoutMs: 15e3
   });
   return result.status === "success";
@@ -23323,430 +24274,18 @@ async function runSelfCorrect() {
   return report;
 }
 
-// src/failure-harvester.ts
-init_redis();
-init_mcp_caller();
-init_logger();
-init_sse();
-import { v4 as uuid18 } from "uuid";
-function categorizeFailure(error) {
-  const lower = error.toLowerCase();
-  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) return "timeout";
-  if (lower.includes("502") || lower.includes("bad gateway") || lower.includes("econnrefused")) return "502";
-  if (lower.includes("401") || lower.includes("403") || lower.includes("unauthorized") || lower.includes("forbidden")) return "auth";
-  if (lower.includes("validation") || lower.includes("invalid") || lower.includes("required")) return "validation";
-  if (lower.includes("mcp") || lower.includes("tool_not_found") || lower.includes("tool call")) return "mcp_error";
-  return "unknown";
-}
-async function harvestFailures(windowHours = 24) {
-  const redis2 = getRedis();
-  if (!redis2) {
-    logger.warn("Failure harvester: Redis not available");
-    return [];
-  }
-  const events = [];
-  const cutoff = new Date(Date.now() - windowHours * 36e5).toISOString();
-  try {
-    let cursor = "0";
-    do {
-      const [nextCursor, fields] = await redis2.hscan("orchestrator:chains", cursor, "COUNT", 200);
-      cursor = nextCursor;
-      for (let i = 0; i < fields.length; i += 2) {
-        const execId = fields[i];
-        const json = fields[i + 1];
-        try {
-          const exec = JSON.parse(json);
-          if (exec.status !== "failed") continue;
-          if (exec.started_at < cutoff) continue;
-          const failedSteps = exec.results?.filter((r) => r.status === "error") ?? [];
-          const errorMsg = exec.error ?? failedSteps.map((s) => String(s.output)).join("; ") ?? "unknown";
-          events.push({
-            $id: `failure-event:${uuid18()}`,
-            execution_id: execId,
-            chain_name: exec.name,
-            category: categorizeFailure(errorMsg),
-            error_message: errorMsg.slice(0, 500),
-            affected_tool: failedSteps[0]?.action ?? null,
-            affected_agent: failedSteps[0]?.agent_id ?? null,
-            timestamp: exec.started_at
-          });
-        } catch {
-        }
-      }
-    } while (cursor !== "0");
-    logger.info({ harvested: events.length, window_hours: windowHours }, "Failure harvester scan complete");
-  } catch (err) {
-    logger.error({ err: String(err) }, "Failure harvester scan failed");
-  }
-  return events;
-}
-async function persistToGraph(events) {
-  let persisted = 0;
-  for (const evt of events) {
-    try {
-      await callMcpTool({
-        toolName: "graph.write_cypher",
-        args: {
-          query: `
-            MERGE (f:FailureEvent {execution_id: $execution_id})
-            SET f.chain_name = $chain_name,
-                f.category = $category,
-                f.error_message = $error_message,
-                f.affected_tool = $affected_tool,
-                f.affected_agent = $affected_agent,
-                f.timestamp = datetime($timestamp),
-                f.harvested_at = datetime()
-          `,
-          params: {
-            execution_id: evt.execution_id,
-            chain_name: evt.chain_name,
-            category: evt.category,
-            error_message: evt.error_message,
-            affected_tool: evt.affected_tool ?? "",
-            affected_agent: evt.affected_agent ?? "",
-            timestamp: evt.timestamp
-          }
-        },
-        callId: uuid18(),
-        timeoutMs: 1e4
-      });
-      persisted++;
-    } catch (err) {
-      logger.warn({ err: String(err), execution_id: evt.execution_id }, "Failed to persist failure event");
-    }
-  }
-  if (persisted > 0) {
-    try {
-      await callMcpTool({
-        toolName: "graph.write_cypher",
-        args: {
-          query: `
-            MATCH (f:FailureEvent) WHERE f.affected_tool <> ''
-            MATCH (t:Tool {name: f.affected_tool})
-            MERGE (f)-[:AFFECTED_TOOL]->(t)
-          `,
-          params: {}
-        },
-        callId: uuid18(),
-        timeoutMs: 1e4
-      });
-      await callMcpTool({
-        toolName: "graph.write_cypher",
-        args: {
-          query: `
-            MATCH (f:FailureEvent) WHERE f.affected_agent <> ''
-            MATCH (a:Agent {id: f.affected_agent})
-            MERGE (f)-[:AFFECTED_AGENT]->(a)
-          `,
-          params: {}
-        },
-        callId: uuid18(),
-        timeoutMs: 1e4
-      });
-    } catch {
-    }
-  }
-  return persisted;
-}
-function buildFailureSummary(events, windowHours = 24) {
-  const byCategory = {
-    timeout: 0,
-    "502": 0,
-    auth: 0,
-    validation: 0,
-    mcp_error: 0,
-    unknown: 0
-  };
-  const toolCounts = /* @__PURE__ */ new Map();
-  const agentCounts = /* @__PURE__ */ new Map();
-  for (const evt of events) {
-    byCategory[evt.category]++;
-    if (evt.affected_tool) toolCounts.set(evt.affected_tool, (toolCounts.get(evt.affected_tool) ?? 0) + 1);
-    if (evt.affected_agent) agentCounts.set(evt.affected_agent, (agentCounts.get(evt.affected_agent) ?? 0) + 1);
-  }
-  const topTools = [...toolCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([tool, count]) => ({ tool, count }));
-  const topAgents = [...agentCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([agent, count]) => ({ agent, count }));
-  return {
-    $id: `failure-summary:${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}`,
-    total_failures: events.length,
-    by_category: byCategory,
-    top_tools: topTools,
-    top_agents: topAgents,
-    recent: events.slice(-20),
-    harvested_at: (/* @__PURE__ */ new Date()).toISOString(),
-    window_hours: windowHours
-  };
-}
-async function runFailureHarvest(windowHours = 24) {
-  const events = await harvestFailures(windowHours);
-  const persisted = await persistToGraph(events);
-  const summary = buildFailureSummary(events, windowHours);
-  const redis2 = getRedis();
-  if (redis2) {
-    await redis2.set("orchestrator:failure-summary", JSON.stringify(summary), "EX", 3600).catch(() => {
-    });
-  }
-  broadcastSSE("failure-harvest", summary);
-  logger.info({
-    total: events.length,
-    persisted,
-    categories: summary.by_category
-  }, "Failure harvest cycle complete");
-  return summary;
-}
-
-// src/competitive-crawler.ts
-init_redis();
-init_mcp_caller();
-init_llm_proxy();
-init_logger();
-init_sse();
-import { v4 as uuid19 } from "uuid";
-var COMPETITOR_TARGETS = [
-  {
-    name: "Palantir AIP",
-    slug: "palantir",
-    urls: [
-      "https://www.palantir.com/docs/foundry/api/",
-      "https://www.palantir.com/platforms/aip/"
-    ]
-  },
-  {
-    name: "Dust.tt",
-    slug: "dust",
-    urls: [
-      "https://docs.dust.tt/",
-      "https://dust.tt/changelog"
-    ]
-  },
-  {
-    name: "Glean",
-    slug: "glean",
-    urls: [
-      "https://developers.glean.com/docs/overview",
-      "https://www.glean.com/product"
-    ]
-  },
-  {
-    name: "LangGraph",
-    slug: "langgraph",
-    urls: [
-      "https://langchain-ai.github.io/langgraph/concepts/",
-      "https://langchain-ai.github.io/langgraph/how-tos/"
-    ]
-  },
-  {
-    name: "Copilot Studio",
-    slug: "copilot-studio",
-    urls: [
-      "https://learn.microsoft.com/en-us/microsoft-copilot-studio/fundamentals-what-is-copilot-studio"
-    ]
-  }
-];
-async function fetchPageText(url) {
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent": "WidgeTDC-Research/1.0 (competitive analysis; public docs only)",
-      "Accept": "text/html,application/json,text/plain"
-    },
-    signal: AbortSignal.timeout(15e3),
-    redirect: "follow"
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-  const contentType = res.headers.get("content-type") ?? "";
-  const raw = await res.text();
-  if (contentType.includes("html")) {
-    return raw.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "").replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "").replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, "").replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, "").replace(/<header[^>]*>[\s\S]*?<\/header>/gi, "").replace(/<[^>]+>/g, " ").replace(/\s{2,}/g, " ").replace(/&[a-z]+;/gi, " ").trim().slice(0, 15e3);
-  }
-  return raw.slice(0, 15e3);
-}
-var EXTRACTION_PROMPT = `You are a competitive intelligence analyst. Given web page content from a competitor, extract specific technical capabilities they offer.
-
-Rules:
-- List ONLY capabilities explicitly mentioned in the content
-- Each capability must be a specific, concrete feature (not marketing fluff)
-- Focus on: APIs, agent/orchestration features, AI/LLM capabilities, security, knowledge management, integrations
-- Return as a bulleted list, one capability per line, starting with "- "
-- Maximum 20 capabilities per page
-- If the page has no relevant technical content, return "NO_CAPABILITIES_FOUND"
-
-Competitor: {competitor}
-URL: {url}
-Page content:
-{content}`;
-async function extractCapabilities(target) {
-  const capabilities = [];
-  for (const url of target.urls) {
-    try {
-      logger.info({ competitor: target.name, url }, "Fetching competitor page");
-      const pageText = await fetchPageText(url);
-      if (pageText.length < 100) {
-        logger.warn({ competitor: target.name, url, length: pageText.length }, "Page too short \u2014 skipping");
-        continue;
-      }
-      const prompt = EXTRACTION_PROMPT.replace("{competitor}", target.name).replace("{url}", url).replace("{content}", pageText.slice(0, 12e3));
-      const llmResult = await chatLLM({
-        provider: "deepseek",
-        // cheap + fast for extraction
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.3,
-        max_tokens: 1500
-      });
-      if (!llmResult.content || llmResult.content.includes("NO_CAPABILITIES_FOUND")) {
-        logger.info({ competitor: target.name, url }, "No capabilities found on page");
-        continue;
-      }
-      const lines = llmResult.content.split("\n").filter((l) => l.trim().startsWith("-") || l.trim().startsWith("*"));
-      for (const line of lines.slice(0, 20)) {
-        const cap = line.replace(/^[\s\-\*]+/, "").trim();
-        if (cap.length > 10 && cap.length < 200) {
-          capabilities.push({
-            $id: `capability:${target.slug}:${uuid19().slice(0, 8)}`,
-            competitor: target.name,
-            capability: cap,
-            category: categorizeCapability(cap),
-            evidence_url: url,
-            extracted_at: (/* @__PURE__ */ new Date()).toISOString()
-          });
-        }
-      }
-      logger.info({ competitor: target.name, url, capabilities: lines.length }, "Extracted capabilities from page");
-    } catch (err) {
-      logger.warn({ competitor: target.name, url, err: String(err) }, "Capability extraction failed for URL");
-    }
-  }
-  return capabilities;
-}
-function categorizeCapability(cap) {
-  const lower = cap.toLowerCase();
-  if (lower.includes("api") || lower.includes("endpoint") || lower.includes("rest") || lower.includes("graphql")) return "api";
-  if (lower.includes("agent") || lower.includes("orchestrat") || lower.includes("workflow")) return "orchestration";
-  if (lower.includes("rag") || lower.includes("search") || lower.includes("retrieval") || lower.includes("knowledge")) return "knowledge";
-  if (lower.includes("security") || lower.includes("auth") || lower.includes("compliance") || lower.includes("rbac")) return "security";
-  if (lower.includes("llm") || lower.includes("model") || lower.includes("ai") || lower.includes("inference")) return "ai";
-  if (lower.includes("deploy") || lower.includes("scale") || lower.includes("monitor")) return "platform";
-  return "general";
-}
-async function persistCapabilities(capabilities) {
-  let persisted = 0;
-  for (const cap of capabilities) {
-    try {
-      await callMcpTool({
-        toolName: "graph.write_cypher",
-        args: {
-          query: `
-            MERGE (c:CompetitorCapability {competitor: $competitor, capability: $capability})
-            SET c.category = $category,
-                c.evidence_url = $evidence_url,
-                c.extracted_at = datetime($extracted_at),
-                c.updated_at = datetime()
-            MERGE (comp:Competitor {name: $competitor})
-            MERGE (comp)-[:HAS_CAPABILITY]->(c)
-          `,
-          params: {
-            competitor: cap.competitor,
-            capability: cap.capability,
-            category: cap.category,
-            evidence_url: cap.evidence_url,
-            extracted_at: cap.extracted_at
-          }
-        },
-        callId: uuid19(),
-        timeoutMs: 1e4
-      });
-      persisted++;
-    } catch (err) {
-      logger.warn({ err: String(err), competitor: cap.competitor }, "Failed to persist capability");
-    }
-  }
-  return persisted;
-}
-async function analyzeGaps(capabilities) {
-  const byCompetitor = {};
-  const capMap = /* @__PURE__ */ new Map();
-  for (const cap of capabilities) {
-    byCompetitor[cap.competitor] = (byCompetitor[cap.competitor] ?? 0) + 1;
-    const existing = capMap.get(cap.capability) ?? [];
-    existing.push(cap.competitor);
-    capMap.set(cap.capability, existing);
-  }
-  let widgetdcTools = [];
-  try {
-    const result = await callMcpTool({
-      toolName: "graph.read_cypher",
-      args: { query: "MATCH (t:Tool) RETURN t.name AS name LIMIT 200" },
-      callId: uuid19(),
-      timeoutMs: 1e4
-    });
-    if (result.status === "success") {
-      const data = result.result;
-      widgetdcTools = (data?.results ?? []).map((r) => r.name.toLowerCase());
-    }
-  } catch {
-  }
-  const gaps = [];
-  for (const [capability, competitors] of capMap.entries()) {
-    const hasIt = widgetdcTools.some(
-      (t) => capability.toLowerCase().includes(t) || t.includes(capability.toLowerCase().slice(0, 15))
-    );
-    if (!hasIt && competitors.length >= 2) {
-      gaps.push({
-        capability,
-        competitors_with: competitors,
-        widgetdc_has: false
-      });
-    }
-  }
-  const strengths = [
-    "Triple-Protocol ABI (REST + MCP + OpenAPI)",
-    "Mercury Folding (context compression)",
-    "Neo4j Knowledge Graph with 17 domains",
-    "Self-correcting graph agent",
-    "Multi-agent chain engine (5 modes)"
-  ];
-  return {
-    $id: `gap-report:${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}`,
-    total_capabilities_found: capabilities.length,
-    by_competitor: byCompetitor,
-    gaps: gaps.slice(0, 30),
-    strengths,
-    generated_at: (/* @__PURE__ */ new Date()).toISOString()
-  };
-}
-async function runCompetitiveCrawl() {
-  logger.info("Starting competitive phagocytosis crawl");
-  const allCapabilities = [];
-  for (const target of COMPETITOR_TARGETS) {
-    const caps = await extractCapabilities(target);
-    allCapabilities.push(...caps);
-    logger.info({ competitor: target.name, capabilities: caps.length }, "Extracted capabilities");
-  }
-  const persisted = await persistCapabilities(allCapabilities);
-  const report = await analyzeGaps(allCapabilities);
-  const redis2 = getRedis();
-  if (redis2 && allCapabilities.length > 0) {
-    await redis2.set("orchestrator:competitive-report", JSON.stringify(report), "EX", 604800).catch(() => {
-    });
-  } else if (redis2 && allCapabilities.length === 0) {
-    logger.warn("Competitive crawl returned zero capabilities \u2014 not caching empty report");
-  }
-  broadcastSSE("competitive-report", report);
-  logger.info({
-    total_capabilities: allCapabilities.length,
-    persisted,
-    gaps: report.gaps.length
-  }, "Competitive phagocytosis crawl complete");
-  return report;
-}
+// src/cron-scheduler.ts
+init_failure_harvester();
+init_competitive_crawler();
 
 // src/routes/adoption.ts
 init_redis();
 init_logger();
 init_mcp_caller();
-import { Router as Router6 } from "express";
-import { v4 as uuid20 } from "uuid";
-var adoptionRouter = Router6();
-var REDIS_KEY3 = "orchestrator:adoption-metrics";
+import { Router as Router7 } from "express";
+import { v4 as uuid21 } from "uuid";
+var adoptionRouter = Router7();
+var REDIS_KEY4 = "orchestrator:adoption-metrics";
 var REDIS_TRENDS_KEY = "orchestrator:adoption-trends";
 var DEFAULT_METRICS = {
   features_done: 14,
@@ -23776,7 +24315,7 @@ adoptionRouter.get("/metrics", async (_req, res) => {
   const redis2 = getRedis();
   if (redis2) {
     try {
-      const cached = await redis2.get(REDIS_KEY3);
+      const cached = await redis2.get(REDIS_KEY4);
       if (cached) {
         res.json(JSON.parse(cached));
         return;
@@ -23791,7 +24330,7 @@ adoptionRouter.get("/metrics", async (_req, res) => {
   };
   if (redis2) {
     try {
-      await redis2.set(REDIS_KEY3, JSON.stringify(metrics2));
+      await redis2.set(REDIS_KEY4, JSON.stringify(metrics2));
     } catch (err) {
       logger.warn({ err: String(err) }, "Redis write failed for adoption metrics");
     }
@@ -23804,7 +24343,7 @@ adoptionRouter.put("/metrics", async (req, res) => {
   let current = { ...DEFAULT_METRICS, generated_at: (/* @__PURE__ */ new Date()).toISOString() };
   if (redis2) {
     try {
-      const cached = await redis2.get(REDIS_KEY3);
+      const cached = await redis2.get(REDIS_KEY4);
       if (cached) current = JSON.parse(cached);
     } catch (err) {
       logger.warn({ err: String(err) }, "Redis read failed during adoption metrics update");
@@ -23822,7 +24361,7 @@ adoptionRouter.put("/metrics", async (req, res) => {
   current.generated_at = (/* @__PURE__ */ new Date()).toISOString();
   if (redis2) {
     try {
-      await redis2.set(REDIS_KEY3, JSON.stringify(current));
+      await redis2.set(REDIS_KEY4, JSON.stringify(current));
     } catch (err) {
       logger.warn({ err: String(err) }, "Redis write failed for adoption metrics update");
       res.status(500).json({ success: false, error: "Failed to persist metrics" });
@@ -23841,7 +24380,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (c:Conversation) WHERE c.createdAt > datetime() - duration('P1D') RETURN count(c) AS count"
       },
-      callId: uuid20(),
+      callId: uuid21(),
       timeoutMs: 1e4
     }),
     // Count artifacts from last 24h
@@ -23850,7 +24389,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (a:AnalysisArtifact) WHERE a.createdAt > datetime() - duration('P1D') RETURN count(a) AS count"
       },
-      callId: uuid20(),
+      callId: uuid21(),
       timeoutMs: 1e4
     }),
     // Count tool calls from audit trail
@@ -23859,7 +24398,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (e:AuditEvent) WHERE e.timestamp > datetime() - duration('P1D') AND e.action = 'tool_call' RETURN count(e) AS count"
       },
-      callId: uuid20(),
+      callId: uuid21(),
       timeoutMs: 1e4
     })
   ]);
@@ -23873,7 +24412,7 @@ async function captureAdoptionSnapshot() {
   let current = { ...DEFAULT_METRICS, generated_at: (/* @__PURE__ */ new Date()).toISOString() };
   if (redis2) {
     try {
-      const cached = await redis2.get(REDIS_KEY3);
+      const cached = await redis2.get(REDIS_KEY4);
       if (cached) current = JSON.parse(cached);
     } catch {
     }
@@ -23964,7 +24503,7 @@ SET m.conversations_24h = $conversations,
           featuresPct: snapshot.features_pct
         }
       },
-      callId: uuid20(),
+      callId: uuid21(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -24005,252 +24544,8 @@ adoptionRouter.get("/trends", async (req, res) => {
   }
 });
 
-// src/routes/loose-ends.ts
-init_redis();
-init_logger();
-init_mcp_caller();
-init_sse();
-import { Router as Router7 } from "express";
-import { v4 as uuid21 } from "uuid";
-var looseEndsRouter = Router7();
-var REDIS_KEY4 = "orchestrator:loose-ends:latest";
-var REDIS_HISTORY = "orchestrator:loose-ends:history";
-var DETECTION_QUERIES = [
-  {
-    name: "Orphan Blocks (no assembly)",
-    category: "orphan_block",
-    severity: "warning",
-    cypher: `MATCH (b) WHERE (b:Block OR b:ArchitectureBlock OR b:LegoBlock)
-AND NOT (b)<-[:COMPOSED_OF]-(:Assembly)
-RETURN b.id AS id, b.name AS name, b.domain AS domain, labels(b)[0] AS type
-LIMIT 25`,
-    buildFinding: (records) => records.map((r) => ({
-      id: `orphan-${r.id ?? uuid21().slice(0, 8)}`,
-      severity: "warning",
-      category: "orphan_block",
-      title: `Orphan block: ${r.name ?? r.id}`,
-      description: `Block "${r.name}" (${r.type}, domain: ${r.domain}) is not part of any assembly`,
-      node_ids: [String(r.id)],
-      suggested_action: "Include in an assembly via POST /api/assembly/compose or archive if obsolete"
-    }))
-  },
-  {
-    name: "Assemblies without decisions",
-    category: "dangling_assembly",
-    severity: "warning",
-    cypher: `MATCH (a:Assembly) WHERE a.status = 'accepted'
-AND NOT (a)<-[:BASED_ON]-(:Decision)
-RETURN a.id AS id, a.name AS name, a.composite AS score
-LIMIT 15`,
-    buildFinding: (records) => records.map((r) => ({
-      id: `dangling-asm-${r.id ?? uuid21().slice(0, 8)}`,
-      severity: "warning",
-      category: "dangling_assembly",
-      title: `Accepted assembly without decision: ${r.name ?? r.id}`,
-      description: `Assembly "${r.name}" was accepted (score: ${r.score}) but no Decision node references it`,
-      node_ids: [String(r.id)],
-      suggested_action: "Create a Decision via POST /api/decisions/certify or reject the assembly"
-    }))
-  },
-  {
-    name: "Decisions without lineage",
-    category: "missing_lineage",
-    severity: "critical",
-    cypher: `MATCH (d:Decision) WHERE NOT (d)-[:BASED_ON]->(:Assembly)
-AND NOT (d)-[:DERIVES_FROM]->()
-RETURN d.id AS id, d.title AS title, d.certified_at AS certified_at
-LIMIT 10`,
-    buildFinding: (records) => records.map((r) => ({
-      id: `no-lineage-${r.id ?? uuid21().slice(0, 8)}`,
-      severity: "critical",
-      category: "missing_lineage",
-      title: `Decision without lineage: ${r.title ?? r.id}`,
-      description: `Decision "${r.title}" has no traceable lineage to assemblies or source signals`,
-      node_ids: [String(r.id)],
-      suggested_action: "Link decision to source assembly or re-certify with proper lineage"
-    }))
-  },
-  {
-    name: "Disconnected high-value nodes",
-    category: "disconnected_node",
-    severity: "info",
-    cypher: `MATCH (n) WHERE (n:StrategicInsight OR n:Pattern OR n:Signal)
-AND NOT (n)-[]-()
-RETURN n.id AS id, labels(n)[0] AS type, n.domain AS domain, n.insight AS title
-LIMIT 20`,
-    buildFinding: (records) => records.map((r) => ({
-      id: `disconnected-${r.id ?? uuid21().slice(0, 8)}`,
-      severity: "info",
-      category: "disconnected_node",
-      title: `Disconnected ${r.type}: ${(r.title ?? r.id ?? "").toString().slice(0, 60)}`,
-      description: `${r.type} node in domain "${r.domain}" has no relationships \u2014 may be a missed connection`,
-      node_ids: [String(r.id)],
-      suggested_action: "Review and connect to related blocks or mark as processed"
-    }))
-  },
-  {
-    name: "Unresolved decisions (stale drafts)",
-    category: "unresolved_decision",
-    severity: "warning",
-    cypher: `MATCH (d:Decision) WHERE d.status = 'draft'
-AND d.created_at < datetime() - duration('P7D')
-RETURN d.id AS id, d.title AS title, d.created_at AS created_at
-LIMIT 10`,
-    buildFinding: (records) => records.map((r) => ({
-      id: `stale-decision-${r.id ?? uuid21().slice(0, 8)}`,
-      severity: "warning",
-      category: "unresolved_decision",
-      title: `Stale draft decision: ${r.title ?? r.id}`,
-      description: `Decision "${r.title}" has been in draft for >7 days (created: ${r.created_at})`,
-      node_ids: [String(r.id)],
-      suggested_action: "Certify, reject, or archive the stale decision"
-    }))
-  }
-];
-async function runLooseEndScan() {
-  const scanId = uuid21();
-  const t0 = Date.now();
-  const findings = [];
-  logger.info({ scan_id: scanId }, "Loose-end scan started");
-  const queryResults = await Promise.allSettled(
-    DETECTION_QUERIES.map(async (dq) => {
-      try {
-        const result = await callMcpTool({
-          toolName: "graph.read_cypher",
-          args: { query: dq.cypher },
-          callId: uuid21(),
-          timeoutMs: 15e3
-        });
-        if (result.status !== "success") return [];
-        const records = Array.isArray(result.result) ? result.result : Array.isArray(result.result?.records) ? result.result.records : [];
-        return dq.buildFinding(records);
-      } catch (err) {
-        logger.warn({ query: dq.name, err: String(err) }, "Loose-end detection query failed");
-        return [];
-      }
-    })
-  );
-  for (const qr of queryResults) {
-    if (qr.status === "fulfilled") {
-      findings.push(...qr.value);
-    }
-  }
-  const summary = {
-    critical: findings.filter((f) => f.severity === "critical").length,
-    warning: findings.filter((f) => f.severity === "warning").length,
-    info: findings.filter((f) => f.severity === "info").length,
-    total: findings.length
-  };
-  const scanResult = {
-    scan_id: scanId,
-    scanned_at: (/* @__PURE__ */ new Date()).toISOString(),
-    duration_ms: Date.now() - t0,
-    findings,
-    summary,
-    auto_fixed: 0
-  };
-  const redis2 = getRedis();
-  if (redis2) {
-    try {
-      await redis2.set(REDIS_KEY4, JSON.stringify(scanResult), "EX", 86400);
-      await redis2.zadd(REDIS_HISTORY, Date.now(), JSON.stringify(scanResult));
-      const count = await redis2.zcard(REDIS_HISTORY);
-      if (count > 30) {
-        await redis2.zremrangebyrank(REDIS_HISTORY, 0, count - 31);
-      }
-    } catch (err) {
-      logger.warn({ err: String(err) }, "Failed to persist loose-end scan");
-    }
-  }
-  try {
-    await callMcpTool({
-      toolName: "graph.write_cypher",
-      args: {
-        query: `MERGE (s:LooseEndScan {id: $id})
-SET s.scanned_at = datetime(), s.duration_ms = $duration,
-    s.critical = $critical, s.warning = $warning, s.info = $info,
-    s.total = $total, s.auto_fixed = 0`,
-        params: {
-          id: scanId,
-          duration: scanResult.duration_ms,
-          critical: summary.critical,
-          warning: summary.warning,
-          info: summary.info,
-          total: summary.total
-        }
-      },
-      callId: uuid21(),
-      timeoutMs: 1e4
-    });
-  } catch {
-  }
-  broadcastSSE("loose-end-scan", {
-    scan_id: scanId,
-    summary,
-    duration_ms: scanResult.duration_ms
-  });
-  logger.info({
-    scan_id: scanId,
-    ...summary,
-    duration_ms: scanResult.duration_ms
-  }, "Loose-end scan complete");
-  return scanResult;
-}
-looseEndsRouter.post("/scan", async (_req, res) => {
-  try {
-    const result = await runLooseEndScan();
-    res.json({ success: true, data: result });
-  } catch (err) {
-    logger.error({ err: String(err) }, "Loose-end scan failed");
-    res.status(500).json({
-      success: false,
-      error: { code: "SCAN_ERROR", message: String(err), status_code: 500 }
-    });
-  }
-});
-looseEndsRouter.get("/", async (_req, res) => {
-  const redis2 = getRedis();
-  if (!redis2) {
-    res.json({ success: true, data: null, message: "No scan results available" });
-    return;
-  }
-  try {
-    const raw = await redis2.get(REDIS_KEY4);
-    if (!raw) {
-      res.json({ success: true, data: null, message: "No scan has been run yet" });
-      return;
-    }
-    res.json({ success: true, data: JSON.parse(raw) });
-  } catch (err) {
-    res.status(500).json({ success: false, error: String(err) });
-  }
-});
-looseEndsRouter.get("/history", async (req, res) => {
-  const redis2 = getRedis();
-  const limit = Math.min(parseInt(String(req.query.limit ?? "10")), 30);
-  if (!redis2) {
-    res.json({ success: true, data: { scans: [], total: 0 } });
-    return;
-  }
-  try {
-    const raw = await redis2.zrevrange(REDIS_HISTORY, 0, limit - 1);
-    const scans = raw.map((r) => {
-      const parsed = JSON.parse(r);
-      return {
-        scan_id: parsed.scan_id,
-        scanned_at: parsed.scanned_at,
-        duration_ms: parsed.duration_ms,
-        summary: parsed.summary,
-        auto_fixed: parsed.auto_fixed
-      };
-    });
-    res.json({ success: true, data: { scans, total: scans.length } });
-  } catch (err) {
-    res.status(500).json({ success: false, error: String(err) });
-  }
-});
-
 // src/cron-scheduler.ts
+init_loose_ends();
 init_slack();
 init_graph_hygiene_cron();
 init_hierarchical_intelligence();
@@ -27612,6 +27907,9 @@ assemblyRouter.put("/:id", async (req, res) => {
   res.json({ success: true, data: assembly });
 });
 
+// src/index.ts
+init_loose_ends();
+
 // src/routes/decisions.ts
 init_redis();
 init_logger();
@@ -29912,9 +30210,10 @@ function seedAgents() {
 init_chat_store();
 
 // src/routes/failures.ts
-import { Router as Router26 } from "express";
+init_failure_harvester();
 init_redis();
 init_logger();
+import { Router as Router26 } from "express";
 var failuresRouter = Router26();
 failuresRouter.get("/summary", async (_req, res) => {
   try {
@@ -29954,9 +30253,10 @@ failuresRouter.post("/harvest", async (req, res) => {
 });
 
 // src/routes/competitive.ts
-import { Router as Router27 } from "express";
+init_competitive_crawler();
 init_redis();
 init_logger();
+import { Router as Router27 } from "express";
 var competitiveRouter = Router27();
 var crawlInProgress = false;
 var lastCrawlAt = 0;
@@ -31441,81 +31741,9 @@ evolutionRouter.get("/history", async (req, res) => {
 });
 
 // src/routes/memory.ts
+init_working_memory();
+init_logger();
 import { Router as Router37 } from "express";
-
-// src/working-memory.ts
-init_redis();
-init_logger();
-var PREFIX = "wm:";
-var DEFAULT_TTL = 86400;
-async function storeMemory(agentId, key, value, ttlSeconds = DEFAULT_TTL) {
-  const redis2 = getRedis();
-  const redisKey = `${PREFIX}${agentId}:${key}`;
-  const entry = {
-    key,
-    value,
-    agent_id: agentId,
-    created_at: (/* @__PURE__ */ new Date()).toISOString(),
-    ttl_seconds: ttlSeconds
-  };
-  if (redis2) {
-    try {
-      await redis2.set(redisKey, JSON.stringify(entry), "EX", ttlSeconds);
-    } catch (err) {
-      logger.warn({ agentId, key, err: String(err) }, "Working memory store failed");
-    }
-  }
-  return entry;
-}
-async function retrieveMemory(agentId, key) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
-  try {
-    const raw = await redis2.get(`${PREFIX}${agentId}:${key}`);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-async function listMemories(agentId) {
-  const redis2 = getRedis();
-  if (!redis2) return [];
-  try {
-    const keys = await redis2.keys(`${PREFIX}${agentId}:*`);
-    const entries = [];
-    for (const k of keys.slice(0, 100)) {
-      const raw = await redis2.get(k);
-      if (raw) entries.push(JSON.parse(raw));
-    }
-    return entries.sort((a, b) => b.created_at.localeCompare(a.created_at));
-  } catch {
-    return [];
-  }
-}
-async function deleteMemory(agentId, key) {
-  const redis2 = getRedis();
-  if (!redis2) return false;
-  try {
-    const result = await redis2.del(`${PREFIX}${agentId}:${key}`);
-    return result > 0;
-  } catch {
-    return false;
-  }
-}
-async function clearAgentMemory(agentId) {
-  const redis2 = getRedis();
-  if (!redis2) return 0;
-  try {
-    const keys = await redis2.keys(`${PREFIX}${agentId}:*`);
-    if (keys.length === 0) return 0;
-    return await redis2.del(...keys);
-  } catch {
-    return 0;
-  }
-}
-
-// src/routes/memory.ts
-init_logger();
 var memoryRouter = Router37();
 memoryRouter.post("/store", async (req, res) => {
   const body = req.body;
