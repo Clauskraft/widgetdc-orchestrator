@@ -120,14 +120,14 @@ var init_config = __esm({
 // src/logger.ts
 import pino from "pino";
 function childLogger(correlationId) {
-  return logger.child({ correlation_id: correlationId });
+  return logger2.child({ correlation_id: correlationId });
 }
-var logger;
+var logger2;
 var init_logger = __esm({
   "src/logger.ts"() {
     "use strict";
     init_config();
-    logger = pino({
+    logger2 = pino({
       level: config.nodeEnv === "production" ? "info" : "debug",
       ...config.nodeEnv !== "production" && {
         transport: {
@@ -161,7 +161,7 @@ data: ${JSON.stringify({ id: clientId })}
     clearInterval(keepAlive);
     const idx = clients.indexOf(client);
     if (idx >= 0) clients.splice(idx, 1);
-    logger.debug({ clientId }, "SSE client disconnected");
+    logger2.debug({ clientId }, "SSE client disconnected");
   });
 }
 function broadcastSSE(event, data) {
@@ -199,7 +199,7 @@ function isRedisEnabled() {
 }
 async function initRedis() {
   if (!redisUrl) {
-    logger.info("REDIS_URL not set \u2014 agent registry will be in-memory only (volatile)");
+    logger2.info("REDIS_URL not set \u2014 agent registry will be in-memory only (volatile)");
     return;
   }
   try {
@@ -212,9 +212,9 @@ async function initRedis() {
       lazyConnect: true
     });
     await redis.connect();
-    logger.info("Redis connected \u2014 agent registry persistence enabled");
+    logger2.info("Redis connected \u2014 agent registry persistence enabled");
   } catch (err) {
-    logger.warn({ err: String(err) }, "Redis connection failed \u2014 falling back to in-memory only");
+    logger2.warn({ err: String(err) }, "Redis connection failed \u2014 falling back to in-memory only");
     redis = null;
   }
 }
@@ -254,7 +254,7 @@ async function storeMessage(msg) {
       }
     }
   } catch (err) {
-    logger.warn({ err: String(err) }, "Chat store Redis write failed");
+    logger2.warn({ err: String(err) }, "Chat store Redis write failed");
   }
 }
 async function getHistory(limit = 100, offset = 0, target) {
@@ -268,7 +268,7 @@ async function getHistory(limit = 100, offset = 0, target) {
       }
     }
   } catch (err) {
-    logger.warn({ err: String(err) }, "Chat store Redis read failed");
+    logger2.warn({ err: String(err) }, "Chat store Redis read failed");
   }
   if (messages.length === 0) {
     messages = memoryMessages.slice(offset, offset + limit * 2);
@@ -325,11 +325,11 @@ async function hydrateMessages() {
       if (redis2) {
         const raw = await redis2.lrange(REDIS_KEY, 0, MAX_MESSAGES - 1);
         memoryMessages = raw.map((r) => JSON.parse(r));
-        logger.info({ count: memoryMessages.length }, "Chat history hydrated from Redis");
+        logger2.info({ count: memoryMessages.length }, "Chat history hydrated from Redis");
       }
     }
   } catch (err) {
-    logger.warn({ err: String(err) }, "Chat history hydration failed");
+    logger2.warn({ err: String(err) }, "Chat history hydration failed");
   }
 }
 function getConversationSummaries() {
@@ -379,14 +379,14 @@ function initWebSocket(server2) {
     if (config.orchestratorApiKey) {
       const token = url.searchParams.get("api_key") ?? (req.headers["authorization"]?.startsWith("Bearer ") ? req.headers["authorization"].slice(7) : "") ?? "";
       if (token !== config.orchestratorApiKey) {
-        logger.warn({ agent_id: agentId }, "WebSocket auth rejected");
+        logger2.warn({ agent_id: agentId }, "WebSocket auth rejected");
         ws.close(4401, "Unauthorized");
         return;
       }
     }
     const conn = { ws, agentId, connectedAt: /* @__PURE__ */ new Date(), lastPingAt: /* @__PURE__ */ new Date() };
     connections.set(agentId, conn);
-    logger.info({ agent_id: agentId, total_connections: connections.size }, "WebSocket connected");
+    logger2.info({ agent_id: agentId, total_connections: connections.size }, "WebSocket connected");
     broadcastMessage({
       from: "System",
       to: "All",
@@ -400,12 +400,12 @@ function initWebSocket(server2) {
         const msg = JSON.parse(data.toString());
         handleIncomingMessage(agentId, msg);
       } catch (err) {
-        logger.warn({ agent_id: agentId, err: String(err) }, "Invalid WS message");
+        logger2.warn({ agent_id: agentId, err: String(err) }, "Invalid WS message");
       }
     });
     ws.on("close", () => {
       connections.delete(agentId);
-      logger.info({ agent_id: agentId, total_connections: connections.size }, "WebSocket disconnected");
+      logger2.info({ agent_id: agentId, total_connections: connections.size }, "WebSocket disconnected");
       broadcastMessage({
         from: "System",
         to: "All",
@@ -416,7 +416,7 @@ function initWebSocket(server2) {
       });
     });
     ws.on("error", (err) => {
-      logger.error({ agent_id: agentId, err: err.message }, "WebSocket error");
+      logger2.error({ agent_id: agentId, err: err.message }, "WebSocket error");
     });
   });
   setInterval(() => {
@@ -426,15 +426,15 @@ function initWebSocket(server2) {
         conn.ws.ping();
         conn.lastPingAt = /* @__PURE__ */ new Date();
       } else if (now - conn.lastPingAt.getTime() > config.wsHeartbeatMs * 3) {
-        logger.warn({ agent_id: agentId }, "Stale WS connection removed");
+        logger2.warn({ agent_id: agentId }, "Stale WS connection removed");
         connections.delete(agentId);
       }
     }
   }, config.wsHeartbeatMs);
-  logger.info({ path: "/ws" }, "WebSocket server ready");
+  logger2.info({ path: "/ws" }, "WebSocket server ready");
 }
 function handleIncomingMessage(fromAgentId, msg) {
-  logger.debug({ from: msg.from, to: msg.to, type: msg.type }, "WS message received");
+  logger2.debug({ from: msg.from, to: msg.to, type: msg.type }, "WS message received");
   if (msg.to === "All") {
     broadcastMessage(msg);
   } else {
@@ -480,7 +480,7 @@ function handleIncomingMessage(fromAgentId, msg) {
           }
         }));
       }
-      logger.info({ from: msg.from, to: msg.to }, "DM stored for offline agent (not broadcast)");
+      logger2.info({ from: msg.from, to: msg.to }, "DM stored for offline agent (not broadcast)");
     }
   }
 }
@@ -509,7 +509,7 @@ function broadcastMessage(msg) {
       sent++;
     }
   }
-  logger.debug({ to: msg.to, type: msg.type, recipients: sent }, "Message broadcast");
+  logger2.debug({ to: msg.to, type: msg.type, recipients: sent }, "Message broadcast");
 }
 function broadcastToolResult(callId, result, agentId) {
   broadcastMessage({
@@ -556,7 +556,7 @@ function persistToRedis(agentId, entry) {
     lastSeenAt: entry.lastSeenAt.toISOString()
   });
   redis2.hset(REDIS_KEY2, agentId, serialised).catch((err) => {
-    logger.warn({ err: String(err), agent_id: agentId }, "Redis persist failed");
+    logger2.warn({ err: String(err), agent_id: agentId }, "Redis persist failed");
   });
 }
 function removeFromRedis(agentId) {
@@ -593,14 +593,14 @@ var init_agent_registry = __esm({
               });
               count++;
             } catch {
-              logger.warn({ agent_id: agentId }, "Skipped corrupt Redis entry");
+              logger2.warn({ agent_id: agentId }, "Skipped corrupt Redis entry");
             }
           }
           if (count > 0) {
-            logger.info({ count }, "Hydrated agent registry from Redis");
+            logger2.info({ count }, "Hydrated agent registry from Redis");
           }
         } catch (err) {
-          logger.warn({ err: String(err) }, "Redis hydration failed \u2014 starting with empty registry");
+          logger2.warn({ err: String(err) }, "Redis hydration failed \u2014 starting with empty registry");
         }
       },
       register(handshake) {
@@ -613,7 +613,7 @@ var init_agent_registry = __esm({
         };
         registry.set(handshake.agent_id, entry);
         persistToRedis(handshake.agent_id, entry);
-        logger.info({ agent_id: handshake.agent_id, status: handshake.status }, "Agent registered");
+        logger2.info({ agent_id: handshake.agent_id, status: handshake.status }, "Agent registered");
       },
       heartbeat(agentId) {
         const entry = registry.get(agentId);
@@ -649,7 +649,7 @@ var init_agent_registry = __esm({
           };
           registry.set(agentId, autoEntry);
           persistToRedis(agentId, autoEntry);
-          logger.info({ agent_id: agentId }, "Auto-discovered and registered new agent");
+          logger2.info({ agent_id: agentId }, "Auto-discovered and registered new agent");
           entry = autoEntry;
         }
         if (entry.handshake.status === "offline") return { allowed: false, reason: `Agent '${agentId}' is offline.` };
@@ -718,13 +718,13 @@ async function postToSlack(payload) {
     if (!res.ok) {
       if (res.status === 404) {
         _slackToolAvailable = false;
-        logger.warn("slack.channel.post not found on backend \u2014 Slack notifications disabled until restart. Register slack as a deferred namespace on the backend to fix.");
+        logger2.warn("slack.channel.post not found on backend \u2014 Slack notifications disabled until restart. Register slack as a deferred namespace on the backend to fix.");
       } else {
-        logger.warn({ status: res.status }, "Slack MCP post failed");
+        logger2.warn({ status: res.status }, "Slack MCP post failed");
       }
     }
   } catch (err) {
-    logger.warn({ err: String(err) }, "Slack MCP post error");
+    logger2.warn({ err: String(err) }, "Slack MCP post error");
   }
 }
 function notifyAgentRegistered(agentId, displayName, namespaces) {
@@ -806,7 +806,7 @@ function validateBeforeMerge(query, params, force) {
   metrics.writes_total++;
   if (force) {
     metrics.writes_passed++;
-    logger.warn("Write-path validation bypassed (force=true)");
+    logger2.warn("Write-path validation bypassed (force=true)");
     return { allowed: true };
   }
   if (query.length > 0) {
@@ -827,7 +827,7 @@ function validateBeforeMerge(query, params, force) {
       if (pattern.test(trimmed)) {
         metrics.writes_rejected++;
         const reason = `Cypher query appears truncated (matched: ${pattern.source}): "${trimmed.slice(-40)}"`;
-        logger.warn({ preview: trimmed.slice(-60) }, `Write REJECTED: ${reason}`);
+        logger2.warn({ preview: trimmed.slice(-60) }, `Write REJECTED: ${reason}`);
         return { allowed: false, reason };
       }
     }
@@ -837,7 +837,7 @@ function validateBeforeMerge(query, params, force) {
       if (isPolluted(value)) {
         metrics.writes_rejected++;
         const reason = `Content in param "${key}" matches LLM prompt pollution patterns`;
-        logger.warn({ param: key, preview: value.slice(0, 80) }, `Write REJECTED: ${reason}`);
+        logger2.warn({ param: key, preview: value.slice(0, 80) }, `Write REJECTED: ${reason}`);
         return { allowed: false, reason };
       }
     }
@@ -849,7 +849,7 @@ function validateBeforeMerge(query, params, force) {
     if (typeof domainName === "string" && !CANONICAL_DOMAINS.has(domainName)) {
       metrics.writes_rejected++;
       const reason = `Domain '${domainName}' not in canonical allowlist (${CANONICAL_DOMAINS.size} domains)`;
-      logger.warn({ domain: domainName }, `Write REJECTED: ${reason}`);
+      logger2.warn({ domain: domainName }, `Write REJECTED: ${reason}`);
       return { allowed: false, reason };
     }
   }
@@ -858,7 +858,7 @@ function validateBeforeMerge(query, params, force) {
       if (!VALID_EMBEDDING_DIMS.has(value.length)) {
         metrics.writes_rejected++;
         const reason = `Embedding dimension ${value.length} in param "${key}" does not match expected (384 or 1536)`;
-        logger.warn({ param: key, dim: value.length }, `Write REJECTED: ${reason}`);
+        logger2.warn({ param: key, dim: value.length }, `Write REJECTED: ${reason}`);
         return { allowed: false, reason };
       }
     }
@@ -874,7 +874,7 @@ function validateBeforeMerge(query, params, force) {
       if (!isInfraNode) {
         metrics.writes_rejected++;
         const reason = "New nodes must have a non-empty title, name, or filename";
-        logger.warn({ cypher: query.slice(0, 120) }, `Write REJECTED: ${reason}`);
+        logger2.warn({ cypher: query.slice(0, 120) }, `Write REJECTED: ${reason}`);
         return { allowed: false, reason };
       }
     }
@@ -928,11 +928,46 @@ var init_write_gate = __esm({
 // src/mcp-caller.ts
 var mcp_caller_exports = {};
 __export(mcp_caller_exports, {
-  callMcpTool: () => callMcpTool
+  callMcpTool: () => callMcpTool,
+  getBackendCircuitState: () => getBackendCircuitState
 });
+function backendRecordSuccess() {
+  if (_backendFailures > 0) {
+    logger.info({ previous_failures: _backendFailures }, "Backend circuit breaker CLOSED \u2014 backend recovered");
+  }
+  _backendFailures = 0;
+  _backendCircuitOpenUntil = 0;
+}
+function backendRecordFailure() {
+  _backendFailures++;
+  if (_backendFailures >= BACKEND_CB_THRESHOLD && _backendCircuitOpenUntil === 0) {
+    _backendCircuitOpenUntil = Date.now() + BACKEND_CB_COOLDOWN_MS;
+    logger.warn(
+      { failures: _backendFailures, cooldown_s: BACKEND_CB_COOLDOWN_MS / 1e3 },
+      "Backend circuit breaker OPEN \u2014 failing fast for all MCP calls"
+    );
+  }
+}
+function isBackendCircuitOpen() {
+  if (_backendCircuitOpenUntil === 0) return false;
+  if (Date.now() > _backendCircuitOpenUntil) {
+    _backendCircuitOpenUntil = 0;
+    logger.info("Backend circuit breaker HALF-OPEN \u2014 allowing probe call");
+    return false;
+  }
+  return true;
+}
+function getBackendCircuitState() {
+  return {
+    failures: _backendFailures,
+    open: _backendCircuitOpenUntil > 0,
+    cooldown_remaining_ms: Math.max(0, _backendCircuitOpenUntil - Date.now())
+  };
+}
 async function ensureAuditLessonsRead() {
   const now = Date.now();
   if (_auditLessonsCache && now - _auditLessonsCache.fetchedAt < AUDIT_LESSONS_TTL_MS) return;
+  if (isBackendCircuitOpen()) return;
   try {
     const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
       method: "POST",
@@ -956,6 +991,27 @@ async function callMcpTool(opts) {
     const log = childLogger(opts.traceId ?? opts.callId);
     const t0 = Date.now();
     const timeoutMs = opts.timeoutMs ?? config.mcpTimeoutMs;
+    if (isBackendCircuitOpen()) {
+      const now = Date.now();
+      if (now - _backendCircuitLoggedAt > 3e4) {
+        _backendCircuitLoggedAt = now;
+        log.warn(
+          { tool: opts.toolName, cooldown_remaining_ms: _backendCircuitOpenUntil - now },
+          "Backend circuit breaker OPEN \u2014 fast-failing MCP call"
+        );
+      }
+      span.setAttribute("mcp.circuit_breaker", "open");
+      return {
+        call_id: opts.callId,
+        status: "error",
+        result: null,
+        error_message: `Backend circuit breaker open (${_backendFailures} consecutive failures). Retrying in ${Math.ceil((_backendCircuitOpenUntil - now) / 1e3)}s.`,
+        error_code: "BACKEND_ERROR",
+        duration_ms: 0,
+        trace_id: opts.traceId ?? null,
+        completed_at: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
     const url = `${config.backendUrl}/api/mcp/route`;
     const { _force: _stripForce, ...wireArgs } = opts.args;
     const body = JSON.stringify({ tool: opts.toolName, payload: wireArgs });
@@ -989,6 +1045,14 @@ async function callMcpTool(opts) {
         await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
       }
       const result = await callMcpToolOnce(opts, url, body, timeoutMs, log, t0);
+      const isTransientError = result.status === "error" || result.status === "timeout";
+      const is502 = result.error_message?.includes("502") || result.error_message?.includes("503");
+      const isTimeout = result.status === "timeout";
+      if (isTransientError && (is502 || isTimeout)) {
+        backendRecordFailure();
+      } else if (result.status === "success") {
+        backendRecordSuccess();
+      }
       if (result.status !== "error" || !result.error_message?.includes("503")) {
         span.setAttribute("mcp.status", result.status);
         span.setAttribute("mcp.duration_ms", result.duration_ms);
@@ -1160,7 +1224,7 @@ async function aggregateSseStream(res, callId, log) {
     throw Object.assign(new Error(`SSE_PARSE_ERROR: ${err}`), { code: "SSE_PARSE_ERROR" });
   }
 }
-var MAX_RETRIES, RETRY_DELAY_MS, _auditLessonsCache, AUDIT_LESSONS_TTL_MS;
+var MAX_RETRIES, RETRY_DELAY_MS, BACKEND_CB_THRESHOLD, BACKEND_CB_COOLDOWN_MS, _backendFailures, _backendCircuitOpenUntil, _backendCircuitLoggedAt, _auditLessonsCache, AUDIT_LESSONS_TTL_MS;
 var init_mcp_caller = __esm({
   "src/mcp-caller.ts"() {
     "use strict";
@@ -1170,6 +1234,11 @@ var init_mcp_caller = __esm({
     init_tracing();
     MAX_RETRIES = 2;
     RETRY_DELAY_MS = 1e3;
+    BACKEND_CB_THRESHOLD = 5;
+    BACKEND_CB_COOLDOWN_MS = 6e4;
+    _backendFailures = 0;
+    _backendCircuitOpenUntil = 0;
+    _backendCircuitLoggedAt = 0;
     _auditLessonsCache = null;
     AUDIT_LESSONS_TTL_MS = 10 * 60 * 1e3;
   }
@@ -1191,7 +1260,7 @@ async function callCognitive(action, params, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs ?? 12e4);
   try {
-    logger.debug({ action, url, agent: params.agent_id }, "Cognitive proxy call");
+    logger2.debug({ action, url, agent: params.agent_id }, "Cognitive proxy call");
     const p = params;
     let body;
     if (action === "analyze") {
@@ -1291,19 +1360,19 @@ __export(hierarchical_intelligence_exports, {
 import { v4 as uuid } from "uuid";
 async function buildCommunitySummaries() {
   const t0 = Date.now();
-  logger.info("Hierarchical intelligence: building community summaries");
+  logger2.info("Hierarchical intelligence: building community summaries");
   let communities;
   let method;
   try {
     communities = await runLeidenCommunities();
     method = "gds-leiden";
   } catch (err) {
-    logger.warn({ error: String(err) }, "GDS Leiden failed \u2014 using Cypher fallback");
+    logger2.warn({ error: String(err) }, "GDS Leiden failed \u2014 using Cypher fallback");
     communities = await runCypherClustering();
     method = "cypher-fallback";
   }
   if (communities.length === 0) {
-    logger.info("No communities found \u2014 graph may be too sparse");
+    logger2.info("No communities found \u2014 graph may be too sparse");
     return { communities_created: 0, summaries_generated: 0, relationships_created: 0, levels: 0, duration_ms: Date.now() - t0, method };
   }
   let summariesGenerated = 0;
@@ -1342,7 +1411,7 @@ async function buildCommunitySummaries() {
     duration_ms: Date.now() - t0,
     method
   };
-  logger.info(result, "Hierarchical intelligence: complete");
+  logger2.info(result, "Hierarchical intelligence: complete");
   return result;
 }
 async function runLeidenCommunities() {
@@ -1403,7 +1472,7 @@ ORDER BY cnt DESC LIMIT 30`
 }
 async function collectCommunityMembers(propertyName) {
   if (!SAFE_COMMUNITY_PROPS.has(propertyName)) {
-    logger.warn({ propertyName }, "Rejected unsafe community property name");
+    logger2.warn({ propertyName }, "Rejected unsafe community property name");
     return [];
   }
   const result = await callMcpTool({
@@ -1446,7 +1515,7 @@ Write a concise executive summary (max 100 words).`,
     summary = String(result ?? "").trim();
     if (summary.length < 10) summary = null;
   } catch {
-    logger.debug({ community_id: community.community_id }, "Community summary generation failed");
+    logger2.debug({ community_id: community.community_id }, "Community summary generation failed");
     return { summary: null, rels_created: 0 };
   }
   if (!summary) return { summary: null, rels_created: 0 };
@@ -1472,7 +1541,7 @@ SET c.name = $name, c.summary = $summary, c.domain = $domain,
       timeoutMs: 1e4
     });
   } catch (err) {
-    logger.debug({ error: String(err) }, "CommunitySummary MERGE failed");
+    logger2.debug({ error: String(err) }, "CommunitySummary MERGE failed");
     return { summary, rels_created: 0 };
   }
   let relsCreated = 0;
@@ -1585,14 +1654,14 @@ RETURN count(*) AS linked`,
     });
     linked = citations.length;
   } catch (err) {
-    logger.debug({ error: String(err) }, "Deliverable\u2192Knowledge hook failed");
+    logger2.debug({ error: String(err) }, "Deliverable\u2192Knowledge hook failed");
   }
-  logger.info({ deliverableId, citations: citations.length, linked }, "Hook: Deliverable\u2192Knowledge");
+  logger2.info({ deliverableId, citations: citations.length, linked }, "Hook: Deliverable\u2192Knowledge");
   return linked;
 }
 function hookAutoEnrichment(answer, query) {
   extractAndMerge(answer, query).catch(
-    (err) => logger.debug({ error: String(err) }, "Auto-enrichment hook failed (non-blocking)")
+    (err) => logger2.debug({ error: String(err) }, "Auto-enrichment hook failed (non-blocking)")
   );
 }
 async function extractAndMerge(answer, query) {
@@ -1642,7 +1711,7 @@ SET n.updatedAt = datetime()`,
       }
     }
     if (entities.length > 0) {
-      logger.info({ count: entities.length }, "Hook: Auto-enrichment \u2014 new entities merged");
+      logger2.info({ count: entities.length }, "Hook: Auto-enrichment \u2014 new entities merged");
     }
   } catch {
   }
@@ -1685,7 +1754,7 @@ SET p.count = coalesce(p.count, 0) + 1, p.lastSeen = datetime()`,
       callId: uuid2(),
       timeoutMs: 5e3
     });
-    logger.info({ selected: selectedMatchId, rejected: rejectedMatchIds.length }, "Hook: Similarity preference logged");
+    logger2.info({ selected: selectedMatchId, rejected: rejectedMatchIds.length }, "Hook: Similarity preference logged");
   } catch {
   }
 }
@@ -1758,11 +1827,11 @@ async function analyzeOutcomes(windowHours = 168) {
 }
 async function retrainRoutingWeights() {
   const t0 = Date.now();
-  logger.info("Adaptive RAG: retraining routing weights");
+  logger2.info("Adaptive RAG: retraining routing weights");
   const stats = await analyzeOutcomes(168);
   const adjustments = [];
   if (stats.length === 0) {
-    logger.info("Adaptive RAG: insufficient data for retraining (<10 samples)");
+    logger2.info("Adaptive RAG: insufficient data for retraining (<10 samples)");
     return { weights: cachedWeights, stats, adjustments: ["No data \u2014 keeping defaults"] };
   }
   const newWeights = { ...cachedWeights };
@@ -1803,7 +1872,7 @@ async function retrainRoutingWeights() {
   }
   cachedWeights = newWeights;
   weightsCacheTime = Date.now();
-  logger.info({
+  logger2.info({
     samples: newWeights.training_samples,
     adjustments: adjustments.length,
     ms: Date.now() - t0
@@ -1831,7 +1900,7 @@ async function sendQLearningReward(state, action, reward) {
       context: { source: "adaptive-rag-f5", type: "q-learning-reward" },
       agent_id: "adaptive-rag"
     }, 1e4);
-    logger.debug({ reward: reward.toFixed(3), strategy: action.strategy }, "Q-learning reward sent");
+    logger2.debug({ reward: reward.toFixed(3), strategy: action.strategy }, "Q-learning reward sent");
   } catch {
   }
 }
@@ -1911,7 +1980,7 @@ async function callGraphRAG(query, maxResults) {
     // graphrag is slower but higher quality
   });
   if (result.status !== "success") {
-    logger.warn({ error: result.error_message }, "autonomous.graphrag failed");
+    logger2.warn({ error: result.error_message }, "autonomous.graphrag failed");
     return [];
   }
   const data = result.result;
@@ -1991,7 +2060,7 @@ async function dualChannelRAG(query, options) {
   const maxResults = options?.maxResults ?? 10;
   const depth = options?.cypherDepth ?? 2;
   const complexity = classifyQuery(query);
-  logger.info({ query: query.slice(0, 80), complexity }, "Hybrid RAG: routing query");
+  logger2.info({ query: query.slice(0, 80), complexity }, "Hybrid RAG: routing query");
   const channels = options?.forceChannels ?? await getChannelsForComplexity(complexity);
   const channelPromises = [];
   const channelsUsed = [];
@@ -2019,7 +2088,7 @@ async function dualChannelRAG(query, options) {
     }
   }
   if (allResults.filter((r) => r.source === "graphrag").length === 0 && !channels.includes("srag")) {
-    logger.info("Hybrid RAG: graphrag returned empty, falling back to srag");
+    logger2.info("Hybrid RAG: graphrag returned empty, falling back to srag");
     const sragResults = await callSRAG(query, maxResults);
     allResults.push(...sragResults);
     channelsUsed.push("srag (fallback)");
@@ -2028,7 +2097,7 @@ async function dualChannelRAG(query, options) {
   allResults = allResults.filter((r) => {
     if (isPolluted(r.content)) {
       pollutionFiltered++;
-      logger.debug({ source: r.source, preview: r.content.slice(0, 60) }, "Filtered polluted result");
+      logger2.debug({ source: r.source, preview: r.content.slice(0, 60) }, "Filtered polluted result");
       return false;
     }
     return true;
@@ -2046,7 +2115,7 @@ async function dualChannelRAG(query, options) {
   const sragCount = topResults.filter((r) => r.source === "srag").length;
   const cypherCount = topResults.filter((r) => r.source === "cypher").length;
   const durationMs = Date.now() - t0;
-  logger.info({
+  logger2.info({
     query: query.slice(0, 60),
     complexity,
     graphragCount,
@@ -2450,7 +2519,7 @@ async function runLoop(steps, maxIterations, exitCondition) {
     previousOutput = lastResult?.output;
     const outputStr = JSON.stringify(previousOutput);
     if (exitCondition && outputStr.includes(exitCondition)) {
-      logger.info({ iteration: i, exitCondition }, "Loop exit condition met");
+      logger2.info({ iteration: i, exitCondition }, "Loop exit condition met");
       break;
     }
   }
@@ -2480,7 +2549,7 @@ Rules:
 }
 async function runAdaptive(steps, query, judgeAgent, confidenceThreshold = 0.6) {
   const complexity = query ? await classifyComplexity(query) : "medium";
-  logger.info({ complexity, query: query?.slice(0, 80) }, "AGoT: classified complexity");
+  logger2.info({ complexity, query: query?.slice(0, 80) }, "AGoT: classified complexity");
   let results;
   let topology;
   switch (complexity) {
@@ -2549,7 +2618,7 @@ async function runFunnel(steps, entryStage = "signal", preloadedContext, executi
     const stage = FUNNEL_STAGES[i];
     const step = steps[i];
     if (!step) {
-      logger.info({ stage, index: i }, "Funnel: no step defined for stage, skipping");
+      logger2.info({ stage, index: i }, "Funnel: no step defined for stage, skipping");
       continue;
     }
     const prevStage = i > 0 ? FUNNEL_STAGES[i - 1] : null;
@@ -2557,7 +2626,7 @@ async function runFunnel(steps, entryStage = "signal", preloadedContext, executi
     state.current_stage = stage;
     state.last_updated = (/* @__PURE__ */ new Date()).toISOString();
     await persistFunnelState(state);
-    logger.info({ stage, step_index: i, execution_id: execId }, "Funnel: executing stage");
+    logger2.info({ stage, step_index: i, execution_id: execId }, "Funnel: executing stage");
     const taggedStep = { ...step, id: step.id ?? `funnel-${stage}` };
     const result = await executeStep(taggedStep, previousOutput);
     result.funnel_stage = stage;
@@ -2567,7 +2636,7 @@ async function runFunnel(steps, entryStage = "signal", preloadedContext, executi
     state.last_updated = (/* @__PURE__ */ new Date()).toISOString();
     await persistFunnelState(state);
     if (result.status === "error") {
-      logger.warn({ stage, error: result.output }, "Funnel: stage failed, state saved for resume");
+      logger2.warn({ stage, error: result.output }, "Funnel: stage failed, state saved for resume");
       break;
     }
   }
@@ -2650,7 +2719,7 @@ async function executeChain(def) {
     started_at: (/* @__PURE__ */ new Date()).toISOString()
   };
   persistExecution(execution);
-  logger.info({ execution_id: executionId, chain: def.name, mode: def.mode, steps: def.steps.length }, "Chain execution started");
+  logger2.info({ execution_id: executionId, chain: def.name, mode: def.mode, steps: def.steps.length }, "Chain execution started");
   broadcastMessage({
     from: "Orchestrator",
     to: "All",
@@ -2711,7 +2780,7 @@ async function executeChain(def) {
     execution.completed_at = (/* @__PURE__ */ new Date()).toISOString();
   }
   persistExecution(execution);
-  logger.info({
+  logger2.info({
     execution_id: executionId,
     status: execution.status,
     steps: execution.steps_completed,
@@ -3321,7 +3390,7 @@ async function persistResult(result) {
 async function ingestDocument(req) {
   const t0 = Date.now();
   const ingestionId = `widgetdc:ingestion:${uuid7()}`;
-  logger.info({
+  logger2.info({
     id: ingestionId,
     filename: req.filename,
     content_length: req.content.length
@@ -3362,15 +3431,15 @@ async function ingestDocument(req) {
           agent_id: "document-intelligence"
         }, 3e4);
         processableContent = typeof folded === "string" ? folded : JSON.stringify(folded);
-        logger.info({ original: markdown.length, folded: processableContent.length }, "Document folded for entity extraction");
+        logger2.info({ original: markdown.length, folded: processableContent.length }, "Document folded for entity extraction");
       } catch {
         processableContent = markdown.slice(0, 3e4);
       }
     }
     if (req.extract_entities !== false) {
-      logger.info({ extract_entities: req.extract_entities, contentLen: processableContent.length }, "Step 3: EXTRACT starting");
+      logger2.info({ extract_entities: req.extract_entities, contentLen: processableContent.length }, "Step 3: EXTRACT starting");
       const extraction = await extractEntities(processableContent, req.filename, req.domain);
-      logger.info({ entities: extraction.entities.length, relations: extraction.relations.length }, "Step 3: EXTRACT complete");
+      logger2.info({ entities: extraction.entities.length, relations: extraction.relations.length }, "Step 3: EXTRACT complete");
       result.entities_extracted = extraction.entities.length;
       result.relations_extracted = extraction.relations.length;
       if (extraction.entities.length > 0) {
@@ -3392,17 +3461,17 @@ async function ingestDocument(req) {
           timeoutMs: 2e4
         });
       } catch {
-        logger.warn({ filename: req.filename }, "SRAG ingest failed \u2014 entities still in graph");
+        logger2.warn({ filename: req.filename }, "SRAG ingest failed \u2014 entities still in graph");
       }
     }
   } catch (err) {
     result.status = "failed";
     result.error = err instanceof Error ? err.message : String(err);
-    logger.error({ id: ingestionId, error: result.error }, "Document intelligence: failed");
+    logger2.error({ id: ingestionId, error: result.error }, "Document intelligence: failed");
   }
   result.duration_ms = Date.now() - t0;
   await persistResult(result);
-  logger.info({
+  logger2.info({
     id: ingestionId,
     method: result.parsing_method,
     entities: result.entities_extracted,
@@ -3431,13 +3500,13 @@ async function tryDoclingParse(req) {
       return { markdown: data.markdown, tables: data.tables ?? [] };
     }
   } catch {
-    logger.debug("Docling-serve not available \u2014 using fallback");
+    logger2.debug("Docling-serve not available \u2014 using fallback");
   }
   return null;
 }
 async function extractEntities(content, filename, domain) {
   try {
-    logger.info({ filename, domain, contentLen: content.length }, "Entity extraction: calling Mercury llm.generate");
+    logger2.info({ filename, domain, contentLen: content.length }, "Entity extraction: calling Mercury llm.generate");
     const extractPrompt = `Extract named entities and relationships. Reply ONLY as JSON, no markdown.
 
 {"entities": [{"name": "...", "type": "Organization|Regulation|Technology|Framework|Service", "properties": {"domain": "..."}}], "relations": [{"from": "...", "to": "...", "type": "USES|COMPLIES_WITH|PART_OF"}]}
@@ -3450,7 +3519,7 @@ Content: ${content.slice(0, 6e3)}`;
       timeoutMs: 3e4
     });
     const rawResult = llmResult.result;
-    logger.info({
+    logger2.info({
       mcpStatus: llmResult.status,
       resultType: typeof rawResult,
       resultKeys: rawResult && typeof rawResult === "object" ? Object.keys(rawResult) : null,
@@ -3459,20 +3528,20 @@ Content: ${content.slice(0, 6e3)}`;
       contentPreview: String(rawResult?.content ?? "").slice(0, 100)
     }, "Entity extraction: Mercury response debug");
     if (llmResult.status !== "success") {
-      logger.warn({ error: llmResult.error_message }, "Mercury entity extraction: MCP call failed");
+      logger2.warn({ error: llmResult.error_message }, "Mercury entity extraction: MCP call failed");
       return { entities: [], relations: [] };
     }
     const raw = llmResult.result;
     if (raw?.success === false) {
-      logger.warn({ error: raw?.error }, "Mercury entity extraction: Mercury returned error");
+      logger2.warn({ error: raw?.error }, "Mercury entity extraction: Mercury returned error");
       return { entities: [], relations: [] };
     }
     const text = raw?.content ?? (typeof raw === "string" ? raw : "");
-    logger.info({ textLen: String(text).length, textSnippet: String(text).slice(0, 150) }, "Entity extraction: Mercury text to parse");
+    logger2.info({ textLen: String(text).length, textSnippet: String(text).slice(0, 150) }, "Entity extraction: Mercury text to parse");
     try {
       const direct = JSON.parse(String(text));
       if (Array.isArray(direct.entities)) {
-        logger.info({ count: direct.entities.length }, "Entity extraction: direct parse OK");
+        logger2.info({ count: direct.entities.length }, "Entity extraction: direct parse OK");
         return { entities: direct.entities.slice(0, 20), relations: Array.isArray(direct.relations) ? direct.relations.slice(0, 30) : [] };
       }
     } catch {
@@ -3481,15 +3550,15 @@ Content: ${content.slice(0, 6e3)}`;
     if (match) {
       try {
         const parsed = JSON.parse(match[0]);
-        logger.info({ count: parsed.entities?.length }, "Entity extraction: regex parse OK");
+        logger2.info({ count: parsed.entities?.length }, "Entity extraction: regex parse OK");
         return { entities: Array.isArray(parsed.entities) ? parsed.entities.slice(0, 20) : [], relations: Array.isArray(parsed.relations) ? parsed.relations.slice(0, 30) : [] };
       } catch (e) {
-        logger.warn({ error: String(e) }, "Entity extraction: regex match found but JSON parse failed");
+        logger2.warn({ error: String(e) }, "Entity extraction: regex match found but JSON parse failed");
       }
     }
-    logger.warn({ textLen: String(text).length, snippet: String(text).slice(0, 200) }, "Entity extraction: NO entities found in Mercury response");
+    logger2.warn({ textLen: String(text).length, snippet: String(text).slice(0, 200) }, "Entity extraction: NO entities found in Mercury response");
   } catch (err) {
-    logger.warn({ error: String(err), filename }, "Entity extraction failed");
+    logger2.warn({ error: String(err), filename }, "Entity extraction failed");
   }
   return { entities: [], relations: [] };
 }
@@ -3518,7 +3587,7 @@ MERGE (n)-[:EXTRACTED_FROM]->(d)`,
       });
       merged++;
     } catch (err) {
-      logger.debug({ entity: entity.name, error: String(err) }, "Entity MERGE failed");
+      logger2.debug({ entity: entity.name, error: String(err) }, "Entity MERGE failed");
     }
   }
   for (const rel of relations) {
@@ -3586,7 +3655,7 @@ async function queryMetric(cypher) {
 }
 async function runGraphHygiene() {
   const t0 = Date.now();
-  logger.info("Graph hygiene cron: starting health check");
+  logger2.info("Graph hygiene cron: starting health check");
   const [orphanData, relData, embedData, domainData, staleData, pollutionData] = await Promise.allSettled([
     // 1. Orphan ratio
     queryMetric(`
@@ -3692,7 +3761,7 @@ SET s.orphan_ratio = $orphan_ratio,
       timeoutMs: 1e4
     });
   } catch (err) {
-    logger.warn({ error: String(err) }, "Graph hygiene: failed to store snapshot in Neo4j");
+    logger2.warn({ error: String(err) }, "Graph hygiene: failed to store snapshot in Neo4j");
   }
   try {
     await callMcpTool({
@@ -3710,12 +3779,12 @@ SET s.orphan_ratio = $orphan_ratio,
     const alertMsg = alerts.map((a) => `${a.metric}: ${a.message}`).join("\n");
     broadcastSSE("graph-health-alert", { metrics: metrics2, alerts });
     if (isSlackEnabled()) {
-      logger.info(`Slack alert: Graph Health Alert (${alerts.length} issues)`);
+      logger2.info(`Slack alert: Graph Health Alert (${alerts.length} issues)`);
     }
-    logger.warn({ alerts: alerts.length }, `Graph hygiene: ${alerts.length} alerts triggered`);
+    logger2.warn({ alerts: alerts.length }, `Graph hygiene: ${alerts.length} alerts triggered`);
   }
   const duration_ms = Date.now() - t0;
-  logger.info({
+  logger2.info({
     ...metrics2,
     alerts: alerts.length,
     ms: duration_ms
@@ -3754,7 +3823,7 @@ async function findSimilarClients(req) {
   const maxResults = Math.min(Math.max(req.max_results ?? 5, 1), 20);
   const alpha = Math.min(Math.max(req.structural_weight ?? 0.6, 0), 1);
   const dimensions = req.dimensions ?? DEFAULT_DIMENSIONS;
-  logger.info({ query: req.query.slice(0, 80), dimensions, alpha }, "Similarity: searching");
+  logger2.info({ query: req.query.slice(0, 80), dimensions, alpha }, "Similarity: searching");
   const queryNode = await findQueryNode(req.query);
   let matches;
   let method;
@@ -3777,7 +3846,7 @@ async function findSimilarClients(req) {
     duration_ms: Date.now() - t0,
     method
   };
-  logger.info({
+  logger2.info({
     query: req.query.slice(0, 60),
     matches: result.matches.length,
     method,
@@ -3807,7 +3876,7 @@ LIMIT 1`,
       }
     }
   } catch (err) {
-    logger.warn({ error: String(err) }, "Similarity: query node lookup failed");
+    logger2.warn({ error: String(err) }, "Similarity: query node lookup failed");
   }
   return null;
 }
@@ -3883,7 +3952,7 @@ RETURN other.id AS client_id,
       };
     });
   } catch (err) {
-    logger.warn({ error: String(err) }, "Similarity: structural computation failed");
+    logger2.warn({ error: String(err) }, "Similarity: structural computation failed");
     return [];
   }
 }
@@ -3912,7 +3981,7 @@ async function computeSemanticSimilarity(query, maxResults) {
       node_type: String(item.type ?? item.label ?? "Document")
     }));
   } catch (err) {
-    logger.warn({ error: String(err) }, "Similarity: semantic computation failed");
+    logger2.warn({ error: String(err) }, "Similarity: semantic computation failed");
     return [];
   }
 }
@@ -4067,18 +4136,18 @@ async function generateDeliverable(req) {
   };
   await persist(deliverable);
   try {
-    logger.info({ id: deliverableId, type: req.type, prompt: req.prompt.slice(0, 80) }, "Deliverable: Step 1 \u2014 Planning");
+    logger2.info({ id: deliverableId, type: req.type, prompt: req.prompt.slice(0, 80) }, "Deliverable: Step 1 \u2014 Planning");
     const plan = await planSections(req.prompt, req.type, maxSections);
     deliverable.title = plan.title;
-    logger.info({ id: deliverableId, sections: plan.sections.length }, "Deliverable: Step 2 \u2014 Retrieving");
+    logger2.info({ id: deliverableId, sections: plan.sections.length }, "Deliverable: Step 2 \u2014 Retrieving");
     const evidence = await retrieveEvidence(plan.sections);
-    logger.info({ id: deliverableId }, "Deliverable: Step 3 \u2014 Writing sections");
+    logger2.info({ id: deliverableId }, "Deliverable: Step 3 \u2014 Writing sections");
     const sections = await writeSections(plan.sections, evidence, req.type);
     deliverable.sections = sections;
-    logger.info({ id: deliverableId }, "Deliverable: Step 4 \u2014 Assembling");
+    logger2.info({ id: deliverableId }, "Deliverable: Step 4 \u2014 Assembling");
     deliverable.markdown = assembleSections(deliverable.title, sections, req.type);
     if (format === "pdf") {
-      logger.info({ id: deliverableId }, "Deliverable: Step 5 \u2014 Rendering PDF");
+      logger2.info({ id: deliverableId }, "Deliverable: Step 5 \u2014 Rendering PDF");
       await renderPDF(deliverable);
     }
     const totalCitations = sections.reduce((n, s) => n + s.citations.length, 0);
@@ -4117,7 +4186,7 @@ async function generateDeliverable(req) {
       });
     } catch {
     }
-    logger.info({
+    logger2.info({
       id: deliverableId,
       sections: sections.length,
       citations: allCitations.length,
@@ -4128,7 +4197,7 @@ async function generateDeliverable(req) {
     deliverable.error = err instanceof Error ? err.message : String(err);
     deliverable.completed_at = (/* @__PURE__ */ new Date()).toISOString();
     deliverable.metadata.generation_ms = Date.now() - t0;
-    logger.error({ id: deliverableId, error: deliverable.error }, "Deliverable: Failed");
+    logger2.error({ id: deliverableId, error: deliverable.error }, "Deliverable: Failed");
   } finally {
     activeGenerations--;
     await persist(deliverable);
@@ -4162,7 +4231,7 @@ Client prompt: "${prompt}"`,
       };
     }
   } catch (err) {
-    logger.warn({ error: String(err) }, "Deliverable planner failed, using fallback");
+    logger2.warn({ error: String(err) }, "Deliverable planner failed, using fallback");
   }
   const fallbackSections = [
     { title: "Executive Summary", query: prompt, purpose: "High-level overview" },
@@ -4305,10 +4374,10 @@ async function renderPDF(deliverable) {
     });
     if (result.status === "success" && result.result) {
       deliverable.doc_url = result.result?.url ?? result.result?.path;
-      logger.info({ id: deliverable.$id }, "Deliverable: DOCX rendered via docgen.word.create");
+      logger2.info({ id: deliverable.$id }, "Deliverable: DOCX rendered via docgen.word.create");
     }
   } catch {
-    logger.info("docgen.word.create not available \u2014 delivering markdown");
+    logger2.info("docgen.word.create not available \u2014 delivering markdown");
     deliverable.format = "markdown";
   }
 }
@@ -4575,7 +4644,7 @@ async function scanCTForDomain(domain, toolsAvailable) {
       return buildCTFallback(domain);
     } catch (err) {
       if (attempt === MAX_RETRIES2) {
-        logger.warn({ domain, err: String(err) }, "CT scan failed after retries, using fallback");
+        logger2.warn({ domain, err: String(err) }, "CT scan failed after retries, using fallback");
         return buildCTFallback(domain);
       }
       await delay(500 * (attempt + 1));
@@ -4593,7 +4662,7 @@ function buildCTFallback(domain) {
   };
 }
 async function runCTStage(domains, toolsAvailable) {
-  logger.info({ count: domains.length, toolsAvailable }, "OSINT Stage 1: CT Transparency Scan");
+  logger2.info({ count: domains.length, toolsAvailable }, "OSINT Stage 1: CT Transparency Scan");
   return processBatched(domains, MAX_CONCURRENT2, (d) => scanCTForDomain(d, toolsAvailable));
 }
 async function scanDMARCForDomain(domain, toolsAvailable) {
@@ -4622,7 +4691,7 @@ async function scanDMARCForDomain(domain, toolsAvailable) {
       return buildDMARCFallback(domain);
     } catch (err) {
       if (attempt === MAX_RETRIES2) {
-        logger.warn({ domain, err: String(err) }, "DMARC scan failed after retries, using fallback");
+        logger2.warn({ domain, err: String(err) }, "DMARC scan failed after retries, using fallback");
         return buildDMARCFallback(domain);
       }
       await delay(500 * (attempt + 1));
@@ -4641,7 +4710,7 @@ function buildDMARCFallback(domain) {
   };
 }
 async function runDMARCStage(domains, toolsAvailable) {
-  logger.info({ count: domains.length, toolsAvailable }, "OSINT Stage 2: DMARC/SPF Scan");
+  logger2.info({ count: domains.length, toolsAvailable }, "OSINT Stage 2: DMARC/SPF Scan");
   return processBatched(domains, MAX_CONCURRENT2, (d) => scanDMARCForDomain(d, toolsAvailable));
 }
 function domainToOrgName(domain) {
@@ -4654,7 +4723,7 @@ async function ingestCTResults(ctResults) {
   const source = `osint-scanner-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}`;
   const liveResults = ctResults.filter((ct) => ct.source !== "fallback");
   if (liveResults.length < ctResults.length) {
-    logger.info({ skipped: ctResults.length - liveResults.length }, "Skipping fallback CT results (not ingesting fabricated data)");
+    logger2.info({ skipped: ctResults.length - liveResults.length }, "Skipping fallback CT results (not ingesting fabricated data)");
   }
   for (let i = 0; i < liveResults.length; i += MERGE_BATCH_SIZE) {
     const batch = liveResults.slice(i, i + MERGE_BATCH_SIZE);
@@ -4704,7 +4773,7 @@ async function ingestCTResults(ctResults) {
       await delay(500);
     }
   }
-  logger.info({ nodesCreated, errors: errors.length }, "CT results ingested");
+  logger2.info({ nodesCreated, errors: errors.length }, "CT results ingested");
   return { nodes_created: nodesCreated, errors };
 }
 async function ingestDMARCResults(dmarcResults) {
@@ -4713,7 +4782,7 @@ async function ingestDMARCResults(dmarcResults) {
   const source = `osint-scanner-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}`;
   const liveResults = dmarcResults.filter((d) => d.source !== "fallback");
   if (liveResults.length < dmarcResults.length) {
-    logger.info({ skipped: dmarcResults.length - liveResults.length }, "Skipping fallback DMARC results (not ingesting placeholder data)");
+    logger2.info({ skipped: dmarcResults.length - liveResults.length }, "Skipping fallback DMARC results (not ingesting placeholder data)");
   }
   for (let i = 0; i < liveResults.length; i += MERGE_BATCH_SIZE) {
     const batch = liveResults.slice(i, i + MERGE_BATCH_SIZE);
@@ -4767,7 +4836,7 @@ async function ingestDMARCResults(dmarcResults) {
       await delay(500);
     }
   }
-  logger.info({ nodesCreated, errors: errors.length }, "DMARC results ingested");
+  logger2.info({ nodesCreated, errors: errors.length }, "DMARC results ingested");
   return { nodes_created: nodesCreated, errors };
 }
 async function persistScanResult(result) {
@@ -4780,9 +4849,9 @@ async function persistScanResult(result) {
     const json = JSON.stringify(result);
     await redis2.set(key, json, "EX", TTL_30_DAYS);
     await redis2.set(latestKey, json, "EX", TTL_30_DAYS);
-    logger.info({ scan_id: result.scan_id }, "OSINT scan persisted to Redis");
+    logger2.info({ scan_id: result.scan_id }, "OSINT scan persisted to Redis");
   } catch (err) {
-    logger.warn({ err: String(err) }, "Failed to persist OSINT scan to Redis");
+    logger2.warn({ err: String(err) }, "Failed to persist OSINT scan to Redis");
   }
 }
 async function runOsintScan(options) {
@@ -4792,10 +4861,10 @@ async function runOsintScan(options) {
   const domains = options?.domains ?? [...DK_PUBLIC_DOMAINS];
   const scanType = options?.scan_type ?? "full";
   const errors = [];
-  logger.info({ scan_id: scanId, domains: domains.length, scan_type: scanType }, "OSINT scan started");
+  logger2.info({ scan_id: scanId, domains: domains.length, scan_type: scanType }, "OSINT scan started");
   const toolsAvailable = await checkToolAvailability();
   if (!toolsAvailable) {
-    logger.warn("the_snout tools not available \u2014 using fallback strategy");
+    logger2.warn("the_snout tools not available \u2014 using fallback strategy");
     errors.push("Backend OSINT tools unavailable \u2014 using fallback data (scan_pending)");
   }
   let ctResults = [];
@@ -4833,7 +4902,7 @@ async function runOsintScan(options) {
     errors
   };
   await persistScanResult(result);
-  logger.info({
+  logger2.info({
     scan_id: scanId,
     duration_ms: result.duration_ms,
     ct_entries: result.ct_entries,
@@ -4853,7 +4922,7 @@ async function getOsintStatus() {
       return JSON.parse(cached);
     }
   } catch (err) {
-    logger.warn({ err: String(err) }, "Failed to read OSINT status from Redis");
+    logger2.warn({ err: String(err) }, "Failed to read OSINT status from Redis");
   }
   return null;
 }
@@ -4941,7 +5010,7 @@ async function persistCycle(cycle) {
     await redis2.ltrim(REDIS_HISTORY_KEY, 0, 19);
     await redis2.expire(REDIS_HISTORY_KEY, REDIS_TTL);
   } catch (err) {
-    logger.warn({ err: String(err) }, "Failed to persist evolution cycle to Redis");
+    logger2.warn({ err: String(err) }, "Failed to persist evolution cycle to Redis");
   }
 }
 function withTimeout(promise, ms, label) {
@@ -4973,7 +5042,7 @@ function safeParseJson(text) {
 }
 async function stageObserve(focusArea) {
   currentStage = "observe";
-  logger.info({ focus_area: focusArea }, "Evolution OBSERVE stage starting");
+  logger2.info({ focus_area: focusArea }, "Evolution OBSERVE stage starting");
   const [healthResult, failuresResult, lessonsResult] = await Promise.allSettled([
     callMcpTool({
       toolName: "graph.read_cypher",
@@ -5029,7 +5098,7 @@ Return JSON: {"observations": ["..."], "priority_areas": ["..."], "confidence": 
         confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0.5
       };
     } catch (err) {
-      logger.warn({ err: String(err) }, "RLM analyze failed in OBSERVE, falling back to heuristic");
+      logger2.warn({ err: String(err) }, "RLM analyze failed in OBSERVE, falling back to heuristic");
     }
   }
   const observations = ["Platform state collected via graph queries (RLM unavailable)"];
@@ -5044,7 +5113,7 @@ Return JSON: {"observations": ["..."], "priority_areas": ["..."], "confidence": 
 }
 async function stageOrient(observeResult, focusArea) {
   currentStage = "orient";
-  logger.info({ priority_areas: observeResult.priority_areas }, "Evolution ORIENT stage starting");
+  logger2.info({ priority_areas: observeResult.priority_areas }, "Evolution ORIENT stage starting");
   const blocksResult = await callMcpTool({
     toolName: "graph.read_cypher",
     args: {
@@ -5082,7 +5151,7 @@ Return JSON: {"blocks_to_evolve": [{"id": "...", "label": "...", "name": "...", 
         estimated_impact: typeof parsed.estimated_impact === "number" ? parsed.estimated_impact : 0.5
       };
     } catch (err) {
-      logger.warn({ err: String(err) }, "RLM plan failed in ORIENT, falling back to heuristic");
+      logger2.warn({ err: String(err) }, "RLM plan failed in ORIENT, falling back to heuristic");
     }
   }
   return {
@@ -5098,7 +5167,7 @@ Return JSON: {"blocks_to_evolve": [{"id": "...", "label": "...", "name": "...", 
 }
 async function stageAct(orientResult, dryRun) {
   currentStage = "act";
-  logger.info({ blocks: orientResult.blocks_to_evolve.length, dry_run: dryRun }, "Evolution ACT stage starting");
+  logger2.info({ blocks: orientResult.blocks_to_evolve.length, dry_run: dryRun }, "Evolution ACT stage starting");
   if (dryRun) {
     return {
       executed: 0,
@@ -5136,13 +5205,13 @@ async function stageAct(orientResult, dryRun) {
       artifacts: execution.results.filter((r) => r.status === "success").map((r) => typeof r.output === "string" ? r.output.slice(0, 200) : JSON.stringify(r.output).slice(0, 200))
     };
   } catch (err) {
-    logger.error({ err: String(err) }, "Evolution ACT chain failed");
+    logger2.error({ err: String(err) }, "Evolution ACT chain failed");
     return { executed: 0, passed: 0, failed: 1, artifacts: [`Chain failed: ${err}`] };
   }
 }
 async function stageLearn(cycleId, observeResult, orientResult, actResult) {
   currentStage = "learn";
-  logger.info({ cycle_id: cycleId }, "Evolution LEARN stage starting");
+  logger2.info({ cycle_id: cycleId }, "Evolution LEARN stage starting");
   let eventsCreated = 0;
   let lessonsWritten = 0;
   try {
@@ -5180,10 +5249,10 @@ async function stageLearn(cycleId, observeResult, orientResult, actResult) {
     if (writeResult.status === "success") {
       eventsCreated = 1;
     } else {
-      logger.warn({ err: writeResult.error_message }, "Failed to write EvolutionEvent to Neo4j");
+      logger2.warn({ err: writeResult.error_message }, "Failed to write EvolutionEvent to Neo4j");
     }
   } catch (err) {
-    logger.warn({ err: String(err) }, "EvolutionEvent write failed");
+    logger2.warn({ err: String(err) }, "EvolutionEvent write failed");
   }
   if (actResult.passed > 0 || actResult.failed > 0) {
     try {
@@ -5211,7 +5280,7 @@ async function stageLearn(cycleId, observeResult, orientResult, actResult) {
         lessonsWritten = 1;
       }
     } catch (err) {
-      logger.warn({ err: String(err) }, "Lesson write failed");
+      logger2.warn({ err: String(err) }, "Lesson write failed");
     }
   }
   return { events_created: eventsCreated, lessons_written: lessonsWritten };
@@ -5226,7 +5295,7 @@ async function runEvolutionLoop(opts) {
   const t0 = Date.now();
   const focusArea = opts?.focus_area?.slice(0, 200);
   const dryRun = opts?.dry_run ?? false;
-  logger.info({ cycle_id: cycleId, focus_area: focusArea, dry_run: dryRun }, "Evolution loop starting");
+  logger2.info({ cycle_id: cycleId, focus_area: focusArea, dry_run: dryRun }, "Evolution loop starting");
   broadcastMessage({
     from: "Orchestrator",
     to: "All",
@@ -5249,7 +5318,7 @@ async function runEvolutionLoop(opts) {
   const abortController = new AbortController();
   const totalTimer = setTimeout(() => {
     if (isRunning) {
-      logger.error({ cycle_id: cycleId }, "Evolution loop hit total timeout (20min)");
+      logger2.error({ cycle_id: cycleId }, "Evolution loop hit total timeout (20min)");
       abortController.abort();
     }
   }, TOTAL_TIMEOUT_MS);
@@ -5299,7 +5368,7 @@ async function runEvolutionLoop(opts) {
       } catch (err) {
         learnResult = { events_created: 0, lessons_written: 0 };
         cycle.stages.learn = { status: "error", error: String(err), duration_ms: Date.now() - lrn_t0 };
-        logger.warn({ err: String(err) }, "LEARN stage failed (non-fatal)");
+        logger2.warn({ err: String(err) }, "LEARN stage failed (non-fatal)");
       }
     }
     const failedStages = Object.values(cycle.stages).filter((s) => s?.status === "error").length;
@@ -5308,7 +5377,7 @@ async function runEvolutionLoop(opts) {
   } catch (err) {
     cycle.status = "failed";
     cycle.summary = `Evolution cycle failed: ${err instanceof Error ? err.message : String(err)}`;
-    logger.error({ cycle_id: cycleId, err: String(err) }, "Evolution loop failed");
+    logger2.error({ cycle_id: cycleId, err: String(err) }, "Evolution loop failed");
   } finally {
     clearTimeout(totalTimer);
     cycle.completed_at = (/* @__PURE__ */ new Date()).toISOString();
@@ -5327,7 +5396,7 @@ async function runEvolutionLoop(opts) {
       timestamp: (/* @__PURE__ */ new Date()).toISOString()
     });
     broadcastSSE("evolution-cycle", cycle);
-    logger.info({
+    logger2.info({
       cycle_id: cycleId,
       status: cycle.status,
       duration_ms: cycle.duration_ms
@@ -5628,7 +5697,7 @@ async function chatLLM(req) {
     const available = Object.keys(providers);
     throw new Error(`Unknown provider '${req.provider}'. Available: ${available.join(", ")}`);
   }
-  logger.info({ provider: req.provider, model: req.model, messages: req.messages.length }, "LLM proxy call");
+  logger2.info({ provider: req.provider, model: req.model, messages: req.messages.length }, "LLM proxy call");
   switch (provider.type) {
     case "openai-compat":
       return callOpenAICompat(provider, req);
@@ -5794,7 +5863,7 @@ async function routeMoA(request) {
       duration_ms: Date.now() - t0
     };
   }
-  logger.info({
+  logger2.info({
     query: request.query.slice(0, 80),
     agents: agents.map((a) => a.agent_id),
     domains: classification.domains,
@@ -5811,7 +5880,7 @@ async function routeMoA(request) {
     classification,
     duration_ms: Date.now() - t0
   };
-  logger.info({
+  logger2.info({
     agents: result.agents_dispatched,
     confidence,
     ms: result.duration_ms
@@ -5892,7 +5961,7 @@ Revised response:` }
     rounds: maxRounds,
     duration_ms: Date.now() - t0
   };
-  logger.info({ provider, rounds: maxRounds, ms: result.duration_ms }, "Critique-refine complete");
+  logger2.info({ provider, rounds: maxRounds, ms: result.duration_ms }, "Critique-refine complete");
   return result;
 }
 var DEFAULT_PRINCIPLES;
@@ -5948,11 +6017,11 @@ ${response}`
     };
     score.aggregate = Number(((score.precision + score.reasoning + score.information + score.safety + score.methodology) / 5).toFixed(1));
   } catch (err) {
-    logger.warn({ err: String(err) }, "Agent judge: failed to parse score, returning defaults");
+    logger2.warn({ err: String(err) }, "Agent judge: failed to parse score, returning defaults");
     score = { precision: 5, reasoning: 5, information: 5, safety: 5, methodology: 5, aggregate: 5, explanation: `Parse error: ${err}` };
   }
   const result = { query, score, provider, duration_ms: Date.now() - t0 };
-  logger.info({ aggregate: score.aggregate, provider, ms: result.duration_ms }, "Agent judge complete");
+  logger2.info({ aggregate: score.aggregate, provider, ms: result.duration_ms }, "Agent judge complete");
   return result;
 }
 var JUDGE_SYSTEM_PROMPT;
@@ -6100,7 +6169,7 @@ Handler type: ${handlerType}` }
     } catch {
     }
   }
-  logger.info({ name, namespace, handlerType }, "Skill Forge: tool created");
+  logger2.info({ name, namespace, handlerType }, "Skill Forge: tool created");
   return {
     action: "created",
     tool: spec2,
@@ -6207,7 +6276,7 @@ async function loadForgedTools() {
         loaded++;
       }
     }
-    if (loaded > 0) logger.info({ count: loaded }, "Skill Forge: loaded persisted tools");
+    if (loaded > 0) logger2.info({ count: loaded }, "Skill Forge: loaded persisted tools");
     return loaded;
   } catch {
     return 0;
@@ -15314,20 +15383,20 @@ async function verifyChainOutput(chainOutput, config2) {
       aborted_by_tripwire: tripwireTripped
     };
     if (allPassed) {
-      logger.info({ retries, checks: checkResults.length }, "Verification gate: PASSED");
+      logger2.info({ retries, checks: checkResults.length }, "Verification gate: PASSED");
       return lastResult;
     }
     if (tripwireTripped) {
-      logger.warn({ tripwire: config2.tripwire_check }, "Verification gate: TRIPWIRE ABORT");
+      logger2.warn({ tripwire: config2.tripwire_check }, "Verification gate: TRIPWIRE ABORT");
       return lastResult;
     }
     retries++;
     if (retries <= maxRetries) {
-      logger.info({ retry: retries, maxRetries, failed: checkResults.filter((c) => c.status !== "pass").map((c) => c.name) }, "Verification gate: retrying");
+      logger2.info({ retry: retries, maxRetries, failed: checkResults.filter((c) => c.status !== "pass").map((c) => c.name) }, "Verification gate: retrying");
       await new Promise((r) => setTimeout(r, 1e3 * retries));
     }
   }
-  logger.warn({ retries: maxRetries }, "Verification gate: FAILED after max retries");
+  logger2.warn({ retries: maxRetries }, "Verification gate: FAILED after max retries");
   return lastResult;
 }
 async function runChecksParallel(checks, chainOutput) {
@@ -15556,7 +15625,7 @@ async function createArtifact(topic, blocks, execution) {
       })
     });
     if (!resp.ok) {
-      logger.warn({ status: resp.status }, "Failed to create investigation artifact");
+      logger2.warn({ status: resp.status }, "Failed to create investigation artifact");
       return null;
     }
     const data = await resp.json();
@@ -15569,13 +15638,13 @@ async function createArtifact(topic, blocks, execution) {
     }
     return null;
   } catch (err) {
-    logger.warn({ err: String(err) }, "Artifact creation failed for investigation");
+    logger2.warn({ err: String(err) }, "Artifact creation failed for investigation");
     return null;
   }
 }
 async function runInvestigation(topic) {
   const chainDef = buildInvestigateChain(topic);
-  logger.info({ topic, chain_id: chainDef.chain_id }, "Starting investigation chain");
+  logger2.info({ topic, chain_id: chainDef.chain_id }, "Starting investigation chain");
   const execution = await executeChain(chainDef);
   const blocks = assembleArtifactBlocks(topic, execution);
   const artifact = await createArtifact(topic, blocks, execution);
@@ -15584,7 +15653,7 @@ async function runInvestigation(topic) {
     result.artifact_id = artifact.artifactId;
     result.artifact_url = artifact.artifactUrl;
     result.artifact_markdown_url = `${artifact.artifactUrl}.md`;
-    logger.info({ artifact_id: artifact.artifactId, topic }, "Investigation artifact created");
+    logger2.info({ artifact_id: artifact.artifactId, topic }, "Investigation artifact created");
   }
   return result;
 }
@@ -15637,7 +15706,7 @@ function foldToolResult(content, toolName) {
   const foldedTokens = Math.ceil(folded.length / 4);
   const saved = originalTokens - foldedTokens;
   totalTokensSaved += saved;
-  logger.debug({ tool: toolName, originalTokens, foldedTokens, saved }, "Tool result folded");
+  logger2.debug({ tool: toolName, originalTokens, foldedTokens, saved }, "Tool result folded");
   return folded;
 }
 async function executeToolCalls(toolCalls) {
@@ -15661,12 +15730,12 @@ async function executeOne(tc) {
     return `Error: Invalid JSON arguments`;
   }
   const name = tc.function.name;
-  logger.info({ tool: name, args_keys: Object.keys(args) }, "Executing tool call");
+  logger2.info({ tool: name, args_keys: Object.keys(args) }, "Executing tool call");
   try {
     return await executeToolByName(name, args);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    logger.warn({ tool: name, error: msg }, "Tool execution failed \u2014 returning graceful fallback");
+    logger2.warn({ tool: name, error: msg }, "Tool execution failed \u2014 returning graceful fallback");
     return buildToolFallback(name, msg);
   }
 }
@@ -15692,7 +15761,7 @@ async function executeToolUnified(toolName, args, opts) {
   let deprecation_notice;
   const toolDef = getTool(toolName);
   if (toolDef?.deprecated) {
-    logger.warn({ tool: toolName }, `Deprecated tool called: ${toolName}. ${toolDef.deprecatedMessage ?? ""}`);
+    logger2.warn({ tool: toolName }, `Deprecated tool called: ${toolName}. ${toolDef.deprecatedMessage ?? ""}`);
     deprecation_notice = {
       deprecated: true,
       since: toolDef.deprecatedSince,
@@ -16478,7 +16547,7 @@ toolsRouter.get("/catalog", async (_req, res) => {
         return;
       }
     } catch (err) {
-      logger.warn({ err: String(err) }, "Redis cache read failed for tool catalog");
+      logger2.warn({ err: String(err) }, "Redis cache read failed for tool catalog");
     }
   }
   const catalog = buildCatalog();
@@ -16486,7 +16555,7 @@ toolsRouter.get("/catalog", async (_req, res) => {
     try {
       await redis2.set(CATALOG_CACHE_KEY, JSON.stringify(catalog), "EX", CATALOG_TTL_SECONDS);
     } catch (err) {
-      logger.warn({ err: String(err) }, "Redis cache write failed for tool catalog");
+      logger2.warn({ err: String(err) }, "Redis cache write failed for tool catalog");
     }
   }
   res.json(catalog);
@@ -16532,9 +16601,9 @@ async function storeEpisode(title, description, events, outcome, tags) {
         timestamp: (/* @__PURE__ */ new Date()).toISOString()
       }
     });
-    logger.info({ title, tags }, "Episode stored to episodic memory");
+    logger2.info({ title, tags }, "Episode stored to episodic memory");
   } catch (err) {
-    logger.warn({ err: String(err), title }, "Episodic memory store failed (non-fatal)");
+    logger2.warn({ err: String(err), title }, "Episodic memory store failed (non-fatal)");
   }
 }
 async function storeGraphMemory(agentId, type, content, tags) {
@@ -16551,9 +16620,9 @@ async function storeGraphMemory(agentId, type, content, tags) {
       query: cypher,
       parameters: { agent_id: agentId, type, content: content.slice(0, 4e3), tags }
     });
-    logger.info({ agentId, type, tags }, "Memory stored to Neo4j graph");
+    logger2.info({ agentId, type, tags }, "Memory stored to Neo4j graph");
   } catch (err) {
-    logger.warn({ err: String(err), type }, "Graph memory store failed (non-fatal)");
+    logger2.warn({ err: String(err), type }, "Graph memory store failed (non-fatal)");
   }
 }
 async function storeSRAG(content, tags, source) {
@@ -16564,9 +16633,9 @@ async function storeSRAG(content, tags, source) {
       tags,
       metadata: { captured_at: (/* @__PURE__ */ new Date()).toISOString() }
     });
-    logger.info({ tags, source }, "Content stored to SRAG");
+    logger2.info({ tags, source }, "Content stored to SRAG");
   } catch (err) {
-    logger.warn({ err: String(err) }, "SRAG store failed (non-fatal)");
+    logger2.warn({ err: String(err) }, "SRAG store failed (non-fatal)");
   }
 }
 function persistToMemory(opts) {
@@ -16577,7 +16646,7 @@ function persistToMemory(opts) {
     storeSRAG(content, [...tags, "auto-memory"], "command-center-chat")
   ]).then((results) => {
     const succeeded = results.filter((r) => r.status === "fulfilled").length;
-    logger.debug({ succeeded, total: 3, title }, "Memory persistence completed");
+    logger2.debug({ succeeded, total: 3, title }, "Memory persistence completed");
   });
 }
 var AGENT_PERSONAS = {
@@ -16633,9 +16702,9 @@ ${context}` },
       ...threadId ? { thread_id: threadId } : {},
       metadata: { provider: result.provider, model: result.model, duration_ms: result.duration_ms }
     });
-    logger.info({ agent: agentId, from, model: result.model, ms: result.duration_ms }, "Agent auto-reply sent");
+    logger2.info({ agent: agentId, from, model: result.model, ms: result.duration_ms }, "Agent auto-reply sent");
   } catch (err) {
-    logger.error({ err: String(err), agent: agentId }, "Agent auto-reply failed");
+    logger2.error({ err: String(err), agent: agentId }, "Agent auto-reply failed");
     broadcastMessage({
       from: agentId,
       to: from,
@@ -16675,7 +16744,7 @@ chatRouter.post("/message", (req, res) => {
   };
   broadcastMessage(msg);
   notifyChatMessage(msg.from, msg.to, msg.message);
-  logger.info({ from: msg.from, to: msg.to, type: msg.type }, "Chat message broadcast");
+  logger2.info({ from: msg.from, to: msg.to, type: msg.type }, "Chat message broadcast");
   const noReply = req.body.no_reply === true;
   if (!noReply && msg.to && msg.to !== "All" && msg.source !== "system" && msg.source !== "agent") {
     if (shouldRouteViaOrchestrator(msg.to)) {
@@ -16734,7 +16803,7 @@ chatRouter.post("/rag", async (req, res) => {
     const result = await dualChannelRAG(query, { maxResults: max_results, cypherDepth: cypher_depth });
     res.json({ success: true, data: result });
   } catch (err) {
-    logger.error({ err: String(err) }, "Dual-RAG error");
+    logger2.error({ err: String(err) }, "Dual-RAG error");
     res.status(500).json({ success: false, error: { code: "RAG_ERROR", message: String(err), status_code: 500 } });
   }
 });
@@ -16829,10 +16898,10 @@ chatRouter.post("/capture", async (req, res) => {
       message: `\u{1F4DA} Knowledge captured: ${message_ids?.length || 0} messages \u2192 SRAG (tags: ${(tags || ["chat-capture"]).join(", ")})`,
       timestamp: (/* @__PURE__ */ new Date()).toISOString()
     });
-    logger.info({ message_count: message_ids?.length, tags }, "Chat knowledge captured to SRAG");
+    logger2.info({ message_count: message_ids?.length, tags }, "Chat knowledge captured to SRAG");
     res.json({ success: true, data: { captured: message_ids?.length || 1, srag_result: sragData } });
   } catch (err) {
-    logger.error({ err: String(err) }, "Knowledge capture failed");
+    logger2.error({ err: String(err) }, "Knowledge capture failed");
     res.status(502).json({ success: false, error: { code: "CAPTURE_FAILED", message: String(err) } });
   }
 });
@@ -16881,7 +16950,7 @@ ${typeof summary === "string" ? summary : JSON.stringify(summary)}`,
     });
     res.json({ success: true, data: { summary, message_count: messages.length, persisted: true } });
   } catch (err) {
-    logger.error({ err: String(err) }, "Summarize failed");
+    logger2.error({ err: String(err) }, "Summarize failed");
     res.status(502).json({ success: false, error: { code: "SUMMARIZE_FAILED", message: String(err) } });
   }
 });
@@ -16904,7 +16973,7 @@ Participants: ${agents.join(", ")} | Rounds: ${maxRounds}`,
     thread_id: debateId
   });
   runDebate(debateId, agents, topic, maxRounds).catch((err) => {
-    logger.error({ err: String(err), debateId }, "Debate failed");
+    logger2.error({ err: String(err), debateId }, "Debate failed");
     broadcastMessage({
       from: "System",
       to: "All",
@@ -17023,7 +17092,7 @@ Original question: ${question}`, timeout_ms: 6e4 });
   }
   const steps = customSteps || defaultSteps;
   runThink(thinkId, question, steps).catch((err) => {
-    logger.error({ err: String(err), thinkId }, "Think failed");
+    logger2.error({ err: String(err), thinkId }, "Think failed");
     broadcastMessage({
       from: "System",
       to: "All",
@@ -17312,7 +17381,7 @@ chainsRouter.post("/execute", async (req, res) => {
       });
     }
   } catch (err) {
-    logger.error({ err: String(err) }, "Chain execution failed");
+    logger2.error({ err: String(err) }, "Chain execution failed");
     res.status(500).json({
       success: false,
       error: { code: "CHAIN_ERROR", message: String(err), status_code: 500 }
@@ -17372,7 +17441,7 @@ cognitiveRouter.post("/:action", async (req, res) => {
     }, body.timeout_ms);
     res.json({ success: true, data: { action, result } });
   } catch (err) {
-    logger.error({ action, err: String(err) }, "Cognitive proxy error");
+    logger2.error({ action, err: String(err) }, "Cognitive proxy error");
     res.status(502).json({
       success: false,
       error: { code: "RLM_ERROR", message: String(err), status_code: 502 }
@@ -17745,7 +17814,7 @@ async function pruneStaleData() {
 async function runSelfCorrect() {
   const t0 = Date.now();
   const startedAt = (/* @__PURE__ */ new Date()).toISOString();
-  logger.info("Self-correcting graph agent starting");
+  logger2.info("Self-correcting graph agent starting");
   const corrections = await Promise.all([
     // Original orchestrator healers
     fixOrphanedNodes().catch((err) => ({
@@ -17861,7 +17930,7 @@ async function runSelfCorrect() {
     });
   } catch {
   }
-  logger.info({
+  logger2.info({
     found: report.total_found,
     fixed: report.total_fixed,
     ms: report.duration_ms
@@ -17887,7 +17956,7 @@ function categorizeFailure(error) {
 async function harvestFailures(windowHours = 24) {
   const redis2 = getRedis();
   if (!redis2) {
-    logger.warn("Failure harvester: Redis not available");
+    logger2.warn("Failure harvester: Redis not available");
     return [];
   }
   const events = [];
@@ -17920,9 +17989,9 @@ async function harvestFailures(windowHours = 24) {
         }
       }
     } while (cursor !== "0");
-    logger.info({ harvested: events.length, window_hours: windowHours }, "Failure harvester scan complete");
+    logger2.info({ harvested: events.length, window_hours: windowHours }, "Failure harvester scan complete");
   } catch (err) {
-    logger.error({ err: String(err) }, "Failure harvester scan failed");
+    logger2.error({ err: String(err) }, "Failure harvester scan failed");
   }
   return events;
 }
@@ -17958,7 +18027,7 @@ async function persistToGraph(events) {
       });
       persisted++;
     } catch (err) {
-      logger.warn({ err: String(err), execution_id: evt.execution_id }, "Failed to persist failure event");
+      logger2.warn({ err: String(err), execution_id: evt.execution_id }, "Failed to persist failure event");
     }
   }
   if (persisted > 0) {
@@ -18033,7 +18102,7 @@ async function runFailureHarvest(windowHours = 24) {
     });
   }
   broadcastSSE("failure-harvest", summary);
-  logger.info({
+  logger2.info({
     total: events.length,
     persisted,
     categories: summary.by_category
@@ -18124,10 +18193,10 @@ async function extractCapabilities(target) {
   const capabilities = [];
   for (const url of target.urls) {
     try {
-      logger.info({ competitor: target.name, url }, "Fetching competitor page");
+      logger2.info({ competitor: target.name, url }, "Fetching competitor page");
       const pageText = await fetchPageText(url);
       if (pageText.length < 100) {
-        logger.warn({ competitor: target.name, url, length: pageText.length }, "Page too short \u2014 skipping");
+        logger2.warn({ competitor: target.name, url, length: pageText.length }, "Page too short \u2014 skipping");
         continue;
       }
       const prompt = EXTRACTION_PROMPT.replace("{competitor}", target.name).replace("{url}", url).replace("{content}", pageText.slice(0, 12e3));
@@ -18139,7 +18208,7 @@ async function extractCapabilities(target) {
         max_tokens: 1500
       });
       if (!llmResult.content || llmResult.content.includes("NO_CAPABILITIES_FOUND")) {
-        logger.info({ competitor: target.name, url }, "No capabilities found on page");
+        logger2.info({ competitor: target.name, url }, "No capabilities found on page");
         continue;
       }
       const lines = llmResult.content.split("\n").filter((l) => l.trim().startsWith("-") || l.trim().startsWith("*"));
@@ -18156,9 +18225,9 @@ async function extractCapabilities(target) {
           });
         }
       }
-      logger.info({ competitor: target.name, url, capabilities: lines.length }, "Extracted capabilities from page");
+      logger2.info({ competitor: target.name, url, capabilities: lines.length }, "Extracted capabilities from page");
     } catch (err) {
-      logger.warn({ competitor: target.name, url, err: String(err) }, "Capability extraction failed for URL");
+      logger2.warn({ competitor: target.name, url, err: String(err) }, "Capability extraction failed for URL");
     }
   }
   return capabilities;
@@ -18202,7 +18271,7 @@ async function persistCapabilities(capabilities) {
       });
       persisted++;
     } catch (err) {
-      logger.warn({ err: String(err), competitor: cap.competitor }, "Failed to persist capability");
+      logger2.warn({ err: String(err), competitor: cap.competitor }, "Failed to persist capability");
     }
   }
   return persisted;
@@ -18260,12 +18329,12 @@ async function analyzeGaps(capabilities) {
   };
 }
 async function runCompetitiveCrawl() {
-  logger.info("Starting competitive phagocytosis crawl");
+  logger2.info("Starting competitive phagocytosis crawl");
   const allCapabilities = [];
   for (const target of COMPETITOR_TARGETS) {
     const caps = await extractCapabilities(target);
     allCapabilities.push(...caps);
-    logger.info({ competitor: target.name, capabilities: caps.length }, "Extracted capabilities");
+    logger2.info({ competitor: target.name, capabilities: caps.length }, "Extracted capabilities");
   }
   const persisted = await persistCapabilities(allCapabilities);
   const report = await analyzeGaps(allCapabilities);
@@ -18274,10 +18343,10 @@ async function runCompetitiveCrawl() {
     await redis2.set("orchestrator:competitive-report", JSON.stringify(report), "EX", 604800).catch(() => {
     });
   } else if (redis2 && allCapabilities.length === 0) {
-    logger.warn("Competitive crawl returned zero capabilities \u2014 not caching empty report");
+    logger2.warn("Competitive crawl returned zero capabilities \u2014 not caching empty report");
   }
   broadcastSSE("competitive-report", report);
-  logger.info({
+  logger2.info({
     total_capabilities: allCapabilities.length,
     persisted,
     gaps: report.gaps.length
@@ -18319,7 +18388,7 @@ adoptionRouter.get("/metrics", async (_req, res) => {
         return;
       }
     } catch (err) {
-      logger.warn({ err: String(err) }, "Redis read failed for adoption metrics");
+      logger2.warn({ err: String(err) }, "Redis read failed for adoption metrics");
     }
   }
   const metrics2 = {
@@ -18330,7 +18399,7 @@ adoptionRouter.get("/metrics", async (_req, res) => {
     try {
       await redis2.set(REDIS_KEY3, JSON.stringify(metrics2));
     } catch (err) {
-      logger.warn({ err: String(err) }, "Redis write failed for adoption metrics");
+      logger2.warn({ err: String(err) }, "Redis write failed for adoption metrics");
     }
   }
   res.json(metrics2);
@@ -18344,7 +18413,7 @@ adoptionRouter.put("/metrics", async (req, res) => {
       const cached = await redis2.get(REDIS_KEY3);
       if (cached) current = JSON.parse(cached);
     } catch (err) {
-      logger.warn({ err: String(err) }, "Redis read failed during adoption metrics update");
+      logger2.warn({ err: String(err) }, "Redis read failed during adoption metrics update");
     }
   }
   if (typeof body.features_done === "number") current.features_done = body.features_done;
@@ -18361,7 +18430,7 @@ adoptionRouter.put("/metrics", async (req, res) => {
     try {
       await redis2.set(REDIS_KEY3, JSON.stringify(current));
     } catch (err) {
-      logger.warn({ err: String(err) }, "Redis write failed for adoption metrics update");
+      logger2.warn({ err: String(err) }, "Redis write failed for adoption metrics update");
       res.status(500).json({ success: false, error: "Failed to persist metrics" });
       return;
     }
@@ -18447,7 +18516,7 @@ async function captureAdoptionSnapshot() {
       }
       uniqueAgents = activeAgents.size;
     } catch (err) {
-      logger.warn({ err: String(err) }, "Failed to collect Redis adoption metrics");
+      logger2.warn({ err: String(err) }, "Failed to collect Redis adoption metrics");
     }
   }
   const snapshot = {
@@ -18470,9 +18539,9 @@ async function captureAdoptionSnapshot() {
       if (totalEntries > 90) {
         await redis2.zremrangebyrank(REDIS_TRENDS_KEY, 0, totalEntries - 91);
       }
-      logger.info({ date: today, snapshot }, "Adoption snapshot captured");
+      logger2.info({ date: today, snapshot }, "Adoption snapshot captured");
     } catch (err) {
-      logger.warn({ err: String(err) }, "Failed to persist adoption snapshot");
+      logger2.warn({ err: String(err) }, "Failed to persist adoption snapshot");
     }
   }
   try {
@@ -18505,7 +18574,7 @@ SET m.conversations_24h = $conversations,
       timeoutMs: 1e4
     });
   } catch (err) {
-    logger.warn({ err: String(err) }, "Failed to write adoption snapshot to Neo4j");
+    logger2.warn({ err: String(err) }, "Failed to write adoption snapshot to Neo4j");
   }
   return snapshot;
 }
@@ -18514,7 +18583,7 @@ adoptionRouter.post("/snapshot", async (_req, res) => {
     const snapshot = await captureAdoptionSnapshot();
     res.json({ success: true, data: snapshot });
   } catch (err) {
-    logger.error({ err: String(err) }, "Adoption snapshot capture failed");
+    logger2.error({ err: String(err) }, "Adoption snapshot capture failed");
     res.status(500).json({
       success: false,
       error: { code: "SNAPSHOT_ERROR", message: String(err), status_code: 500 }
@@ -18534,7 +18603,7 @@ adoptionRouter.get("/trends", async (req, res) => {
     const trends = raw.map((r) => JSON.parse(r));
     res.json({ success: true, data: { trends, days, total: trends.length } });
   } catch (err) {
-    logger.warn({ err: String(err) }, "Failed to read adoption trends");
+    logger2.warn({ err: String(err) }, "Failed to read adoption trends");
     res.status(500).json({
       success: false,
       error: { code: "TRENDS_ERROR", message: String(err), status_code: 500 }
@@ -18648,7 +18717,7 @@ async function runLooseEndScan() {
   const scanId = uuid20();
   const t0 = Date.now();
   const findings = [];
-  logger.info({ scan_id: scanId }, "Loose-end scan started");
+  logger2.info({ scan_id: scanId }, "Loose-end scan started");
   const queryResults = await Promise.allSettled(
     DETECTION_QUERIES.map(async (dq) => {
       try {
@@ -18662,7 +18731,7 @@ async function runLooseEndScan() {
         const records = Array.isArray(result.result) ? result.result : Array.isArray(result.result?.records) ? result.result.records : [];
         return dq.buildFinding(records);
       } catch (err) {
-        logger.warn({ query: dq.name, err: String(err) }, "Loose-end detection query failed");
+        logger2.warn({ query: dq.name, err: String(err) }, "Loose-end detection query failed");
         return [];
       }
     })
@@ -18696,7 +18765,7 @@ async function runLooseEndScan() {
         await redis2.zremrangebyrank(REDIS_HISTORY, 0, count - 31);
       }
     } catch (err) {
-      logger.warn({ err: String(err) }, "Failed to persist loose-end scan");
+      logger2.warn({ err: String(err) }, "Failed to persist loose-end scan");
     }
   }
   try {
@@ -18726,7 +18795,7 @@ SET s.scanned_at = datetime(), s.duration_ms = $duration,
     summary,
     duration_ms: scanResult.duration_ms
   });
-  logger.info({
+  logger2.info({
     scan_id: scanId,
     ...summary,
     duration_ms: scanResult.duration_ms
@@ -18738,7 +18807,7 @@ looseEndsRouter.post("/scan", async (_req, res) => {
     const result = await runLooseEndScan();
     res.json({ success: true, data: result });
   } catch (err) {
-    logger.error({ err: String(err) }, "Loose-end scan failed");
+    logger2.error({ err: String(err) }, "Loose-end scan failed");
     res.status(500).json({
       success: false,
       error: { code: "SCAN_ERROR", message: String(err), status_code: 500 }
@@ -18810,15 +18879,15 @@ function registerCronJob(job) {
     cronTasks.set(job.id, task);
   }
   persistCronJobs();
-  logger.info({ id: job.id, schedule: job.schedule, enabled: job.enabled }, "Cron job registered");
+  logger2.info({ id: job.id, schedule: job.schedule, enabled: job.enabled }, "Cron job registered");
 }
 async function runCronJob(jobId) {
   const job = jobs.get(jobId);
   if (!job) {
-    logger.warn({ id: jobId }, "Cron job not found");
+    logger2.warn({ id: jobId }, "Cron job not found");
     return;
   }
-  logger.info({ id: job.id, name: job.name }, "Cron job triggered");
+  logger2.info({ id: job.id, name: job.name }, "Cron job triggered");
   broadcastMessage({
     from: "Orchestrator",
     to: "All",
@@ -18849,7 +18918,7 @@ async function runCronJob(jobId) {
         job.last_status = "failed";
         job.run_count++;
         persistCronJobs();
-        logger.error({ id: job.id, err: String(err) }, "Adoption snapshot failed");
+        logger2.error({ id: job.id, err: String(err) }, "Adoption snapshot failed");
       }
       return;
     }
@@ -18888,7 +18957,7 @@ async function runCronJob(jobId) {
         job.last_status = "failed";
         job.run_count++;
         persistCronJobs();
-        logger.error({ id: job.id, err: String(err) }, "Adoption weekly digest failed");
+        logger2.error({ id: job.id, err: String(err) }, "Adoption weekly digest failed");
       }
       return;
     }
@@ -18913,7 +18982,7 @@ async function runCronJob(jobId) {
         job.last_status = "failed";
         job.run_count++;
         persistCronJobs();
-        logger.error({ id: job.id, err: String(err) }, "Loose-end scan failed");
+        logger2.error({ id: job.id, err: String(err) }, "Loose-end scan failed");
       }
       return;
     }
@@ -18937,7 +19006,7 @@ async function runCronJob(jobId) {
         job.last_status = "failed";
         job.run_count++;
         persistCronJobs();
-        logger.error({ id: job.id, err: String(err) }, "Failure harvest cron failed");
+        logger2.error({ id: job.id, err: String(err) }, "Failure harvest cron failed");
       }
       return;
     }
@@ -18961,7 +19030,7 @@ async function runCronJob(jobId) {
         job.last_status = "failed";
         job.run_count++;
         persistCronJobs();
-        logger.error({ id: job.id, err: String(err) }, "Competitive crawl cron failed");
+        logger2.error({ id: job.id, err: String(err) }, "Competitive crawl cron failed");
       }
       return;
     }
@@ -18987,7 +19056,7 @@ async function runCronJob(jobId) {
         job.last_status = "failed";
         job.run_count++;
         persistCronJobs();
-        logger.error({ id: job.id, err: String(err) }, "Graph hygiene cron failed");
+        logger2.error({ id: job.id, err: String(err) }, "Graph hygiene cron failed");
       }
       return;
     }
@@ -19011,7 +19080,7 @@ async function runCronJob(jobId) {
         job.last_status = "failed";
         job.run_count++;
         persistCronJobs();
-        logger.error({ id: job.id, err: String(err) }, "Adaptive RAG retrain cron failed");
+        logger2.error({ id: job.id, err: String(err) }, "Adaptive RAG retrain cron failed");
       }
       return;
     }
@@ -19035,7 +19104,7 @@ async function runCronJob(jobId) {
         job.last_status = "failed";
         job.run_count++;
         persistCronJobs();
-        logger.error({ id: job.id, err: String(err) }, "Community builder cron failed");
+        logger2.error({ id: job.id, err: String(err) }, "Community builder cron failed");
       }
       return;
     }
@@ -19077,7 +19146,7 @@ async function runCronJob(jobId) {
         job.last_status = "failed";
         job.run_count++;
         persistCronJobs();
-        logger.error({ id: job.id, err: String(err) }, "OSINT scan cron failed");
+        logger2.error({ id: job.id, err: String(err) }, "OSINT scan cron failed");
       }
       return;
     }
@@ -19103,7 +19172,7 @@ async function runCronJob(jobId) {
         job.last_status = "failed";
         job.run_count++;
         persistCronJobs();
-        logger.error({ id: job.id, err: String(err) }, "Evolution loop cron failed");
+        logger2.error({ id: job.id, err: String(err) }, "Evolution loop cron failed");
       }
       return;
     }
@@ -19132,17 +19201,17 @@ async function runCronJob(jobId) {
         await redis2.set("orchestrator:knowledge-feed", JSON.stringify(feed), "EX", 86400);
         const briefing = buildKnowledgeBriefing(feed);
         await redis2.set("orchestrator:knowledge-briefing-prompt", briefing, "EX", 86400);
-        logger.info("Knowledge briefing prompt cached for Open WebUI");
+        logger2.info("Knowledge briefing prompt cached for Open WebUI");
       }
       broadcastSSE("knowledge-feed", feed);
-      logger.info({ execution_id: result.execution_id }, "Daily knowledge feed cached and broadcast");
+      logger2.info({ execution_id: result.execution_id }, "Daily knowledge feed cached and broadcast");
     }
   } catch (err) {
     job.last_run = (/* @__PURE__ */ new Date()).toISOString();
     job.last_status = "failed";
     job.run_count++;
     persistCronJobs();
-    logger.error({ id: job.id, err: String(err) }, "Cron job failed");
+    logger2.error({ id: job.id, err: String(err) }, "Cron job failed");
   }
 }
 function setCronJobEnabled(jobId, enabled) {
@@ -19160,7 +19229,7 @@ function setCronJobEnabled(jobId, enabled) {
     cronTasks.delete(jobId);
   }
   persistCronJobs();
-  logger.info({ id: jobId, enabled }, "Cron job toggled");
+  logger2.info({ id: jobId, enabled }, "Cron job toggled");
   return true;
 }
 function listCronJobs() {
@@ -19194,9 +19263,9 @@ async function hydrateCronJobs() {
     for (const job of savedJobs) {
       registerCronJob(job);
     }
-    logger.info({ count: savedJobs.length }, "Hydrated cron jobs from Redis");
+    logger2.info({ count: savedJobs.length }, "Hydrated cron jobs from Redis");
   } catch (err) {
-    logger.warn({ err: String(err) }, "Failed to hydrate cron jobs");
+    logger2.warn({ err: String(err) }, "Failed to hydrate cron jobs");
   }
 }
 function buildKnowledgeBriefing(feed) {
@@ -19789,7 +19858,7 @@ function recordFailure() {
   consecutiveFailures++;
   if (consecutiveFailures >= CIRCUIT_THRESHOLD) {
     circuitOpenUntil = Date.now() + CIRCUIT_RESET_MS;
-    logger.warn({ failures: consecutiveFailures }, "OpenClaw circuit breaker OPEN");
+    logger2.warn({ failures: consecutiveFailures }, "OpenClaw circuit breaker OPEN");
   }
 }
 function isCircuitOpen() {
@@ -19797,7 +19866,7 @@ function isCircuitOpen() {
   if (Date.now() > circuitOpenUntil) {
     circuitOpenUntil = 0;
     consecutiveFailures = 0;
-    logger.info("OpenClaw circuit breaker RESET (auto)");
+    logger2.info("OpenClaw circuit breaker RESET (auto)");
     return false;
   }
   return true;
@@ -19821,11 +19890,11 @@ async function fetchSkills() {
       if (Array.isArray(skills)) {
         skillManifest = skills;
         skillsFetchedAt = (/* @__PURE__ */ new Date()).toISOString();
-        logger.info({ count: skills.length }, "OpenClaw skills discovered");
+        logger2.info({ count: skills.length }, "OpenClaw skills discovered");
       }
     }
   } catch (err) {
-    logger.warn({ err: String(err) }, "OpenClaw skill discovery failed (non-fatal)");
+    logger2.warn({ err: String(err) }, "OpenClaw skill discovery failed (non-fatal)");
   }
 }
 async function pollHealth() {
@@ -19873,7 +19942,7 @@ function getOpenClawSkills() {
 }
 function initOpenClaw() {
   if (!config.openclawUrl) {
-    logger.info("OpenClaw not configured \u2014 skipping init");
+    logger2.info("OpenClaw not configured \u2014 skipping init");
     return;
   }
   pollHealth();
@@ -19930,7 +19999,7 @@ openclawRouter.all("/proxy/*", async (req, res) => {
     }
   } catch (err) {
     recordFailure();
-    logger.warn({ err: String(err), path: targetPath, failures: consecutiveFailures }, "OpenClaw proxy error");
+    logger2.warn({ err: String(err), path: targetPath, failures: consecutiveFailures }, "OpenClaw proxy error");
     res.status(502).json({
       success: false,
       error: {
@@ -20065,7 +20134,7 @@ llmRouter.post("/chat", async (req, res) => {
     }
     res.json({ success: true, data: result });
   } catch (err) {
-    logger.error({ err: String(err), provider }, "LLM chat error");
+    logger2.error({ err: String(err), provider }, "LLM chat error");
     res.status(502).json({
       success: false,
       error: { code: "LLM_ERROR", message: String(err instanceof Error ? err.message : err), status_code: 502 }
@@ -20115,10 +20184,10 @@ llmRouter.post("/conversation", async (req, res) => {
         usage: result.usage
       }
     });
-    logger.info({ provider, model: result.model, convId, ms: result.duration_ms }, "LLM conversation persisted");
+    logger2.info({ provider, model: result.model, convId, ms: result.duration_ms }, "LLM conversation persisted");
     res.json({ success: true, data: { ...result, conversation_id: convId } });
   } catch (err) {
-    logger.error({ err: String(err), provider, convId }, "LLM conversation error");
+    logger2.error({ err: String(err), provider, convId }, "LLM conversation error");
     res.status(502).json({
       success: false,
       error: { code: "LLM_ERROR", message: String(err instanceof Error ? err.message : err), status_code: 502 }
@@ -20148,7 +20217,7 @@ async function logAudit(entry) {
       }
     }
   } catch (err) {
-    logger.warn({ err: String(err) }, "Audit Redis write failed, using memory");
+    logger2.warn({ err: String(err) }, "Audit Redis write failed, using memory");
   }
   memoryAudit.unshift(entry);
   if (memoryAudit.length > MAX_ENTRIES) memoryAudit = memoryAudit.slice(0, MAX_ENTRIES);
@@ -20163,7 +20232,7 @@ async function getAuditLog(limit = 100, offset = 0) {
       }
     }
   } catch (err) {
-    logger.warn({ err: String(err) }, "Audit Redis read failed, using memory");
+    logger2.warn({ err: String(err) }, "Audit Redis read failed, using memory");
   }
   return memoryAudit.slice(offset, offset + limit);
 }
@@ -20290,7 +20359,7 @@ knowledgeRouter.get("/cards", async (req, res) => {
       return;
     }
   }
-  logger.info({ query: q }, "kg_rag empty or failed, falling back to srag.query");
+  logger2.info({ query: q }, "kg_rag empty or failed, falling back to srag.query");
   const sragResult = await callMcp("srag.query", { query: q, domains });
   if (sragResult.ok) {
     const cards = normalizeCards(sragResult.data, "srag");
@@ -20310,7 +20379,7 @@ knowledgeRouter.get("/feed", async (_req, res) => {
         return;
       }
     } catch (err) {
-      logger.warn({ err: String(err) }, "Redis cache read failed for knowledge feed");
+      logger2.warn({ err: String(err) }, "Redis cache read failed for knowledge feed");
     }
   }
   const feed = {
@@ -20361,7 +20430,7 @@ knowledgeRouter.get("/feed", async (_req, res) => {
     try {
       await redis2.set(FEED_CACHE_KEY, JSON.stringify(feed), "EX", FEED_TTL_SECONDS);
     } catch (err) {
-      logger.warn({ err: String(err) }, "Redis cache write failed for knowledge feed");
+      logger2.warn({ err: String(err) }, "Redis cache write failed for knowledge feed");
     }
   }
   res.json(feed);
@@ -20380,7 +20449,7 @@ knowledgeRouter.get("/briefing", async (_req, res) => {
     }
     res.type("text/plain").send(briefing);
   } catch (err) {
-    logger.warn({ err: String(err) }, "Redis read failed for knowledge briefing");
+    logger2.warn({ err: String(err) }, "Redis read failed for knowledge briefing");
     res.status(500).json({ error: "Failed to read briefing from cache" });
   }
 });
@@ -20403,7 +20472,7 @@ async function storeArtifact(artifact) {
     await redis2.sadd(ARTIFACT_INDEX, artifact.$id);
     return true;
   } catch (err) {
-    logger.warn({ err: String(err) }, "Redis store failed for artifact");
+    logger2.warn({ err: String(err) }, "Redis store failed for artifact");
     return false;
   }
 }
@@ -20414,7 +20483,7 @@ async function loadArtifact(id) {
     const raw = await redis2.get(`${ARTIFACT_PREFIX}${id}`);
     return raw ? JSON.parse(raw) : null;
   } catch (err) {
-    logger.warn({ err: String(err), id }, "Redis load failed for artifact");
+    logger2.warn({ err: String(err), id }, "Redis load failed for artifact");
     return null;
   }
 }
@@ -20424,7 +20493,7 @@ async function listAllIds() {
   try {
     return await redis2.smembers(ARTIFACT_INDEX);
   } catch (err) {
-    logger.warn({ err: String(err) }, "Redis list failed for artifact index");
+    logger2.warn({ err: String(err) }, "Redis list failed for artifact index");
     return [];
   }
 }
@@ -20454,7 +20523,7 @@ artifactRouter.post("/", async (req, res) => {
     res.status(503).json({ success: false, error: "Redis not available" });
     return;
   }
-  logger.info({ id: artifact.$id, title: artifact.title }, "Artifact created");
+  logger2.info({ id: artifact.$id, title: artifact.title }, "Artifact created");
   res.status(201).json({ success: true, artifact });
 });
 artifactRouter.get("/", async (req, res) => {
@@ -20486,7 +20555,7 @@ artifactRouter.get("/", async (req, res) => {
       }
     }
   } catch (err) {
-    logger.warn({ err: String(err) }, "Redis pipeline failed for artifact list");
+    logger2.warn({ err: String(err) }, "Redis pipeline failed for artifact list");
   }
   let filtered = artifacts.filter((a) => a.status !== "archived");
   if (statusFilter) {
@@ -20537,7 +20606,7 @@ artifactRouter.put("/:id", async (req, res) => {
     res.status(503).json({ success: false, error: "Redis not available" });
     return;
   }
-  logger.info({ id, title: existing.title }, "Artifact updated");
+  logger2.info({ id, title: existing.title }, "Artifact updated");
   res.json({ success: true, artifact: existing });
 });
 artifactRouter.delete("/:id", async (req, res) => {
@@ -20554,7 +20623,7 @@ artifactRouter.delete("/:id", async (req, res) => {
     res.status(503).json({ success: false, error: "Redis not available" });
     return;
   }
-  logger.info({ id }, "Artifact archived");
+  logger2.info({ id }, "Artifact archived");
   res.json({ success: true });
 });
 function trendEmoji(trend) {
@@ -20732,7 +20801,7 @@ async function storeNotebook(notebook) {
     await redis2.sadd(NOTEBOOK_INDEX, notebook.$id);
     return true;
   } catch (err) {
-    logger.warn({ err: String(err) }, "Redis store failed for notebook");
+    logger2.warn({ err: String(err) }, "Redis store failed for notebook");
     return false;
   }
 }
@@ -20743,7 +20812,7 @@ async function loadNotebook(id) {
     const raw = await redis2.get(`${NOTEBOOK_PREFIX}${id}`);
     return raw ? JSON.parse(raw) : null;
   } catch (err) {
-    logger.warn({ err: String(err), id }, "Redis load failed for notebook");
+    logger2.warn({ err: String(err), id }, "Redis load failed for notebook");
     return null;
   }
 }
@@ -20834,7 +20903,7 @@ notebookRouter.post("/execute", async (req, res) => {
       cells[i].id = `cell-${i}`;
     }
   }
-  logger.info({ id, title: body.title, cellCount: cells.length }, "Notebook execution started");
+  logger2.info({ id, title: body.title, cellCount: cells.length }, "Notebook execution started");
   const cellResults = /* @__PURE__ */ new Map();
   let context = "";
   for (const cell of cells) {
@@ -20876,9 +20945,9 @@ notebookRouter.post("/execute", async (req, res) => {
   };
   const stored = await storeNotebook(notebook);
   if (!stored) {
-    logger.warn({ id }, "Notebook executed but Redis storage failed");
+    logger2.warn({ id }, "Notebook executed but Redis storage failed");
   }
-  logger.info({ id, title: notebook.title, cellsExecuted: cells.length }, "Notebook execution complete");
+  logger2.info({ id, title: notebook.title, cellsExecuted: cells.length }, "Notebook execution complete");
   res.status(201).json({ success: true, notebook });
 });
 notebookRouter.get("/:id", async (req, res) => {
@@ -21063,7 +21132,7 @@ async function fetchChildren(level, label) {
   if (!q) return [];
   const result = await callMcp2("graph.read_cypher", { query: q.query, params: q.params });
   if (!result.ok) {
-    logger.warn({ level, label, error: result.error }, "Drill children query failed");
+    logger2.warn({ level, label, error: result.error }, "Drill children query failed");
     return [];
   }
   let records = extractRecords(result.data);
@@ -21089,7 +21158,7 @@ async function saveContext(sessionId, ctx) {
     await redis2.set(`${DRILL_PREFIX}${sessionId}`, JSON.stringify(ctx), "EX", SESSION_TTL);
     return true;
   } catch (err) {
-    logger.warn({ err: String(err) }, "Redis save failed for drill context");
+    logger2.warn({ err: String(err) }, "Redis save failed for drill context");
     return false;
   }
 }
@@ -21100,7 +21169,7 @@ async function loadContext(sessionId) {
     const raw = await redis2.get(`${DRILL_PREFIX}${sessionId}`);
     return raw ? JSON.parse(raw) : null;
   } catch (err) {
-    logger.warn({ err: String(err) }, "Redis load failed for drill context");
+    logger2.warn({ err: String(err) }, "Redis load failed for drill context");
     return null;
   }
 }
@@ -21130,7 +21199,7 @@ drillRouter.post("/start", async (req, res) => {
     return;
   }
   const children = await fetchChildren("domain", domain);
-  logger.info({ session_id: sessionId, domain, children_count: children.length }, "Drill session started");
+  logger2.info({ session_id: sessionId, domain, children_count: children.length }, "Drill session started");
   res.json({
     success: true,
     session_id: sessionId,
@@ -21160,7 +21229,7 @@ drillRouter.post("/down", async (req, res) => {
   ctx.current_label = target_id;
   await saveContext(session_id, ctx);
   const children = await fetchChildren(target_level, target_id);
-  logger.info({ session_id, target_level, target_id, depth: ctx.stack.length }, "Drill down");
+  logger2.info({ session_id, target_level, target_id, depth: ctx.stack.length }, "Drill down");
   res.json({
     success: true,
     context: ctx,
@@ -21189,7 +21258,7 @@ drillRouter.post("/up", async (req, res) => {
   ctx.current_label = parent.label;
   await saveContext(session_id, ctx);
   const children = await fetchChildren(ctx.current_level, ctx.current_label);
-  logger.info({ session_id, level: ctx.current_level, label: ctx.current_label }, "Drill up");
+  logger2.info({ session_id, level: ctx.current_level, label: ctx.current_label }, "Drill up");
   res.json({
     success: true,
     context: ctx,
@@ -21303,7 +21372,7 @@ drillRouter.get("/moc", async (req, res) => {
   }
   lines.push("---");
   lines.push(`*Map of Content for ${domain} \u2014 WidgeTDC Adoption Blueprint*`);
-  logger.info({ domain, frameworks: frameworks.size, records: records.length }, "MOC generated");
+  logger2.info({ domain, frameworks: frameworks.size, records: records.length }, "MOC generated");
   res.type("text/markdown").send(lines.join("\n"));
 });
 function trendArrow(trend) {
@@ -21365,7 +21434,7 @@ async function compressContext(content, options) {
     content: compressed,
     duration_ms: Date.now() - t0
   };
-  logger.debug({
+  logger2.debug({
     strategy,
     original: content.length,
     compressed: compressed.length,
@@ -21389,7 +21458,7 @@ async function foldCompress(content, maxChars) {
       return compressed.slice(0, maxChars);
     }
   } catch (err) {
-    logger.warn({ err: String(err) }, "RLM fold failed, falling back to truncation");
+    logger2.warn({ err: String(err) }, "RLM fold failed, falling back to truncation");
   }
   return smartTruncate(content, maxChars);
 }
@@ -21559,7 +21628,7 @@ monitorRouter.get("/status", async (_req, res) => {
       }
     });
   } catch (err) {
-    logger.error({ err: String(err) }, "Monitor status error");
+    logger2.error({ err: String(err) }, "Monitor status error");
     res.status(500).json({ success: false, error: String(err) });
   }
 });
@@ -21627,7 +21696,7 @@ monitorRouter.post("/self-correct", async (_req, res) => {
     const report = await runSelfCorrect();
     res.json({ success: true, data: report });
   } catch (err) {
-    logger.error({ err: String(err) }, "Self-correct trigger error");
+    logger2.error({ err: String(err) }, "Self-correct trigger error");
     res.status(500).json({ success: false, error: String(err) });
   }
 });
@@ -21654,7 +21723,7 @@ monitorRouter.post("/compress", async (req, res) => {
       }
     });
   } catch (err) {
-    logger.error({ err: String(err) }, "Compress error");
+    logger2.error({ err: String(err) }, "Compress error");
     res.status(500).json({ success: false, error: String(err) });
   }
 });
@@ -21678,7 +21747,7 @@ async function storeAssembly(assembly) {
     await redis2.sadd(REDIS_INDEX2, assembly.$id);
     return true;
   } catch (err) {
-    logger.warn({ err: String(err) }, "Redis store failed for assembly");
+    logger2.warn({ err: String(err) }, "Redis store failed for assembly");
     return false;
   }
 }
@@ -21742,7 +21811,7 @@ ORDER BY b.domain, b.name LIMIT 50`;
       })).filter((b) => b.block_id);
     }
   } catch (err) {
-    logger.warn({ err: String(err) }, "Failed to fetch blocks from graph");
+    logger2.warn({ err: String(err) }, "Failed to fetch blocks from graph");
   }
   if (blocks.length === 0) {
     res.status(404).json({
@@ -21779,7 +21848,7 @@ Reply as JSON:
       analysis = JSON.parse(match[0]);
     }
   } catch (err) {
-    logger.warn({ err: String(err) }, "LLM analysis failed, creating single assembly from all blocks");
+    logger2.warn({ err: String(err) }, "LLM analysis failed, creating single assembly from all blocks");
     analysis = {
       candidates: [{
         name: "Default Assembly",
@@ -21858,11 +21927,11 @@ MERGE (a)-[:COMPOSED_OF]->(b)`,
         timeoutMs: 1e4
       });
     } catch (err) {
-      logger.warn({ err: String(err), assembly_id: assemblyId }, "Failed to write assembly to Neo4j");
+      logger2.warn({ err: String(err), assembly_id: assemblyId }, "Failed to write assembly to Neo4j");
     }
   }
   assemblies.sort((a, b) => b.scores.composite - a.scores.composite);
-  logger.info({
+  logger2.info({
     count: assemblies.length,
     block_count: blocks.length,
     top_score: assemblies[0]?.scores.composite
@@ -21904,7 +21973,7 @@ assemblyRouter.get("/", async (req, res) => {
       }
     }
   } catch (err) {
-    logger.warn({ err: String(err) }, "Redis pipeline failed for assembly list");
+    logger2.warn({ err: String(err) }, "Redis pipeline failed for assembly list");
   }
   let filtered = assemblies;
   if (statusFilter) {
@@ -21972,7 +22041,7 @@ async function storeDecision(decision) {
     await redis2.sadd(REDIS_INDEX3, decision.$id);
     return true;
   } catch (err) {
-    logger.warn({ err: String(err) }, "Redis store failed for decision");
+    logger2.warn({ err: String(err) }, "Redis store failed for decision");
     return false;
   }
 }
@@ -22055,7 +22124,7 @@ ORDER BY b.name`,
       }
     }
   } catch (err) {
-    logger.warn({ err: String(err), assemblyId }, "Failed to build lineage chain");
+    logger2.warn({ err: String(err), assemblyId }, "Failed to build lineage chain");
   }
   return lineage;
 }
@@ -22178,7 +22247,7 @@ CREATE (d)-[:CERTIFIED_BY_EVIDENCE]->(e)`,
       timeoutMs: 15e3
     });
   } catch (err) {
-    logger.warn({ err: String(err), decision_id: decisionId }, "Failed to write decision to Neo4j");
+    logger2.warn({ err: String(err), decision_id: decisionId }, "Failed to write decision to Neo4j");
   }
   broadcastSSE("decision-certified", {
     decision_id: decisionId,
@@ -22186,7 +22255,7 @@ CREATE (d)-[:CERTIFIED_BY_EVIDENCE]->(e)`,
     assembly_id: assemblyId,
     lineage_depth: lineageChain.length
   });
-  logger.info({
+  logger2.info({
     decision_id: decisionId,
     title,
     assembly_id: assemblyId,
@@ -22222,7 +22291,7 @@ decisionsRouter.get("/", async (req, res) => {
       }
     }
   } catch (err) {
-    logger.warn({ err: String(err) }, "Redis pipeline failed for decisions list");
+    logger2.warn({ err: String(err) }, "Redis pipeline failed for decisions list");
   }
   let filtered = decisions;
   if (statusFilter) {
@@ -22283,7 +22352,7 @@ s1s4Router.post("/trigger", async (req, res) => {
   if (!url) {
     return res.status(400).json({ success: false, error: "URL or path is required" });
   }
-  logger.info({ url, topic }, "\u{1F6F0}\uFE0F Triggering S1-S4 Pipeline");
+  logger2.info({ url, topic }, "\u{1F6F0}\uFE0F Triggering S1-S4 Pipeline");
   try {
     const execution = await executeChain({
       name: `S1-S4: ${topic || "General Intelligence"}`,
@@ -22336,7 +22405,7 @@ s1s4Router.post("/trigger", async (req, res) => {
     });
     res.json({ success: true, execution_id: execution.execution_id });
   } catch (error) {
-    logger.error({ error: String(error) }, "S1-S4 Trigger failed");
+    logger2.error({ error: String(error) }, "S1-S4 Trigger failed");
     res.status(500).json({ success: false, error: String(error) });
   }
 });
@@ -22362,7 +22431,7 @@ function requireApiKey(req, res, next) {
     next();
     return;
   }
-  logger.warn({ path: req.path, ip: req.ip }, "Unauthorized request");
+  logger2.warn({ path: req.path, ip: req.ip }, "Unauthorized request");
   res.status(401).json({
     success: false,
     error: { code: "UNAUTHORIZED", message: "Valid API key required. Use Authorization: Bearer <key> or X-API-Key header.", status_code: 401 }
@@ -22411,10 +22480,10 @@ async function extract(domain) {
       timeoutMs: 3e4
     });
     const items = result?.sources ?? result?.results ?? [];
-    logger.info({ domain, items: Array.isArray(items) ? items.length : 0 }, "Harvest extract complete");
+    logger2.info({ domain, items: Array.isArray(items) ? items.length : 0 }, "Harvest extract complete");
     return Array.isArray(items) ? items : [];
   } catch (err) {
-    logger.warn({ domain, err: String(err) }, "Harvest extract failed");
+    logger2.warn({ domain, err: String(err) }, "Harvest extract failed");
     return [];
   }
 }
@@ -22482,10 +22551,10 @@ async function store(components) {
       });
       stored++;
     } catch (err) {
-      logger.warn({ id: comp.id, err: String(err) }, "Harvest store failed for component");
+      logger2.warn({ id: comp.id, err: String(err) }, "Harvest store failed for component");
     }
   }
-  logger.info({ stored, total: components.length }, "Harvest store complete");
+  logger2.info({ stored, total: components.length }, "Harvest store complete");
   return stored;
 }
 async function verify(components) {
@@ -22505,12 +22574,12 @@ async function verify(components) {
     } catch {
     }
   }
-  logger.info({ verified, total: components.length }, "Harvest verify complete");
+  logger2.info({ verified, total: components.length }, "Harvest verify complete");
   return verified;
 }
 async function runHarvestPipeline(domain) {
   const start = Date.now();
-  logger.info({ domain }, "Harvest pipeline starting");
+  logger2.info({ domain }, "Harvest pipeline starting");
   const raw = await extract(domain);
   const components = generalize(raw, domain);
   const stored = await store(components);
@@ -22521,7 +22590,7 @@ async function runHarvestPipeline(domain) {
     verified,
     duration_ms: Date.now() - start
   };
-  logger.info(result, "Harvest pipeline complete");
+  logger2.info(result, "Harvest pipeline complete");
   return result;
 }
 async function runFullHarvest() {
@@ -22777,7 +22846,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     }
   }
   const t0 = Date.now();
-  logger.info({ model, provider, stream, messageCount: llmMessages.length, ip: clientIp }, "OpenAI compat request");
+  logger2.info({ model, provider, stream, messageCount: llmMessages.length, ip: clientIp }, "OpenAI compat request");
   try {
     let loopMessages = [...llmMessages];
     let finalContent = "";
@@ -22786,7 +22855,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     const allToolNames = [];
     const userMsg = (messages || []).filter((m) => m.role === "user").pop()?.content || "";
     const selectedTools = assistant ? ORCHESTRATOR_TOOLS.filter((t) => assistant.tools.includes(t.function.name)) : selectToolsForQuery(userMsg);
-    logger.debug({ selectedTools: selectedTools.map((t) => t.function.name), query: userMsg.slice(0, 50), assistant: assistant?.id || null }, "Tool selection");
+    logger2.debug({ selectedTools: selectedTools.map((t) => t.function.name), query: userMsg.slice(0, 50), assistant: assistant?.id || null }, "Tool selection");
     const maxRounds = assistant ? MAX_TOOL_ROUNDS_ASSISTANT : MAX_TOOL_ROUNDS;
     for (let round = 0; round <= maxRounds; round++) {
       const result = await chatLLM({
@@ -22809,7 +22878,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
         toolRounds++;
         const toolNames = result.tool_calls.map((tc) => tc.function.name);
         allToolNames.push(...toolNames);
-        logger.info({ round, tools: toolNames, partialContent: (result.content || "").length }, "Tool calls requested");
+        logger2.info({ round, tools: toolNames, partialContent: (result.content || "").length }, "Tool calls requested");
         loopMessages.push({
           role: "assistant",
           content: result.content || "",
@@ -22833,7 +22902,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
         role: "user",
         content: "Baseret p\xE5 alle tool-resultater ovenfor, generer nu dit fulde svar. Inklud\xE9r konkrete data, tal og referencer. Svar p\xE5 dansk i consulting-kvalitet med overskrifter og struktur."
       });
-      logger.info({ toolRounds, messageCount: loopMessages.length }, "Forcing text synthesis after tool rounds");
+      logger2.info({ toolRounds, messageCount: loopMessages.length }, "Forcing text synthesis after tool rounds");
       const summaryResult = await chatLLM({
         provider,
         messages: loopMessages,
@@ -22843,14 +22912,14 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
         // No tools — force text response
       });
       finalContent = summaryResult.content;
-      logger.info({ contentLength: finalContent?.length ?? 0, hasContent: !!finalContent }, "Synthesis result");
+      logger2.info({ contentLength: finalContent?.length ?? 0, hasContent: !!finalContent }, "Synthesis result");
       if (summaryResult.usage) {
         totalUsage.prompt_tokens += summaryResult.usage.prompt_tokens;
         totalUsage.completion_tokens += summaryResult.usage.completion_tokens;
         totalUsage.total_tokens += summaryResult.usage.total_tokens;
       }
     }
-    logger.info({ model, provider, toolRounds, tools: allToolNames, toolsOffered: selectedTools.length, duration_ms: Date.now() - t0 }, "OpenAI compat complete (orchestrated)");
+    logger2.info({ model, provider, toolRounds, tools: allToolNames, toolsOffered: selectedTools.length, duration_ms: Date.now() - t0 }, "OpenAI compat complete (orchestrated)");
     recordMetrics(model || "gemini-flash", allToolNames, toolRounds, totalUsage.total_tokens, selectedTools.length);
     if (stream) {
       res.setHeader("Content-Type", "text/event-stream");
@@ -22895,7 +22964,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
       });
     }
   } catch (err) {
-    logger.error({ model, provider, err: String(err) }, "OpenAI compat error");
+    logger2.error({ model, provider, err: String(err) }, "OpenAI compat error");
     res.status(500).json({
       error: {
         message: String(err),
@@ -23107,7 +23176,7 @@ promptGeneratorRouter.post("/", (req, res) => {
     return;
   }
   const trimmed = description.trim();
-  logger.info({ description: trimmed }, "Prompt generator request");
+  logger2.info({ description: trimmed }, "Prompt generator request");
   const result = classifyIntent(trimmed);
   res.json({
     success: true,
@@ -23755,9 +23824,9 @@ async function getBackendTools() {
       };
     }).filter((t) => t.name !== "backend.");
     backendToolsCacheTime = Date.now();
-    logger.info({ count: backendToolsCache.length }, "MCP gateway: refreshed backend tools cache");
+    logger2.info({ count: backendToolsCache.length }, "MCP gateway: refreshed backend tools cache");
   } catch (err) {
-    logger.warn({ err: String(err) }, "MCP gateway: failed to fetch backend tools");
+    logger2.warn({ err: String(err) }, "MCP gateway: failed to fetch backend tools");
   }
   return backendToolsCache;
 }
@@ -23880,7 +23949,7 @@ mcpGatewayRouter.post("/", async (req, res) => {
     return;
   }
   const { method, id, params } = body;
-  logger.info({ method, id }, "MCP gateway request");
+  logger2.info({ method, id }, "MCP gateway request");
   let response;
   try {
     switch (method) {
@@ -23907,7 +23976,7 @@ mcpGatewayRouter.post("/", async (req, res) => {
         };
     }
   } catch (err) {
-    logger.error({ method, err: String(err) }, "MCP gateway error");
+    logger2.error({ method, err: String(err) }, "MCP gateway error");
     response = {
       jsonrpc: "2.0",
       id: id ?? null,
@@ -23958,7 +24027,7 @@ toolGatewayRouter.post("/:name", async (req, res) => {
   }
   const callId = req.body?.call_id ?? uuid28();
   const args = req.body ?? {};
-  logger.info({ tool: name, call_id: callId }, "REST tool gateway call");
+  logger2.info({ tool: name, call_id: callId }, "REST tool gateway call");
   const result = await executeToolUnified(name, args, {
     call_id: callId,
     source_protocol: "openapi",
@@ -24239,7 +24308,7 @@ function seedAgents() {
       cleaned++;
     }
   }
-  logger.info({ seeded, cleaned }, "Agent seeds applied");
+  logger2.info({ seeded, cleaned }, "Agent seeds applied");
 }
 
 // src/index.ts
@@ -24271,7 +24340,7 @@ failuresRouter.get("/summary", async (_req, res) => {
     }
     res.json({ success: true, data: summary, source: "fresh" });
   } catch (err) {
-    logger.error({ err: String(err) }, "Failure summary endpoint failed");
+    logger2.error({ err: String(err) }, "Failure summary endpoint failed");
     res.status(500).json({ success: false, error: { code: "HARVEST_READ_ERROR", message: "Failed to read failure summary. Check server logs.", status_code: 500 } });
   }
 });
@@ -24282,7 +24351,7 @@ failuresRouter.post("/harvest", async (req, res) => {
     const summary = await runFailureHarvest(windowHours);
     res.json({ success: true, data: summary });
   } catch (err) {
-    logger.error({ err: String(err) }, "Manual failure harvest failed");
+    logger2.error({ err: String(err) }, "Manual failure harvest failed");
     res.status(500).json({ success: false, error: { code: "HARVEST_FAILED", message: "Failure harvest failed. Check server logs.", status_code: 500 } });
   }
 });
@@ -24310,7 +24379,7 @@ competitiveRouter.get("/report", async (_req, res) => {
     }
     res.json({ success: true, data: null, message: "No report yet. Trigger crawl via POST /api/competitive/crawl" });
   } catch (err) {
-    logger.error({ err: String(err) }, "Competitive report endpoint failed");
+    logger2.error({ err: String(err) }, "Competitive report endpoint failed");
     res.status(500).json({ success: false, error: { code: "COMPETITIVE_READ_ERROR", message: "Failed to read competitive report. Check server logs.", status_code: 500 } });
   }
 });
@@ -24337,7 +24406,7 @@ competitiveRouter.post("/crawl", async (_req, res) => {
     lastCrawlAt = Date.now();
     res.json({ success: true, data: report });
   } catch (err) {
-    logger.error({ err: String(err) }, "Manual competitive crawl failed");
+    logger2.error({ err: String(err) }, "Manual competitive crawl failed");
     res.status(500).json({ success: false, error: { code: "CRAWL_FAILED", message: "Crawl failed. Check server logs.", status_code: 500 } });
   } finally {
     crawlInProgress = false;
@@ -24476,7 +24545,7 @@ foldRouter.post("/", async (req, res) => {
       }
     });
   } catch (err) {
-    logger.error({ err: String(err) }, "CaaS fold request failed");
+    logger2.error({ err: String(err) }, "CaaS fold request failed");
     res.status(502).json({
       success: false,
       error: { code: "FOLD_FAILED", message: "Mercury Folding request failed. Check server logs.", status_code: 502 }
@@ -24640,7 +24709,7 @@ async function consolidateDomains() {
         DELETE d
       `, { variant });
       totalMerged++;
-      logger.info({ variant, canonical }, "Domain consolidated");
+      logger2.info({ variant, canonical }, "Domain consolidated");
     }
   }
   const afterResult = await graphRead3(`MATCH (d:Domain) RETURN count(d) AS count`);
@@ -24711,23 +24780,23 @@ async function purgeGraphBloat() {
 async function runGraphHygiene2() {
   const t0 = Date.now();
   const operations = [];
-  logger.info("Starting graph hygiene run (LIN-574)");
+  logger2.info("Starting graph hygiene run (LIN-574)");
   try {
     operations.push(await fixFrameworkDomainRels());
   } catch (err) {
-    logger.error({ err: String(err) }, "P0 framework_domain_rels failed");
+    logger2.error({ err: String(err) }, "P0 framework_domain_rels failed");
     operations.push({ operation: "framework_domain_rels", severity: "P0", before: 0, after: 0, fixed: 0, details: `Error: ${String(err).slice(0, 200)}` });
   }
   try {
     operations.push(await consolidateDomains());
   } catch (err) {
-    logger.error({ err: String(err) }, "P1 domain_consolidation failed");
+    logger2.error({ err: String(err) }, "P1 domain_consolidation failed");
     operations.push({ operation: "domain_consolidation", severity: "P1", before: 0, after: 0, fixed: 0, details: `Error: ${String(err).slice(0, 200)}` });
   }
   try {
     operations.push(await purgeGraphBloat());
   } catch (err) {
-    logger.error({ err: String(err) }, "P2 graph_bloat_purge failed");
+    logger2.error({ err: String(err) }, "P2 graph_bloat_purge failed");
     operations.push({ operation: "graph_bloat_purge", severity: "P2", before: 0, after: 0, fixed: 0, details: `Error: ${String(err).slice(0, 200)}` });
   }
   const report = {
@@ -24739,7 +24808,7 @@ async function runGraphHygiene2() {
     total_fixed: operations.reduce((sum, op) => sum + op.fixed, 0)
   };
   broadcastSSE("graph-hygiene", report);
-  logger.info({ total_fixed: report.total_fixed, duration_ms: report.duration_ms }, "Graph hygiene complete");
+  logger2.info({ total_fixed: report.total_fixed, duration_ms: report.duration_ms }, "Graph hygiene complete");
   return report;
 }
 
@@ -24760,7 +24829,7 @@ graphHygieneRouter.post("/run", async (_req, res) => {
     const report = await runGraphHygiene2();
     res.json({ success: true, data: report });
   } catch (err) {
-    logger.error({ err: String(err) }, "Graph hygiene run failed");
+    logger2.error({ err: String(err) }, "Graph hygiene run failed");
     res.status(500).json({ success: false, error: { code: "HYGIENE_FAILED", message: "Graph hygiene failed. Check server logs.", status_code: 500 } });
   } finally {
     hygieneInProgress = false;
@@ -24785,7 +24854,7 @@ graphHygieneRouter.post("/fix/:op", async (req, res) => {
     const result = await fn();
     res.json({ success: true, data: result });
   } catch (err) {
-    logger.error({ err: String(err), op }, "Graph hygiene operation failed");
+    logger2.error({ err: String(err), op }, "Graph hygiene operation failed");
     res.status(500).json({ success: false, error: { code: "OPERATION_FAILED", message: "Operation failed. Check server logs.", status_code: 500 } });
   }
 });
@@ -24857,7 +24926,7 @@ deliverablesRouter.post("/generate", async (req, res) => {
     format,
     max_sections: maxSections
   };
-  logger.info({ prompt: prompt.slice(0, 80), type, format }, "Deliverable generation requested");
+  logger2.info({ prompt: prompt.slice(0, 80), type, format }, "Deliverable generation requested");
   try {
     const deliverable = await generateDeliverable(request);
     res.json({
@@ -24975,7 +25044,7 @@ similarityRouter.post("/search", async (req, res) => {
     max_results: maxResults,
     structural_weight: structuralWeight
   };
-  logger.info({ query: query.slice(0, 80) }, "Similarity search requested");
+  logger2.info({ query: query.slice(0, 80) }, "Similarity search requested");
   try {
     const result = await findSimilarClients(request);
     res.json({
@@ -25024,7 +25093,7 @@ similarityRouter.post("/select", async (req, res) => {
     });
     return;
   }
-  logger.info({ queryId, selected: selectedMatchId, rejected: rejectedMatchIds.length }, "Similarity preference received");
+  logger2.info({ queryId, selected: selectedMatchId, rejected: rejectedMatchIds.length }, "Similarity preference received");
   hookSimilarityPreference(queryId || "unknown", selectedMatchId, rejectedMatchIds).catch(() => {
   });
   res.json({ success: true, data: { message: "Preference logged", selected: selectedMatchId, rejected_count: rejectedMatchIds.length } });
@@ -25055,6 +25124,7 @@ similarityRouter.get("/client/:id", async (req, res) => {
 
 // src/index.ts
 init_write_gate();
+init_mcp_caller();
 
 // src/routes/intelligence.ts
 init_document_intelligence();
@@ -25103,7 +25173,7 @@ intelligenceRouter.post("/ingest", async (req, res) => {
   }
 });
 intelligenceRouter.post("/communities", async (_req, res) => {
-  logger.info("Intelligence API: building community summaries");
+  logger2.info("Intelligence API: building community summaries");
   try {
     const result = await buildCommunitySummaries();
     res.json({ success: true, data: result });
@@ -25257,7 +25327,7 @@ RETURN p.name as name, p.status as status`,
           status: result.status === "success" ? "synced" : "failed"
         });
       } catch (err) {
-        logger.warn({ principle: p.number, err: String(err) }, "Failed to sync principle to graph");
+        logger2.warn({ principle: p.number, err: String(err) }, "Failed to sync principle to graph");
         results.push({ principle: p.number, status: "error" });
       }
     }
@@ -25271,7 +25341,7 @@ RETURN p.name as name, p.status as status`,
       }
     });
   } catch (err) {
-    logger.error({ err: String(err) }, "Governance graph sync failed");
+    logger2.error({ err: String(err) }, "Governance graph sync failed");
     res.status(500).json({
       success: false,
       error: { code: "GOVERNANCE_SYNC_ERROR", message: "Failed to sync governance to graph", status_code: 500 }
@@ -25310,7 +25380,7 @@ osintRouter.post("/scan", async (req, res) => {
       });
       return;
     }
-    logger.info({
+    logger2.info({
       domains: body.domains?.length ?? DK_PUBLIC_DOMAINS.length,
       scan_type: body.scan_type ?? "full"
     }, "OSINT scan triggered via API");
@@ -25337,7 +25407,7 @@ osintRouter.post("/scan", async (req, res) => {
         }
       });
     } else {
-      scanPromise.catch((err) => logger.error({ err: String(err) }, "Background OSINT scan failed"));
+      scanPromise.catch((err) => logger2.error({ err: String(err) }, "Background OSINT scan failed"));
       res.status(202).json({
         success: true,
         message: "OSINT scan started. Poll GET /api/osint/status for results.",
@@ -25345,7 +25415,7 @@ osintRouter.post("/scan", async (req, res) => {
       });
     }
   } catch (err) {
-    logger.error({ err: String(err) }, "OSINT scan endpoint failed");
+    logger2.error({ err: String(err) }, "OSINT scan endpoint failed");
     res.status(500).json({
       success: false,
       error: {
@@ -25394,7 +25464,7 @@ osintRouter.get("/status", async (_req, res) => {
       }
     });
   } catch (err) {
-    logger.error({ err: String(err) }, "OSINT status endpoint failed");
+    logger2.error({ err: String(err) }, "OSINT status endpoint failed");
     res.status(500).json({
       success: false,
       error: {
@@ -25453,12 +25523,12 @@ evolutionRouter.post("/run", async (req, res) => {
         current_stage: currentStatus.current_stage
       });
       cyclePromise.catch((err) => {
-        logger.error({ err: String(err) }, "Background evolution loop failed");
+        logger2.error({ err: String(err) }, "Background evolution loop failed");
       });
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    logger.error({ err: message }, "Evolution run endpoint failed");
+    logger2.error({ err: message }, "Evolution run endpoint failed");
     res.status(500).json({
       success: false,
       error: { code: "EVOLUTION_ERROR", message, status_code: 500 }
@@ -25475,7 +25545,7 @@ evolutionRouter.get("/history", async (req, res) => {
     const history = await getEvolutionHistory(limit);
     res.json({ success: true, data: history, count: history.length });
   } catch (err) {
-    logger.error({ err: String(err) }, "Evolution history endpoint failed");
+    logger2.error({ err: String(err) }, "Evolution history endpoint failed");
     res.status(500).json({
       success: false,
       error: { code: "HISTORY_ERROR", message: String(err), status_code: 500 }
@@ -25505,7 +25575,7 @@ async function storeMemory(agentId, key, value, ttlSeconds = DEFAULT_TTL) {
     try {
       await redis2.set(redisKey, JSON.stringify(entry), "EX", ttlSeconds);
     } catch (err) {
-      logger.warn({ agentId, key, err: String(err) }, "Working memory store failed");
+      logger2.warn({ agentId, key, err: String(err) }, "Working memory store failed");
     }
   }
   return entry;
@@ -25579,7 +25649,7 @@ memoryRouter.post("/store", async (req, res) => {
   }
   const ttl = typeof body.ttl_seconds === "number" ? body.ttl_seconds : void 0;
   const entry = await storeMemory(agentId, key, value, ttl);
-  logger.info({ agentId, key }, "Working memory stored");
+  logger2.info({ agentId, key }, "Working memory stored");
   res.json({ success: true, data: entry });
 });
 memoryRouter.get("/:agent_id", async (req, res) => {
@@ -25610,7 +25680,7 @@ memoryRouter.delete("/:agent_id/:key", async (req, res) => {
 memoryRouter.delete("/:agent_id", async (req, res) => {
   const agentId = decodeURIComponent(req.params.agent_id);
   const count = await clearAgentMemory(agentId);
-  logger.info({ agentId, count }, "Working memory cleared");
+  logger2.info({ agentId, count }, "Working memory cleared");
   res.json({ success: true, data: { cleared: count, agent_id: agentId } });
 });
 
@@ -25686,7 +25756,7 @@ abiDocsRouter.post("/try", async (req, res) => {
     return;
   }
   const safeArgs = args && typeof args === "object" ? args : {};
-  logger.info({ tool, args_keys: Object.keys(safeArgs) }, "ABI playground: executing tool");
+  logger2.info({ tool, args_keys: Object.keys(safeArgs) }, "ABI playground: executing tool");
   const result = await executeToolUnified(tool, safeArgs, {
     source_protocol: "abi-playground",
     fold: false
@@ -25914,7 +25984,7 @@ abiHealthRouter.get("/diff", (_req, res) => {
       }
     });
   } catch (err) {
-    logger.error({ err: String(err) }, "ABI diff error");
+    logger2.error({ err: String(err) }, "ABI diff error");
     res.status(500).json({
       success: false,
       error: { code: "ABI_DIFF_ERROR", message: String(err), status_code: 500 }
@@ -25928,7 +25998,7 @@ abiHealthRouter.post("/snapshot", (_req, res) => {
     const dir = path.dirname(snapshotPath);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     writeFileSync(snapshotPath, JSON.stringify(snapshot, null, 2));
-    logger.info({
+    logger2.info({
       tools: snapshot.meta.total_tools,
       namespaces: snapshot.meta.namespaces.length
     }, "ABI snapshot saved");
@@ -25944,7 +26014,7 @@ abiHealthRouter.post("/snapshot", (_req, res) => {
       }
     });
   } catch (err) {
-    logger.error({ err: String(err) }, "ABI snapshot save error");
+    logger2.error({ err: String(err) }, "ABI snapshot save error");
     res.status(500).json({
       success: false,
       error: { code: "ABI_SNAPSHOT_ERROR", message: String(err), status_code: 500 }
@@ -26121,16 +26191,16 @@ if (ipDenyList.length > 0) {
       return clientIp === entry;
     });
     if (blocked) {
-      logger.warn({ ip: clientIp }, "Blocked request from denied IP");
+      logger2.warn({ ip: clientIp }, "Blocked request from denied IP");
       res.status(403).json({ error: "Forbidden" });
       return;
     }
     next();
   });
-  logger.info({ count: ipDenyList.length }, "IP deny list active");
+  logger2.info({ count: ipDenyList.length }, "IP deny list active");
 }
 app.use((req, _res, next) => {
-  logger.debug({ method: req.method, path: req.path }, "Request");
+  logger2.debug({ method: req.method, path: req.path }, "Request");
   next();
 });
 app.use(express.static(path2.join(__dirname2, "public"), {
@@ -26222,6 +26292,7 @@ app.get("/health", (_req, res) => {
     librechat_url: config.libreChatUrl || null,
     slack_enabled: isSlackEnabled(),
     write_gate_stats: getWriteGateStats(),
+    backend_circuit_breaker: getBackendCircuitState(),
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   });
 });
@@ -26245,7 +26316,7 @@ app.use((req, res) => {
   });
 });
 app.use((err, _req, res, _next) => {
-  logger.error({ err: err.message, stack: err.stack }, "Unhandled error");
+  logger2.error({ err: err.message, stack: err.stack }, "Unhandled error");
   res.status(500).json({
     success: false,
     error: { code: "INTERNAL_ERROR", message: "Internal server error", status_code: 500 }
@@ -26263,20 +26334,20 @@ async function boot() {
   initOpenClaw();
   initWebSocket(server);
   server.listen(config.port, () => {
-    logger.info(
+    logger2.info(
       { port: config.port, backend: config.backendUrl, env: config.nodeEnv, redis: isRedisEnabled() },
       "WidgeTDC Orchestrator ready"
     );
   });
 }
 boot().catch((err) => {
-  logger.error({ err: String(err) }, "Boot failed");
+  logger2.error({ err: String(err) }, "Boot failed");
   process.exit(1);
 });
 process.on("SIGTERM", () => {
-  logger.info("SIGTERM received \u2014 shutting down gracefully");
+  logger2.info("SIGTERM received \u2014 shutting down gracefully");
   server.close(() => {
-    logger.info("Server closed");
+    logger2.info("Server closed");
     process.exit(0);
   });
 });

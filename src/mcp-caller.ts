@@ -28,15 +28,59 @@ interface McpCallOptions {
 const MAX_RETRIES = 2
 const RETRY_DELAY_MS = 1000
 
+// ─── Backend Circuit Breaker ─────────────────────────────────────────────────
+// When backend is down (502/timeout), fail fast instead of queueing 20+ cron
+// jobs that each wait 10-15s for a timeout. Pattern matches openclaw.ts.
+const BACKEND_CB_THRESHOLD = 5       // consecutive failures before opening
+const BACKEND_CB_COOLDOWN_MS = 60_000 // 60s cooldown before probe
+let _backendFailures = 0
+let _backendCircuitOpenUntil = 0
+let _backendCircuitLoggedAt = 0
+
+function backendRecordSuccess(): void {
+  if (_backendFailures > 0) {
+    logger.info({ previous_failures: _backendFailures }, 'Backend circuit breaker CLOSED — backend recovered')
+  }
+  _backendFailures = 0
+  _backendCircuitOpenUntil = 0
+}
+
+function backendRecordFailure(): void {
+  _backendFailures++
+  if (_backendFailures >= BACKEND_CB_THRESHOLD && _backendCircuitOpenUntil === 0) {
+    _backendCircuitOpenUntil = Date.now() + BACKEND_CB_COOLDOWN_MS
+    logger.warn({ failures: _backendFailures, cooldown_s: BACKEND_CB_COOLDOWN_MS / 1000 },
+      'Backend circuit breaker OPEN — failing fast for all MCP calls')
+  }
+}
+
+function isBackendCircuitOpen(): boolean {
+  if (_backendCircuitOpenUntil === 0) return false
+  if (Date.now() > _backendCircuitOpenUntil) {
+    // Cooldown expired — allow one probe call through
+    _backendCircuitOpenUntil = 0
+    logger.info('Backend circuit breaker HALF-OPEN — allowing probe call')
+    return false
+  }
+  return true
+}
+
+export function getBackendCircuitState() {
+  return {
+    failures: _backendFailures,
+    open: _backendCircuitOpenUntil > 0,
+    cooldown_remaining_ms: Math.max(0, _backendCircuitOpenUntil - Date.now()),
+  }
+}
+
 // F2: Cached audit.lessons — prevents hydration warning spam from backend.
-// Backend expects agents to read audit.lessons before graph.write_cypher.
-// Cache refreshes every 10 minutes; write calls proceed even if fetch fails.
 let _auditLessonsCache: { data: unknown; fetchedAt: number } | null = null
 const AUDIT_LESSONS_TTL_MS = 10 * 60 * 1000
 
 async function ensureAuditLessonsRead(): Promise<void> {
   const now = Date.now()
   if (_auditLessonsCache && now - _auditLessonsCache.fetchedAt < AUDIT_LESSONS_TTL_MS) return
+  if (isBackendCircuitOpen()) return // don't waste time if backend is down
 
   try {
     const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
@@ -63,6 +107,28 @@ export async function callMcpTool(opts: McpCallOptions): Promise<OrchestratorToo
     const log = childLogger(opts.traceId ?? opts.callId)
     const t0 = Date.now()
     const timeoutMs = opts.timeoutMs ?? config.mcpTimeoutMs
+
+    // Backend circuit breaker — fail fast when backend is known-down
+    if (isBackendCircuitOpen()) {
+      const now = Date.now()
+      // Log at most once per 30s to avoid spam
+      if (now - _backendCircuitLoggedAt > 30_000) {
+        _backendCircuitLoggedAt = now
+        log.warn({ tool: opts.toolName, cooldown_remaining_ms: _backendCircuitOpenUntil - now },
+          'Backend circuit breaker OPEN — fast-failing MCP call')
+      }
+      span.setAttribute('mcp.circuit_breaker', 'open')
+      return {
+        call_id: opts.callId,
+        status: 'error',
+        result: null,
+        error_message: `Backend circuit breaker open (${_backendFailures} consecutive failures). Retrying in ${Math.ceil((_backendCircuitOpenUntil - now) / 1000)}s.`,
+        error_code: 'BACKEND_ERROR',
+        duration_ms: 0,
+        trace_id: opts.traceId ?? null,
+        completed_at: new Date().toISOString(),
+      }
+    }
 
     const url = `${config.backendUrl}/api/mcp/route`
     // Strip internal _force sentinel before sending to backend
@@ -106,6 +172,18 @@ export async function callMcpTool(opts: McpCallOptions): Promise<OrchestratorToo
       }
 
       const result = await callMcpToolOnce(opts, url, body, timeoutMs, log, t0)
+
+      // Track backend health for circuit breaker
+      const isTransientError = result.status === 'error' || result.status === 'timeout'
+      const is502 = result.error_message?.includes('502') || result.error_message?.includes('503')
+      const isTimeout = result.status === 'timeout'
+
+      if (isTransientError && (is502 || isTimeout)) {
+        backendRecordFailure()
+      } else if (result.status === 'success') {
+        backendRecordSuccess()
+      }
+
       if (result.status !== 'error' || !result.error_message?.includes('503')) {
         span.setAttribute('mcp.status', result.status)
         span.setAttribute('mcp.duration_ms', result.duration_ms)

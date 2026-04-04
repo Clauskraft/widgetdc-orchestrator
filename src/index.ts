@@ -70,6 +70,7 @@ import { graphHygieneRouter } from './routes/graph-hygiene.js'
 import { deliverablesRouter } from './routes/deliverables.js'
 import { similarityRouter } from './routes/similarity.js'
 import { getWriteGateStats } from './write-gate.js'
+import { getBackendCircuitState } from './mcp-caller.js'
 import { intelligenceRouter } from './routes/intelligence.js'
 import { governanceRouter } from './routes/governance.js'
 import { osintRouter } from './routes/osint.js'
@@ -282,6 +283,7 @@ app.get('/health', (_req, res) => {
     librechat_url: config.libreChatUrl || null,
     slack_enabled: isSlackEnabled(),
     write_gate_stats: getWriteGateStats(),
+    backend_circuit_breaker: getBackendCircuitState(),
     timestamp: new Date().toISOString(),
   })
 })
