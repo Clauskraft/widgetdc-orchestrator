@@ -187,10 +187,13 @@ engagementsRouter.post('/plan', async (req: Request, res: Response) => {
   const durationWeeks = body.duration_weeks
   const teamSize = body.team_size
 
-  if (!objective || typeof objective !== 'string' || objective.length < 10) return badRequest(res, 'objective required (min 10 chars)')
+  // v4.0.3: Route does minimal TYPE validation only. Semantic limits (ranges, hard
+  // caps, sanity checks) are enforced by the engagement-engine smart gates which
+  // return a typed PlanGateRejection mapped to HTTP 422.
+  if (typeof objective !== 'string' || objective.length === 0) return badRequest(res, 'objective required (string)')
   if (!domain || typeof domain !== 'string') return badRequest(res, 'domain required')
-  if (typeof durationWeeks !== 'number' || durationWeeks < 1 || durationWeeks > 104) return badRequest(res, 'duration_weeks must be 1-104')
-  if (typeof teamSize !== 'number' || teamSize < 1 || teamSize > 100) return badRequest(res, 'team_size must be 1-100')
+  if (typeof durationWeeks !== 'number') return badRequest(res, 'duration_weeks must be a number')
+  if (typeof teamSize !== 'number') return badRequest(res, 'team_size must be a number')
 
   const request: PlanRequest = {
     engagement_id: typeof body.engagement_id === 'string' ? body.engagement_id : undefined,
