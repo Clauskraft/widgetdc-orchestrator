@@ -16472,9 +16472,12 @@ var WINDOW_TTL = 30 * 24 * 3600;
 var STALE_MS = 30 * 24 * 3600 * 1e3;
 function isoWeek() {
   const now = /* @__PURE__ */ new Date();
-  const jan4 = new Date(now.getFullYear(), 0, 4);
-  const week = Math.ceil(((now.getTime() - jan4.getTime()) / 864e5 + jan4.getDay() + 1) / 7);
-  return `${now.getFullYear()}${String(week).padStart(2, "0")}`;
+  const d = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const week = Math.ceil(((d.getTime() - yearStart.getTime()) / 864e5 + 1) / 7);
+  return `${d.getUTCFullYear()}${String(week).padStart(2, "0")}`;
 }
 var ADVANCED_TOOLS = new Set(
   TOOL_REGISTRY.filter((t) => t.namespace === "intelligence").map((t) => t.name)

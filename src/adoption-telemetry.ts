@@ -23,12 +23,15 @@ const KEY_LAST     = 'orchestrator:telemetry:last_called'
 const WINDOW_TTL   = 30 * 24 * 3600          // 30-day rolling window expiry (seconds)
 const STALE_MS     = 30 * 24 * 3600 * 1000   // 30 days in ms
 
-/** ISO week string YYYYWW — changes every Monday, giving 7-day buckets */
+/** ISO 8601 week string YYYYWW — changes every Monday, correctly handles year boundaries */
 function isoWeek(): string {
   const now = new Date()
-  const jan4 = new Date(now.getFullYear(), 0, 4)
-  const week = Math.ceil(((now.getTime() - jan4.getTime()) / 86400000 + jan4.getDay() + 1) / 7)
-  return `${now.getFullYear()}${String(week).padStart(2, '0')}`
+  const d = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()))
+  const dayNum = d.getUTCDay() || 7 // Sunday → 7
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum) // Thursday of this ISO week
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1))
+  const week = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7)
+  return `${d.getUTCFullYear()}${String(week).padStart(2, '0')}`
 }
 
 /** Set of intelligence-namespace tool names (advanced utilisation metric) */

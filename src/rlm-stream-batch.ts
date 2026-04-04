@@ -46,7 +46,10 @@ export async function streamA2ATask(
     const messages: A2AMessage[] = [{ role: 'user', parts: [{ type: 'text', text: prompt }] }]
     const res = await fetch(`${RLM_URL}/a2a/tasks/sendSubscribe`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.backendApiKey}`,
+      },
       body: JSON.stringify({ messages, skill_id: skillId }),
       signal: controller.signal,
     })
