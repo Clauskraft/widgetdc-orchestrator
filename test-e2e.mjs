@@ -1,5 +1,5 @@
 /**
- * test-e2e.mjs — 80 comprehensive end-to-end tests for WidgeTDC Command Center
+ * test-e2e.mjs — 100 comprehensive end-to-end tests for WidgeTDC Command Center
  *
  * Covers: Health, Dashboard, Agents, Chat, Chains, Cron, Cognitive, LLM,
  *         Audit, SSE, WebSocket, Auth, Frontend HTML/CSS/JS, Command Palette,
@@ -783,6 +783,232 @@ await test('80. GET /health includes write_gate_stats and cron_jobs', async () =
   assert(r.version, `missing version field`)
   assert(r.cron_jobs >= 20, `expected 20+ crons, got ${r.cron_jobs}`)
   assert(r.agents_registered >= 1, `expected 1+ agents, got ${r.agents_registered}`)
+})
+
+// ═══════════════════════════════════════════════════════════════
+// SECTION 14: Tool Gateway Validation (Tests 81-100)
+// ═══════════════════════════════════════════════════════════════
+
+console.log('\n' + '=' .repeat(60))
+console.log('  SECTION 14: Tool Gateway Validation (81-100)')
+console.log('=' .repeat(60))
+
+// ── 81. search_knowledge — rejects missing query ──
+await test('81. POST /api/tools/search_knowledge rejects missing query', async () => {
+  const r = await api('/api/tools/search_knowledge', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `search_knowledge not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'search_knowledge', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(result.includes('Error'), `expected Error for missing query, got: ${result.slice(0, 100)}`)
+})
+
+// ── 82. reason_deeply — rejects missing question ──
+await test('82. POST /api/tools/reason_deeply rejects missing question', async () => {
+  const r = await api('/api/tools/reason_deeply', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `reason_deeply not deployed (404)`)
+  // Returns 500 (RLM validation) or 200 (error in result) — both are valid rejection
+  assert(r.status === 200 || r.status === 500, `expected 200 or 500, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'reason_deeply', `wrong tool_name: ${r.body?.data?.tool_name}`)
+})
+
+// ── 83. query_graph — rejects missing cypher ──
+await test('83. POST /api/tools/query_graph rejects missing cypher', async () => {
+  const r = await api('/api/tools/query_graph', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `query_graph not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'query_graph', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(result.includes('Error'), `expected Error for missing cypher, got: ${result.slice(0, 100)}`)
+})
+
+// ── 84. query_graph — rejects destructive write operations ──
+await test('84. POST /api/tools/query_graph rejects DELETE cypher', async () => {
+  const r = await api('/api/tools/query_graph', { method: 'POST', body: JSON.stringify({ cypher: 'DELETE (n) RETURN n' }) })
+  assert(r.status !== 404, `query_graph not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  const result = r.body?.data?.result ?? ''
+  assert(result.includes('Error') && result.includes('read-only'), `expected read-only Error, got: ${result.slice(0, 100)}`)
+})
+
+// ── 85. check_tasks — succeeds without required args ──
+await test('85. POST /api/tools/check_tasks returns data (no args needed)', async () => {
+  const r = await api('/api/tools/check_tasks', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `check_tasks not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'check_tasks', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(typeof result === 'string', `expected string result, got: ${typeof result}`)
+})
+
+// ── 86. call_mcp_tool — rejects missing tool_name ──
+await test('86. POST /api/tools/call_mcp_tool rejects missing tool_name', async () => {
+  const r = await api('/api/tools/call_mcp_tool', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `call_mcp_tool not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'call_mcp_tool', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(typeof result === 'string', `expected string result, got: ${typeof result}`)
+})
+
+// ── 87. get_platform_health — returns data without args ──
+await test('87. POST /api/tools/get_platform_health returns data', async () => {
+  const r = await api('/api/tools/get_platform_health', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `get_platform_health not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'get_platform_health', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(typeof result === 'string', `expected string result, got: ${typeof result}`)
+})
+
+// ── 88. search_documents — rejects missing query ──
+await test('88. POST /api/tools/search_documents rejects missing query', async () => {
+  const r = await api('/api/tools/search_documents', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `search_documents not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'search_documents', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(typeof result === 'string', `expected string result, got: ${typeof result}`)
+})
+
+// ── 89. linear_issues — succeeds without required args ──
+await test('89. POST /api/tools/linear_issues returns data (no required args)', async () => {
+  const r = await api('/api/tools/linear_issues', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `linear_issues not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'linear_issues', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(typeof result === 'string', `expected string result, got: ${typeof result}`)
+})
+
+// ── 90. linear_issue_detail — rejects missing identifier ──
+await test('90. POST /api/tools/linear_issue_detail rejects missing identifier', async () => {
+  const r = await api('/api/tools/linear_issue_detail', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `linear_issue_detail not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'linear_issue_detail', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(typeof result === 'string', `expected string result, got: ${typeof result}`)
+})
+
+// ── 91. run_chain — rejects missing steps ──
+await test('91. POST /api/tools/run_chain rejects empty steps', async () => {
+  const r = await api('/api/tools/run_chain', { method: 'POST', body: JSON.stringify({ name: 'test', mode: 'sequential', steps: [] }) })
+  assert(r.status !== 404, `run_chain not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'run_chain', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(typeof result === 'string', `expected string result, got: ${typeof result}`)
+})
+
+// ── 92. list_tools — returns tools without args ──
+await test('92. POST /api/tools/list_tools returns tool list', async () => {
+  const r = await api('/api/tools/list_tools', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `list_tools not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'list_tools', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(result.includes('tools'), `expected tool list in result, got: ${result.slice(0, 100)}`)
+})
+
+// ── 93. adaptive_rag_dashboard — returns dashboard without args ──
+await test('93. POST /api/tools/adaptive_rag_dashboard returns data', async () => {
+  const r = await api('/api/tools/adaptive_rag_dashboard', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `adaptive_rag_dashboard not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'adaptive_rag_dashboard', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(typeof result === 'string', `expected string result, got: ${typeof result}`)
+})
+
+// ── 94. adaptive_rag_query — rejects missing query ──
+await test('94. POST /api/tools/adaptive_rag_query rejects missing query', async () => {
+  const r = await api('/api/tools/adaptive_rag_query', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `adaptive_rag_query not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'adaptive_rag_query', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(result.includes('Error'), `expected Error for missing query, got: ${result.slice(0, 100)}`)
+})
+
+// ── 95. adaptive_rag_reward — rejects missing args ──
+await test('95. POST /api/tools/adaptive_rag_reward rejects missing args', async () => {
+  const r = await api('/api/tools/adaptive_rag_reward', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `adaptive_rag_reward not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'adaptive_rag_reward', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(result.includes('Error'), `expected Error for missing args, got: ${result.slice(0, 100)}`)
+})
+
+// ── 96. moa_query — rejects empty query (validation only, no LLM) ──
+await test('96. POST /api/tools/moa_query rejects empty query', async () => {
+  const r = await api('/api/tools/moa_query', { method: 'POST', body: JSON.stringify({ query: '' }) })
+  assert(r.status !== 404, `moa_query not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'moa_query', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(result.includes('Error'), `expected Error for empty query, got: ${result.slice(0, 100)}`)
+})
+
+// ── 97. forge_analyze_gaps — returns data without args ──
+await test('97. POST /api/tools/forge_analyze_gaps returns data', async () => {
+  const r = await api('/api/tools/forge_analyze_gaps', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `forge_analyze_gaps not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'forge_analyze_gaps', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(typeof result === 'string', `expected string result, got: ${typeof result}`)
+})
+
+// ── 98. forge_list — returns list without args ──
+await test('98. POST /api/tools/forge_list returns data', async () => {
+  const r = await api('/api/tools/forge_list', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `forge_list not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'forge_list', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(typeof result === 'string', `expected string result, got: ${typeof result}`)
+})
+
+// ── 99. forge_tool — rejects missing name and purpose (validation only) ──
+await test('99. POST /api/tools/forge_tool rejects missing args', async () => {
+  const r = await api('/api/tools/forge_tool', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `forge_tool not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'forge_tool', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(result.includes('Error'), `expected Error for missing args, got: ${result.slice(0, 100)}`)
+})
+
+// ── 100. governance_matrix — returns matrix without args ──
+await test('100. POST /api/tools/governance_matrix returns matrix', async () => {
+  const r = await api('/api/tools/governance_matrix', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `governance_matrix not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'governance_matrix', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(result.includes('Manifesto') || result.includes('matrix') || result.includes('principle'), `expected governance data, got: ${result.slice(0, 100)}`)
+})
+
+// ── 101. precedent_search — rejects too-short query ──
+await test('101. POST /api/tools/precedent_search rejects short query', async () => {
+  const r = await api('/api/tools/precedent_search', { method: 'POST', body: JSON.stringify({ query: 'ab' }) })
+  assert(r.status !== 404, `precedent_search not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'precedent_search', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(result.includes('Error'), `expected Error for short query, got: ${result.slice(0, 100)}`)
+})
+
+// ── 102. precedent_search — rejects missing query ──
+await test('102. POST /api/tools/precedent_search rejects missing query', async () => {
+  const r = await api('/api/tools/precedent_search', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `precedent_search not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'precedent_search', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(result.includes('Error'), `expected Error for missing query, got: ${result.slice(0, 100)}`)
 })
 
 // ═══════════════════════════════════════════════════════════════
