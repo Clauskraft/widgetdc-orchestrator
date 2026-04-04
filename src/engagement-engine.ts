@@ -18,10 +18,10 @@
  */
 import { v4 as uuid } from 'uuid'
 import { callMcpTool } from './mcp-caller.js'
+import { callCognitiveRaw } from './cognitive-proxy.js'
 import { dualChannelRAG } from './dual-rag.js'
 import { getRedis } from './redis.js'
 import { logger } from './logger.js'
-import { config } from './config.js'
 import { sendQLearningReward } from './adaptive-rag.js'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -333,70 +333,66 @@ export async function matchPrecedents(req: MatchRequest): Promise<{
   return { matches, query_ms: Date.now() - t0 }
 }
 
-// ─── RLM Cognitive Analyze (direct call — bypasses cognitive-proxy unwrap bug) ──
+// ─── kg_rag parallel retrieval channel (v4.0.1 enhancement) ─────────────────
 
 /**
- * Direct fetch to RLM /cognitive/analyze. The cognitive-proxy.ts wrapper discards
- * structured response fields (analysis/insights/recommendations) via its unwrap
- * logic that only checks result/answer/reasoning/plan. We consume the raw response.
- *
- * Expected response shape (from production probing 2026-04-04):
- * {
- *   trace: { trace_id, total_duration_ms },
- *   quality: { overall_score, parsability, relevance, completeness },
- *   routing: { provider, model, domain, latency_ms, cost },
- *   analysis: {
- *     engagement_overview,
- *     phase_breakdown: [{ phase_name, duration_weeks, objective, key_activities, deliverables }],
- *     resource_allocation: { team_size, roles, budget_dkk, budget_allocation_estimate },
- *     methodology_integration: { ... per-framework ... },
- *     key_challenges_and_mitigations: [{ challenge, mitigation }]
- *   },
- *   insights: [string],
- *   recommendations: [string],
- *   confidence: number
- * }
+ * Query kg_rag.query for graph-augmented evidence. Returns synthesized answer
+ * plus source array with scores across 40 Neo4j namespaces.
+ * Complements dualChannelRAG which uses autonomous.graphrag.
  */
-async function callRlmAnalyze(
-  task: string,
-  context: Record<string, unknown>,
-  constraints: string[],
-  timeoutMs = 60000,
-): Promise<Record<string, unknown> | null> {
-  if (!config.rlmUrl) return null
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
+async function queryKgRag(query: string, maxEvidence = 10): Promise<{ answer: string; sources: Array<{ id: string; content: string; score: number }> }> {
   try {
-    const res = await fetch(`${config.rlmUrl}/cognitive/analyze`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(config.backendApiKey ? { 'Authorization': `Bearer ${config.backendApiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        task,
-        context,
-        analysis_dimensions: [
-          'phase_breakdown',
-          'resource_allocation',
-          'methodology_integration',
-          'key_challenges_and_mitigations',
-        ],
-        constraints,
-        agent_id: 'engagement-planner',
-      }),
-      signal: controller.signal,
+    const result = await callMcpTool({
+      toolName: 'kg_rag.query',
+      args: { question: query, max_evidence: maxEvidence },
+      callId: uuid(),
+      timeoutMs: 45000,
     })
-    if (!res.ok) {
-      logger.warn({ status: res.status }, 'RLM /cognitive/analyze non-OK')
-      return null
-    }
-    return (await res.json()) as Record<string, unknown>
+    if (result.status !== 'success') return { answer: '', sources: [] }
+    const data = result.result as Record<string, unknown> | null
+    if (!data) return { answer: '', sources: [] }
+    const answer = typeof data.answer === 'string' ? data.answer : ''
+    const sources = Array.isArray(data.sources)
+      ? (data.sources as Array<Record<string, unknown>>).map(s => ({
+          id: String(s.id ?? 'unknown'),
+          content: String(s.content ?? ''),
+          score: typeof s.score === 'number' ? s.score : 0.5,
+        }))
+      : []
+    return { answer, sources }
   } catch (err) {
-    logger.debug({ error: String(err) }, 'RLM /cognitive/analyze failed')
+    logger.debug({ error: String(err) }, 'kg_rag.query failed')
+    return { answer: '', sources: [] }
+  }
+}
+
+// ─── Context folding (v4.0.1 enhancement) ───────────────────────────────────
+
+/**
+ * Compress large evidence via backend context_folding.fold MCP tool.
+ * Auto-selects strategy (baseline/neural/deepseek) based on size.
+ * Returns folded text or null if folding failed (fallback to original).
+ */
+async function foldContext(text: string, query: string, maxTokens = 1500): Promise<string | null> {
+  if (!text || text.length < 500) return null // not worth folding
+  try {
+    const result = await callMcpTool({
+      toolName: 'context_folding.fold',
+      args: {
+        task: query,
+        context: { text },
+        max_tokens: maxTokens,
+        domain: 'consulting',
+      },
+      callId: uuid(),
+      timeoutMs: 20000,
+    })
+    if (result.status !== 'success') return null
+    const data = result.result as Record<string, unknown> | null
+    const folded = data?.compressed_text ?? data?.folded_text ?? data?.result
+    return typeof folded === 'string' && folded.length > 50 ? folded : null
+  } catch {
     return null
-  } finally {
-    clearTimeout(timer)
   }
 }
 
@@ -415,21 +411,36 @@ export async function generatePlan(req: PlanRequest): Promise<EngagementPlan> {
   const t0 = Date.now()
   const engagementId = req.engagement_id ?? `eng-${uuid()}`
 
-  // Step 1: Precedent matching (parallel with methodology retrieval)
-  const [precedents, methodologyBundle, riskBundle] = await Promise.all([
+  // Step 1: Deep retrieval (4 parallel channels — precedents + methodology + risks + kg_rag)
+  // kg_rag.query adds multi-hop graph-augmented evidence with cross-namespace sources
+  // (consulting-frameworks, regulatory-nis2, competitive-intel, etc. — 40 namespaces)
+  const [precedents, methodologyBundle, riskBundle, kgRagBundle] = await Promise.all([
     matchPrecedents({ objective: req.objective, domain: req.domain, max_results: 5 }),
     dualChannelRAG(`consulting methodology framework for ${req.domain} ${req.objective}`, { maxResults: 5 }),
     dualChannelRAG(`risks challenges pitfalls for ${req.domain} consulting engagement ${req.objective}`, { maxResults: 5 }),
+    queryKgRag(`${req.domain} engagement approach: ${req.objective}`, 8),
   ])
 
-  const methodologyEvidence = methodologyBundle.results.map(r => r.content).join('\n\n').slice(0, 3500)
-  const riskEvidence = riskBundle.results.map(r => r.content).join('\n\n').slice(0, 2500)
+  let methodologyEvidence = methodologyBundle.results.map(r => r.content).join('\n\n').slice(0, 3500)
+  let riskEvidence = riskBundle.results.map(r => r.content).join('\n\n').slice(0, 2500)
+  const kgRagEvidence = kgRagBundle.answer.slice(0, 2500)
   const precedentText = precedents.matches.map((m, i) => `[${i + 1}] ${m.title} (similarity: ${m.similarity})`).join('\n')
+
+  // Context folding: if total evidence exceeds 6000 chars, compress via RLM /fold/context
+  const totalEvidenceLen = methodologyEvidence.length + riskEvidence.length + kgRagEvidence.length
+  if (totalEvidenceLen > 6000) {
+    const foldedMethod = await foldContext(methodologyEvidence, `consulting methodology for ${req.domain}`, 1500)
+    const foldedRisk = await foldContext(riskEvidence, `risks for ${req.domain} engagement`, 1000)
+    if (foldedMethod) methodologyEvidence = foldedMethod
+    if (foldedRisk) riskEvidence = foldedRisk
+    logger.info({ original: totalEvidenceLen, folded: methodologyEvidence.length + riskEvidence.length }, 'Engagement plan: context folded')
+  }
 
   const totalCitations =
     precedents.matches.length +
     methodologyBundle.results.length +
-    riskBundle.results.length
+    riskBundle.results.length +
+    kgRagBundle.sources.length
 
   const avgConfidence =
     ([
@@ -455,6 +466,9 @@ ${methodologyEvidence || '[limited evidence]'}
 
 RISK EVIDENCE FROM KNOWLEDGE GRAPH:
 ${riskEvidence || '[limited evidence]'}
+
+GRAPH-AUGMENTED CONTEXT (kg_rag multi-hop synthesis):
+${kgRagEvidence || '[no kg_rag context]'}
 
 SIMILAR PRECEDENT ENGAGEMENTS:
 ${precedentText || '[no precedents — cold start]'}
@@ -483,27 +497,42 @@ Rules:
   let platformConfidence = 0
   let routingMeta: Record<string, unknown> | null = null
 
-  // TIER 1: Direct call to RLM /cognitive/analyze — the platform's NATIVE engagement
-  // planning capability. Returns structured analysis.phase_breakdown, key_challenges_and_mitigations,
-  // resource_allocation, methodology_integration, insights, recommendations + self-scored confidence
-  // and quality. We bypass cognitive-proxy.ts::callCognitive because its unwrap logic
-  // (data.result ?? data.answer ?? data.reasoning ?? data.plan ?? data) discards the
-  // structured fields — latent platform-wide bug tracked separately (affects 8+ consumers).
-  const analyzed = await callRlmAnalyze(
-    `Design a ${req.duration_weeks}-week consulting engagement for: ${req.objective}`,
+  // TIER 1: RLM /cognitive/analyze via callCognitiveRaw — returns full structured response
+  // including analysis.phase_breakdown, key_challenges_and_mitigations, resource_allocation,
+  // insights, recommendations, confidence, quality self-score, routing metadata.
+  // Uses the new raw wrapper (cognitive-proxy.ts::callCognitiveRaw) instead of the legacy
+  // callCognitive() which unwraps to text (backward-compat for 8+ existing consumers).
+  const analyzed = await callCognitiveRaw(
+    'analyze',
     {
-      domain: req.domain,
-      team_size: req.team_size,
-      budget_dkk: req.budget_dkk,
-      precedent_summaries: precedents.matches.slice(0, 3).map(m => m.title),
-      methodology_evidence: methodologyEvidence.slice(0, 2000),
-      risk_evidence: riskEvidence.slice(0, 1500),
+      prompt: `Design a ${req.duration_weeks}-week consulting engagement for: ${req.objective}`,
+      context: {
+        domain: req.domain,
+        team_size: req.team_size,
+        budget_dkk: req.budget_dkk,
+        precedent_summaries: precedents.matches.slice(0, 3).map(m => m.title),
+        methodology_evidence: methodologyEvidence.slice(0, 2000),
+        risk_evidence: riskEvidence.slice(0, 1500),
+        kg_rag_synthesis: kgRagEvidence.slice(0, 1500),
+      },
+      agent_id: 'engagement-planner',
+      // Custom fields consumed by callCognitiveRaw passthrough
+      ...({
+        task: `Design a ${req.duration_weeks}-week consulting engagement for: ${req.objective}`,
+        analysis_dimensions: [
+          'phase_breakdown',
+          'resource_allocation',
+          'methodology_integration',
+          'key_challenges_and_mitigations',
+        ],
+        constraints: [
+          `duration: ${req.duration_weeks} weeks`,
+          `team: ${req.team_size} people`,
+          req.budget_dkk ? `budget: ${req.budget_dkk} DKK` : '',
+        ].filter(Boolean),
+      } as Record<string, unknown>),
     },
-    [
-      `duration: ${req.duration_weeks} weeks`,
-      `team: ${req.team_size} people`,
-      req.budget_dkk ? `budget: ${req.budget_dkk} DKK` : '',
-    ].filter(Boolean),
+    60000,
   )
 
   if (analyzed?.analysis) {

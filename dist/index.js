@@ -9489,6 +9489,81 @@ async function callCognitive(action, params, timeoutMs) {
     throw err;
   }
 }
+async function callCognitiveRaw(action, params, timeoutMs) {
+  if (!config.rlmUrl) return null;
+  const path3 = COGNITIVE_ROUTES[action];
+  if (!path3) {
+    throw new Error(`Unknown cognitive action: ${action}. Valid: ${Object.keys(COGNITIVE_ROUTES).join(", ")}`);
+  }
+  const url = `${config.rlmUrl}${path3}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs ?? 12e4);
+  try {
+    const p = params;
+    let body;
+    if (action === "analyze") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "string" ? p.context : p.context || params.prompt,
+        analysis_dimensions: p.analysis_dimensions || ["general"],
+        constraints: p.constraints || [],
+        agent_id: params.agent_id
+      };
+    } else if (action === "reason") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
+        agent_id: params.agent_id,
+        depth: params.depth ?? 0
+      };
+    } else if (action === "plan") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
+        constraints: p.constraints || [],
+        agent_id: params.agent_id
+      };
+    } else if (action === "fold") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
+        agent_id: params.agent_id
+      };
+    } else {
+      body = {
+        prompt: params.prompt,
+        task: p.task || params.prompt,
+        context: p.context || params.prompt,
+        agent_id: params.agent_id,
+        depth: params.depth ?? 0,
+        mode: params.mode ?? "standard"
+      };
+    }
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    clearTimeout(timer);
+    if (!res.ok) {
+      logger.warn({ action, status: res.status }, "callCognitiveRaw: non-OK");
+      return null;
+    }
+    return await res.json();
+  } catch (err) {
+    clearTimeout(timer);
+    if (err instanceof Error && err.name === "AbortError") {
+      logger.warn({ action, timeoutMs }, "callCognitiveRaw: timeout");
+      return null;
+    }
+    logger.debug({ action, error: String(err) }, "callCognitiveRaw: failed");
+    return null;
+  }
+}
 async function getRlmHealth() {
   if (!config.rlmUrl) return null;
   try {
@@ -29480,6 +29555,7 @@ import { Router as Router32 } from "express";
 
 // src/engagement-engine.ts
 init_mcp_caller();
+init_cognitive_proxy();
 init_dual_rag();
 init_redis();
 init_logger();
@@ -29680,18 +29756,73 @@ async function matchPrecedents(req) {
   logger.info({ query: req.objective.slice(0, 60), count: matches.length, ms: Date.now() - t0 }, "Engagement: precedents matched");
   return { matches, query_ms: Date.now() - t0 };
 }
+async function queryKgRag(query, maxEvidence = 10) {
+  try {
+    const result = await callMcpTool({
+      toolName: "kg_rag.query",
+      args: { question: query, max_evidence: maxEvidence },
+      callId: uuid30(),
+      timeoutMs: 45e3
+    });
+    if (result.status !== "success") return { answer: "", sources: [] };
+    const data = result.result;
+    if (!data) return { answer: "", sources: [] };
+    const answer = typeof data.answer === "string" ? data.answer : "";
+    const sources = Array.isArray(data.sources) ? data.sources.map((s) => ({
+      id: String(s.id ?? "unknown"),
+      content: String(s.content ?? ""),
+      score: typeof s.score === "number" ? s.score : 0.5
+    })) : [];
+    return { answer, sources };
+  } catch (err) {
+    logger.debug({ error: String(err) }, "kg_rag.query failed");
+    return { answer: "", sources: [] };
+  }
+}
+async function foldContext(text, query, maxTokens = 1500) {
+  if (!text || text.length < 500) return null;
+  try {
+    const result = await callMcpTool({
+      toolName: "context_folding.fold",
+      args: {
+        task: query,
+        context: { text },
+        max_tokens: maxTokens,
+        domain: "consulting"
+      },
+      callId: uuid30(),
+      timeoutMs: 2e4
+    });
+    if (result.status !== "success") return null;
+    const data = result.result;
+    const folded = data?.compressed_text ?? data?.folded_text ?? data?.result;
+    return typeof folded === "string" && folded.length > 50 ? folded : null;
+  } catch {
+    return null;
+  }
+}
 async function generatePlan(req) {
   const t0 = Date.now();
   const engagementId = req.engagement_id ?? `eng-${uuid30()}`;
-  const [precedents, methodologyBundle, riskBundle] = await Promise.all([
+  const [precedents, methodologyBundle, riskBundle, kgRagBundle] = await Promise.all([
     matchPrecedents({ objective: req.objective, domain: req.domain, max_results: 5 }),
     dualChannelRAG(`consulting methodology framework for ${req.domain} ${req.objective}`, { maxResults: 5 }),
-    dualChannelRAG(`risks challenges pitfalls for ${req.domain} consulting engagement ${req.objective}`, { maxResults: 5 })
+    dualChannelRAG(`risks challenges pitfalls for ${req.domain} consulting engagement ${req.objective}`, { maxResults: 5 }),
+    queryKgRag(`${req.domain} engagement approach: ${req.objective}`, 8)
   ]);
-  const methodologyEvidence = methodologyBundle.results.map((r) => r.content).join("\n\n").slice(0, 3500);
-  const riskEvidence = riskBundle.results.map((r) => r.content).join("\n\n").slice(0, 2500);
+  let methodologyEvidence = methodologyBundle.results.map((r) => r.content).join("\n\n").slice(0, 3500);
+  let riskEvidence = riskBundle.results.map((r) => r.content).join("\n\n").slice(0, 2500);
+  const kgRagEvidence = kgRagBundle.answer.slice(0, 2500);
   const precedentText = precedents.matches.map((m, i) => `[${i + 1}] ${m.title} (similarity: ${m.similarity})`).join("\n");
-  const totalCitations = precedents.matches.length + methodologyBundle.results.length + riskBundle.results.length;
+  const totalEvidenceLen = methodologyEvidence.length + riskEvidence.length + kgRagEvidence.length;
+  if (totalEvidenceLen > 6e3) {
+    const foldedMethod = await foldContext(methodologyEvidence, `consulting methodology for ${req.domain}`, 1500);
+    const foldedRisk = await foldContext(riskEvidence, `risks for ${req.domain} engagement`, 1e3);
+    if (foldedMethod) methodologyEvidence = foldedMethod;
+    if (foldedRisk) riskEvidence = foldedRisk;
+    logger.info({ original: totalEvidenceLen, folded: methodologyEvidence.length + riskEvidence.length }, "Engagement plan: context folded");
+  }
+  const totalCitations = precedents.matches.length + methodologyBundle.results.length + riskBundle.results.length + kgRagBundle.sources.length;
   const avgConfidence = [
     ...methodologyBundle.results.map((r) => r.score),
     ...riskBundle.results.map((r) => r.score),
@@ -29712,6 +29843,9 @@ ${methodologyEvidence || "[limited evidence]"}
 
 RISK EVIDENCE FROM KNOWLEDGE GRAPH:
 ${riskEvidence || "[limited evidence]"}
+
+GRAPH-AUGMENTED CONTEXT (kg_rag multi-hop synthesis):
+${kgRagEvidence || "[no kg_rag context]"}
 
 SIMILAR PRECEDENT ENGAGEMENTS:
 ${precedentText || "[no precedents \u2014 cold start]"}
@@ -29738,21 +29872,37 @@ Rules:
   let planSource = "fallback-template";
   let platformConfidence = 0;
   let routingMeta = null;
-  const analyzed = await callRlmAnalyze(
-    `Design a ${req.duration_weeks}-week consulting engagement for: ${req.objective}`,
+  const analyzed = await callCognitiveRaw(
+    "analyze",
     {
-      domain: req.domain,
-      team_size: req.team_size,
-      budget_dkk: req.budget_dkk,
-      precedent_summaries: precedents.matches.slice(0, 3).map((m) => m.title),
-      methodology_evidence: methodologyEvidence.slice(0, 2e3),
-      risk_evidence: riskEvidence.slice(0, 1500)
+      prompt: `Design a ${req.duration_weeks}-week consulting engagement for: ${req.objective}`,
+      context: {
+        domain: req.domain,
+        team_size: req.team_size,
+        budget_dkk: req.budget_dkk,
+        precedent_summaries: precedents.matches.slice(0, 3).map((m) => m.title),
+        methodology_evidence: methodologyEvidence.slice(0, 2e3),
+        risk_evidence: riskEvidence.slice(0, 1500),
+        kg_rag_synthesis: kgRagEvidence.slice(0, 1500)
+      },
+      agent_id: "engagement-planner",
+      // Custom fields consumed by callCognitiveRaw passthrough
+      ...{
+        task: `Design a ${req.duration_weeks}-week consulting engagement for: ${req.objective}`,
+        analysis_dimensions: [
+          "phase_breakdown",
+          "resource_allocation",
+          "methodology_integration",
+          "key_challenges_and_mitigations"
+        ],
+        constraints: [
+          `duration: ${req.duration_weeks} weeks`,
+          `team: ${req.team_size} people`,
+          req.budget_dkk ? `budget: ${req.budget_dkk} DKK` : ""
+        ].filter(Boolean)
+      }
     },
-    [
-      `duration: ${req.duration_weeks} weeks`,
-      `team: ${req.team_size} people`,
-      req.budget_dkk ? `budget: ${req.budget_dkk} DKK` : ""
-    ].filter(Boolean)
+    6e4
   );
   if (analyzed?.analysis) {
     const a = analyzed.analysis;
