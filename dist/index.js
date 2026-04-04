@@ -23213,6 +23213,42 @@ async function runCronJob(jobId) {
       }
       return;
     }
+    if (job.id === "adoption-drift-check") {
+      try {
+        const { execSync } = await import("child_process");
+        const output = execSync("node scripts/ci-adoption-check.mjs --no-build --no-abi", {
+          encoding: "utf8",
+          timeout: 6e4,
+          cwd: process.cwd()
+        });
+        const passed = output.includes("All checks passed");
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = passed ? "clean" : "DRIFT_DETECTED";
+        job.run_count++;
+        persistCronJobs();
+        if (!passed) {
+          broadcastMessage({
+            from: "Orchestrator",
+            to: "All",
+            source: "orchestrator",
+            type: "Message",
+            message: `\u26A0\uFE0F Adoption drift detected \u2014 ci-adoption-check reported gaps. Run 'npm run test:ci' to investigate.`,
+            timestamp: (/* @__PURE__ */ new Date()).toISOString()
+          });
+          broadcastSSE("adoption-drift", { status: "DRIFT_DETECTED", timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+          logger.warn("Adoption drift cron: gaps detected");
+        } else {
+          logger.info("Adoption drift cron: clean (5/5 checks pass)");
+        }
+      } catch (err) {
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = "failed";
+        job.run_count++;
+        persistCronJobs();
+        logger.error({ id: job.id, err: String(err) }, "Adoption drift cron failed");
+      }
+      return;
+    }
     if (job.id === "adaptive-rag-retrain") {
       try {
         const result2 = await retrainRoutingWeights();
@@ -23550,6 +23586,18 @@ function registerDefaultLoops() {
           }
         }
       ]
+    }
+  });
+  registerCronJob({
+    id: "adoption-drift-check",
+    name: "Adoption Gate Drift Detection",
+    schedule: "0 2 * * *",
+    // Daily 02:00 UTC
+    enabled: true,
+    chain: {
+      name: "Adoption Drift",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
     }
   });
   registerCronJob({
