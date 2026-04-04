@@ -12,6 +12,7 @@ import { notifyToolCall } from '../slack.js'
 import { validate, validateToolCall } from '../validation.js'
 import { getRedis } from '../redis.js'
 import { ORCHESTRATOR_TOOLS } from '../tool-executor.js'
+import { recordToolCall } from '../adoption-telemetry.js'
 import type { OrchestratorToolCall } from '@widgetdc/contracts/orchestrator'
 
 export const toolsRouter = Router()
@@ -78,6 +79,7 @@ toolsRouter.post('/call', async (req: Request, res: Response) => {
     res.json(toolResult)
     if (toolResult.status === 'success') {
       broadcastToolResult(call.call_id, toolResult.result, call.agent_id)
+      recordToolCall(call.tool_name)
     }
     notifyToolCall(call.agent_id, call.tool_name, toolResult.status, toolResult.duration_ms ?? 0, toolResult.error_message)
     log.info({ tool: call.tool_name, status: toolResult.status, ms: toolResult.duration_ms }, 'Tool call done')

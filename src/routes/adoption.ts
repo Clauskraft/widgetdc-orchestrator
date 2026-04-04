@@ -10,6 +10,7 @@ import { getRedis } from '../redis.js'
 import { logger } from '../logger.js'
 import { callMcpTool } from '../mcp-caller.js'
 import { v4 as uuid } from 'uuid'
+import { computeTelemetry } from '../adoption-telemetry.js'
 
 export const adoptionRouter = Router()
 
@@ -56,6 +57,18 @@ const DEFAULT_METRICS: Omit<AdoptionMetrics, 'generated_at'> = {
   pipelines: 3,
   obsidian_views: 3,
 }
+
+/* ─── GET /telemetry — Runtime tool-usage KPIs ───────────────────────────── */
+
+adoptionRouter.get('/telemetry', async (_req: Request, res: Response) => {
+  try {
+    const summary = await computeTelemetry()
+    res.json({ success: true, data: summary })
+  } catch (err) {
+    logger.error({ err: String(err) }, 'adoption telemetry compute failed')
+    res.status(500).json({ success: false, error: { code: 'TELEMETRY_ERROR', message: String(err) } })
+  }
+})
 
 /* ─── GET /metrics ────────────────────────────────────────────────────────── */
 

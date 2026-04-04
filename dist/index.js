@@ -16445,6 +16445,110 @@ ${tools.map((t) => `- ${t.name} (${t.handler_type}, ${t.verified ? "verified" : 
   }
 }
 
+// src/adoption-telemetry.ts
+init_redis();
+init_logger();
+init_tool_registry();
+var KEY_CALLS = "orchestrator:telemetry:calls";
+var KEY_LAST = "orchestrator:telemetry:last_called";
+var WINDOW_TTL = 30 * 24 * 3600;
+var STALE_MS = 30 * 24 * 3600 * 1e3;
+function isoWeek() {
+  const now = /* @__PURE__ */ new Date();
+  const jan4 = new Date(now.getFullYear(), 0, 4);
+  const week = Math.ceil(((now.getTime() - jan4.getTime()) / 864e5 + jan4.getDay() + 1) / 7);
+  return `${now.getFullYear()}${String(week).padStart(2, "0")}`;
+}
+var ADVANCED_TOOLS = new Set(
+  TOOL_REGISTRY.filter((t) => t.namespace === "intelligence").map((t) => t.name)
+);
+function recordToolCall(toolName) {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  const windowKey = `orchestrator:telemetry:window:${isoWeek()}`;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  redis2.pipeline().zincrby(KEY_CALLS, 1, toolName).zincrby(windowKey, 1, toolName).expire(windowKey, WINDOW_TTL).hset(KEY_LAST, toolName, now).exec().catch((err) => logger2.warn({ err: String(err), tool: toolName }, "telemetry: Redis write failed"));
+}
+async function computeTelemetry() {
+  const redis2 = getRedis();
+  const allTools = TOOL_REGISTRY.map((t) => t.name);
+  const now = Date.now();
+  const empty = (tool) => ({
+    tool,
+    namespace: TOOL_REGISTRY.find((t) => t.name === tool)?.namespace ?? "unknown",
+    lifetime_calls: 0,
+    weekly_calls: 0,
+    last_called: null,
+    stale: false,
+    advanced: ADVANCED_TOOLS.has(tool)
+  });
+  if (!redis2) {
+    const tools2 = allTools.map(empty);
+    return buildSummary(tools2);
+  }
+  const windowKey = `orchestrator:telemetry:window:${isoWeek()}`;
+  const [lifetimeRaw, weeklyRaw, lastRaw] = await Promise.all([
+    redis2.zrange(KEY_CALLS, 0, -1, "WITHSCORES"),
+    redis2.zrange(windowKey, 0, -1, "WITHSCORES"),
+    redis2.hgetall(KEY_LAST)
+  ]);
+  const parseZSet = (raw) => {
+    const m = /* @__PURE__ */ new Map();
+    for (let i = 0; i < raw.length - 1; i += 2) {
+      m.set(raw[i], parseInt(raw[i + 1], 10) || 0);
+    }
+    return m;
+  };
+  const lifetimeCounts = parseZSet(lifetimeRaw);
+  const weeklyCounts = parseZSet(weeklyRaw);
+  const lastCalled = lastRaw ?? {};
+  const tools = allTools.map((name) => {
+    const ns = TOOL_REGISTRY.find((t) => t.name === name)?.namespace ?? "unknown";
+    const lc = lastCalled[name] ?? null;
+    const life = lifetimeCounts.get(name) ?? 0;
+    const stale = life > 0 && lc !== null && now - new Date(lc).getTime() > STALE_MS;
+    return {
+      tool: name,
+      namespace: ns,
+      lifetime_calls: life,
+      weekly_calls: weeklyCounts.get(name) ?? 0,
+      last_called: lc,
+      stale,
+      advanced: ADVANCED_TOOLS.has(name)
+    };
+  });
+  return buildSummary(tools);
+}
+function buildSummary(tools) {
+  const total = tools.length;
+  const calledEver = tools.filter((t) => t.lifetime_calls > 0);
+  const calledWeek = tools.filter((t) => t.weekly_calls > 0);
+  const zeroCalls = tools.filter((t) => t.lifetime_calls === 0).map((t) => t.tool);
+  const stale = tools.filter((t) => t.stale).map((t) => t.tool);
+  const hotTools = [...tools].sort((a, b) => b.lifetime_calls - a.lifetime_calls).slice(0, 5).map((t) => ({ tool: t.tool, calls: t.lifetime_calls }));
+  const advancedTools = tools.filter((t) => t.advanced);
+  const advancedUsed = advancedTools.filter((t) => t.weekly_calls > 0);
+  return {
+    generated_at: (/* @__PURE__ */ new Date()).toISOString(),
+    total_tools: total,
+    tools_called_ever: calledEver.length,
+    tools_called_this_week: calledWeek.length,
+    zero_call_tools: zeroCalls,
+    stale_tools: stale,
+    hot_tools: hotTools,
+    kpis: {
+      utilisation_rate_pct: pct(calledWeek.length, total),
+      advanced_utilisation_pct: pct(advancedUsed.length, advancedTools.length),
+      zero_call_rate_pct: pct(zeroCalls.length, total),
+      stale_rate_pct: pct(stale.length, total)
+    },
+    tools
+  };
+}
+function pct(n, d) {
+  return d === 0 ? 0 : Math.round(n / d * 1e3) / 10;
+}
+
 // src/routes/tools.ts
 var toolsRouter = Router2();
 toolsRouter.post("/call", async (req, res) => {
@@ -16507,6 +16611,7 @@ toolsRouter.post("/call", async (req, res) => {
     res.json(toolResult);
     if (toolResult.status === "success") {
       broadcastToolResult(call.call_id, toolResult.result, call.agent_id);
+      recordToolCall(call.tool_name);
     }
     notifyToolCall(call.agent_id, call.tool_name, toolResult.status, toolResult.duration_ms ?? 0, toolResult.error_message);
     log.info({ tool: call.tool_name, status: toolResult.status, ms: toolResult.duration_ms }, "Tool call done");
@@ -18426,6 +18531,15 @@ var DEFAULT_METRICS = {
   pipelines: 3,
   obsidian_views: 3
 };
+adoptionRouter.get("/telemetry", async (_req, res) => {
+  try {
+    const summary = await computeTelemetry();
+    res.json({ success: true, data: summary });
+  } catch (err) {
+    logger2.error({ err: String(err) }, "adoption telemetry compute failed");
+    res.status(500).json({ success: false, error: { code: "TELEMETRY_ERROR", message: String(err) } });
+  }
+});
 adoptionRouter.get("/metrics", async (_req, res) => {
   const redis2 = getRedis();
   if (redis2) {
@@ -26327,7 +26441,7 @@ app.get("/health", (_req, res) => {
   res.json({
     status: "healthy",
     service: "widgetdc-orchestrator",
-    version: "3.2.0",
+    version: "3.2.1",
     uptime_seconds: Math.floor(process.uptime()),
     agents_registered: AgentRegistry.all().length,
     ws_connections: getConnectionStats().total,

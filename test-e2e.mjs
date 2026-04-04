@@ -1012,6 +1012,75 @@ await test('102. POST /api/tools/precedent_search rejects missing query', async 
 })
 
 // ═══════════════════════════════════════════════════════════════
+// Section 15: CI Adoption Gate — remaining 9 tools (found by ci-adoption-check.mjs)
+// ═══════════════════════════════════════════════════════════════
+
+// ── 103. investigate — exists and responds ──
+await test('103. POST /api/tools/investigate responds', async () => {
+  const r = await api('/api/tools/investigate', { method: 'POST', body: JSON.stringify({ topic: 'test' }) })
+  assert(r.status !== 404, `investigate not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'investigate', `wrong tool_name`)
+})
+
+// ── 104. create_notebook — exists and responds ──
+await test('104. POST /api/tools/create_notebook responds', async () => {
+  const r = await api('/api/tools/create_notebook', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `create_notebook not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'create_notebook', `wrong tool_name`)
+})
+
+// ── 105. verify_output — exists and responds ──
+await test('105. POST /api/tools/verify_output responds', async () => {
+  const r = await api('/api/tools/verify_output', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `verify_output not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'verify_output', `wrong tool_name`)
+})
+
+// ── 106. generate_deliverable rejects short prompt ──
+await test('106. POST /api/tools/generate_deliverable rejects short prompt', async () => {
+  const r = await api('/api/tools/generate_deliverable', { method: 'POST', body: JSON.stringify({ prompt: 'hi' }) })
+  assert(r.status !== 404, `generate_deliverable not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  const result = r.body?.data?.result ?? ''
+  assert(result.includes('Error'), `expected Error for short prompt`)
+})
+
+// ── 107. run_osint_scan — exists (do NOT trigger real scan) ──
+await test('107. POST /api/tools/run_osint_scan exists', async () => {
+  const r = await api('/api/tools/run_osint_scan', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `run_osint_scan not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'run_osint_scan', `wrong tool_name`)
+})
+
+// ── 108. run_evolution — exists (do NOT trigger real cycle) ──
+await test('108. POST /api/tools/run_evolution exists', async () => {
+  const r = await api('/api/tools/run_evolution', { method: 'POST', body: JSON.stringify({ dry_run: true }) })
+  assert(r.status !== 404, `run_evolution not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'run_evolution', `wrong tool_name`)
+})
+
+// ── 109. ingest_document rejects missing content ──
+await test('109. POST /api/tools/ingest_document rejects missing content', async () => {
+  const r = await api('/api/tools/ingest_document', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `ingest_document not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'ingest_document', `wrong tool_name`)
+})
+
+// ── 110. build_communities — exists ──
+await test('110. POST /api/tools/build_communities exists', async () => {
+  const r = await api('/api/tools/build_communities', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `build_communities not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'build_communities', `wrong tool_name`)
+})
+
+// ── 111. adaptive_rag_retrain — exists ──
+await test('111. POST /api/tools/adaptive_rag_retrain exists', async () => {
+  const r = await api('/api/tools/adaptive_rag_retrain', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `adaptive_rag_retrain not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'adaptive_rag_retrain', `wrong tool_name`)
+})
+
+// ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped
 console.log(`  RESULTS: ${passed} passed, ${failed} failed, ${skipped} skipped / ${total} total`)
