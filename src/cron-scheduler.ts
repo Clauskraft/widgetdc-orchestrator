@@ -329,7 +329,18 @@ export async function runCronJob(jobId: string): Promise<void> {
 
     // ═══ Backend Cron Proxy Jobs (v2.8.0) ═══════════════════════════════
     // These crons call WidgeTDC backend /api/cron/* endpoints via HTTP POST.
-    if (job.id === 'data-lifecycle' || job.id === 'graph-overflow' || job.id === 'skill-forge') {
+    if (
+      job.id === 'data-lifecycle' ||
+      job.id === 'graph-overflow' ||
+      job.id === 'skill-forge' ||
+      // Fase 3 TECH-9: 6 additional backend cron proxies (Fase 2 TECH-6)
+      job.id === 'adoption-maintenance' ||
+      job.id === 'synergy' ||
+      job.id === 'embedding-reindex' ||
+      job.id === 'consulting-activation' ||
+      job.id === 'autonomous-linear-loop' ||
+      job.id === 'lesson-delivery'
+    ) {
       try {
         const endpoint = `${config.backendUrl}/api/cron/${job.id}`
         const res = await fetch(endpoint, {
@@ -1203,6 +1214,89 @@ export function registerDefaultLoops(): void {
     enabled: true,
     chain: {
       name: 'Skill Forge',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Fase 3 TECH-9: Backend cron proxies migrated from local node-cron
+  // See WidgeTDC PR #4179 (Fase 2 TECH-6) for backend endpoint migration.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // Adoption Maintenance — LIN-444: rollout expiry, consensus expiry, APO
+  registerCronJob({
+    id: 'adoption-maintenance',
+    name: 'Adoption Maintenance (Rollout Expiry + APO)',
+    schedule: '*/5 * * * *', // Every 5 minutes
+    enabled: true,
+    chain: {
+      name: 'Adoption Maintenance',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
+  // Synergy — SYN-A2/A3 (LIN-323): Omega → ROMA bridge
+  registerCronJob({
+    id: 'synergy',
+    name: 'Synergy Cycle (Omega → ROMA Bridge)',
+    schedule: '*/5 * * * *', // Every 5 minutes
+    enabled: true,
+    chain: {
+      name: 'Synergy',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
+  // Embedding Reindex — fix zero-vector embeddings + embed missing nodes
+  registerCronJob({
+    id: 'embedding-reindex',
+    name: 'Embedding Reindex (Fix Zero Vectors)',
+    schedule: '0 */4 * * *', // Every 4 hours
+    enabled: true,
+    chain: {
+      name: 'Embedding Reindex',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
+  // Consulting Activation — all 4 daily jobs (digest, CVE, patterns, intelligence)
+  registerCronJob({
+    id: 'consulting-activation',
+    name: 'Consulting Activation (Daily Intelligence Jobs)',
+    schedule: '0 6 * * *', // Daily 06:00 UTC
+    enabled: true,
+    chain: {
+      name: 'Consulting Activation',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
+  // Autonomous Linear Loop — LIN-380: label-filtered issue picker
+  registerCronJob({
+    id: 'autonomous-linear-loop',
+    name: 'Autonomous Linear Loop (Issue Picker)',
+    schedule: '*/30 * * * *', // Every 30 minutes
+    enabled: true,
+    chain: {
+      name: 'Autonomous Linear Loop',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
+  // Lesson Delivery — LIN-389: ensures lessons reach agents (no orphans)
+  registerCronJob({
+    id: 'lesson-delivery',
+    name: 'Lesson Delivery (Feynman Loop)',
+    schedule: '*/30 * * * *', // Every 30 minutes
+    enabled: true,
+    chain: {
+      name: 'Lesson Delivery',
       mode: 'sequential',
       steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
     },
