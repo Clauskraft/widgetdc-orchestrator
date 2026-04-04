@@ -75,6 +75,45 @@ Når brugeren skriver "100% autonomt" kører agenten **fuldstændigt autonomt** 
 - Neo Aura masterplan: `NEO_AURA_MASTERPLAN.md`
 - Governance bundle: `MASTER_POLICY.md` + `config/*.json`
 
+## Mandatory Adoption Verification (Post-Code-Change)
+
+**WHEN:** After creating new source files, tools, routes, or features in this repo.
+**WHY:** Prevents half-wired features (code exists but not callable/tested/documented).
+
+### After creating a new tool:
+1. `defineTool({...})` in `src/tool-registry.ts`
+2. `case '{name}':` handler in `src/tool-executor.ts`
+3. `npm run build && npm run test:abi` — verify additive, 0 breaking
+4. Add e2e test in `test-e2e.mjs` (validation test minimum)
+5. Add entry in `docs/TOOLS.md` (description + params + curl example)
+
+### After creating a new route:
+1. Import + mount in `src/index.ts`
+2. Add e2e test for at least validation (400 on bad input)
+3. `npm run build` — verify no compile errors
+
+### After creating a new source module:
+1. If periodic → add to `cron-scheduler.ts`
+2. If stateful → add boot hook in `index.ts`
+3. If user-facing → create Open WebUI tool in `pipelines/`
+
+### Before committing:
+```bash
+npm run build            # Must pass
+node --check dist/index.js  # Must pass
+npm run test:abi         # 0 breaking changes
+```
+
+### Before releasing:
+```bash
+node test-e2e.mjs       # All tests green
+# Verify production after deploy:
+curl $ORCH_URL/health   # Correct version
+curl $ORCH_URL/api/tools | grep '"total"'  # Expected tool count
+```
+
+**Adoption score = features fully wired / features shipped. Target: 100% always.**
+
 ## Cross-Repo Sync
 
 | Layer | Owner | Governs |
