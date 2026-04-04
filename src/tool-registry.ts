@@ -797,6 +797,70 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     timeoutMs: 5000,
     outputDescription: 'Full AnalysisArtifact object',
   }),
+
+  // ─── v4.0.7 — Ghost-tier sweep round 3 (LIN-619) ──────────────────────────
+  // Final ghost-tier closure: drill stack (G4.15-19 stateful hierarchical
+  // navigation, Redis-backed sessions) + s1-s4 research pipeline trigger.
+
+  defineTool({
+    name: 'drill_start',
+    namespace: 'graph',
+    description: 'Start a hierarchical drill-down session (G4.15). Creates Redis session and returns children at the domain level. Navigation path: Domain → Segment → Framework → KPI → Trend → Recommendation.',
+    input: z.object({
+      domain: z.string().describe('Consulting domain to begin drill from'),
+    }),
+    timeoutMs: 15000,
+    outputDescription: 'DrillContext with session_id, current level, children, breadcrumbs',
+  }),
+
+  defineTool({
+    name: 'drill_down',
+    namespace: 'graph',
+    description: 'Drill down into a child level in an active session (G4.16). Pushes current position to stack, moves to target_id at target_level.',
+    input: z.object({
+      session_id: z.string().describe('Active drill session ID'),
+      target_id: z.string().describe('Child node ID to drill into'),
+      target_level: z.string().describe('Child level: segment|framework|kpi|trend|recommendation'),
+    }),
+    timeoutMs: 15000,
+    outputDescription: 'Updated DrillContext with children at new level',
+  }),
+
+  defineTool({
+    name: 'drill_up',
+    namespace: 'graph',
+    description: 'Navigate up one level in drill session (G4.17). Pops parent from stack, returns children at parent level.',
+    input: z.object({
+      session_id: z.string().describe('Active drill session ID'),
+    }),
+    timeoutMs: 15000,
+    outputDescription: 'Updated DrillContext at parent level',
+  }),
+
+  defineTool({
+    name: 'drill_children',
+    namespace: 'graph',
+    description: 'Fetch children at current drill position without navigating (G4.18). Safe read-only inspection.',
+    input: z.object({
+      session_id: z.string().describe('Active drill session ID'),
+    }),
+    timeoutMs: 10000,
+    outputDescription: 'DrillChild[] at current position with breadcrumbs',
+  }),
+
+  defineTool({
+    name: 'research_harvest',
+    namespace: 'intelligence',
+    description: 'Trigger the S1-S4 research harvesting pipeline — Extract (OSINT) → Map (cognitive analyze) → Sync/Inject (Neo4j) → Verify (audit). Returns execution_id.',
+    input: z.object({
+      url: z.string().describe('URL or local path to harvest'),
+      source_type: z.string().optional().describe('Source type (e.g. MEDIA, BLOG, PAPER)'),
+      topic: z.string().optional().describe('Topic context for mapping'),
+      weights: z.record(z.unknown()).optional().describe('Optional salience weights'),
+    }),
+    timeoutMs: 180000,
+    outputDescription: 'Execution ID for tracking the 4-step chain',
+  }),
 ]
 
 // ─── Protocol Compilers ─────────────────────────────────────────────────────

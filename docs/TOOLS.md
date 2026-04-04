@@ -1134,6 +1134,47 @@ Retrieve a specific AnalysisArtifact by ID with all blocks, graph refs, tags, an
 
 ---
 
+## v4.0.7 Ghost-Tier Sweep Round 3 (LIN-619)
+
+Final ghost-tier closure: drill stack navigation (G4.15-19) + research harvesting pipeline.
+
+### `drill_start`
+**Namespace:** graph | **Timeout:** 15s | **Handler:** orchestrator | **G4.15**
+
+Start a hierarchical drill-down session. Creates Redis session (1h TTL) and returns children at domain level. Path: Domain → Segment → Framework → KPI → Trend → Recommendation.
+
+**Required:** `domain`
+
+### `drill_down`
+**Namespace:** graph | **Timeout:** 15s | **Handler:** orchestrator | **G4.16**
+
+Drill into a child level in an active session. Pushes current position to stack.
+
+**Required:** `session_id`, `target_id`, `target_level`
+
+### `drill_up`
+**Namespace:** graph | **Timeout:** 15s | **Handler:** orchestrator | **G4.17**
+
+Navigate up one level. Pops parent from stack.
+
+**Required:** `session_id`
+
+### `drill_children`
+**Namespace:** graph | **Timeout:** 10s | **Handler:** orchestrator | **G4.18**
+
+Fetch children at current position without navigating. Read-only.
+
+**Required:** `session_id`
+
+### `research_harvest`
+**Namespace:** intelligence | **Timeout:** 180s | **Handler:** orchestrator
+
+Trigger the S1-S4 research harvesting pipeline: Extract (OSINT) → Map (cognitive analyze) → Sync/Inject (Neo4j) → Verify (audit).
+
+**Required:** `url` | **Optional:** `source_type`, `topic`, `weights`
+
+---
+
 ## Adding a New Tool
 
 All protocols (REST, OpenAI, MCP) compile automatically from a single entry in `src/tool-registry.ts`:

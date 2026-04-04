@@ -1387,6 +1387,109 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    // ─── v4.0.7 — Ghost-tier sweep round 3 (LIN-619) ───────────────────────
+
+    case 'drill_start': {
+      try {
+        const { saveDrillContext, fetchDrillChildren } = await import('./routes/drill.js')
+        const domain = String(args.domain ?? '')
+        if (!domain) return 'Error: domain required'
+        const sessionId = uuid()
+        const ctx = {
+          stack: [],
+          current_level: 'domain',
+          current_id: domain,
+          current_label: domain,
+          domain,
+        }
+        const saved = await saveDrillContext(sessionId, ctx)
+        if (!saved) return 'Error: Redis unavailable for drill session'
+        const children = await fetchDrillChildren('domain', domain)
+        return JSON.stringify({ session_id: sessionId, current_level: 'domain', current_label: domain, children_count: children.length, children: children.slice(0, 10) })
+      } catch (err) {
+        return `Drill start failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'drill_down': {
+      try {
+        const { loadDrillContext, saveDrillContext, fetchDrillChildren } = await import('./routes/drill.js')
+        const sessionId = String(args.session_id ?? '')
+        const targetId = String(args.target_id ?? '')
+        const targetLevel = String(args.target_level ?? '')
+        if (!sessionId || !targetId || !targetLevel) return 'Error: session_id, target_id, target_level required'
+        const ctx = await loadDrillContext(sessionId)
+        if (!ctx) return `Drill session ${sessionId} not found or expired`
+        ctx.stack.push({ level: ctx.current_level, id: ctx.current_id, label: ctx.current_label })
+        ctx.current_level = targetLevel
+        ctx.current_id = targetId
+        ctx.current_label = targetId
+        await saveDrillContext(sessionId, ctx)
+        const children = await fetchDrillChildren(targetLevel, targetId)
+        return JSON.stringify({ session_id: sessionId, current_level: targetLevel, current_label: targetId, depth: ctx.stack.length, children_count: children.length })
+      } catch (err) {
+        return `Drill down failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'drill_up': {
+      try {
+        const { loadDrillContext, saveDrillContext, fetchDrillChildren } = await import('./routes/drill.js')
+        const sessionId = String(args.session_id ?? '')
+        if (!sessionId) return 'Error: session_id required'
+        const ctx = await loadDrillContext(sessionId)
+        if (!ctx) return `Drill session ${sessionId} not found or expired`
+        if (ctx.stack.length === 0) return 'Already at top level (domain)'
+        const parent = ctx.stack.pop()!
+        ctx.current_level = parent.level
+        ctx.current_id = parent.id
+        ctx.current_label = parent.label
+        await saveDrillContext(sessionId, ctx)
+        const children = await fetchDrillChildren(ctx.current_level, ctx.current_label)
+        return JSON.stringify({ session_id: sessionId, current_level: ctx.current_level, current_label: ctx.current_label, depth: ctx.stack.length, children_count: children.length })
+      } catch (err) {
+        return `Drill up failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'drill_children': {
+      try {
+        const { loadDrillContext, fetchDrillChildren } = await import('./routes/drill.js')
+        const sessionId = String(args.session_id ?? '')
+        if (!sessionId) return 'Error: session_id required'
+        const ctx = await loadDrillContext(sessionId)
+        if (!ctx) return `Drill session ${sessionId} not found or expired`
+        const children = await fetchDrillChildren(ctx.current_level, ctx.current_label)
+        return JSON.stringify({ session_id: sessionId, current_level: ctx.current_level, current_label: ctx.current_label, children_count: children.length, children: children.slice(0, 20) })
+      } catch (err) {
+        return `Drill children failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'research_harvest': {
+      try {
+        const { executeChain } = await import('./chain-engine.js')
+        const url = String(args.url ?? '')
+        if (!url) return 'Error: url required'
+        const topic = typeof args.topic === 'string' ? args.topic : 'General Intelligence'
+        const sourceType = typeof args.source_type === 'string' ? args.source_type : 'MEDIA'
+        const weights = (args.weights && typeof args.weights === 'object') ? args.weights : {}
+        const execution = await executeChain({
+          name: `S1-S4: ${topic}`,
+          mode: 'sequential',
+          steps: [
+            { agent_id: 'harvester', tool_name: 'osint.scrape', arguments: { url, max_lines: 50 } },
+            { agent_id: 'orchestrator', cognitive_action: 'analyze', prompt: `Transform this raw data into a valid IntelligenceObservation (snake_case). Topic=${topic}, Weights=${JSON.stringify(weights)}. Data: {{prev}}` },
+            { agent_id: 'orchestrator', tool_name: 'graph.write_cypher', arguments: { query: 'MERGE (o:IntelligenceObservation {id: apoc.create.uuid()}) SET o.url = $url, o.source_type = $source_type, o.timestamp = datetime() RETURN o.id', parameters: { url, source_type: sourceType } } },
+            { agent_id: 'sentinel', tool_name: 'audit.run', arguments: { target_id: '{{prev}}' } },
+          ],
+        } as any)
+        return JSON.stringify({ execution_id: (execution as any).execution_id ?? 'unknown', topic, url })
+      } catch (err) {
+        return `S1-S4 trigger failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
     default: {
       // Check forged tools before giving up
       try {

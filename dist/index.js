@@ -10994,6 +10994,13 @@ var init_routing_engine = __esm({
 });
 
 // src/chain-engine.ts
+var chain_engine_exports = {};
+__export(chain_engine_exports, {
+  FUNNEL_STAGES: () => FUNNEL_STAGES,
+  executeChain: () => executeChain,
+  getExecution: () => getExecution,
+  listExecutions: () => listExecutions
+});
 import { v4 as uuid5 } from "uuid";
 function persistExecution(exec) {
   executions.set(exec.execution_id, exec);
@@ -12470,6 +12477,64 @@ var init_tool_registry = __esm({
         }),
         timeoutMs: 5e3,
         outputDescription: "Full AnalysisArtifact object"
+      }),
+      // ─── v4.0.7 — Ghost-tier sweep round 3 (LIN-619) ──────────────────────────
+      // Final ghost-tier closure: drill stack (G4.15-19 stateful hierarchical
+      // navigation, Redis-backed sessions) + s1-s4 research pipeline trigger.
+      defineTool({
+        name: "drill_start",
+        namespace: "graph",
+        description: "Start a hierarchical drill-down session (G4.15). Creates Redis session and returns children at the domain level. Navigation path: Domain \u2192 Segment \u2192 Framework \u2192 KPI \u2192 Trend \u2192 Recommendation.",
+        input: z.object({
+          domain: z.string().describe("Consulting domain to begin drill from")
+        }),
+        timeoutMs: 15e3,
+        outputDescription: "DrillContext with session_id, current level, children, breadcrumbs"
+      }),
+      defineTool({
+        name: "drill_down",
+        namespace: "graph",
+        description: "Drill down into a child level in an active session (G4.16). Pushes current position to stack, moves to target_id at target_level.",
+        input: z.object({
+          session_id: z.string().describe("Active drill session ID"),
+          target_id: z.string().describe("Child node ID to drill into"),
+          target_level: z.string().describe("Child level: segment|framework|kpi|trend|recommendation")
+        }),
+        timeoutMs: 15e3,
+        outputDescription: "Updated DrillContext with children at new level"
+      }),
+      defineTool({
+        name: "drill_up",
+        namespace: "graph",
+        description: "Navigate up one level in drill session (G4.17). Pops parent from stack, returns children at parent level.",
+        input: z.object({
+          session_id: z.string().describe("Active drill session ID")
+        }),
+        timeoutMs: 15e3,
+        outputDescription: "Updated DrillContext at parent level"
+      }),
+      defineTool({
+        name: "drill_children",
+        namespace: "graph",
+        description: "Fetch children at current drill position without navigating (G4.18). Safe read-only inspection.",
+        input: z.object({
+          session_id: z.string().describe("Active drill session ID")
+        }),
+        timeoutMs: 1e4,
+        outputDescription: "DrillChild[] at current position with breadcrumbs"
+      }),
+      defineTool({
+        name: "research_harvest",
+        namespace: "intelligence",
+        description: "Trigger the S1-S4 research harvesting pipeline \u2014 Extract (OSINT) \u2192 Map (cognitive analyze) \u2192 Sync/Inject (Neo4j) \u2192 Verify (audit). Returns execution_id.",
+        input: z.object({
+          url: z.string().describe("URL or local path to harvest"),
+          source_type: z.string().optional().describe("Source type (e.g. MEDIA, BLOG, PAPER)"),
+          topic: z.string().optional().describe("Topic context for mapping"),
+          weights: z.record(z.unknown()).optional().describe("Optional salience weights")
+        }),
+        timeoutMs: 18e4,
+        outputDescription: "Execution ID for tracking the 4-step chain"
       })
     ];
   }
@@ -17651,6 +17716,363 @@ var init_artifacts = __esm({
   }
 });
 
+// src/routes/drill.ts
+var drill_exports = {};
+__export(drill_exports, {
+  drillRouter: () => drillRouter,
+  fetchDrillChildren: () => fetchDrillChildren,
+  loadDrillContext: () => loadDrillContext,
+  saveDrillContext: () => saveDrillContext
+});
+import { Router as Router5 } from "express";
+import { randomUUID as randomUUID2 } from "crypto";
+async function callMcp(tool, payload) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MCP_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.backendApiKey}`
+      },
+      body: JSON.stringify({ tool, payload }),
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      return { ok: false, error: `MCP ${tool} returned ${res.status}` };
+    }
+    const data = await res.json();
+    return { ok: true, data };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `MCP ${tool} failed: ${msg}` };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function extractRecords(data) {
+  if (Array.isArray(data)) return data;
+  if (data && typeof data === "object") {
+    const d = data;
+    if (Array.isArray(d.records)) return d.records;
+    if (Array.isArray(d.data)) return d.data;
+    if (Array.isArray(d.results)) return d.results;
+  }
+  return [];
+}
+function nextLevel(current) {
+  const idx = LEVEL_ORDER.indexOf(current);
+  return idx >= 0 && idx < LEVEL_ORDER.length - 1 ? LEVEL_ORDER[idx + 1] : null;
+}
+function childrenQuery(level, id) {
+  switch (level) {
+    case "domain":
+      return {
+        query: `MATCH (d:ConsultingDomain {name: $name})-[:HAS_SEGMENT]->(s) RETURN s.name AS label, elementId(s) AS id, 'segment' AS level`,
+        params: { name: id }
+      };
+    case "segment":
+      return {
+        query: `MATCH (s {name: $name})-[:HAS_FRAMEWORK]->(f:ConsultingFramework) RETURN f.name AS label, elementId(f) AS id, 'framework' AS level`,
+        params: { name: id }
+      };
+    case "framework":
+      return {
+        query: `MATCH (f:ConsultingFramework {name: $name})-[:HAS_KPI]->(k:KPI) RETURN k.name AS label, elementId(k) AS id, 'kpi' AS level`,
+        params: { name: id }
+      };
+    case "kpi":
+      return {
+        query: `MATCH (k:KPI {name: $name})-[:HAS_TREND]->(t) RETURN t.name AS label, elementId(t) AS id, 'trend' AS level`,
+        params: { name: id }
+      };
+    case "trend":
+      return {
+        query: `MATCH (t {name: $name})-[:HAS_RECOMMENDATION]->(r) RETURN r.name AS label, elementId(r) AS id, 'recommendation' AS level`,
+        params: { name: id }
+      };
+    default:
+      return null;
+  }
+}
+function domainFrameworksFallback() {
+  return {
+    query: `MATCH (d:ConsultingDomain {name: $name})-[:HAS_FRAMEWORK]->(f:ConsultingFramework) RETURN f.name AS label, elementId(f) AS id, 'framework' AS level`,
+    params: { name: "" }
+    // filled at call site
+  };
+}
+async function fetchDrillChildren(level, label) {
+  const q = childrenQuery(level, label);
+  if (!q) return [];
+  const result = await callMcp("graph.read_cypher", { query: q.query, params: q.params });
+  if (!result.ok) {
+    logger.warn({ level, label, error: result.error }, "Drill children query failed");
+    return [];
+  }
+  let records = extractRecords(result.data);
+  if (level === "domain" && records.length === 0) {
+    const fb = domainFrameworksFallback();
+    fb.params.name = label;
+    const fbResult = await callMcp("graph.read_cypher", { query: fb.query, params: fb.params });
+    if (fbResult.ok) {
+      records = extractRecords(fbResult.data);
+    }
+  }
+  return records.map((r) => ({
+    id: String(r.id ?? ""),
+    label: String(r.label ?? ""),
+    type: String(r.level ?? nextLevel(level) ?? "unknown"),
+    count: typeof r.count === "number" ? r.count : void 0
+  }));
+}
+async function saveDrillContext(sessionId, ctx) {
+  const redis2 = getRedis();
+  if (!redis2) return false;
+  try {
+    await redis2.set(`${DRILL_PREFIX}${sessionId}`, JSON.stringify(ctx), "EX", SESSION_TTL);
+    return true;
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Redis save failed for drill context");
+    return false;
+  }
+}
+async function loadDrillContext(sessionId) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${DRILL_PREFIX}${sessionId}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Redis load failed for drill context");
+    return null;
+  }
+}
+function buildBreadcrumbs(ctx) {
+  return [
+    ...ctx.stack,
+    { level: ctx.current_level, id: ctx.current_id, label: ctx.current_label }
+  ];
+}
+function trendArrow(trend) {
+  if (!trend) return "\u2192";
+  const t = trend.toLowerCase();
+  if (t === "up" || t === "rising" || t === "increasing") return "\u2191";
+  if (t === "down" || t === "falling" || t === "decreasing") return "\u2193";
+  return "\u2192";
+}
+var drillRouter, DRILL_PREFIX, SESSION_TTL, MCP_TIMEOUT_MS, LEVEL_ORDER;
+var init_drill = __esm({
+  "src/routes/drill.ts"() {
+    "use strict";
+    init_redis();
+    init_config();
+    init_logger();
+    drillRouter = Router5();
+    DRILL_PREFIX = "orchestrator:drill:";
+    SESSION_TTL = 3600;
+    MCP_TIMEOUT_MS = 12e3;
+    LEVEL_ORDER = ["domain", "segment", "framework", "kpi", "trend", "recommendation"];
+    drillRouter.post("/start", async (req, res) => {
+      const { domain } = req.body;
+      if (!domain) {
+        res.status(400).json({ success: false, error: "Missing required field: domain" });
+        return;
+      }
+      const sessionId = randomUUID2();
+      const ctx = {
+        stack: [],
+        current_level: "domain",
+        current_id: domain,
+        current_label: domain,
+        domain
+      };
+      const saved = await saveDrillContext(sessionId, ctx);
+      if (!saved) {
+        res.status(503).json({ success: false, error: "Redis not available" });
+        return;
+      }
+      const children = await fetchDrillChildren("domain", domain);
+      logger.info({ session_id: sessionId, domain, children_count: children.length }, "Drill session started");
+      res.json({
+        success: true,
+        session_id: sessionId,
+        context: ctx,
+        children,
+        breadcrumbs: buildBreadcrumbs(ctx)
+      });
+    });
+    drillRouter.post("/down", async (req, res) => {
+      const { session_id, target_id, target_level } = req.body;
+      if (!session_id || !target_id || !target_level) {
+        res.status(400).json({ success: false, error: "Missing required fields: session_id, target_id, target_level" });
+        return;
+      }
+      const ctx = await loadDrillContext(session_id);
+      if (!ctx) {
+        res.status(404).json({ success: false, error: "Drill session not found or expired" });
+        return;
+      }
+      ctx.stack.push({
+        level: ctx.current_level,
+        id: ctx.current_id,
+        label: ctx.current_label
+      });
+      ctx.current_level = target_level;
+      ctx.current_id = target_id;
+      ctx.current_label = target_id;
+      await saveDrillContext(session_id, ctx);
+      const children = await fetchDrillChildren(target_level, target_id);
+      logger.info({ session_id, target_level, target_id, depth: ctx.stack.length }, "Drill down");
+      res.json({
+        success: true,
+        context: ctx,
+        children,
+        breadcrumbs: buildBreadcrumbs(ctx)
+      });
+    });
+    drillRouter.post("/up", async (req, res) => {
+      const { session_id } = req.body;
+      if (!session_id) {
+        res.status(400).json({ success: false, error: "Missing required field: session_id" });
+        return;
+      }
+      const ctx = await loadDrillContext(session_id);
+      if (!ctx) {
+        res.status(404).json({ success: false, error: "Drill session not found or expired" });
+        return;
+      }
+      if (ctx.stack.length === 0) {
+        res.status(400).json({ success: false, error: "Already at top level" });
+        return;
+      }
+      const parent = ctx.stack.pop();
+      ctx.current_level = parent.level;
+      ctx.current_id = parent.id;
+      ctx.current_label = parent.label;
+      await saveDrillContext(session_id, ctx);
+      const children = await fetchDrillChildren(ctx.current_level, ctx.current_label);
+      logger.info({ session_id, level: ctx.current_level, label: ctx.current_label }, "Drill up");
+      res.json({
+        success: true,
+        context: ctx,
+        children,
+        breadcrumbs: buildBreadcrumbs(ctx)
+      });
+    });
+    drillRouter.get("/children", async (req, res) => {
+      const sessionId = req.query.session_id;
+      if (!sessionId) {
+        res.status(400).json({ success: false, error: "Missing required query param: session_id" });
+        return;
+      }
+      const ctx = await loadDrillContext(sessionId);
+      if (!ctx) {
+        res.status(404).json({ success: false, error: "Drill session not found or expired" });
+        return;
+      }
+      const children = await fetchDrillChildren(ctx.current_level, ctx.current_label);
+      res.json({
+        success: true,
+        children,
+        context: ctx,
+        breadcrumbs: buildBreadcrumbs(ctx)
+      });
+    });
+    drillRouter.get("/moc", async (req, res) => {
+      const domain = req.query.domain;
+      if (!domain) {
+        res.status(400).json({ success: false, error: "Missing required query param: domain" });
+        return;
+      }
+      const hierarchyQuery = `
+    MATCH (d:ConsultingDomain {name: $domain})
+    OPTIONAL MATCH (d)-[:HAS_FRAMEWORK]->(f:ConsultingFramework)
+    OPTIONAL MATCH (f)-[:HAS_KPI]->(k:KPI)
+    RETURN d.name AS domain_name, f.name AS framework_name, k.name AS kpi_name, k.value AS kpi_value, k.trend AS kpi_trend
+    ORDER BY f.name, k.name
+  `;
+      const result = await callMcp("graph.read_cypher", {
+        query: hierarchyQuery,
+        params: { domain }
+      });
+      if (!result.ok) {
+        res.status(502).json({ success: false, error: result.error ?? "Neo4j query failed" });
+        return;
+      }
+      const records = extractRecords(result.data);
+      const frameworks = /* @__PURE__ */ new Map();
+      for (const rec of records) {
+        const fName = rec.framework_name ? String(rec.framework_name) : null;
+        if (!fName) continue;
+        if (!frameworks.has(fName)) {
+          frameworks.set(fName, { kpis: [] });
+        }
+        const kName = rec.kpi_name ? String(rec.kpi_name) : null;
+        if (kName) {
+          frameworks.get(fName).kpis.push({
+            name: kName,
+            value: String(rec.kpi_value ?? ""),
+            trend: trendArrow(rec.kpi_trend)
+          });
+        }
+      }
+      const lines = [];
+      lines.push(`# ${domain} \u2014 Map of Content`);
+      lines.push("");
+      lines.push(`> Generated: ${(/* @__PURE__ */ new Date()).toISOString()}`);
+      lines.push(`> Source: WidgeTDC Neo4j Knowledge Graph`);
+      lines.push("");
+      if (frameworks.size > 0) {
+        lines.push("## Frameworks");
+        lines.push("");
+        for (const [fName, fData] of frameworks) {
+          lines.push(`- [[${fName}]] (${fData.kpis.length} KPIs)`);
+        }
+        lines.push("");
+        lines.push("## KPIs");
+        lines.push("");
+        for (const [fName, fData] of frameworks) {
+          if (fData.kpis.length === 0) continue;
+          lines.push(`### ${fName}`);
+          lines.push("");
+          for (const kpi of fData.kpis) {
+            const valueStr = kpi.value ? `: ${kpi.value} ${kpi.trend}` : ` ${kpi.trend}`;
+            lines.push(`- ${kpi.name}${valueStr}`);
+          }
+          lines.push("");
+        }
+      } else {
+        lines.push("*No frameworks found for this domain.*");
+        lines.push("");
+      }
+      const recsQuery = `
+    MATCH (d:ConsultingDomain {name: $domain})-[:HAS_FRAMEWORK]->(f)-[:HAS_KPI]->(k)-[:HAS_RECOMMENDATION]->(r)
+    RETURN r.name AS rec_name, r.description AS rec_desc, elementId(r) AS rec_id
+    LIMIT 20
+  `;
+      const recsResult = await callMcp("graph.read_cypher", { query: recsQuery, params: { domain } });
+      const recs = recsResult.ok ? extractRecords(recsResult.data) : [];
+      if (recs.length > 0) {
+        lines.push("## Recommendations");
+        lines.push("");
+        for (const rec of recs) {
+          const name = String(rec.rec_name ?? "Unnamed");
+          const desc = rec.rec_desc ? ` \u2014 ${String(rec.rec_desc)}` : "";
+          const id = String(rec.rec_id ?? "");
+          lines.push(`- [${name}](obsidian://widgetdc-open?artifact=${encodeURIComponent(id)})${desc}`);
+        }
+        lines.push("");
+      }
+      lines.push("---");
+      lines.push(`*Map of Content for ${domain} \u2014 WidgeTDC Adoption Blueprint*`);
+      logger.info({ domain, frameworks: frameworks.size, records: records.length }, "MOC generated");
+      res.type("text/markdown").send(lines.join("\n"));
+    });
+  }
+});
+
 // src/tool-executor.ts
 import { v4 as uuid20 } from "uuid";
 function getTokenSavings() {
@@ -18701,6 +19123,103 @@ ${lines.join("\n")}`;
         return JSON.stringify(artifact, null, 2);
       } catch (err) {
         return `Artifact get failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    // ─── v4.0.7 — Ghost-tier sweep round 3 (LIN-619) ───────────────────────
+    case "drill_start": {
+      try {
+        const { saveDrillContext: saveDrillContext2, fetchDrillChildren: fetchDrillChildren2 } = await Promise.resolve().then(() => (init_drill(), drill_exports));
+        const domain = String(args.domain ?? "");
+        if (!domain) return "Error: domain required";
+        const sessionId = uuid20();
+        const ctx = {
+          stack: [],
+          current_level: "domain",
+          current_id: domain,
+          current_label: domain,
+          domain
+        };
+        const saved = await saveDrillContext2(sessionId, ctx);
+        if (!saved) return "Error: Redis unavailable for drill session";
+        const children = await fetchDrillChildren2("domain", domain);
+        return JSON.stringify({ session_id: sessionId, current_level: "domain", current_label: domain, children_count: children.length, children: children.slice(0, 10) });
+      } catch (err) {
+        return `Drill start failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "drill_down": {
+      try {
+        const { loadDrillContext: loadDrillContext2, saveDrillContext: saveDrillContext2, fetchDrillChildren: fetchDrillChildren2 } = await Promise.resolve().then(() => (init_drill(), drill_exports));
+        const sessionId = String(args.session_id ?? "");
+        const targetId = String(args.target_id ?? "");
+        const targetLevel = String(args.target_level ?? "");
+        if (!sessionId || !targetId || !targetLevel) return "Error: session_id, target_id, target_level required";
+        const ctx = await loadDrillContext2(sessionId);
+        if (!ctx) return `Drill session ${sessionId} not found or expired`;
+        ctx.stack.push({ level: ctx.current_level, id: ctx.current_id, label: ctx.current_label });
+        ctx.current_level = targetLevel;
+        ctx.current_id = targetId;
+        ctx.current_label = targetId;
+        await saveDrillContext2(sessionId, ctx);
+        const children = await fetchDrillChildren2(targetLevel, targetId);
+        return JSON.stringify({ session_id: sessionId, current_level: targetLevel, current_label: targetId, depth: ctx.stack.length, children_count: children.length });
+      } catch (err) {
+        return `Drill down failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "drill_up": {
+      try {
+        const { loadDrillContext: loadDrillContext2, saveDrillContext: saveDrillContext2, fetchDrillChildren: fetchDrillChildren2 } = await Promise.resolve().then(() => (init_drill(), drill_exports));
+        const sessionId = String(args.session_id ?? "");
+        if (!sessionId) return "Error: session_id required";
+        const ctx = await loadDrillContext2(sessionId);
+        if (!ctx) return `Drill session ${sessionId} not found or expired`;
+        if (ctx.stack.length === 0) return "Already at top level (domain)";
+        const parent = ctx.stack.pop();
+        ctx.current_level = parent.level;
+        ctx.current_id = parent.id;
+        ctx.current_label = parent.label;
+        await saveDrillContext2(sessionId, ctx);
+        const children = await fetchDrillChildren2(ctx.current_level, ctx.current_label);
+        return JSON.stringify({ session_id: sessionId, current_level: ctx.current_level, current_label: ctx.current_label, depth: ctx.stack.length, children_count: children.length });
+      } catch (err) {
+        return `Drill up failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "drill_children": {
+      try {
+        const { loadDrillContext: loadDrillContext2, fetchDrillChildren: fetchDrillChildren2 } = await Promise.resolve().then(() => (init_drill(), drill_exports));
+        const sessionId = String(args.session_id ?? "");
+        if (!sessionId) return "Error: session_id required";
+        const ctx = await loadDrillContext2(sessionId);
+        if (!ctx) return `Drill session ${sessionId} not found or expired`;
+        const children = await fetchDrillChildren2(ctx.current_level, ctx.current_label);
+        return JSON.stringify({ session_id: sessionId, current_level: ctx.current_level, current_label: ctx.current_label, children_count: children.length, children: children.slice(0, 20) });
+      } catch (err) {
+        return `Drill children failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "research_harvest": {
+      try {
+        const { executeChain: executeChain2 } = await Promise.resolve().then(() => (init_chain_engine(), chain_engine_exports));
+        const url = String(args.url ?? "");
+        if (!url) return "Error: url required";
+        const topic = typeof args.topic === "string" ? args.topic : "General Intelligence";
+        const sourceType = typeof args.source_type === "string" ? args.source_type : "MEDIA";
+        const weights = args.weights && typeof args.weights === "object" ? args.weights : {};
+        const execution = await executeChain2({
+          name: `S1-S4: ${topic}`,
+          mode: "sequential",
+          steps: [
+            { agent_id: "harvester", tool_name: "osint.scrape", arguments: { url, max_lines: 50 } },
+            { agent_id: "orchestrator", cognitive_action: "analyze", prompt: `Transform this raw data into a valid IntelligenceObservation (snake_case). Topic=${topic}, Weights=${JSON.stringify(weights)}. Data: {{prev}}` },
+            { agent_id: "orchestrator", tool_name: "graph.write_cypher", arguments: { query: "MERGE (o:IntelligenceObservation {id: apoc.create.uuid()}) SET o.url = $url, o.source_type = $source_type, o.timestamp = datetime() RETURN o.id", parameters: { url, source_type: sourceType } } },
+            { agent_id: "sentinel", tool_name: "audit.run", arguments: { target_id: "{{prev}}" } }
+          ]
+        });
+        return JSON.stringify({ execution_id: execution.execution_id ?? "unknown", topic, url });
+      } catch (err) {
+        return `S1-S4 trigger failed: ${err instanceof Error ? err.message : String(err)}`;
       }
     }
     default: {
@@ -23480,7 +23999,7 @@ init_chat_broadcaster();
 init_config();
 init_logger();
 init_slack();
-import { Router as Router5 } from "express";
+import { Router as Router6 } from "express";
 init_redis();
 init_tool_executor();
 
@@ -23601,7 +24120,7 @@ function pct(n, d) {
 }
 
 // src/routes/tools.ts
-var toolsRouter = Router5();
+var toolsRouter = Router6();
 toolsRouter.post("/call", async (req, res) => {
   const result = validate(validateToolCall, req.body);
   if (!result.ok) {
@@ -23769,7 +24288,7 @@ toolsRouter.get("/catalog", async (_req, res) => {
 init_chat_broadcaster();
 init_logger();
 init_slack();
-import { Router as Router6 } from "express";
+import { Router as Router7 } from "express";
 init_chat_store();
 init_config();
 init_chain_engine();
@@ -23919,7 +24438,7 @@ ${context}` },
     });
   }
 }
-var chatRouter = Router6();
+var chatRouter = Router7();
 function shouldRouteViaOrchestrator(target) {
   if (!target) return false;
   return target === "master" || target === "Orchestrator";
@@ -24503,8 +25022,8 @@ chatRouter.get("/ws-stats", (_req, res) => {
 // src/routes/chains.ts
 init_chain_engine();
 init_logger();
-import { Router as Router7 } from "express";
-var chainsRouter = Router7();
+import { Router as Router8 } from "express";
+var chainsRouter = Router8();
 chainsRouter.post("/execute", async (req, res) => {
   const body = req.body;
   const validModes = ["sequential", "parallel", "loop", "debate", "adaptive", "funnel"];
@@ -24611,8 +25130,8 @@ chainsRouter.get("/", (_req, res) => {
 // src/routes/cognitive.ts
 init_cognitive_proxy();
 init_logger();
-import { Router as Router8 } from "express";
-var cognitiveRouter = Router8();
+import { Router as Router9 } from "express";
+var cognitiveRouter = Router9();
 cognitiveRouter.post("/:action", async (req, res) => {
   const { action } = req.params;
   const body = req.body;
@@ -24662,7 +25181,7 @@ cognitiveRouter.get("/health", async (_req, res) => {
 });
 
 // src/routes/cron.ts
-import { Router as Router10 } from "express";
+import { Router as Router11 } from "express";
 
 // src/cron-scheduler.ts
 init_chain_engine();
@@ -25151,9 +25670,9 @@ init_competitive_crawler();
 init_redis();
 init_logger();
 init_mcp_caller();
-import { Router as Router9 } from "express";
+import { Router as Router10 } from "express";
 import { v4 as uuid22 } from "uuid";
-var adoptionRouter = Router9();
+var adoptionRouter = Router10();
 var REDIS_KEY4 = "orchestrator:adoption-metrics";
 var REDIS_TRENDS_KEY = "orchestrator:adoption-trends";
 var DEFAULT_METRICS = {
@@ -26519,7 +27038,7 @@ function registerDefaultLoops() {
 }
 
 // src/routes/cron.ts
-var cronRouter = Router10();
+var cronRouter = Router11();
 cronRouter.get("/", (_req, res) => {
   const jobs2 = listCronJobs();
   res.json({ success: true, data: { jobs: jobs2, total: jobs2.length } });
@@ -26588,14 +27107,14 @@ cronRouter.delete("/:id", (req, res) => {
 init_agent_registry();
 init_chat_broadcaster();
 init_chain_engine();
-import { Router as Router12 } from "express";
+import { Router as Router13 } from "express";
 init_cognitive_proxy();
 
 // src/routes/openclaw.ts
 init_config();
 init_logger();
-import { Router as Router11 } from "express";
-var openclawRouter = Router11();
+import { Router as Router12 } from "express";
+var openclawRouter = Router12();
 var healthStatus = {
   healthy: false,
   checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -26771,7 +27290,7 @@ openclawRouter.all("/proxy/*", async (req, res) => {
 init_config();
 init_routing_engine();
 init_redis();
-var dashboardRouter = Router12();
+var dashboardRouter = Router13();
 var CACHE_KEY = "orchestrator:dashboard-cache";
 var CACHE_TTL = 15;
 dashboardRouter.get("/data", async (_req, res) => {
@@ -26859,8 +27378,8 @@ init_llm_proxy();
 init_chat_broadcaster();
 init_chat_store();
 init_logger();
-import { Router as Router13 } from "express";
-var llmRouter = Router13();
+import { Router as Router14 } from "express";
+var llmRouter = Router14();
 llmRouter.get("/providers", (_req, res) => {
   res.json({ success: true, data: { providers: listProviders() } });
 });
@@ -26951,7 +27470,7 @@ llmRouter.post("/conversation", async (req, res) => {
 });
 
 // src/routes/audit.ts
-import { Router as Router14 } from "express";
+import { Router as Router15 } from "express";
 
 // src/audit.ts
 init_redis();
@@ -27033,7 +27552,7 @@ function auditMiddleware(req, res, next) {
 }
 
 // src/routes/audit.ts
-var auditRouter = Router14();
+var auditRouter = Router15();
 auditRouter.get("/log", async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 100, 500);
   const offset = parseInt(req.query.offset) || 0;
@@ -27052,15 +27571,15 @@ auditRouter.get("/log", async (req, res) => {
 init_config();
 init_redis();
 init_logger();
-import { Router as Router15 } from "express";
-var knowledgeRouter = Router15();
+import { Router as Router16 } from "express";
+var knowledgeRouter = Router16();
 var FEED_CACHE_KEY = "orchestrator:knowledge-feed";
 var BRIEFING_CACHE_KEY = "orchestrator:knowledge-briefing-prompt";
 var FEED_TTL_SECONDS = 86400;
-var MCP_TIMEOUT_MS = 1e4;
-async function callMcp(tool, payload) {
+var MCP_TIMEOUT_MS2 = 1e4;
+async function callMcp2(tool, payload) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), MCP_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), MCP_TIMEOUT_MS2);
   try {
     const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
       method: "POST",
@@ -27106,7 +27625,7 @@ knowledgeRouter.get("/cards", async (req, res) => {
   }
   const topK = Math.min(Math.max(parseInt(req.query.top_k) || 5, 1), 50);
   const domains = req.query.domains || "all";
-  const kgResult = await callMcp("kg_rag.query", { question: q, top_k: topK });
+  const kgResult = await callMcp2("kg_rag.query", { question: q, top_k: topK });
   if (kgResult.ok) {
     const cards = normalizeCards(kgResult.data, "kg_rag");
     if (cards.length > 0) {
@@ -27115,7 +27634,7 @@ knowledgeRouter.get("/cards", async (req, res) => {
     }
   }
   logger.info({ query: q }, "kg_rag empty or failed, falling back to srag.query");
-  const sragResult = await callMcp("srag.query", { query: q, domains });
+  const sragResult = await callMcp2("srag.query", { query: q, domains });
   if (sragResult.ok) {
     const cards = normalizeCards(sragResult.data, "srag");
     res.json({ cards, source: "srag", query: q, count: cards.length });
@@ -27145,7 +27664,7 @@ knowledgeRouter.get("/feed", async (_req, res) => {
     domain_coverage: {}
   };
   const errors = [];
-  const graphResult = await callMcp("graph.read_cypher", {
+  const graphResult = await callMcp2("graph.read_cypher", {
     query: "MATCH (n) RETURN labels(n) AS type, count(*) AS count ORDER BY count DESC LIMIT 20"
   });
   if (graphResult.ok) {
@@ -27164,7 +27683,7 @@ knowledgeRouter.get("/feed", async (_req, res) => {
   } else {
     errors.push(graphResult.error ?? "graph.read_cypher failed");
   }
-  const insightResult = await callMcp("kg_rag.query", {
+  const insightResult = await callMcp2("kg_rag.query", {
     question: "What are the most important recent insights and gaps?",
     top_k: 10
   });
@@ -27217,10 +27736,10 @@ init_redis();
 init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
-import { Router as Router16 } from "express";
-import { randomUUID as randomUUID2 } from "crypto";
+import { Router as Router17 } from "express";
+import { randomUUID as randomUUID3 } from "crypto";
 import { v4 as uuid23 } from "uuid";
-var notebookRouter = Router16();
+var notebookRouter = Router17();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
 var TTL_SECONDS8 = 2592e3;
@@ -27327,7 +27846,7 @@ notebookRouter.post("/execute", async (req, res) => {
     res.status(400).json({ success: false, error: "Missing required fields: title, cells (non-empty array)" });
     return;
   }
-  const id = `widgetdc:notebook:${randomUUID2()}`;
+  const id = `widgetdc:notebook:${randomUUID3()}`;
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const cells = body.cells;
   for (let i = 0; i < cells.length; i++) {
@@ -27471,349 +27990,8 @@ async function renderNotebookMarkdown(_req, res, id) {
   res.type("text/markdown").send(lines.join("\n"));
 }
 
-// src/routes/drill.ts
-init_redis();
-init_config();
-init_logger();
-import { Router as Router17 } from "express";
-import { randomUUID as randomUUID3 } from "crypto";
-var drillRouter = Router17();
-var DRILL_PREFIX = "orchestrator:drill:";
-var SESSION_TTL = 3600;
-var MCP_TIMEOUT_MS2 = 12e3;
-async function callMcp2(tool, payload) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), MCP_TIMEOUT_MS2);
-  try {
-    const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${config.backendApiKey}`
-      },
-      body: JSON.stringify({ tool, payload }),
-      signal: controller.signal
-    });
-    if (!res.ok) {
-      return { ok: false, error: `MCP ${tool} returned ${res.status}` };
-    }
-    const data = await res.json();
-    return { ok: true, data };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: `MCP ${tool} failed: ${msg}` };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-function extractRecords(data) {
-  if (Array.isArray(data)) return data;
-  if (data && typeof data === "object") {
-    const d = data;
-    if (Array.isArray(d.records)) return d.records;
-    if (Array.isArray(d.data)) return d.data;
-    if (Array.isArray(d.results)) return d.results;
-  }
-  return [];
-}
-var LEVEL_ORDER = ["domain", "segment", "framework", "kpi", "trend", "recommendation"];
-function nextLevel(current) {
-  const idx = LEVEL_ORDER.indexOf(current);
-  return idx >= 0 && idx < LEVEL_ORDER.length - 1 ? LEVEL_ORDER[idx + 1] : null;
-}
-function childrenQuery(level, id) {
-  switch (level) {
-    case "domain":
-      return {
-        query: `MATCH (d:ConsultingDomain {name: $name})-[:HAS_SEGMENT]->(s) RETURN s.name AS label, elementId(s) AS id, 'segment' AS level`,
-        params: { name: id }
-      };
-    case "segment":
-      return {
-        query: `MATCH (s {name: $name})-[:HAS_FRAMEWORK]->(f:ConsultingFramework) RETURN f.name AS label, elementId(f) AS id, 'framework' AS level`,
-        params: { name: id }
-      };
-    case "framework":
-      return {
-        query: `MATCH (f:ConsultingFramework {name: $name})-[:HAS_KPI]->(k:KPI) RETURN k.name AS label, elementId(k) AS id, 'kpi' AS level`,
-        params: { name: id }
-      };
-    case "kpi":
-      return {
-        query: `MATCH (k:KPI {name: $name})-[:HAS_TREND]->(t) RETURN t.name AS label, elementId(t) AS id, 'trend' AS level`,
-        params: { name: id }
-      };
-    case "trend":
-      return {
-        query: `MATCH (t {name: $name})-[:HAS_RECOMMENDATION]->(r) RETURN r.name AS label, elementId(r) AS id, 'recommendation' AS level`,
-        params: { name: id }
-      };
-    default:
-      return null;
-  }
-}
-function domainFrameworksFallback() {
-  return {
-    query: `MATCH (d:ConsultingDomain {name: $name})-[:HAS_FRAMEWORK]->(f:ConsultingFramework) RETURN f.name AS label, elementId(f) AS id, 'framework' AS level`,
-    params: { name: "" }
-    // filled at call site
-  };
-}
-async function fetchChildren(level, label) {
-  const q = childrenQuery(level, label);
-  if (!q) return [];
-  const result = await callMcp2("graph.read_cypher", { query: q.query, params: q.params });
-  if (!result.ok) {
-    logger.warn({ level, label, error: result.error }, "Drill children query failed");
-    return [];
-  }
-  let records = extractRecords(result.data);
-  if (level === "domain" && records.length === 0) {
-    const fb = domainFrameworksFallback();
-    fb.params.name = label;
-    const fbResult = await callMcp2("graph.read_cypher", { query: fb.query, params: fb.params });
-    if (fbResult.ok) {
-      records = extractRecords(fbResult.data);
-    }
-  }
-  return records.map((r) => ({
-    id: String(r.id ?? ""),
-    label: String(r.label ?? ""),
-    type: String(r.level ?? nextLevel(level) ?? "unknown"),
-    count: typeof r.count === "number" ? r.count : void 0
-  }));
-}
-async function saveContext(sessionId, ctx) {
-  const redis2 = getRedis();
-  if (!redis2) return false;
-  try {
-    await redis2.set(`${DRILL_PREFIX}${sessionId}`, JSON.stringify(ctx), "EX", SESSION_TTL);
-    return true;
-  } catch (err) {
-    logger.warn({ err: String(err) }, "Redis save failed for drill context");
-    return false;
-  }
-}
-async function loadContext(sessionId) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
-  try {
-    const raw = await redis2.get(`${DRILL_PREFIX}${sessionId}`);
-    return raw ? JSON.parse(raw) : null;
-  } catch (err) {
-    logger.warn({ err: String(err) }, "Redis load failed for drill context");
-    return null;
-  }
-}
-function buildBreadcrumbs(ctx) {
-  return [
-    ...ctx.stack,
-    { level: ctx.current_level, id: ctx.current_id, label: ctx.current_label }
-  ];
-}
-drillRouter.post("/start", async (req, res) => {
-  const { domain } = req.body;
-  if (!domain) {
-    res.status(400).json({ success: false, error: "Missing required field: domain" });
-    return;
-  }
-  const sessionId = randomUUID3();
-  const ctx = {
-    stack: [],
-    current_level: "domain",
-    current_id: domain,
-    current_label: domain,
-    domain
-  };
-  const saved = await saveContext(sessionId, ctx);
-  if (!saved) {
-    res.status(503).json({ success: false, error: "Redis not available" });
-    return;
-  }
-  const children = await fetchChildren("domain", domain);
-  logger.info({ session_id: sessionId, domain, children_count: children.length }, "Drill session started");
-  res.json({
-    success: true,
-    session_id: sessionId,
-    context: ctx,
-    children,
-    breadcrumbs: buildBreadcrumbs(ctx)
-  });
-});
-drillRouter.post("/down", async (req, res) => {
-  const { session_id, target_id, target_level } = req.body;
-  if (!session_id || !target_id || !target_level) {
-    res.status(400).json({ success: false, error: "Missing required fields: session_id, target_id, target_level" });
-    return;
-  }
-  const ctx = await loadContext(session_id);
-  if (!ctx) {
-    res.status(404).json({ success: false, error: "Drill session not found or expired" });
-    return;
-  }
-  ctx.stack.push({
-    level: ctx.current_level,
-    id: ctx.current_id,
-    label: ctx.current_label
-  });
-  ctx.current_level = target_level;
-  ctx.current_id = target_id;
-  ctx.current_label = target_id;
-  await saveContext(session_id, ctx);
-  const children = await fetchChildren(target_level, target_id);
-  logger.info({ session_id, target_level, target_id, depth: ctx.stack.length }, "Drill down");
-  res.json({
-    success: true,
-    context: ctx,
-    children,
-    breadcrumbs: buildBreadcrumbs(ctx)
-  });
-});
-drillRouter.post("/up", async (req, res) => {
-  const { session_id } = req.body;
-  if (!session_id) {
-    res.status(400).json({ success: false, error: "Missing required field: session_id" });
-    return;
-  }
-  const ctx = await loadContext(session_id);
-  if (!ctx) {
-    res.status(404).json({ success: false, error: "Drill session not found or expired" });
-    return;
-  }
-  if (ctx.stack.length === 0) {
-    res.status(400).json({ success: false, error: "Already at top level" });
-    return;
-  }
-  const parent = ctx.stack.pop();
-  ctx.current_level = parent.level;
-  ctx.current_id = parent.id;
-  ctx.current_label = parent.label;
-  await saveContext(session_id, ctx);
-  const children = await fetchChildren(ctx.current_level, ctx.current_label);
-  logger.info({ session_id, level: ctx.current_level, label: ctx.current_label }, "Drill up");
-  res.json({
-    success: true,
-    context: ctx,
-    children,
-    breadcrumbs: buildBreadcrumbs(ctx)
-  });
-});
-drillRouter.get("/children", async (req, res) => {
-  const sessionId = req.query.session_id;
-  if (!sessionId) {
-    res.status(400).json({ success: false, error: "Missing required query param: session_id" });
-    return;
-  }
-  const ctx = await loadContext(sessionId);
-  if (!ctx) {
-    res.status(404).json({ success: false, error: "Drill session not found or expired" });
-    return;
-  }
-  const children = await fetchChildren(ctx.current_level, ctx.current_label);
-  res.json({
-    success: true,
-    children,
-    context: ctx,
-    breadcrumbs: buildBreadcrumbs(ctx)
-  });
-});
-drillRouter.get("/moc", async (req, res) => {
-  const domain = req.query.domain;
-  if (!domain) {
-    res.status(400).json({ success: false, error: "Missing required query param: domain" });
-    return;
-  }
-  const hierarchyQuery = `
-    MATCH (d:ConsultingDomain {name: $domain})
-    OPTIONAL MATCH (d)-[:HAS_FRAMEWORK]->(f:ConsultingFramework)
-    OPTIONAL MATCH (f)-[:HAS_KPI]->(k:KPI)
-    RETURN d.name AS domain_name, f.name AS framework_name, k.name AS kpi_name, k.value AS kpi_value, k.trend AS kpi_trend
-    ORDER BY f.name, k.name
-  `;
-  const result = await callMcp2("graph.read_cypher", {
-    query: hierarchyQuery,
-    params: { domain }
-  });
-  if (!result.ok) {
-    res.status(502).json({ success: false, error: result.error ?? "Neo4j query failed" });
-    return;
-  }
-  const records = extractRecords(result.data);
-  const frameworks = /* @__PURE__ */ new Map();
-  for (const rec of records) {
-    const fName = rec.framework_name ? String(rec.framework_name) : null;
-    if (!fName) continue;
-    if (!frameworks.has(fName)) {
-      frameworks.set(fName, { kpis: [] });
-    }
-    const kName = rec.kpi_name ? String(rec.kpi_name) : null;
-    if (kName) {
-      frameworks.get(fName).kpis.push({
-        name: kName,
-        value: String(rec.kpi_value ?? ""),
-        trend: trendArrow(rec.kpi_trend)
-      });
-    }
-  }
-  const lines = [];
-  lines.push(`# ${domain} \u2014 Map of Content`);
-  lines.push("");
-  lines.push(`> Generated: ${(/* @__PURE__ */ new Date()).toISOString()}`);
-  lines.push(`> Source: WidgeTDC Neo4j Knowledge Graph`);
-  lines.push("");
-  if (frameworks.size > 0) {
-    lines.push("## Frameworks");
-    lines.push("");
-    for (const [fName, fData] of frameworks) {
-      lines.push(`- [[${fName}]] (${fData.kpis.length} KPIs)`);
-    }
-    lines.push("");
-    lines.push("## KPIs");
-    lines.push("");
-    for (const [fName, fData] of frameworks) {
-      if (fData.kpis.length === 0) continue;
-      lines.push(`### ${fName}`);
-      lines.push("");
-      for (const kpi of fData.kpis) {
-        const valueStr = kpi.value ? `: ${kpi.value} ${kpi.trend}` : ` ${kpi.trend}`;
-        lines.push(`- ${kpi.name}${valueStr}`);
-      }
-      lines.push("");
-    }
-  } else {
-    lines.push("*No frameworks found for this domain.*");
-    lines.push("");
-  }
-  const recsQuery = `
-    MATCH (d:ConsultingDomain {name: $domain})-[:HAS_FRAMEWORK]->(f)-[:HAS_KPI]->(k)-[:HAS_RECOMMENDATION]->(r)
-    RETURN r.name AS rec_name, r.description AS rec_desc, elementId(r) AS rec_id
-    LIMIT 20
-  `;
-  const recsResult = await callMcp2("graph.read_cypher", { query: recsQuery, params: { domain } });
-  const recs = recsResult.ok ? extractRecords(recsResult.data) : [];
-  if (recs.length > 0) {
-    lines.push("## Recommendations");
-    lines.push("");
-    for (const rec of recs) {
-      const name = String(rec.rec_name ?? "Unnamed");
-      const desc = rec.rec_desc ? ` \u2014 ${String(rec.rec_desc)}` : "";
-      const id = String(rec.rec_id ?? "");
-      lines.push(`- [${name}](obsidian://widgetdc-open?artifact=${encodeURIComponent(id)})${desc}`);
-    }
-    lines.push("");
-  }
-  lines.push("---");
-  lines.push(`*Map of Content for ${domain} \u2014 WidgeTDC Adoption Blueprint*`);
-  logger.info({ domain, frameworks: frameworks.size, records: records.length }, "MOC generated");
-  res.type("text/markdown").send(lines.join("\n"));
-});
-function trendArrow(trend) {
-  if (!trend) return "\u2192";
-  const t = trend.toLowerCase();
-  if (t === "up" || t === "rising" || t === "increasing") return "\u2191";
-  if (t === "down" || t === "falling" || t === "decreasing") return "\u2193";
-  return "\u2192";
-}
+// src/index.ts
+init_drill();
 
 // src/routes/monitor.ts
 init_mcp_caller();

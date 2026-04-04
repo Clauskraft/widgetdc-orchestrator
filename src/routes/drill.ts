@@ -17,13 +17,13 @@ const SESSION_TTL = 3600 // 1 hour
 
 /* ─── Types (G4.15) ──────────────────────────────────────────────────────── */
 
-interface DrillLevel {
+export interface DrillLevel {
   level: string
   id: string
   label: string
 }
 
-interface DrillContext {
+export interface DrillContext {
   stack: DrillLevel[]
   current_level: string
   current_id: string
@@ -143,7 +143,7 @@ function domainFrameworksFallback(): { query: string; params: Record<string, str
   }
 }
 
-async function fetchChildren(level: string, label: string): Promise<DrillChild[]> {
+export async function fetchDrillChildren(level: string, label: string): Promise<DrillChild[]> {
   const q = childrenQuery(level, label)
   if (!q) return []
 
@@ -175,7 +175,8 @@ async function fetchChildren(level: string, label: string): Promise<DrillChild[]
 
 /* ─── Redis session helpers ───────────────────────────────────────────────── */
 
-async function saveContext(sessionId: string, ctx: DrillContext): Promise<boolean> {
+// v4.0.7: exported for tool-executor access (LIN-619)
+export async function saveDrillContext(sessionId: string, ctx: DrillContext): Promise<boolean> {
   const redis = getRedis()
   if (!redis) return false
   try {
@@ -187,7 +188,7 @@ async function saveContext(sessionId: string, ctx: DrillContext): Promise<boolea
   }
 }
 
-async function loadContext(sessionId: string): Promise<DrillContext | null> {
+export async function loadDrillContext(sessionId: string): Promise<DrillContext | null> {
   const redis = getRedis()
   if (!redis) return null
   try {
@@ -225,13 +226,13 @@ drillRouter.post('/start', async (req: Request, res: Response) => {
     domain,
   }
 
-  const saved = await saveContext(sessionId, ctx)
+  const saved = await saveDrillContext(sessionId, ctx)
   if (!saved) {
     res.status(503).json({ success: false, error: 'Redis not available' })
     return
   }
 
-  const children = await fetchChildren('domain', domain)
+  const children = await fetchDrillChildren('domain', domain)
 
   logger.info({ session_id: sessionId, domain, children_count: children.length }, 'Drill session started')
 
@@ -258,7 +259,7 @@ drillRouter.post('/down', async (req: Request, res: Response) => {
     return
   }
 
-  const ctx = await loadContext(session_id)
+  const ctx = await loadDrillContext(session_id)
   if (!ctx) {
     res.status(404).json({ success: false, error: 'Drill session not found or expired' })
     return
@@ -276,9 +277,9 @@ drillRouter.post('/down', async (req: Request, res: Response) => {
   ctx.current_id = target_id
   ctx.current_label = target_id // label = name in Neo4j
 
-  await saveContext(session_id, ctx)
+  await saveDrillContext(session_id, ctx)
 
-  const children = await fetchChildren(target_level, target_id)
+  const children = await fetchDrillChildren(target_level, target_id)
 
   logger.info({ session_id, target_level, target_id, depth: ctx.stack.length }, 'Drill down')
 
@@ -300,7 +301,7 @@ drillRouter.post('/up', async (req: Request, res: Response) => {
     return
   }
 
-  const ctx = await loadContext(session_id)
+  const ctx = await loadDrillContext(session_id)
   if (!ctx) {
     res.status(404).json({ success: false, error: 'Drill session not found or expired' })
     return
@@ -317,9 +318,9 @@ drillRouter.post('/up', async (req: Request, res: Response) => {
   ctx.current_id = parent.id
   ctx.current_label = parent.label
 
-  await saveContext(session_id, ctx)
+  await saveDrillContext(session_id, ctx)
 
-  const children = await fetchChildren(ctx.current_level, ctx.current_label)
+  const children = await fetchDrillChildren(ctx.current_level, ctx.current_label)
 
   logger.info({ session_id, level: ctx.current_level, label: ctx.current_label }, 'Drill up')
 
@@ -341,13 +342,13 @@ drillRouter.get('/children', async (req: Request, res: Response) => {
     return
   }
 
-  const ctx = await loadContext(sessionId)
+  const ctx = await loadDrillContext(sessionId)
   if (!ctx) {
     res.status(404).json({ success: false, error: 'Drill session not found or expired' })
     return
   }
 
-  const children = await fetchChildren(ctx.current_level, ctx.current_label)
+  const children = await fetchDrillChildren(ctx.current_level, ctx.current_label)
 
   res.json({
     success: true,

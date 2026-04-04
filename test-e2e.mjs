@@ -1220,6 +1220,45 @@ await test('129. POST /api/tools/artifact_get responds', async () => {
 })
 
 // ═══════════════════════════════════════════════════════════════
+// Section 19: v4.0.7 LIN-619 — Ghost-tier sweep round 3 (drill + research)
+// ═══════════════════════════════════════════════════════════════
+
+// ── 130. drill_start — exists ──
+await test('130. POST /api/tools/drill_start responds', async () => {
+  const r = await api('/api/tools/drill_start', { method: 'POST', body: JSON.stringify({ domain: 'Finance' }) })
+  assert(r.status !== 404, `drill_start not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'drill_start', `wrong tool_name`)
+})
+
+// ── 131. drill_down — exists ──
+await test('131. POST /api/tools/drill_down responds', async () => {
+  const r = await api('/api/tools/drill_down', { method: 'POST', body: JSON.stringify({ session_id: 'nonexistent' }) })
+  assert(r.status !== 404, `drill_down not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'drill_down', `wrong tool_name`)
+})
+
+// ── 132. drill_up — exists ──
+await test('132. POST /api/tools/drill_up responds', async () => {
+  const r = await api('/api/tools/drill_up', { method: 'POST', body: JSON.stringify({ session_id: 'nonexistent' }) })
+  assert(r.status !== 404, `drill_up not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'drill_up', `wrong tool_name`)
+})
+
+// ── 133. drill_children — exists ──
+await test('133. POST /api/tools/drill_children responds', async () => {
+  const r = await api('/api/tools/drill_children', { method: 'POST', body: JSON.stringify({ session_id: 'nonexistent' }) })
+  assert(r.status !== 404, `drill_children not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'drill_children', `wrong tool_name`)
+})
+
+// ── 134. research_harvest — exists ──
+await test('134. POST /api/tools/research_harvest responds', async () => {
+  const r = await api('/api/tools/research_harvest', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `research_harvest not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'research_harvest', `wrong tool_name`)
+})
+
+// ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped
 console.log(`  RESULTS: ${passed} passed, ${failed} failed, ${skipped} skipped / ${total} total`)

@@ -17,6 +17,10 @@ const INFRA_ROUTERS = new Set([
   'abi-health', 'abi-versioning', 'openai-compat', 'prompt-generator', 'adoption',
   // chat/agents/cron/chains are meta-orchestration, not user tools
   'chat', 'agents', 'cron',
+  // v4.0.7 reclassifications:
+  // - tools: IS the tool-registry REST surface (POST /tools/call dispatches registered tools)
+  // - openclaw: external service proxy (forwards to openclaw.up.railway.app)
+  'tools', 'openclaw',
 ])
 
 // Routers that SHOULD have tool-registry entries (feature routers)
@@ -28,9 +32,10 @@ const FEATURE_ROUTERS = [
 ]
 
 // Known mapping: router name → expected tool names in registry
+// Updated through v4.0.7 (LIN-619). Zero ghost-tier target achieved.
 const EXPECTED_TOOLS_BY_ROUTER = {
   'knowledge': ['search_knowledge', 'search_documents'],
-  'assembly': ['generate_deliverable'],
+  'assembly': ['generate_deliverable', 'artifact_list', 'artifact_get'],
   'deliverables': ['generate_deliverable'],
   'similarity': ['precedent_search'],
   'notebooks': ['create_notebook'],
@@ -38,22 +43,24 @@ const EXPECTED_TOOLS_BY_ROUTER = {
   'osint': ['run_osint_scan'],
   'chains': ['run_chain'],
   'evolution': ['run_evolution'],
-  'intelligence': ['ingest_document', 'build_communities', 'adaptive_rag_dashboard', 'adaptive_rag_query', 'adaptive_rag_retrain', 'adaptive_rag_reward', 'graph_hygiene_run'],
+  'intelligence': [
+    'ingest_document', 'build_communities', 'adaptive_rag_dashboard', 'adaptive_rag_query',
+    'adaptive_rag_retrain', 'adaptive_rag_reward', 'graph_hygiene_run',
+    'failure_harvest', 'competitive_crawl', 'loose_ends_scan', 'research_harvest',
+  ],
   'engagements': ['engagement_create', 'engagement_match', 'engagement_plan', 'engagement_outcome', 'engagement_list'],
-  'cognitive': ['reason_deeply'],
-  'loose-ends': [],  // drill/loose-ends internal — TBD
-  'drill': [],
-  'artifacts': [],
-  'decisions': [],
-  'failures': [],
-  'fold': [],
+  'cognitive': ['reason_deeply', 'context_fold'],
   'graph-hygiene': ['graph_hygiene_run'],
-  'llm': [],
-  'memory': [],
-  'competitive': [],
-  's1-s4': [],
-  'tools': [],  // tools.ts is the tool-registry surface
-  'openclaw': [],  // proxy to external service
+  'memory': ['memory_store', 'memory_retrieve'],
+  'failures': ['failure_harvest'],
+  'competitive': ['competitive_crawl'],
+  'fold': ['context_fold'],
+  'loose-ends': ['loose_ends_scan'],
+  'decisions': ['decision_certify', 'decision_list', 'decision_lineage'],
+  'artifacts': ['artifact_list', 'artifact_get'],
+  'llm': ['llm_chat', 'llm_providers'],
+  'drill': ['drill_start', 'drill_down', 'drill_up', 'drill_children'],
+  's1-s4': ['research_harvest'],
 }
 
 function extractEndpoints(routerFile) {
