@@ -11402,6 +11402,312 @@ var init_chain_engine = __esm({
   }
 });
 
+// src/verification-gate.ts
+import { v4 as uuid6 } from "uuid";
+async function verifyChainOutput(chainOutput, config2) {
+  const maxRetries = config2.max_retries ?? 3;
+  const start = Date.now();
+  let retries = 0;
+  let lastResult = null;
+  while (retries <= maxRetries) {
+    const checkResults = await runChecksParallel(config2.checks, chainOutput);
+    const tripwireTripped = config2.tripwire_check ? checkResults.some((c) => c.name === config2.tripwire_check && c.status !== "pass") : false;
+    const allPassed = checkResults.every((c) => c.status === "pass");
+    lastResult = {
+      passed: allPassed && !tripwireTripped,
+      checks: checkResults,
+      retries_attempted: retries,
+      total_duration_ms: Date.now() - start,
+      aborted_by_tripwire: tripwireTripped
+    };
+    if (allPassed) {
+      logger.info({ retries, checks: checkResults.length }, "Verification gate: PASSED");
+      return lastResult;
+    }
+    if (tripwireTripped) {
+      logger.warn({ tripwire: config2.tripwire_check }, "Verification gate: TRIPWIRE ABORT");
+      return lastResult;
+    }
+    retries++;
+    if (retries <= maxRetries) {
+      logger.info({ retry: retries, maxRetries, failed: checkResults.filter((c) => c.status !== "pass").map((c) => c.name) }, "Verification gate: retrying");
+      await new Promise((r) => setTimeout(r, 1e3 * retries));
+    }
+  }
+  logger.warn({ retries: maxRetries }, "Verification gate: FAILED after max retries");
+  return lastResult;
+}
+async function runChecksParallel(checks, chainOutput) {
+  const results = await Promise.allSettled(
+    checks.map(async (check) => {
+      const start = Date.now();
+      try {
+        const args = { ...check.arguments };
+        for (const [k, v] of Object.entries(args)) {
+          if (v === "{{output}}") args[k] = chainOutput;
+        }
+        const result = await callMcpTool({
+          toolName: check.tool_name,
+          args,
+          callId: `verify-${uuid6().substring(0, 8)}`,
+          timeoutMs: 15e3
+        });
+        let passed = true;
+        if (check.validate) {
+          passed = check.validate(result);
+        } else if (check.expected_key) {
+          const actual = result?.[check.expected_key];
+          passed = actual === check.expected_value;
+        }
+        return {
+          name: check.name,
+          status: passed ? "pass" : "fail",
+          output: result,
+          duration_ms: Date.now() - start
+        };
+      } catch (err) {
+        return {
+          name: check.name,
+          status: "error",
+          output: String(err),
+          duration_ms: Date.now() - start
+        };
+      }
+    })
+  );
+  return results.map(
+    (r, i) => r.status === "fulfilled" ? r.value : {
+      name: checks[i].name,
+      status: "error",
+      output: String(r.reason),
+      duration_ms: 0
+    }
+  );
+}
+var init_verification_gate = __esm({
+  "src/verification-gate.ts"() {
+    "use strict";
+    init_logger();
+    init_mcp_caller();
+  }
+});
+
+// src/investigate-chain.ts
+function buildInvestigateChain(topic) {
+  return {
+    chain_id: `investigate-${Date.now().toString(36)}`,
+    name: `Investigate: ${topic}`,
+    description: `Multi-agent deep investigation of "${topic}"`,
+    mode: "sequential",
+    steps: [
+      // Step 1: Graph exploration
+      {
+        id: "graph-explore",
+        agent_id: "graph-steward",
+        tool_name: "graph.read_cypher",
+        arguments: {
+          query: `MATCH (n) WHERE toLower(n.title) CONTAINS toLower($topic) OR toLower(coalesce(n.name,'')) CONTAINS toLower($topic) OR toLower(coalesce(n.description,'')) CONTAINS toLower($topic) WITH n LIMIT 20 OPTIONAL MATCH (n)-[r]-(m) RETURN labels(n)[0] AS type, coalesce(n.title, n.name, n.id) AS name, collect(DISTINCT {rel: type(r), target: coalesce(m.title, m.name, labels(m)[0])}) AS connections LIMIT 20`,
+          params: { topic }
+        },
+        timeout_ms: 2e4
+      },
+      // Step 2: Compliance analysis
+      {
+        id: "compliance-analysis",
+        agent_id: "regulatory-navigator",
+        tool_name: "srag.query",
+        arguments: {
+          query: `Compliance and regulatory framework analysis for: ${topic}. Include relevant Danish/EU regulations, governance requirements, and risk considerations. Previous graph findings: {{prev}}`
+        },
+        timeout_ms: 3e4
+      },
+      // Step 3: Strategic recommendations
+      {
+        id: "strategic-recommendations",
+        agent_id: "consulting-partner",
+        tool_name: "kg_rag.query",
+        arguments: {
+          question: `Strategic consulting analysis for: ${topic}. Provide actionable recommendations, patterns, and best practices. Previous compliance findings: {{prev}}`,
+          max_evidence: 15
+        },
+        timeout_ms: 3e4
+      },
+      // Step 4: Deep reasoning synthesis
+      {
+        id: "deep-reasoning",
+        agent_id: "orchestrator",
+        cognitive_action: "reason",
+        prompt: `Synthesize a comprehensive deep analysis of "${topic}" based on all previous findings:
+
+{{prev}}
+
+Provide:
+1. Key findings from graph exploration
+2. Compliance implications
+3. Strategic recommendations
+4. Risk assessment
+5. Suggested next actions`,
+        timeout_ms: 45e3
+      },
+      // Step 5: Artifact assembly — handled post-chain
+      // We use a lightweight step that signals assembly
+      {
+        id: "signal-assembly",
+        agent_id: "orchestrator",
+        tool_name: "graph.health",
+        arguments: {},
+        timeout_ms: 1e4
+      }
+    ]
+  };
+}
+function assembleArtifactBlocks(topic, execution) {
+  const blocks = [];
+  const results = execution.results;
+  const graphResult = results.find((r) => r.step_id === "graph-explore");
+  if (graphResult && graphResult.status === "success") {
+    blocks.push({
+      type: "cypher",
+      label: "Graph Exploration",
+      content: {
+        query: `MATCH (n) WHERE toLower(n.title) CONTAINS toLower("${topic}") ... (see full chain)`
+      }
+    });
+    blocks.push({
+      type: "text",
+      label: "Graph Results",
+      content: {
+        body: typeof graphResult.output === "string" ? graphResult.output : JSON.stringify(graphResult.output, null, 2)
+      }
+    });
+  }
+  const complianceResult = results.find((r) => r.step_id === "compliance-analysis");
+  if (complianceResult && complianceResult.status === "success") {
+    blocks.push({
+      type: "text",
+      label: "Compliance & Regulatory Analysis",
+      content: {
+        body: typeof complianceResult.output === "string" ? complianceResult.output : JSON.stringify(complianceResult.output, null, 2)
+      }
+    });
+  }
+  const strategyResult = results.find((r) => r.step_id === "strategic-recommendations");
+  if (strategyResult && strategyResult.status === "success") {
+    blocks.push({
+      type: "text",
+      label: "Strategic Recommendations",
+      content: {
+        body: typeof strategyResult.output === "string" ? strategyResult.output : JSON.stringify(strategyResult.output, null, 2)
+      }
+    });
+  }
+  const reasoningResult = results.find((r) => r.step_id === "deep-reasoning");
+  if (reasoningResult && reasoningResult.status === "success") {
+    blocks.push({
+      type: "text",
+      label: "Deep Reasoning Synthesis",
+      content: {
+        body: typeof reasoningResult.output === "string" ? reasoningResult.output : JSON.stringify(reasoningResult.output, null, 2)
+      }
+    });
+  }
+  blocks.push({
+    type: "kpi_card",
+    label: "Investigation Metrics",
+    content: {
+      label: "Steps Completed",
+      value: `${execution.steps_completed}/${execution.steps_total}`,
+      trend: execution.status === "completed" ? "up" : "down"
+    }
+  });
+  if (execution.duration_ms) {
+    blocks.push({
+      type: "kpi_card",
+      content: {
+        label: "Duration",
+        value: `${(execution.duration_ms / 1e3).toFixed(1)}s`
+      }
+    });
+  }
+  const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${config.port}`;
+  blocks.push({
+    type: "deep_link",
+    label: "Access Links",
+    content: {
+      label: "View in Command Center",
+      uri: `${baseUrl}/#chains`
+    }
+  });
+  blocks.push({
+    type: "deep_link",
+    content: {
+      label: "Open in Obsidian",
+      uri: `obsidian://widgetdc?action=investigate&topic=${encodeURIComponent(topic)}`
+    }
+  });
+  return blocks;
+}
+async function createArtifact(topic, blocks, execution) {
+  const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${config.port}`;
+  const apiKey = process.env.ORCHESTRATOR_API_KEY ?? "";
+  try {
+    const resp = await fetch(`${baseUrl}/api/artifacts`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        title: `Investigation: ${topic}`,
+        source: "investigate-chain",
+        blocks,
+        tags: ["investigation", "multi-agent", topic.toLowerCase().replace(/\s+/g, "-")],
+        graph_refs: execution.results.filter((r) => r.step_id === "graph-explore" && r.status === "success").map((r) => `neo4j:investigate:${topic}`),
+        created_by: "investigate-chain"
+      })
+    });
+    if (!resp.ok) {
+      logger.warn({ status: resp.status }, "Failed to create investigation artifact");
+      return null;
+    }
+    const data = await resp.json();
+    if (data.success && data.artifact) {
+      const id = data.artifact.$id;
+      return {
+        artifactId: id,
+        artifactUrl: `${baseUrl}/api/artifacts/${encodeURIComponent(id)}`
+      };
+    }
+    return null;
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Artifact creation failed for investigation");
+    return null;
+  }
+}
+async function runInvestigation(topic) {
+  const chainDef = buildInvestigateChain(topic);
+  logger.info({ topic, chain_id: chainDef.chain_id }, "Starting investigation chain");
+  const execution = await executeChain(chainDef);
+  const blocks = assembleArtifactBlocks(topic, execution);
+  const artifact = await createArtifact(topic, blocks, execution);
+  const result = { execution };
+  if (artifact) {
+    result.artifact_id = artifact.artifactId;
+    result.artifact_url = artifact.artifactUrl;
+    result.artifact_markdown_url = `${artifact.artifactUrl}.md`;
+    logger.info({ artifact_id: artifact.artifactId, topic }, "Investigation artifact created");
+  }
+  return result;
+}
+var init_investigate_chain = __esm({
+  "src/investigate-chain.ts"() {
+    "use strict";
+    init_chain_engine();
+    init_config();
+    init_logger();
+  }
+});
+
 // src/tool-registry.ts
 var tool_registry_exports = {};
 __export(tool_registry_exports, {
@@ -14776,6 +15082,819 @@ var init_skill_forge = __esm({
     init_logger();
     FORGED_TOOLS = /* @__PURE__ */ new Map();
     REDIS_PREFIX4 = "forge:";
+  }
+});
+
+// src/tool-executor.ts
+import { v4 as uuid15 } from "uuid";
+function getTokenSavings() {
+  return { totalTokensSaved, totalFoldingCalls, avgSavingsPerFold: totalFoldingCalls > 0 ? Math.round(totalTokensSaved / totalFoldingCalls) : 0 };
+}
+function foldToolResult(content, toolName) {
+  const MAX_CHARS = 800;
+  const TARGET_CHARS = 500;
+  if (content.length <= MAX_CHARS) return content;
+  const originalTokens = Math.ceil(content.length / 4);
+  totalFoldingCalls++;
+  let folded;
+  try {
+    const parsed = JSON.parse(content);
+    if (Array.isArray(parsed)) {
+      const truncated = parsed.slice(0, 5);
+      folded = JSON.stringify(truncated, null, 1).slice(0, TARGET_CHARS);
+      folded += `
+... (${parsed.length} total items, showing first 5)`;
+    } else if (typeof parsed === "object") {
+      const slim = {};
+      for (const [k, v] of Object.entries(parsed)) {
+        if (typeof v === "string" && v.length > 200) {
+          slim[k] = v.slice(0, 200) + "...";
+        } else if (Array.isArray(v) && v.length > 3) {
+          slim[k] = [...v.slice(0, 3), `... +${v.length - 3} more`];
+        } else {
+          slim[k] = v;
+        }
+      }
+      folded = JSON.stringify(slim, null, 1).slice(0, TARGET_CHARS);
+    } else {
+      folded = content.slice(0, TARGET_CHARS) + "...";
+    }
+  } catch {
+    const lines = content.split("\n");
+    folded = lines.slice(0, 15).join("\n").slice(0, TARGET_CHARS);
+    if (lines.length > 15) folded += `
+... (${lines.length} total lines)`;
+  }
+  const foldedTokens = Math.ceil(folded.length / 4);
+  const saved = originalTokens - foldedTokens;
+  totalTokensSaved += saved;
+  logger.debug({ tool: toolName, originalTokens, foldedTokens, saved }, "Tool result folded");
+  return folded;
+}
+async function executeToolCalls(toolCalls) {
+  const results = await Promise.allSettled(
+    toolCalls.map((tc) => executeOne(tc))
+  );
+  return results.map((r, i) => {
+    const raw = r.status === "fulfilled" ? r.value : `Error: ${r.reason}`;
+    return {
+      tool_call_id: toolCalls[i].id,
+      role: "tool",
+      content: foldToolResult(raw, toolCalls[i].function.name)
+    };
+  });
+}
+async function executeOne(tc) {
+  let args;
+  try {
+    args = JSON.parse(tc.function.arguments);
+  } catch {
+    return `Error: Invalid JSON arguments`;
+  }
+  const name = tc.function.name;
+  logger.info({ tool: name, args_keys: Object.keys(args) }, "Executing tool call");
+  try {
+    return await executeToolByName(name, args);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ tool: name, error: msg }, "Tool execution failed \u2014 returning graceful fallback");
+    return buildToolFallback(name, msg);
+  }
+}
+function buildToolFallback(toolName, error) {
+  const short = error.length > 200 ? error.slice(0, 200) + "..." : error;
+  switch (toolName) {
+    case "search_knowledge":
+      return `Knowledge search unavailable (${short}). Try query_graph with a direct Cypher query, or call_mcp_tool with srag.query as a fallback.`;
+    case "reason_deeply":
+      return `RLM reasoning unavailable (${short}). Try breaking the question into simpler parts using search_knowledge or query_graph.`;
+    case "query_graph":
+      return `Neo4j graph query failed (${short}). The graph may be temporarily slow \u2014 try a simpler query or use search_knowledge instead.`;
+    case "linear_issues":
+    case "linear_issue_detail":
+      return `Linear query failed (${short}). Linear data may be temporarily unavailable.`;
+    default:
+      return `Tool "${toolName}" failed: ${short}`;
+  }
+}
+async function executeToolUnified(toolName, args, opts) {
+  const callId = opts?.call_id ?? uuid15();
+  const t0 = Date.now();
+  let deprecation_notice;
+  const toolDef = getTool(toolName);
+  if (toolDef?.deprecated) {
+    logger.warn({ tool: toolName }, `Deprecated tool called: ${toolName}. ${toolDef.deprecatedMessage ?? ""}`);
+    deprecation_notice = {
+      deprecated: true,
+      since: toolDef.deprecatedSince,
+      message: toolDef.deprecatedMessage,
+      sunset_date: toolDef.sunsetDate,
+      replaced_by: toolDef.replacedBy
+    };
+  }
+  try {
+    const rawResult = await executeToolByName(toolName, args);
+    const duration = Date.now() - t0;
+    const shouldFold = opts?.fold !== false;
+    const folded = shouldFold ? foldToolResult(rawResult, toolName) : rawResult;
+    const resultWithWarning = deprecation_notice ? `[DEPRECATED] ${toolDef?.deprecatedMessage ?? `Tool "${toolName}" is deprecated.`}${toolDef?.replacedBy ? ` Use "${toolDef.replacedBy}" instead.` : ""}
+
+${folded}` : folded;
+    return {
+      call_id: callId,
+      tool_name: toolName,
+      status: "success",
+      result: resultWithWarning,
+      duration_ms: duration,
+      completed_at: (/* @__PURE__ */ new Date()).toISOString(),
+      was_folded: shouldFold && folded !== rawResult,
+      source_protocol: opts?.source_protocol ?? "unknown",
+      ...deprecation_notice ? { deprecation_notice } : {}
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      call_id: callId,
+      tool_name: toolName,
+      status: "error",
+      result: null,
+      error_message: msg,
+      duration_ms: Date.now() - t0,
+      completed_at: (/* @__PURE__ */ new Date()).toISOString(),
+      was_folded: false,
+      source_protocol: opts?.source_protocol ?? "unknown",
+      ...deprecation_notice ? { deprecation_notice } : {}
+    };
+  }
+}
+async function executeToolByName(name, args) {
+  switch (name) {
+    case "search_knowledge": {
+      if (!args.query || typeof args.query !== "string") return "Error: query is required and must be a string";
+      const result = await dualChannelRAG(args.query, {
+        maxResults: args.max_results ?? 10
+      });
+      if (result.merged_context.length === 0) return "No results found for this query.";
+      try {
+        const { hookAutoEnrichment: hookAutoEnrichment3 } = await Promise.resolve().then(() => (init_compound_hooks(), compound_hooks_exports));
+        hookAutoEnrichment3(result.merged_context, args.query);
+      } catch {
+      }
+      const header = `[${result.route_strategy}] ${result.graphrag_count} graphrag + ${result.srag_count} semantic + ${result.cypher_count} graph (${result.duration_ms}ms, channels: ${result.channels_used.join(",")}${result.pollution_filtered > 0 ? `, ${result.pollution_filtered} polluted filtered` : ""}):`;
+      return `${header}
+
+${result.merged_context}`;
+    }
+    case "reason_deeply": {
+      if (!isRlmAvailable()) return "RLM Engine is not available.";
+      const mode = args.mode ?? "reason";
+      const result = await callCognitive(mode, {
+        prompt: args.question,
+        context: { source: "chat-tool-call" },
+        agent_id: "chat-orchestrator",
+        depth: 1
+      }, 45e3);
+      return typeof result === "string" ? result : JSON.stringify(result, null, 2);
+    }
+    case "query_graph": {
+      const cypher = args.cypher;
+      if (!cypher || typeof cypher !== "string") return "Error: cypher query is required and must be a string";
+      const WRITE_KEYWORDS = /\b(DELETE|DETACH|CREATE|MERGE|SET|REMOVE|DROP|CALL\s+dbms)\b/i;
+      if (WRITE_KEYWORDS.test(cypher)) {
+        return "Error: query_graph is read-only. Write operations (DELETE, CREATE, MERGE, SET, REMOVE, DROP) are not allowed.";
+      }
+      const result = await callMcpTool({
+        toolName: "graph.read_cypher",
+        args: { query: cypher, params: args.params ?? {} },
+        callId: uuid15(),
+        timeoutMs: 15e3
+      });
+      if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
+      const rows = Array.isArray(result.result) ? result.result : result.result?.results ?? result.result;
+      return JSON.stringify(rows, null, 2).slice(0, 800);
+    }
+    case "check_tasks": {
+      const filter = args.filter ?? "active";
+      const keyword = args.keyword ?? "";
+      let cypher;
+      if (filter === "blocked") {
+        cypher = `MATCH (n) WHERE (n:Task OR n:L3Task) AND toLower(coalesce(n.status,'')) CONTAINS 'block' RETURN coalesce(n.identifier,n.id) AS id, n.title AS title, n.status AS status ORDER BY n.updatedAt DESC LIMIT 15`;
+      } else if (filter === "recent") {
+        cypher = `MATCH (n) WHERE (n:Task OR n:L3Task) RETURN coalesce(n.identifier,n.id) AS id, n.title AS title, n.status AS status ORDER BY n.updatedAt DESC LIMIT 15`;
+      } else {
+        cypher = `MATCH (n) WHERE (n:Task OR n:L3Task) AND n.status IN ['In Progress', 'Todo', 'Backlog'] RETURN coalesce(n.identifier,n.id) AS id, n.title AS title, n.status AS status ORDER BY n.updatedAt DESC LIMIT 15`;
+      }
+      const result = await callMcpTool({
+        toolName: "graph.read_cypher",
+        args: { query: cypher },
+        callId: uuid15(),
+        timeoutMs: 1e4
+      });
+      if (result.status !== "success") return `Task query failed: ${result.error_message}`;
+      const rows = result.result?.results ?? result.result ?? [];
+      if (!Array.isArray(rows) || rows.length === 0) return "No tasks found.";
+      return rows.map((r) => `- [${r.id ?? "?"}] ${r.title ?? "Untitled"} (${r.status ?? "?"})`).join("\n");
+    }
+    case "call_mcp_tool": {
+      const result = await callMcpTool({
+        toolName: args.tool_name,
+        args: args.payload ?? {},
+        callId: uuid15(),
+        timeoutMs: 3e4
+      });
+      if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
+      return JSON.stringify(result.result, null, 2).slice(0, 800);
+    }
+    case "get_platform_health": {
+      const [backendHealth, graphHealth] = await Promise.allSettled([
+        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid15(), timeoutMs: 1e4 }),
+        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid15(), timeoutMs: 1e4 })
+      ]);
+      const parts = [];
+      if (backendHealth.status === "fulfilled" && backendHealth.value.status === "success") {
+        parts.push(`Neo4j: ${JSON.stringify(backendHealth.value.result)}`);
+      }
+      if (graphHealth.status === "fulfilled" && graphHealth.value.status === "success") {
+        const stats = graphHealth.value.result;
+        parts.push(`Graph: ${stats?.nodes ?? "?"} nodes, ${stats?.relationships ?? "?"} rels`);
+      }
+      return parts.join("\n") || "Health check returned no data.";
+    }
+    case "search_documents": {
+      const result = await callMcpTool({
+        toolName: "srag.query",
+        args: { query: args.query },
+        callId: uuid15(),
+        timeoutMs: 2e4
+      });
+      if (result.status !== "success") return `Document search failed: ${result.error_message}`;
+      return JSON.stringify(result.result, null, 2).slice(0, 800);
+    }
+    case "linear_issues": {
+      const status = args.status ?? "active";
+      const limit = args.limit ?? 10;
+      const query = args.query ?? "";
+      const payload = { limit };
+      if (query) payload.query = query;
+      if (status === "active") payload.status = "started";
+      else if (status === "done") payload.status = "completed";
+      else if (status === "backlog") payload.status = "backlog";
+      const result = await callMcpTool({
+        toolName: "linear.issues",
+        args: payload,
+        callId: uuid15(),
+        timeoutMs: 15e3
+      });
+      if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
+      const data = result.result;
+      const issues = data?.issues ?? data ?? [];
+      if (!Array.isArray(issues) || issues.length === 0) return "No Linear issues found.";
+      return issues.map(
+        (i) => `- [${i.identifier}] ${i.title} (${i.status}) ${i.assignee ? `\u2192 ${i.assignee}` : ""} ${i.url ?? ""}`
+      ).join("\n");
+    }
+    case "linear_issue_detail": {
+      const identifier = args.identifier;
+      const result = await callMcpTool({
+        toolName: "linear.issue_get",
+        args: { identifier },
+        callId: uuid15(),
+        timeoutMs: 15e3
+      });
+      if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
+      return JSON.stringify(result.result, null, 2).slice(0, 800);
+    }
+    case "investigate": {
+      const topic = args.topic;
+      if (!topic) return "Error: topic is required";
+      try {
+        const result = await runInvestigation(topic);
+        const summary = `Investigation "${topic}" ${result.execution.status} \u2014 ${result.execution.steps_completed}/${result.execution.steps_total} steps, ${result.execution.duration_ms}ms`;
+        const artifactInfo = result.artifact_url ? `
+Artifact: ${result.artifact_url}
+Markdown: ${result.artifact_markdown_url}` : "\nArtifact: creation skipped (Redis unavailable or error)";
+        const output = result.execution.final_output ? `
+
+Synthesis:
+${typeof result.execution.final_output === "string" ? result.execution.final_output : JSON.stringify(result.execution.final_output, null, 2).slice(0, 600)}` : "";
+        return summary + artifactInfo + output;
+      } catch (err) {
+        return `Investigation failed: ${err}`;
+      }
+    }
+    case "run_chain": {
+      const steps = args.steps ?? [];
+      const chainDef = {
+        name: args.name,
+        mode: args.mode ?? "sequential",
+        steps: steps.map((s, i) => ({
+          id: `step-${i}`,
+          agent_id: s.agent_id ?? "chat-orchestrator",
+          tool_name: s.tool_name,
+          cognitive_action: s.cognitive_action,
+          prompt: s.prompt,
+          arguments: s.arguments ?? (s.prompt ? { query: s.prompt } : {})
+        }))
+      };
+      try {
+        const execution = await executeChain(chainDef);
+        const summary = `Chain "${execution.name}" (${execution.mode}): ${execution.status} \u2014 ${execution.steps_completed}/${execution.steps_total} steps, ${execution.duration_ms}ms`;
+        const output = execution.final_output ? `
+
+Result: ${typeof execution.final_output === "string" ? execution.final_output : JSON.stringify(execution.final_output, null, 2).slice(0, 800)}` : "";
+        return summary + output + (execution.error ? `
+Error: ${execution.error}` : "");
+      } catch (err) {
+        return `Chain execution failed: ${err}`;
+      }
+    }
+    case "create_notebook": {
+      const topic = args.topic;
+      if (!topic) return "Error: topic is required";
+      const customCells = args.cells;
+      const cells = customCells && customCells.length > 0 ? customCells : [
+        { type: "query", id: "q1", query: `MATCH (n) WHERE toLower(coalesce(n.title,'')) CONTAINS toLower($topic) OR toLower(coalesce(n.name,'')) CONTAINS toLower($topic) RETURN labels(n)[0] AS type, coalesce(n.title, n.name) AS name, n.status AS status LIMIT 20`, params: { topic } },
+        { type: "query", id: "q2", query: `What are the key insights and patterns related to this topic?`, params: { topic } },
+        { type: "insight", id: "i1", prompt: `Analyze the findings about "${topic}" and provide strategic consulting insights, key patterns, and recommendations.` },
+        { type: "data", id: "d1", source_cell_id: "q1", visualization: "table" },
+        { type: "action", id: "a1", recommendation: `Review the analysis of "${topic}" and determine next steps for the consulting engagement.` }
+      ];
+      try {
+        const { config: appConfig } = await Promise.resolve().then(() => (init_config(), config_exports));
+        const baseUrl = appConfig.nodeEnv === "production" ? "https://orchestrator-production-c27e.up.railway.app" : `http://localhost:${appConfig.port}`;
+        const resp = await fetch(`${baseUrl}/api/notebooks/execute`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${appConfig.orchestratorApiKey}`
+          },
+          body: JSON.stringify({ title: `Notebook: ${topic}`, cells, created_by: "chat-orchestrator" })
+        });
+        const data = await resp.json();
+        if (!data.success) return `Notebook creation failed: ${data.error}`;
+        const nb = data.notebook;
+        const cellSummaries = nb.cells.map((c) => {
+          if (c.type === "query") return `[Query] ${c.query.slice(0, 60)}... \u2192 ${c.result ? "OK" : "no result"}`;
+          if (c.type === "insight") return `[Insight] ${(c.content ?? "").slice(0, 100)}...`;
+          if (c.type === "data") return `[Data] from ${c.source_cell_id}: ${c.result ? "OK" : "no data"}`;
+          if (c.type === "action") return `[Action] ${c.recommendation.slice(0, 80)}`;
+          return `[${c.type}]`;
+        }).join("\n");
+        return `Notebook created: "${nb.title}"
+ID: ${nb.$id}
+Cells: ${nb.cells.length}
+
+${cellSummaries}
+
+View: /api/notebooks/${encodeURIComponent(nb.$id)}
+Markdown: /api/notebooks/${encodeURIComponent(nb.$id)}.md`;
+      } catch (err) {
+        return `Notebook creation failed: ${err}`;
+      }
+    }
+    case "verify_output": {
+      const content = args.content;
+      const checks = args.checks ?? [
+        { name: "graph_health", tool_name: "graph.health", arguments: {} }
+      ];
+      try {
+        const result = await verifyChainOutput(
+          { content },
+          {
+            checks: checks.map((c) => ({
+              name: c.name ?? "check",
+              tool_name: c.tool_name ?? "graph.health",
+              arguments: c.arguments ?? {}
+            }))
+          }
+        );
+        return JSON.stringify(result, null, 2).slice(0, 800);
+      } catch (err) {
+        return `Verification failed: ${err}`;
+      }
+    }
+    case "ingest_document": {
+      const content = args.content;
+      const filename = args.filename;
+      if (!content || content.length < 20) return "Error: content required (min 20 chars)";
+      if (!filename) return "Error: filename required";
+      try {
+        const { ingestDocument: ingestDocument2 } = await Promise.resolve().then(() => (init_document_intelligence(), document_intelligence_exports));
+        const result = await ingestDocument2({
+          content,
+          filename,
+          domain: args.domain,
+          extract_entities: args.extract_entities !== false
+        });
+        return `Ingested "${result.filename}": ${result.entities_extracted} entities, ${result.nodes_merged} nodes merged, ${result.tables_found} tables (${result.parsing_method}, ${result.duration_ms}ms)`;
+      } catch (err) {
+        return `Document ingestion failed: ${err}`;
+      }
+    }
+    case "build_communities": {
+      try {
+        const { buildCommunitySummaries: buildCommunitySummaries2 } = await Promise.resolve().then(() => (init_hierarchical_intelligence(), hierarchical_intelligence_exports));
+        const result = await buildCommunitySummaries2();
+        return `Communities built: ${result.communities_created} communities, ${result.summaries_generated} summaries, ${result.relationships_created} rels (${result.method}, ${result.duration_ms}ms)`;
+      } catch (err) {
+        return `Community build failed: ${err}`;
+      }
+    }
+    case "adaptive_rag_dashboard": {
+      try {
+        const { getAdaptiveRAGDashboard: getAdaptiveRAGDashboard2 } = await Promise.resolve().then(() => (init_adaptive_rag(), adaptive_rag_exports));
+        const d = await getAdaptiveRAGDashboard2();
+        const lines = [
+          `Compound Metric: ${d.compound_metric.score} (accuracy=${d.compound_metric.accuracy}, quality=${d.compound_metric.quality}, coverage=${d.compound_metric.coverage})`,
+          `Training samples: ${d.outcome_count}`,
+          `Weights updated: ${d.weights.updated_at}`,
+          ...d.stats.map((s) => `  ${s.strategy}: ${s.total_queries} queries, confidence=${s.avg_confidence.toFixed(2)}, zero-result=${(s.zero_result_rate * 100).toFixed(0)}%`)
+        ];
+        return lines.join("\n");
+      } catch (err) {
+        return `Adaptive RAG dashboard failed: ${err}`;
+      }
+    }
+    case "graph_hygiene_run": {
+      try {
+        const { runGraphHygiene: runGraphHygiene3 } = await Promise.resolve().then(() => (init_graph_hygiene_cron(), graph_hygiene_cron_exports));
+        const result = await runGraphHygiene3();
+        const m = result.metrics;
+        const alertStr = result.alerts.length > 0 ? `
+ALERTS: ${result.alerts.map((a) => a.message).join("; ")}` : "\nNo alerts \u2014 all metrics within thresholds.";
+        return `Graph Health (${result.duration_ms}ms):
+  Orphan ratio: ${(m.orphan_ratio * 100).toFixed(1)}%
+  Avg rels/node: ${m.avg_rels_per_node.toFixed(1)}
+  Embedding coverage: ${(m.embedding_coverage * 100).toFixed(1)}%
+  Domains: ${m.domain_count}
+  Stale nodes: ${m.stale_node_count}
+  Pollution: ${m.pollution_count}${alertStr}`;
+      } catch (err) {
+        return `Graph hygiene failed: ${err}`;
+      }
+    }
+    case "precedent_search": {
+      const query = args.query;
+      if (!query || query.length < 3) return "Error: query is required (min 3 chars)";
+      try {
+        const { findSimilarClients: findSimilarClients2 } = await Promise.resolve().then(() => (init_similarity_engine(), similarity_engine_exports));
+        const result = await findSimilarClients2({
+          query,
+          dimensions: args.dimensions,
+          max_results: typeof args.max_results === "number" && Number.isInteger(args.max_results) ? args.max_results : void 0,
+          structural_weight: typeof args.structural_weight === "number" ? args.structural_weight : void 0
+        });
+        if (result.matches.length === 0) return `No similar clients found for "${query}" (method: ${result.method}, ${result.duration_ms}ms)`;
+        const lines = result.matches.map((m, i) => {
+          const dims = m.shared_dimensions.map((d) => `${d.dimension}: ${d.shared_values.slice(0, 3).join(", ")}`).join(" | ");
+          return `${i + 1}. ${m.client_name} (score: ${m.overall_score.toFixed(2)}, ${m.node_type})${dims ? ` \u2014 ${dims}` : ""}`;
+        });
+        return `Found ${result.matches.length} similar clients (method: ${result.method}, ${result.duration_ms}ms):
+
+${lines.join("\n")}`;
+      } catch (err) {
+        return `Precedent search failed: ${err}`;
+      }
+    }
+    case "generate_deliverable": {
+      const prompt = args.prompt;
+      if (!prompt || prompt.length < 10) return "Error: prompt is required (min 10 chars)";
+      const type = args.type ?? "analysis";
+      if (!["analysis", "roadmap", "assessment"].includes(type)) return "Error: type must be analysis, roadmap, or assessment";
+      try {
+        const { generateDeliverable: generateDeliverable2 } = await Promise.resolve().then(() => (init_deliverable_engine(), deliverable_engine_exports));
+        const rawMax = args.max_sections;
+        const maxSections = typeof rawMax === "number" && Number.isInteger(rawMax) ? rawMax : void 0;
+        const result = await generateDeliverable2({
+          prompt,
+          type,
+          format: args.format ?? "markdown",
+          max_sections: maxSections
+        });
+        const summary = `Deliverable "${result.title}" \u2014 ${result.status} (${result.metadata.sections_count} sections, ${result.metadata.total_citations} citations, ${result.metadata.generation_ms}ms)`;
+        const preview = result.markdown.slice(0, 600);
+        return `${summary}
+
+ID: ${result.$id}
+URL: /api/deliverables/${encodeURIComponent(result.$id)}
+Markdown: /api/deliverables/${encodeURIComponent(result.$id)}/markdown
+
+${preview}...`;
+      } catch (err) {
+        return `Deliverable generation failed: ${err}`;
+      }
+    }
+    case "governance_matrix": {
+      const { getEnforcementMatrix: getEnforcementMatrix2, getEnforcementScore: getEnforcementScore2, getGaps: getGaps2 } = await Promise.resolve().then(() => (init_manifesto_governance(), manifesto_governance_exports));
+      const filter = args.filter ?? "all";
+      if (filter === "gaps") {
+        const gaps = getGaps2();
+        return gaps.length === 0 ? "All 10 manifesto principles are ENFORCED. No gaps." : `${gaps.length} principle(s) with gaps:
+${gaps.map((g) => `P${g.number} ${g.name} \u2014 ${g.status}: ${g.gap_remediation ?? "No remediation specified"}`).join("\n")}`;
+      }
+      const principles = filter === "enforced" ? getEnforcementMatrix2().filter((p) => p.status === "ENFORCED") : getEnforcementMatrix2();
+      const score = getEnforcementScore2();
+      const lines = principles.map(
+        (p) => `P${p.number} ${p.name} \u2014 ${p.status} [${p.enforcement_layer}] ${p.mechanism}`
+      );
+      return `Manifesto Enforcement Matrix (${score.score}):
+${lines.join("\n")}`;
+    }
+    case "run_osint_scan": {
+      try {
+        const { runOsintScan: runOsintScan2 } = await Promise.resolve().then(() => (init_osint_scanner(), osint_scanner_exports));
+        const result = await runOsintScan2({
+          domains: args.domains,
+          scan_type: args.scan_type
+        });
+        const summary = `OSINT scan ${result.scan_id} completed in ${result.duration_ms}ms \u2014 ${result.domains_scanned} domains, ${result.ct_entries} CT entries, ${result.dmarc_results} DMARC results, ${result.total_new_nodes} new nodes (tools: ${result.tools_available ? "live" : "fallback"})`;
+        if (result.errors.length > 0) {
+          return `${summary}
+
+Errors (${result.errors.length}):
+${result.errors.slice(0, 10).join("\n")}`;
+        }
+        return summary;
+      } catch (err) {
+        return `OSINT scan failed: ${err}`;
+      }
+    }
+    case "list_tools": {
+      const { TOOL_REGISTRY: TOOL_REGISTRY3 } = await Promise.resolve().then(() => (init_tool_registry(), tool_registry_exports));
+      let tools = TOOL_REGISTRY3;
+      if (args.namespace && typeof args.namespace === "string") {
+        tools = tools.filter((t) => t.namespace === args.namespace);
+      }
+      if (args.category && typeof args.category === "string") {
+        tools = tools.filter((t) => t.category === args.category);
+      }
+      const summary = tools.map(
+        (t) => `- ${t.name} [${t.namespace}/${t.category}] \u2014 ${t.description.slice(0, 80)}${t.description.length > 80 ? "..." : ""} (${t.availableVia.join(",")})`
+      );
+      return `${tools.length} tools${args.namespace ? ` in namespace "${args.namespace}"` : ""}${args.category ? ` in category "${args.category}"` : ""}:
+
+${summary.join("\n")}`;
+    }
+    case "run_evolution": {
+      const { runEvolutionLoop: runEvolutionLoop2 } = await Promise.resolve().then(() => (init_evolution_loop(), evolution_loop_exports));
+      const result = await runEvolutionLoop2({
+        focus_area: args.focus_area,
+        dry_run: args.dry_run ?? false
+      });
+      return `Evolution cycle ${result.status}: ${result.summary}`;
+    }
+    // ─── SNOUT Wave 2: Steal Smart ──────────────────────────────────────────
+    case "adaptive_rag_query": {
+      const query = args.query;
+      if (!query || query.length < 2) return "Error: query is required (min 2 chars)";
+      try {
+        const result = await dualChannelRAG(query, {
+          maxResults: args.max_results ?? 10
+        });
+        if (result.merged_context.length === 0) return `No results found for "${query}" (strategy: ${result.route_strategy}, ${result.duration_ms}ms)`;
+        const header = `[Adaptive RAG: ${result.route_strategy}] ${result.graphrag_count} graphrag + ${result.srag_count} semantic + ${result.cypher_count} graph (${result.duration_ms}ms, channels: ${result.channels_used.join(",")})`;
+        return `${header}
+
+${result.merged_context}`;
+      } catch (err) {
+        return `Adaptive RAG query failed: ${err}`;
+      }
+    }
+    case "adaptive_rag_retrain": {
+      try {
+        const { retrainRoutingWeights: retrainRoutingWeights2 } = await Promise.resolve().then(() => (init_adaptive_rag(), adaptive_rag_exports));
+        const result = await retrainRoutingWeights2();
+        return `Retrain complete (${result.training_samples} samples):
+  Compound metric: ${result.compound_metric.toFixed(3)}
+  Old weights: ${JSON.stringify(result.old_weights)}
+  New weights: ${JSON.stringify(result.new_weights)}`;
+      } catch (err) {
+        return `Retrain failed: ${err}`;
+      }
+    }
+    case "adaptive_rag_reward": {
+      const query = args.query;
+      const strategy = args.strategy;
+      const reward = args.reward;
+      if (!query || !strategy || typeof reward !== "number") return "Error: query, strategy, and reward (number) are required";
+      if (reward < -1 || reward > 1) return "Error: reward must be between -1.0 and 1.0";
+      try {
+        const { sendQLearningReward: sendQLearningReward2 } = await Promise.resolve().then(() => (init_adaptive_rag(), adaptive_rag_exports));
+        await sendQLearningReward2(query, strategy, reward);
+        return `Q-learning reward sent: strategy=${strategy}, reward=${reward}${args.reason ? `, reason: ${args.reason}` : ""}`;
+      } catch (err) {
+        return `Reward signal failed: ${err}`;
+      }
+    }
+    case "moa_query": {
+      const query = args.query;
+      if (!query || query.length < 5) return "Error: query is required (min 5 chars)";
+      try {
+        const { routeMoA: routeMoA2 } = await Promise.resolve().then(() => (init_moa_router(), moa_router_exports));
+        const result = await routeMoA2({
+          query,
+          agents: args.agents,
+          max_agents: args.max_agents,
+          provider: args.provider
+        });
+        const agentList = result.agents_dispatched.join(", ") || "none";
+        const header = `MoA [${result.classification.complexity}] \u2192 ${agentList} (confidence: ${result.confidence.toFixed(2)}, ${result.duration_ms}ms)`;
+        return `${header}
+Domains: ${result.classification.domains.join(", ")}
+
+${result.consensus}`;
+      } catch (err) {
+        return `MoA routing failed: ${err}`;
+      }
+    }
+    case "critique_refine": {
+      const query = args.query;
+      if (!query || query.length < 5) return "Error: query is required (min 5 chars)";
+      try {
+        const { critiqueRefine: critiqueRefine2 } = await Promise.resolve().then(() => (init_critique_refine(), critique_refine_exports));
+        const result = await critiqueRefine2(
+          query,
+          args.provider ?? "deepseek",
+          args.principles,
+          args.max_rounds ?? 1
+        );
+        return `Critique-Refine (${result.provider}, ${result.rounds} round, ${result.duration_ms}ms):
+
+**Original:**
+${result.original.slice(0, 400)}
+
+**Critique:**
+${result.critique.slice(0, 300)}
+
+**Revised:**
+${result.revised.slice(0, 500)}`;
+      } catch (err) {
+        return `Critique-refine failed: ${err}`;
+      }
+    }
+    case "judge_response": {
+      const query = args.query;
+      const response = args.response;
+      if (!query || !response) return "Error: query and response are required";
+      try {
+        const { judgeResponse: judgeResponse2 } = await Promise.resolve().then(() => (init_agent_judge(), agent_judge_exports));
+        const result = await judgeResponse2(
+          query,
+          response,
+          args.context,
+          args.provider ?? "deepseek"
+        );
+        const s = result.score;
+        return `PRISM Score: ${s.aggregate}/10 (${result.duration_ms}ms)
+  P-Precision:   ${s.precision}/10
+  R-Reasoning:   ${s.reasoning}/10
+  I-Information:  ${s.information}/10
+  S-Safety:      ${s.safety}/10
+  M-Methodology: ${s.methodology}/10
+
+${s.explanation}`;
+      } catch (err) {
+        return `Agent judge failed: ${err}`;
+      }
+    }
+    case "forge_tool": {
+      const toolName = args.name;
+      const purpose = args.purpose;
+      if (!toolName || !purpose) return "Error: name and purpose are required";
+      try {
+        const { forgeTool: forgeTool2, verifyForgedTool: verifyForgedTool2 } = await Promise.resolve().then(() => (init_skill_forge(), skill_forge_exports));
+        const handlerType = args.handler_type ?? "llm-generate";
+        const config2 = {};
+        if (args.backend_tool) config2.backend_tool = args.backend_tool;
+        if (args.system_prompt) config2.system_prompt = args.system_prompt;
+        if (args.cypher_template) config2.cypher_template = args.cypher_template;
+        const result = await forgeTool2(toolName, purpose, handlerType, config2);
+        if (result.action !== "created") return `Forge: ${result.message}`;
+        const shouldVerify = args.verify !== false;
+        let verifyMsg = "";
+        if (shouldVerify) {
+          const vResult = await verifyForgedTool2(toolName);
+          verifyMsg = `
+Verification: ${vResult.verified ? "PASSED" : "FAILED"} \u2014 ${vResult.result}`;
+        }
+        return `Forged tool "${toolName}" (${handlerType}, ${result.duration_ms}ms)${verifyMsg}
+Description: ${result.tool?.description}`;
+      } catch (err) {
+        return `Forge failed: ${err}`;
+      }
+    }
+    case "forge_analyze_gaps": {
+      try {
+        const { analyzeToolGaps: analyzeToolGaps2 } = await Promise.resolve().then(() => (init_skill_forge(), skill_forge_exports));
+        const analysis = await analyzeToolGaps2(args.provider ?? "deepseek");
+        if (analysis.gaps.length === 0) return `No gaps found (${analysis.total_calls_analyzed} calls analyzed)`;
+        const gapLines = analysis.gaps.map((g) => `- ${g.pattern} (freq: ${g.frequency}): ${g.suggestion}`);
+        return `Gap Analysis (${analysis.total_calls_analyzed} calls, ${(analysis.failure_rate * 100).toFixed(1)}% failure rate):
+${gapLines.join("\n")}`;
+      } catch (err) {
+        return `Gap analysis failed: ${err}`;
+      }
+    }
+    case "forge_list": {
+      try {
+        const { getForgedTools: getForgedTools2 } = await Promise.resolve().then(() => (init_skill_forge(), skill_forge_exports));
+        const tools = getForgedTools2();
+        if (tools.length === 0) return "No forged tools. Use forge_tool to create one.";
+        return `${tools.length} forged tools:
+${tools.map((t) => `- ${t.name} (${t.handler_type}, ${t.verified ? "verified" : "unverified"}) \u2014 ${t.description.slice(0, 80)}`).join("\n")}`;
+      } catch (err) {
+        return `List failed: ${err}`;
+      }
+    }
+    default: {
+      try {
+        const { hasForgedTool: hasForgedTool2, executeForgedTool: executeForgedTool2 } = await Promise.resolve().then(() => (init_skill_forge(), skill_forge_exports));
+        if (hasForgedTool2(name)) {
+          return await executeForgedTool2(name, args);
+        }
+      } catch {
+      }
+      return `Unknown tool: ${name}`;
+    }
+  }
+}
+var ORCHESTRATOR_TOOLS, totalTokensSaved, totalFoldingCalls;
+var init_tool_executor = __esm({
+  "src/tool-executor.ts"() {
+    "use strict";
+    init_dual_rag();
+    init_cognitive_proxy();
+    init_mcp_caller();
+    init_chain_engine();
+    init_verification_gate();
+    init_investigate_chain();
+    init_logger();
+    init_tool_registry();
+    ORCHESTRATOR_TOOLS = toOpenAITools();
+    totalTokensSaved = 0;
+    totalFoldingCalls = 0;
+  }
+});
+
+// src/startup-validator.ts
+var startup_validator_exports = {};
+__export(startup_validator_exports, {
+  validateOrThrow: () => validateOrThrow,
+  validateStartup: () => validateStartup
+});
+async function validateStartup() {
+  const errors = [];
+  const warnings = [];
+  let validated = 0;
+  for (const tool of TOOL_REGISTRY) {
+    try {
+      const result = await executeToolUnified(tool.name, {}, {
+        call_id: `validator-${tool.name}`,
+        source_protocol: "validator",
+        fold: false
+      });
+      const resultStr = typeof result.result === "string" ? result.result : "";
+      if (resultStr.startsWith("Unknown tool:")) {
+        errors.push(`${tool.name}: no executor case (registry defines it but tool-executor.ts has no case)`);
+        continue;
+      }
+      validated++;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      warnings.push(`${tool.name}: validation threw (${msg.slice(0, 60)})`);
+      validated++;
+    }
+  }
+  return {
+    passed: errors.length === 0,
+    errors,
+    warnings,
+    tools_validated: validated
+  };
+}
+async function validateOrThrow() {
+  logger.info({ total_tools: TOOL_REGISTRY.length }, "Startup validation: checking registry\u2194executor parity");
+  const result = await validateStartup();
+  if (result.warnings.length > 0) {
+    logger.warn({ count: result.warnings.length, warnings: result.warnings.slice(0, 3) }, "Startup validation: warnings (non-fatal)");
+  }
+  if (!result.passed) {
+    logger.error({ errors: result.errors }, "Startup validation FAILED \u2014 refusing to start");
+    throw new Error(
+      `Startup validation failed: ${result.errors.length} tool(s) have no executor case. Fix: add missing cases in src/tool-executor.ts. Errors: ${result.errors.join("; ")}`
+    );
+  }
+  logger.info({
+    validated: result.tools_validated,
+    warnings: result.warnings.length
+  }, "Startup validation: PASSED \u2014 registry\u2194executor parity confirmed");
+}
+var init_startup_validator = __esm({
+  "src/startup-validator.ts"() {
+    "use strict";
+    init_tool_registry();
+    init_tool_executor();
+    init_logger();
   }
 });
 
@@ -19466,1047 +20585,7 @@ init_logger();
 init_slack();
 import { Router as Router2 } from "express";
 init_redis();
-
-// src/tool-executor.ts
-init_dual_rag();
-init_cognitive_proxy();
-init_mcp_caller();
-init_chain_engine();
-
-// src/verification-gate.ts
-init_logger();
-init_mcp_caller();
-import { v4 as uuid6 } from "uuid";
-async function verifyChainOutput(chainOutput, config2) {
-  const maxRetries = config2.max_retries ?? 3;
-  const start = Date.now();
-  let retries = 0;
-  let lastResult = null;
-  while (retries <= maxRetries) {
-    const checkResults = await runChecksParallel(config2.checks, chainOutput);
-    const tripwireTripped = config2.tripwire_check ? checkResults.some((c) => c.name === config2.tripwire_check && c.status !== "pass") : false;
-    const allPassed = checkResults.every((c) => c.status === "pass");
-    lastResult = {
-      passed: allPassed && !tripwireTripped,
-      checks: checkResults,
-      retries_attempted: retries,
-      total_duration_ms: Date.now() - start,
-      aborted_by_tripwire: tripwireTripped
-    };
-    if (allPassed) {
-      logger.info({ retries, checks: checkResults.length }, "Verification gate: PASSED");
-      return lastResult;
-    }
-    if (tripwireTripped) {
-      logger.warn({ tripwire: config2.tripwire_check }, "Verification gate: TRIPWIRE ABORT");
-      return lastResult;
-    }
-    retries++;
-    if (retries <= maxRetries) {
-      logger.info({ retry: retries, maxRetries, failed: checkResults.filter((c) => c.status !== "pass").map((c) => c.name) }, "Verification gate: retrying");
-      await new Promise((r) => setTimeout(r, 1e3 * retries));
-    }
-  }
-  logger.warn({ retries: maxRetries }, "Verification gate: FAILED after max retries");
-  return lastResult;
-}
-async function runChecksParallel(checks, chainOutput) {
-  const results = await Promise.allSettled(
-    checks.map(async (check) => {
-      const start = Date.now();
-      try {
-        const args = { ...check.arguments };
-        for (const [k, v] of Object.entries(args)) {
-          if (v === "{{output}}") args[k] = chainOutput;
-        }
-        const result = await callMcpTool({
-          toolName: check.tool_name,
-          args,
-          callId: `verify-${uuid6().substring(0, 8)}`,
-          timeoutMs: 15e3
-        });
-        let passed = true;
-        if (check.validate) {
-          passed = check.validate(result);
-        } else if (check.expected_key) {
-          const actual = result?.[check.expected_key];
-          passed = actual === check.expected_value;
-        }
-        return {
-          name: check.name,
-          status: passed ? "pass" : "fail",
-          output: result,
-          duration_ms: Date.now() - start
-        };
-      } catch (err) {
-        return {
-          name: check.name,
-          status: "error",
-          output: String(err),
-          duration_ms: Date.now() - start
-        };
-      }
-    })
-  );
-  return results.map(
-    (r, i) => r.status === "fulfilled" ? r.value : {
-      name: checks[i].name,
-      status: "error",
-      output: String(r.reason),
-      duration_ms: 0
-    }
-  );
-}
-
-// src/investigate-chain.ts
-init_chain_engine();
-init_config();
-init_logger();
-function buildInvestigateChain(topic) {
-  return {
-    chain_id: `investigate-${Date.now().toString(36)}`,
-    name: `Investigate: ${topic}`,
-    description: `Multi-agent deep investigation of "${topic}"`,
-    mode: "sequential",
-    steps: [
-      // Step 1: Graph exploration
-      {
-        id: "graph-explore",
-        agent_id: "graph-steward",
-        tool_name: "graph.read_cypher",
-        arguments: {
-          query: `MATCH (n) WHERE toLower(n.title) CONTAINS toLower($topic) OR toLower(coalesce(n.name,'')) CONTAINS toLower($topic) OR toLower(coalesce(n.description,'')) CONTAINS toLower($topic) WITH n LIMIT 20 OPTIONAL MATCH (n)-[r]-(m) RETURN labels(n)[0] AS type, coalesce(n.title, n.name, n.id) AS name, collect(DISTINCT {rel: type(r), target: coalesce(m.title, m.name, labels(m)[0])}) AS connections LIMIT 20`,
-          params: { topic }
-        },
-        timeout_ms: 2e4
-      },
-      // Step 2: Compliance analysis
-      {
-        id: "compliance-analysis",
-        agent_id: "regulatory-navigator",
-        tool_name: "srag.query",
-        arguments: {
-          query: `Compliance and regulatory framework analysis for: ${topic}. Include relevant Danish/EU regulations, governance requirements, and risk considerations. Previous graph findings: {{prev}}`
-        },
-        timeout_ms: 3e4
-      },
-      // Step 3: Strategic recommendations
-      {
-        id: "strategic-recommendations",
-        agent_id: "consulting-partner",
-        tool_name: "kg_rag.query",
-        arguments: {
-          question: `Strategic consulting analysis for: ${topic}. Provide actionable recommendations, patterns, and best practices. Previous compliance findings: {{prev}}`,
-          max_evidence: 15
-        },
-        timeout_ms: 3e4
-      },
-      // Step 4: Deep reasoning synthesis
-      {
-        id: "deep-reasoning",
-        agent_id: "orchestrator",
-        cognitive_action: "reason",
-        prompt: `Synthesize a comprehensive deep analysis of "${topic}" based on all previous findings:
-
-{{prev}}
-
-Provide:
-1. Key findings from graph exploration
-2. Compliance implications
-3. Strategic recommendations
-4. Risk assessment
-5. Suggested next actions`,
-        timeout_ms: 45e3
-      },
-      // Step 5: Artifact assembly — handled post-chain
-      // We use a lightweight step that signals assembly
-      {
-        id: "signal-assembly",
-        agent_id: "orchestrator",
-        tool_name: "graph.health",
-        arguments: {},
-        timeout_ms: 1e4
-      }
-    ]
-  };
-}
-function assembleArtifactBlocks(topic, execution) {
-  const blocks = [];
-  const results = execution.results;
-  const graphResult = results.find((r) => r.step_id === "graph-explore");
-  if (graphResult && graphResult.status === "success") {
-    blocks.push({
-      type: "cypher",
-      label: "Graph Exploration",
-      content: {
-        query: `MATCH (n) WHERE toLower(n.title) CONTAINS toLower("${topic}") ... (see full chain)`
-      }
-    });
-    blocks.push({
-      type: "text",
-      label: "Graph Results",
-      content: {
-        body: typeof graphResult.output === "string" ? graphResult.output : JSON.stringify(graphResult.output, null, 2)
-      }
-    });
-  }
-  const complianceResult = results.find((r) => r.step_id === "compliance-analysis");
-  if (complianceResult && complianceResult.status === "success") {
-    blocks.push({
-      type: "text",
-      label: "Compliance & Regulatory Analysis",
-      content: {
-        body: typeof complianceResult.output === "string" ? complianceResult.output : JSON.stringify(complianceResult.output, null, 2)
-      }
-    });
-  }
-  const strategyResult = results.find((r) => r.step_id === "strategic-recommendations");
-  if (strategyResult && strategyResult.status === "success") {
-    blocks.push({
-      type: "text",
-      label: "Strategic Recommendations",
-      content: {
-        body: typeof strategyResult.output === "string" ? strategyResult.output : JSON.stringify(strategyResult.output, null, 2)
-      }
-    });
-  }
-  const reasoningResult = results.find((r) => r.step_id === "deep-reasoning");
-  if (reasoningResult && reasoningResult.status === "success") {
-    blocks.push({
-      type: "text",
-      label: "Deep Reasoning Synthesis",
-      content: {
-        body: typeof reasoningResult.output === "string" ? reasoningResult.output : JSON.stringify(reasoningResult.output, null, 2)
-      }
-    });
-  }
-  blocks.push({
-    type: "kpi_card",
-    label: "Investigation Metrics",
-    content: {
-      label: "Steps Completed",
-      value: `${execution.steps_completed}/${execution.steps_total}`,
-      trend: execution.status === "completed" ? "up" : "down"
-    }
-  });
-  if (execution.duration_ms) {
-    blocks.push({
-      type: "kpi_card",
-      content: {
-        label: "Duration",
-        value: `${(execution.duration_ms / 1e3).toFixed(1)}s`
-      }
-    });
-  }
-  const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${config.port}`;
-  blocks.push({
-    type: "deep_link",
-    label: "Access Links",
-    content: {
-      label: "View in Command Center",
-      uri: `${baseUrl}/#chains`
-    }
-  });
-  blocks.push({
-    type: "deep_link",
-    content: {
-      label: "Open in Obsidian",
-      uri: `obsidian://widgetdc?action=investigate&topic=${encodeURIComponent(topic)}`
-    }
-  });
-  return blocks;
-}
-async function createArtifact(topic, blocks, execution) {
-  const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${config.port}`;
-  const apiKey = process.env.ORCHESTRATOR_API_KEY ?? "";
-  try {
-    const resp = await fetch(`${baseUrl}/api/artifacts`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        title: `Investigation: ${topic}`,
-        source: "investigate-chain",
-        blocks,
-        tags: ["investigation", "multi-agent", topic.toLowerCase().replace(/\s+/g, "-")],
-        graph_refs: execution.results.filter((r) => r.step_id === "graph-explore" && r.status === "success").map((r) => `neo4j:investigate:${topic}`),
-        created_by: "investigate-chain"
-      })
-    });
-    if (!resp.ok) {
-      logger.warn({ status: resp.status }, "Failed to create investigation artifact");
-      return null;
-    }
-    const data = await resp.json();
-    if (data.success && data.artifact) {
-      const id = data.artifact.$id;
-      return {
-        artifactId: id,
-        artifactUrl: `${baseUrl}/api/artifacts/${encodeURIComponent(id)}`
-      };
-    }
-    return null;
-  } catch (err) {
-    logger.warn({ err: String(err) }, "Artifact creation failed for investigation");
-    return null;
-  }
-}
-async function runInvestigation(topic) {
-  const chainDef = buildInvestigateChain(topic);
-  logger.info({ topic, chain_id: chainDef.chain_id }, "Starting investigation chain");
-  const execution = await executeChain(chainDef);
-  const blocks = assembleArtifactBlocks(topic, execution);
-  const artifact = await createArtifact(topic, blocks, execution);
-  const result = { execution };
-  if (artifact) {
-    result.artifact_id = artifact.artifactId;
-    result.artifact_url = artifact.artifactUrl;
-    result.artifact_markdown_url = `${artifact.artifactUrl}.md`;
-    logger.info({ artifact_id: artifact.artifactId, topic }, "Investigation artifact created");
-  }
-  return result;
-}
-
-// src/tool-executor.ts
-init_logger();
-init_tool_registry();
-import { v4 as uuid15 } from "uuid";
-var ORCHESTRATOR_TOOLS = toOpenAITools();
-var totalTokensSaved = 0;
-var totalFoldingCalls = 0;
-function getTokenSavings() {
-  return { totalTokensSaved, totalFoldingCalls, avgSavingsPerFold: totalFoldingCalls > 0 ? Math.round(totalTokensSaved / totalFoldingCalls) : 0 };
-}
-function foldToolResult(content, toolName) {
-  const MAX_CHARS = 800;
-  const TARGET_CHARS = 500;
-  if (content.length <= MAX_CHARS) return content;
-  const originalTokens = Math.ceil(content.length / 4);
-  totalFoldingCalls++;
-  let folded;
-  try {
-    const parsed = JSON.parse(content);
-    if (Array.isArray(parsed)) {
-      const truncated = parsed.slice(0, 5);
-      folded = JSON.stringify(truncated, null, 1).slice(0, TARGET_CHARS);
-      folded += `
-... (${parsed.length} total items, showing first 5)`;
-    } else if (typeof parsed === "object") {
-      const slim = {};
-      for (const [k, v] of Object.entries(parsed)) {
-        if (typeof v === "string" && v.length > 200) {
-          slim[k] = v.slice(0, 200) + "...";
-        } else if (Array.isArray(v) && v.length > 3) {
-          slim[k] = [...v.slice(0, 3), `... +${v.length - 3} more`];
-        } else {
-          slim[k] = v;
-        }
-      }
-      folded = JSON.stringify(slim, null, 1).slice(0, TARGET_CHARS);
-    } else {
-      folded = content.slice(0, TARGET_CHARS) + "...";
-    }
-  } catch {
-    const lines = content.split("\n");
-    folded = lines.slice(0, 15).join("\n").slice(0, TARGET_CHARS);
-    if (lines.length > 15) folded += `
-... (${lines.length} total lines)`;
-  }
-  const foldedTokens = Math.ceil(folded.length / 4);
-  const saved = originalTokens - foldedTokens;
-  totalTokensSaved += saved;
-  logger.debug({ tool: toolName, originalTokens, foldedTokens, saved }, "Tool result folded");
-  return folded;
-}
-async function executeToolCalls(toolCalls) {
-  const results = await Promise.allSettled(
-    toolCalls.map((tc) => executeOne(tc))
-  );
-  return results.map((r, i) => {
-    const raw = r.status === "fulfilled" ? r.value : `Error: ${r.reason}`;
-    return {
-      tool_call_id: toolCalls[i].id,
-      role: "tool",
-      content: foldToolResult(raw, toolCalls[i].function.name)
-    };
-  });
-}
-async function executeOne(tc) {
-  let args;
-  try {
-    args = JSON.parse(tc.function.arguments);
-  } catch {
-    return `Error: Invalid JSON arguments`;
-  }
-  const name = tc.function.name;
-  logger.info({ tool: name, args_keys: Object.keys(args) }, "Executing tool call");
-  try {
-    return await executeToolByName(name, args);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    logger.warn({ tool: name, error: msg }, "Tool execution failed \u2014 returning graceful fallback");
-    return buildToolFallback(name, msg);
-  }
-}
-function buildToolFallback(toolName, error) {
-  const short = error.length > 200 ? error.slice(0, 200) + "..." : error;
-  switch (toolName) {
-    case "search_knowledge":
-      return `Knowledge search unavailable (${short}). Try query_graph with a direct Cypher query, or call_mcp_tool with srag.query as a fallback.`;
-    case "reason_deeply":
-      return `RLM reasoning unavailable (${short}). Try breaking the question into simpler parts using search_knowledge or query_graph.`;
-    case "query_graph":
-      return `Neo4j graph query failed (${short}). The graph may be temporarily slow \u2014 try a simpler query or use search_knowledge instead.`;
-    case "linear_issues":
-    case "linear_issue_detail":
-      return `Linear query failed (${short}). Linear data may be temporarily unavailable.`;
-    default:
-      return `Tool "${toolName}" failed: ${short}`;
-  }
-}
-async function executeToolUnified(toolName, args, opts) {
-  const callId = opts?.call_id ?? uuid15();
-  const t0 = Date.now();
-  let deprecation_notice;
-  const toolDef = getTool(toolName);
-  if (toolDef?.deprecated) {
-    logger.warn({ tool: toolName }, `Deprecated tool called: ${toolName}. ${toolDef.deprecatedMessage ?? ""}`);
-    deprecation_notice = {
-      deprecated: true,
-      since: toolDef.deprecatedSince,
-      message: toolDef.deprecatedMessage,
-      sunset_date: toolDef.sunsetDate,
-      replaced_by: toolDef.replacedBy
-    };
-  }
-  try {
-    const rawResult = await executeToolByName(toolName, args);
-    const duration = Date.now() - t0;
-    const shouldFold = opts?.fold !== false;
-    const folded = shouldFold ? foldToolResult(rawResult, toolName) : rawResult;
-    const resultWithWarning = deprecation_notice ? `[DEPRECATED] ${toolDef?.deprecatedMessage ?? `Tool "${toolName}" is deprecated.`}${toolDef?.replacedBy ? ` Use "${toolDef.replacedBy}" instead.` : ""}
-
-${folded}` : folded;
-    return {
-      call_id: callId,
-      tool_name: toolName,
-      status: "success",
-      result: resultWithWarning,
-      duration_ms: duration,
-      completed_at: (/* @__PURE__ */ new Date()).toISOString(),
-      was_folded: shouldFold && folded !== rawResult,
-      source_protocol: opts?.source_protocol ?? "unknown",
-      ...deprecation_notice ? { deprecation_notice } : {}
-    };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return {
-      call_id: callId,
-      tool_name: toolName,
-      status: "error",
-      result: null,
-      error_message: msg,
-      duration_ms: Date.now() - t0,
-      completed_at: (/* @__PURE__ */ new Date()).toISOString(),
-      was_folded: false,
-      source_protocol: opts?.source_protocol ?? "unknown",
-      ...deprecation_notice ? { deprecation_notice } : {}
-    };
-  }
-}
-async function executeToolByName(name, args) {
-  switch (name) {
-    case "search_knowledge": {
-      if (!args.query || typeof args.query !== "string") return "Error: query is required and must be a string";
-      const result = await dualChannelRAG(args.query, {
-        maxResults: args.max_results ?? 10
-      });
-      if (result.merged_context.length === 0) return "No results found for this query.";
-      try {
-        const { hookAutoEnrichment: hookAutoEnrichment3 } = await Promise.resolve().then(() => (init_compound_hooks(), compound_hooks_exports));
-        hookAutoEnrichment3(result.merged_context, args.query);
-      } catch {
-      }
-      const header = `[${result.route_strategy}] ${result.graphrag_count} graphrag + ${result.srag_count} semantic + ${result.cypher_count} graph (${result.duration_ms}ms, channels: ${result.channels_used.join(",")}${result.pollution_filtered > 0 ? `, ${result.pollution_filtered} polluted filtered` : ""}):`;
-      return `${header}
-
-${result.merged_context}`;
-    }
-    case "reason_deeply": {
-      if (!isRlmAvailable()) return "RLM Engine is not available.";
-      const mode = args.mode ?? "reason";
-      const result = await callCognitive(mode, {
-        prompt: args.question,
-        context: { source: "chat-tool-call" },
-        agent_id: "chat-orchestrator",
-        depth: 1
-      }, 45e3);
-      return typeof result === "string" ? result : JSON.stringify(result, null, 2);
-    }
-    case "query_graph": {
-      const cypher = args.cypher;
-      if (!cypher || typeof cypher !== "string") return "Error: cypher query is required and must be a string";
-      const WRITE_KEYWORDS = /\b(DELETE|DETACH|CREATE|MERGE|SET|REMOVE|DROP|CALL\s+dbms)\b/i;
-      if (WRITE_KEYWORDS.test(cypher)) {
-        return "Error: query_graph is read-only. Write operations (DELETE, CREATE, MERGE, SET, REMOVE, DROP) are not allowed.";
-      }
-      const result = await callMcpTool({
-        toolName: "graph.read_cypher",
-        args: { query: cypher, params: args.params ?? {} },
-        callId: uuid15(),
-        timeoutMs: 15e3
-      });
-      if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
-      const rows = Array.isArray(result.result) ? result.result : result.result?.results ?? result.result;
-      return JSON.stringify(rows, null, 2).slice(0, 800);
-    }
-    case "check_tasks": {
-      const filter = args.filter ?? "active";
-      const keyword = args.keyword ?? "";
-      let cypher;
-      if (filter === "blocked") {
-        cypher = `MATCH (n) WHERE (n:Task OR n:L3Task) AND toLower(coalesce(n.status,'')) CONTAINS 'block' RETURN coalesce(n.identifier,n.id) AS id, n.title AS title, n.status AS status ORDER BY n.updatedAt DESC LIMIT 15`;
-      } else if (filter === "recent") {
-        cypher = `MATCH (n) WHERE (n:Task OR n:L3Task) RETURN coalesce(n.identifier,n.id) AS id, n.title AS title, n.status AS status ORDER BY n.updatedAt DESC LIMIT 15`;
-      } else {
-        cypher = `MATCH (n) WHERE (n:Task OR n:L3Task) AND n.status IN ['In Progress', 'Todo', 'Backlog'] RETURN coalesce(n.identifier,n.id) AS id, n.title AS title, n.status AS status ORDER BY n.updatedAt DESC LIMIT 15`;
-      }
-      const result = await callMcpTool({
-        toolName: "graph.read_cypher",
-        args: { query: cypher },
-        callId: uuid15(),
-        timeoutMs: 1e4
-      });
-      if (result.status !== "success") return `Task query failed: ${result.error_message}`;
-      const rows = result.result?.results ?? result.result ?? [];
-      if (!Array.isArray(rows) || rows.length === 0) return "No tasks found.";
-      return rows.map((r) => `- [${r.id ?? "?"}] ${r.title ?? "Untitled"} (${r.status ?? "?"})`).join("\n");
-    }
-    case "call_mcp_tool": {
-      const result = await callMcpTool({
-        toolName: args.tool_name,
-        args: args.payload ?? {},
-        callId: uuid15(),
-        timeoutMs: 3e4
-      });
-      if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
-      return JSON.stringify(result.result, null, 2).slice(0, 800);
-    }
-    case "get_platform_health": {
-      const [backendHealth, graphHealth] = await Promise.allSettled([
-        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid15(), timeoutMs: 1e4 }),
-        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid15(), timeoutMs: 1e4 })
-      ]);
-      const parts = [];
-      if (backendHealth.status === "fulfilled" && backendHealth.value.status === "success") {
-        parts.push(`Neo4j: ${JSON.stringify(backendHealth.value.result)}`);
-      }
-      if (graphHealth.status === "fulfilled" && graphHealth.value.status === "success") {
-        const stats = graphHealth.value.result;
-        parts.push(`Graph: ${stats?.nodes ?? "?"} nodes, ${stats?.relationships ?? "?"} rels`);
-      }
-      return parts.join("\n") || "Health check returned no data.";
-    }
-    case "search_documents": {
-      const result = await callMcpTool({
-        toolName: "srag.query",
-        args: { query: args.query },
-        callId: uuid15(),
-        timeoutMs: 2e4
-      });
-      if (result.status !== "success") return `Document search failed: ${result.error_message}`;
-      return JSON.stringify(result.result, null, 2).slice(0, 800);
-    }
-    case "linear_issues": {
-      const status = args.status ?? "active";
-      const limit = args.limit ?? 10;
-      const query = args.query ?? "";
-      const payload = { limit };
-      if (query) payload.query = query;
-      if (status === "active") payload.status = "started";
-      else if (status === "done") payload.status = "completed";
-      else if (status === "backlog") payload.status = "backlog";
-      const result = await callMcpTool({
-        toolName: "linear.issues",
-        args: payload,
-        callId: uuid15(),
-        timeoutMs: 15e3
-      });
-      if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
-      const data = result.result;
-      const issues = data?.issues ?? data ?? [];
-      if (!Array.isArray(issues) || issues.length === 0) return "No Linear issues found.";
-      return issues.map(
-        (i) => `- [${i.identifier}] ${i.title} (${i.status}) ${i.assignee ? `\u2192 ${i.assignee}` : ""} ${i.url ?? ""}`
-      ).join("\n");
-    }
-    case "linear_issue_detail": {
-      const identifier = args.identifier;
-      const result = await callMcpTool({
-        toolName: "linear.issue_get",
-        args: { identifier },
-        callId: uuid15(),
-        timeoutMs: 15e3
-      });
-      if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
-      return JSON.stringify(result.result, null, 2).slice(0, 800);
-    }
-    case "investigate": {
-      const topic = args.topic;
-      if (!topic) return "Error: topic is required";
-      try {
-        const result = await runInvestigation(topic);
-        const summary = `Investigation "${topic}" ${result.execution.status} \u2014 ${result.execution.steps_completed}/${result.execution.steps_total} steps, ${result.execution.duration_ms}ms`;
-        const artifactInfo = result.artifact_url ? `
-Artifact: ${result.artifact_url}
-Markdown: ${result.artifact_markdown_url}` : "\nArtifact: creation skipped (Redis unavailable or error)";
-        const output = result.execution.final_output ? `
-
-Synthesis:
-${typeof result.execution.final_output === "string" ? result.execution.final_output : JSON.stringify(result.execution.final_output, null, 2).slice(0, 600)}` : "";
-        return summary + artifactInfo + output;
-      } catch (err) {
-        return `Investigation failed: ${err}`;
-      }
-    }
-    case "run_chain": {
-      const steps = args.steps ?? [];
-      const chainDef = {
-        name: args.name,
-        mode: args.mode ?? "sequential",
-        steps: steps.map((s, i) => ({
-          id: `step-${i}`,
-          agent_id: s.agent_id ?? "chat-orchestrator",
-          tool_name: s.tool_name,
-          cognitive_action: s.cognitive_action,
-          prompt: s.prompt,
-          arguments: s.arguments ?? (s.prompt ? { query: s.prompt } : {})
-        }))
-      };
-      try {
-        const execution = await executeChain(chainDef);
-        const summary = `Chain "${execution.name}" (${execution.mode}): ${execution.status} \u2014 ${execution.steps_completed}/${execution.steps_total} steps, ${execution.duration_ms}ms`;
-        const output = execution.final_output ? `
-
-Result: ${typeof execution.final_output === "string" ? execution.final_output : JSON.stringify(execution.final_output, null, 2).slice(0, 800)}` : "";
-        return summary + output + (execution.error ? `
-Error: ${execution.error}` : "");
-      } catch (err) {
-        return `Chain execution failed: ${err}`;
-      }
-    }
-    case "create_notebook": {
-      const topic = args.topic;
-      if (!topic) return "Error: topic is required";
-      const customCells = args.cells;
-      const cells = customCells && customCells.length > 0 ? customCells : [
-        { type: "query", id: "q1", query: `MATCH (n) WHERE toLower(coalesce(n.title,'')) CONTAINS toLower($topic) OR toLower(coalesce(n.name,'')) CONTAINS toLower($topic) RETURN labels(n)[0] AS type, coalesce(n.title, n.name) AS name, n.status AS status LIMIT 20`, params: { topic } },
-        { type: "query", id: "q2", query: `What are the key insights and patterns related to this topic?`, params: { topic } },
-        { type: "insight", id: "i1", prompt: `Analyze the findings about "${topic}" and provide strategic consulting insights, key patterns, and recommendations.` },
-        { type: "data", id: "d1", source_cell_id: "q1", visualization: "table" },
-        { type: "action", id: "a1", recommendation: `Review the analysis of "${topic}" and determine next steps for the consulting engagement.` }
-      ];
-      try {
-        const { config: appConfig } = await Promise.resolve().then(() => (init_config(), config_exports));
-        const baseUrl = appConfig.nodeEnv === "production" ? "https://orchestrator-production-c27e.up.railway.app" : `http://localhost:${appConfig.port}`;
-        const resp = await fetch(`${baseUrl}/api/notebooks/execute`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${appConfig.orchestratorApiKey}`
-          },
-          body: JSON.stringify({ title: `Notebook: ${topic}`, cells, created_by: "chat-orchestrator" })
-        });
-        const data = await resp.json();
-        if (!data.success) return `Notebook creation failed: ${data.error}`;
-        const nb = data.notebook;
-        const cellSummaries = nb.cells.map((c) => {
-          if (c.type === "query") return `[Query] ${c.query.slice(0, 60)}... \u2192 ${c.result ? "OK" : "no result"}`;
-          if (c.type === "insight") return `[Insight] ${(c.content ?? "").slice(0, 100)}...`;
-          if (c.type === "data") return `[Data] from ${c.source_cell_id}: ${c.result ? "OK" : "no data"}`;
-          if (c.type === "action") return `[Action] ${c.recommendation.slice(0, 80)}`;
-          return `[${c.type}]`;
-        }).join("\n");
-        return `Notebook created: "${nb.title}"
-ID: ${nb.$id}
-Cells: ${nb.cells.length}
-
-${cellSummaries}
-
-View: /api/notebooks/${encodeURIComponent(nb.$id)}
-Markdown: /api/notebooks/${encodeURIComponent(nb.$id)}.md`;
-      } catch (err) {
-        return `Notebook creation failed: ${err}`;
-      }
-    }
-    case "verify_output": {
-      const content = args.content;
-      const checks = args.checks ?? [
-        { name: "graph_health", tool_name: "graph.health", arguments: {} }
-      ];
-      try {
-        const result = await verifyChainOutput(
-          { content },
-          {
-            checks: checks.map((c) => ({
-              name: c.name ?? "check",
-              tool_name: c.tool_name ?? "graph.health",
-              arguments: c.arguments ?? {}
-            }))
-          }
-        );
-        return JSON.stringify(result, null, 2).slice(0, 800);
-      } catch (err) {
-        return `Verification failed: ${err}`;
-      }
-    }
-    case "ingest_document": {
-      const content = args.content;
-      const filename = args.filename;
-      if (!content || content.length < 20) return "Error: content required (min 20 chars)";
-      if (!filename) return "Error: filename required";
-      try {
-        const { ingestDocument: ingestDocument2 } = await Promise.resolve().then(() => (init_document_intelligence(), document_intelligence_exports));
-        const result = await ingestDocument2({
-          content,
-          filename,
-          domain: args.domain,
-          extract_entities: args.extract_entities !== false
-        });
-        return `Ingested "${result.filename}": ${result.entities_extracted} entities, ${result.nodes_merged} nodes merged, ${result.tables_found} tables (${result.parsing_method}, ${result.duration_ms}ms)`;
-      } catch (err) {
-        return `Document ingestion failed: ${err}`;
-      }
-    }
-    case "build_communities": {
-      try {
-        const { buildCommunitySummaries: buildCommunitySummaries2 } = await Promise.resolve().then(() => (init_hierarchical_intelligence(), hierarchical_intelligence_exports));
-        const result = await buildCommunitySummaries2();
-        return `Communities built: ${result.communities_created} communities, ${result.summaries_generated} summaries, ${result.relationships_created} rels (${result.method}, ${result.duration_ms}ms)`;
-      } catch (err) {
-        return `Community build failed: ${err}`;
-      }
-    }
-    case "adaptive_rag_dashboard": {
-      try {
-        const { getAdaptiveRAGDashboard: getAdaptiveRAGDashboard2 } = await Promise.resolve().then(() => (init_adaptive_rag(), adaptive_rag_exports));
-        const d = await getAdaptiveRAGDashboard2();
-        const lines = [
-          `Compound Metric: ${d.compound_metric.score} (accuracy=${d.compound_metric.accuracy}, quality=${d.compound_metric.quality}, coverage=${d.compound_metric.coverage})`,
-          `Training samples: ${d.outcome_count}`,
-          `Weights updated: ${d.weights.updated_at}`,
-          ...d.stats.map((s) => `  ${s.strategy}: ${s.total_queries} queries, confidence=${s.avg_confidence.toFixed(2)}, zero-result=${(s.zero_result_rate * 100).toFixed(0)}%`)
-        ];
-        return lines.join("\n");
-      } catch (err) {
-        return `Adaptive RAG dashboard failed: ${err}`;
-      }
-    }
-    case "graph_hygiene_run": {
-      try {
-        const { runGraphHygiene: runGraphHygiene3 } = await Promise.resolve().then(() => (init_graph_hygiene_cron(), graph_hygiene_cron_exports));
-        const result = await runGraphHygiene3();
-        const m = result.metrics;
-        const alertStr = result.alerts.length > 0 ? `
-ALERTS: ${result.alerts.map((a) => a.message).join("; ")}` : "\nNo alerts \u2014 all metrics within thresholds.";
-        return `Graph Health (${result.duration_ms}ms):
-  Orphan ratio: ${(m.orphan_ratio * 100).toFixed(1)}%
-  Avg rels/node: ${m.avg_rels_per_node.toFixed(1)}
-  Embedding coverage: ${(m.embedding_coverage * 100).toFixed(1)}%
-  Domains: ${m.domain_count}
-  Stale nodes: ${m.stale_node_count}
-  Pollution: ${m.pollution_count}${alertStr}`;
-      } catch (err) {
-        return `Graph hygiene failed: ${err}`;
-      }
-    }
-    case "precedent_search": {
-      const query = args.query;
-      if (!query || query.length < 3) return "Error: query is required (min 3 chars)";
-      try {
-        const { findSimilarClients: findSimilarClients2 } = await Promise.resolve().then(() => (init_similarity_engine(), similarity_engine_exports));
-        const result = await findSimilarClients2({
-          query,
-          dimensions: args.dimensions,
-          max_results: typeof args.max_results === "number" && Number.isInteger(args.max_results) ? args.max_results : void 0,
-          structural_weight: typeof args.structural_weight === "number" ? args.structural_weight : void 0
-        });
-        if (result.matches.length === 0) return `No similar clients found for "${query}" (method: ${result.method}, ${result.duration_ms}ms)`;
-        const lines = result.matches.map((m, i) => {
-          const dims = m.shared_dimensions.map((d) => `${d.dimension}: ${d.shared_values.slice(0, 3).join(", ")}`).join(" | ");
-          return `${i + 1}. ${m.client_name} (score: ${m.overall_score.toFixed(2)}, ${m.node_type})${dims ? ` \u2014 ${dims}` : ""}`;
-        });
-        return `Found ${result.matches.length} similar clients (method: ${result.method}, ${result.duration_ms}ms):
-
-${lines.join("\n")}`;
-      } catch (err) {
-        return `Precedent search failed: ${err}`;
-      }
-    }
-    case "generate_deliverable": {
-      const prompt = args.prompt;
-      if (!prompt || prompt.length < 10) return "Error: prompt is required (min 10 chars)";
-      const type = args.type ?? "analysis";
-      if (!["analysis", "roadmap", "assessment"].includes(type)) return "Error: type must be analysis, roadmap, or assessment";
-      try {
-        const { generateDeliverable: generateDeliverable2 } = await Promise.resolve().then(() => (init_deliverable_engine(), deliverable_engine_exports));
-        const rawMax = args.max_sections;
-        const maxSections = typeof rawMax === "number" && Number.isInteger(rawMax) ? rawMax : void 0;
-        const result = await generateDeliverable2({
-          prompt,
-          type,
-          format: args.format ?? "markdown",
-          max_sections: maxSections
-        });
-        const summary = `Deliverable "${result.title}" \u2014 ${result.status} (${result.metadata.sections_count} sections, ${result.metadata.total_citations} citations, ${result.metadata.generation_ms}ms)`;
-        const preview = result.markdown.slice(0, 600);
-        return `${summary}
-
-ID: ${result.$id}
-URL: /api/deliverables/${encodeURIComponent(result.$id)}
-Markdown: /api/deliverables/${encodeURIComponent(result.$id)}/markdown
-
-${preview}...`;
-      } catch (err) {
-        return `Deliverable generation failed: ${err}`;
-      }
-    }
-    case "governance_matrix": {
-      const { getEnforcementMatrix: getEnforcementMatrix2, getEnforcementScore: getEnforcementScore2, getGaps: getGaps2 } = await Promise.resolve().then(() => (init_manifesto_governance(), manifesto_governance_exports));
-      const filter = args.filter ?? "all";
-      if (filter === "gaps") {
-        const gaps = getGaps2();
-        return gaps.length === 0 ? "All 10 manifesto principles are ENFORCED. No gaps." : `${gaps.length} principle(s) with gaps:
-${gaps.map((g) => `P${g.number} ${g.name} \u2014 ${g.status}: ${g.gap_remediation ?? "No remediation specified"}`).join("\n")}`;
-      }
-      const principles = filter === "enforced" ? getEnforcementMatrix2().filter((p) => p.status === "ENFORCED") : getEnforcementMatrix2();
-      const score = getEnforcementScore2();
-      const lines = principles.map(
-        (p) => `P${p.number} ${p.name} \u2014 ${p.status} [${p.enforcement_layer}] ${p.mechanism}`
-      );
-      return `Manifesto Enforcement Matrix (${score.score}):
-${lines.join("\n")}`;
-    }
-    case "run_osint_scan": {
-      try {
-        const { runOsintScan: runOsintScan2 } = await Promise.resolve().then(() => (init_osint_scanner(), osint_scanner_exports));
-        const result = await runOsintScan2({
-          domains: args.domains,
-          scan_type: args.scan_type
-        });
-        const summary = `OSINT scan ${result.scan_id} completed in ${result.duration_ms}ms \u2014 ${result.domains_scanned} domains, ${result.ct_entries} CT entries, ${result.dmarc_results} DMARC results, ${result.total_new_nodes} new nodes (tools: ${result.tools_available ? "live" : "fallback"})`;
-        if (result.errors.length > 0) {
-          return `${summary}
-
-Errors (${result.errors.length}):
-${result.errors.slice(0, 10).join("\n")}`;
-        }
-        return summary;
-      } catch (err) {
-        return `OSINT scan failed: ${err}`;
-      }
-    }
-    case "list_tools": {
-      const { TOOL_REGISTRY: TOOL_REGISTRY3 } = await Promise.resolve().then(() => (init_tool_registry(), tool_registry_exports));
-      let tools = TOOL_REGISTRY3;
-      if (args.namespace && typeof args.namespace === "string") {
-        tools = tools.filter((t) => t.namespace === args.namespace);
-      }
-      if (args.category && typeof args.category === "string") {
-        tools = tools.filter((t) => t.category === args.category);
-      }
-      const summary = tools.map(
-        (t) => `- ${t.name} [${t.namespace}/${t.category}] \u2014 ${t.description.slice(0, 80)}${t.description.length > 80 ? "..." : ""} (${t.availableVia.join(",")})`
-      );
-      return `${tools.length} tools${args.namespace ? ` in namespace "${args.namespace}"` : ""}${args.category ? ` in category "${args.category}"` : ""}:
-
-${summary.join("\n")}`;
-    }
-    case "run_evolution": {
-      const { runEvolutionLoop: runEvolutionLoop2 } = await Promise.resolve().then(() => (init_evolution_loop(), evolution_loop_exports));
-      const result = await runEvolutionLoop2({
-        focus_area: args.focus_area,
-        dry_run: args.dry_run ?? false
-      });
-      return `Evolution cycle ${result.status}: ${result.summary}`;
-    }
-    // ─── SNOUT Wave 2: Steal Smart ──────────────────────────────────────────
-    case "adaptive_rag_query": {
-      const query = args.query;
-      if (!query || query.length < 2) return "Error: query is required (min 2 chars)";
-      try {
-        const result = await dualChannelRAG(query, {
-          maxResults: args.max_results ?? 10
-        });
-        if (result.merged_context.length === 0) return `No results found for "${query}" (strategy: ${result.route_strategy}, ${result.duration_ms}ms)`;
-        const header = `[Adaptive RAG: ${result.route_strategy}] ${result.graphrag_count} graphrag + ${result.srag_count} semantic + ${result.cypher_count} graph (${result.duration_ms}ms, channels: ${result.channels_used.join(",")})`;
-        return `${header}
-
-${result.merged_context}`;
-      } catch (err) {
-        return `Adaptive RAG query failed: ${err}`;
-      }
-    }
-    case "adaptive_rag_retrain": {
-      try {
-        const { retrainRoutingWeights: retrainRoutingWeights2 } = await Promise.resolve().then(() => (init_adaptive_rag(), adaptive_rag_exports));
-        const result = await retrainRoutingWeights2();
-        return `Retrain complete (${result.training_samples} samples):
-  Compound metric: ${result.compound_metric.toFixed(3)}
-  Old weights: ${JSON.stringify(result.old_weights)}
-  New weights: ${JSON.stringify(result.new_weights)}`;
-      } catch (err) {
-        return `Retrain failed: ${err}`;
-      }
-    }
-    case "adaptive_rag_reward": {
-      const query = args.query;
-      const strategy = args.strategy;
-      const reward = args.reward;
-      if (!query || !strategy || typeof reward !== "number") return "Error: query, strategy, and reward (number) are required";
-      if (reward < -1 || reward > 1) return "Error: reward must be between -1.0 and 1.0";
-      try {
-        const { sendQLearningReward: sendQLearningReward2 } = await Promise.resolve().then(() => (init_adaptive_rag(), adaptive_rag_exports));
-        await sendQLearningReward2(query, strategy, reward);
-        return `Q-learning reward sent: strategy=${strategy}, reward=${reward}${args.reason ? `, reason: ${args.reason}` : ""}`;
-      } catch (err) {
-        return `Reward signal failed: ${err}`;
-      }
-    }
-    case "moa_query": {
-      const query = args.query;
-      if (!query || query.length < 5) return "Error: query is required (min 5 chars)";
-      try {
-        const { routeMoA: routeMoA2 } = await Promise.resolve().then(() => (init_moa_router(), moa_router_exports));
-        const result = await routeMoA2({
-          query,
-          agents: args.agents,
-          max_agents: args.max_agents,
-          provider: args.provider
-        });
-        const agentList = result.agents_dispatched.join(", ") || "none";
-        const header = `MoA [${result.classification.complexity}] \u2192 ${agentList} (confidence: ${result.confidence.toFixed(2)}, ${result.duration_ms}ms)`;
-        return `${header}
-Domains: ${result.classification.domains.join(", ")}
-
-${result.consensus}`;
-      } catch (err) {
-        return `MoA routing failed: ${err}`;
-      }
-    }
-    case "critique_refine": {
-      const query = args.query;
-      if (!query || query.length < 5) return "Error: query is required (min 5 chars)";
-      try {
-        const { critiqueRefine: critiqueRefine2 } = await Promise.resolve().then(() => (init_critique_refine(), critique_refine_exports));
-        const result = await critiqueRefine2(
-          query,
-          args.provider ?? "deepseek",
-          args.principles,
-          args.max_rounds ?? 1
-        );
-        return `Critique-Refine (${result.provider}, ${result.rounds} round, ${result.duration_ms}ms):
-
-**Original:**
-${result.original.slice(0, 400)}
-
-**Critique:**
-${result.critique.slice(0, 300)}
-
-**Revised:**
-${result.revised.slice(0, 500)}`;
-      } catch (err) {
-        return `Critique-refine failed: ${err}`;
-      }
-    }
-    case "judge_response": {
-      const query = args.query;
-      const response = args.response;
-      if (!query || !response) return "Error: query and response are required";
-      try {
-        const { judgeResponse: judgeResponse2 } = await Promise.resolve().then(() => (init_agent_judge(), agent_judge_exports));
-        const result = await judgeResponse2(
-          query,
-          response,
-          args.context,
-          args.provider ?? "deepseek"
-        );
-        const s = result.score;
-        return `PRISM Score: ${s.aggregate}/10 (${result.duration_ms}ms)
-  P-Precision:   ${s.precision}/10
-  R-Reasoning:   ${s.reasoning}/10
-  I-Information:  ${s.information}/10
-  S-Safety:      ${s.safety}/10
-  M-Methodology: ${s.methodology}/10
-
-${s.explanation}`;
-      } catch (err) {
-        return `Agent judge failed: ${err}`;
-      }
-    }
-    case "forge_tool": {
-      const toolName = args.name;
-      const purpose = args.purpose;
-      if (!toolName || !purpose) return "Error: name and purpose are required";
-      try {
-        const { forgeTool: forgeTool2, verifyForgedTool: verifyForgedTool2 } = await Promise.resolve().then(() => (init_skill_forge(), skill_forge_exports));
-        const handlerType = args.handler_type ?? "llm-generate";
-        const config2 = {};
-        if (args.backend_tool) config2.backend_tool = args.backend_tool;
-        if (args.system_prompt) config2.system_prompt = args.system_prompt;
-        if (args.cypher_template) config2.cypher_template = args.cypher_template;
-        const result = await forgeTool2(toolName, purpose, handlerType, config2);
-        if (result.action !== "created") return `Forge: ${result.message}`;
-        const shouldVerify = args.verify !== false;
-        let verifyMsg = "";
-        if (shouldVerify) {
-          const vResult = await verifyForgedTool2(toolName);
-          verifyMsg = `
-Verification: ${vResult.verified ? "PASSED" : "FAILED"} \u2014 ${vResult.result}`;
-        }
-        return `Forged tool "${toolName}" (${handlerType}, ${result.duration_ms}ms)${verifyMsg}
-Description: ${result.tool?.description}`;
-      } catch (err) {
-        return `Forge failed: ${err}`;
-      }
-    }
-    case "forge_analyze_gaps": {
-      try {
-        const { analyzeToolGaps: analyzeToolGaps2 } = await Promise.resolve().then(() => (init_skill_forge(), skill_forge_exports));
-        const analysis = await analyzeToolGaps2(args.provider ?? "deepseek");
-        if (analysis.gaps.length === 0) return `No gaps found (${analysis.total_calls_analyzed} calls analyzed)`;
-        const gapLines = analysis.gaps.map((g) => `- ${g.pattern} (freq: ${g.frequency}): ${g.suggestion}`);
-        return `Gap Analysis (${analysis.total_calls_analyzed} calls, ${(analysis.failure_rate * 100).toFixed(1)}% failure rate):
-${gapLines.join("\n")}`;
-      } catch (err) {
-        return `Gap analysis failed: ${err}`;
-      }
-    }
-    case "forge_list": {
-      try {
-        const { getForgedTools: getForgedTools2 } = await Promise.resolve().then(() => (init_skill_forge(), skill_forge_exports));
-        const tools = getForgedTools2();
-        if (tools.length === 0) return "No forged tools. Use forge_tool to create one.";
-        return `${tools.length} forged tools:
-${tools.map((t) => `- ${t.name} (${t.handler_type}, ${t.verified ? "verified" : "unverified"}) \u2014 ${t.description.slice(0, 80)}`).join("\n")}`;
-      } catch (err) {
-        return `List failed: ${err}`;
-      }
-    }
-    default: {
-      try {
-        const { hasForgedTool: hasForgedTool2, executeForgedTool: executeForgedTool2 } = await Promise.resolve().then(() => (init_skill_forge(), skill_forge_exports));
-        if (hasForgedTool2(name)) {
-          return await executeForgedTool2(name, args);
-        }
-      } catch {
-      }
-      return `Unknown tool: ${name}`;
-    }
-  }
-}
+init_tool_executor();
 
 // src/adoption-telemetry.ts
 init_redis();
@@ -20528,12 +20607,21 @@ function isoWeek() {
 var ADVANCED_TOOLS = new Set(
   TOOL_REGISTRY.filter((t) => t.namespace === "intelligence").map((t) => t.name)
 );
+var lastErrorLog = /* @__PURE__ */ new Map();
+var ERROR_THROTTLE_MS = 5 * 60 * 1e3;
 function recordToolCall(toolName) {
   const redis2 = getRedis();
   if (!redis2) return;
   const windowKey = `orchestrator:telemetry:window:${isoWeek()}`;
   const now = (/* @__PURE__ */ new Date()).toISOString();
-  redis2.pipeline().zincrby(KEY_CALLS, 1, toolName).zincrby(windowKey, 1, toolName).expire(windowKey, WINDOW_TTL).hset(KEY_LAST, toolName, now).exec().catch((err) => logger.warn({ err: String(err), tool: toolName }, "telemetry: Redis write failed"));
+  redis2.pipeline().zincrby(KEY_CALLS, 1, toolName).zincrby(windowKey, 1, toolName).expire(windowKey, WINDOW_TTL).hset(KEY_LAST, toolName, now).exec().catch((err) => {
+    const nowMs = Date.now();
+    const last = lastErrorLog.get(toolName) ?? 0;
+    if (nowMs - last > ERROR_THROTTLE_MS) {
+      lastErrorLog.set(toolName, nowMs);
+      logger.warn({ err: String(err), tool: toolName }, "telemetry: Redis write failed (throttled)");
+    }
+  });
 }
 async function computeTelemetry() {
   const redis2 = getRedis();
@@ -27041,9 +27129,10 @@ async function runFullHarvest() {
 
 // src/routes/openai-compat.ts
 init_llm_proxy();
-import { Router as Router21 } from "express";
+init_tool_executor();
 init_logger();
 init_config();
+import { Router as Router21 } from "express";
 import { v4 as uuid26 } from "uuid";
 var MAX_TOOL_ROUNDS = 2;
 var MAX_TOOL_ROUNDS_ASSISTANT = 4;
@@ -28213,11 +28302,12 @@ openapiRouter.use("/docs", swaggerUi.serve, swaggerUi.setup(spec, {
 }));
 
 // src/routes/mcp-gateway.ts
-import { Router as Router24 } from "express";
+init_tool_executor();
 init_tool_registry();
 init_mcp_caller();
 init_config();
 init_logger();
+import { Router as Router24 } from "express";
 import { v4 as uuid27 } from "uuid";
 var mcpGatewayRouter = Router24();
 var backendToolsCache = [];
@@ -28431,9 +28521,10 @@ mcpGatewayRouter.delete("/", (_req, res) => {
 });
 
 // src/routes/tool-gateway.ts
-import { Router as Router25 } from "express";
+init_tool_executor();
 init_tool_registry();
 init_logger();
+import { Router as Router25 } from "express";
 import { v4 as uuid28 } from "uuid";
 var toolGatewayRouter = Router25();
 toolGatewayRouter.post("/:name", async (req, res) => {
@@ -31227,8 +31318,9 @@ memoryRouter.delete("/:agent_id", async (req, res) => {
 
 // src/routes/abi-docs.ts
 init_tool_registry();
-import { Router as Router38 } from "express";
+init_tool_executor();
 init_logger();
+import { Router as Router38 } from "express";
 var abiDocsRouter = Router38();
 abiDocsRouter.get("/docs", (_req, res) => {
   const namespace = _req.query.namespace ?? void 0;
@@ -31865,6 +31957,8 @@ app.use((err, _req, res, _next) => {
   });
 });
 async function boot() {
+  const { validateOrThrow: validateOrThrow2 } = await Promise.resolve().then(() => (init_startup_validator(), startup_validator_exports));
+  await validateOrThrow2();
   await initRedis();
   await AgentRegistry.hydrate();
   seedAgents();

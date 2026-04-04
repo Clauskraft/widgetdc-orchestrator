@@ -1,0 +1,19 @@
+#!/bin/sh
+# Bulletproof W2: Pre-commit adoption gate
+# Runs fast CI checks (no build, no ABI) on every commit.
+# Blocks commits with registry↔executor drift, missing tests, or missing docs.
+#
+# Install: cp scripts/git-hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# Or:      git config core.hooksPath scripts/git-hooks
+
+echo "🔒 Pre-commit adoption gate..."
+node scripts/ci-adoption-check.mjs --no-build --no-abi
+
+if [ $? -ne 0 ]; then
+  echo ""
+  echo "❌ Pre-commit blocked: adoption gate failed."
+  echo "   Fix the issues above, or bypass with: git commit --no-verify"
+  exit 1
+fi
+
+echo "✅ Pre-commit adoption gate passed"

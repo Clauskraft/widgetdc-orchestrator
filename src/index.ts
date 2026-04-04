@@ -329,6 +329,12 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 
 // ─── Boot ────────────────────────────────────────────────────────────────────
 async function boot() {
+  // Bulletproof W1: Fail-fast startup validation — registry↔executor parity
+  // If any tool in TOOL_REGISTRY has no executor case, refuse to start.
+  // Catches regressions like missing imports, broken switch statements.
+  const { validateOrThrow } = await import('./startup-validator.js')
+  await validateOrThrow()
+
   await initRedis()
   await AgentRegistry.hydrate()
   seedAgents()

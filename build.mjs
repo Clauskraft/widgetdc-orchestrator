@@ -13,6 +13,34 @@ if (!existsSync(contractsDist)) {
   process.exit(1)
 }
 
+// Bulletproof W3: Build-time tool registry ↔ executor parity check
+// Fail fast if new tools added to registry without matching executor case.
+const registrySource = readFileSync('./src/tool-registry.ts', 'utf8')
+const executorSource = readFileSync('./src/tool-executor.ts', 'utf8')
+
+// Extract tool names from defineTool({ name: 'x', ... }) blocks
+const registryNames = new Set()
+const toolBlocks = registrySource.split('defineTool({').slice(1)
+for (const block of toolBlocks) {
+  const m = block.match(/^\s*name:\s*['"]([a-z_]+)['"]/)
+  if (m) registryNames.add(m[1])
+}
+
+// Extract case labels from tool-executor (case 'x':)
+const executorNames = new Set()
+const caseMatches = executorSource.matchAll(/^\s*case\s+['"]([a-z_]+)['"]\s*:/gm)
+for (const m of caseMatches) executorNames.add(m[1])
+
+const missingExecutor = [...registryNames].filter(n => !executorNames.has(n))
+if (missingExecutor.length > 0) {
+  console.error('❌ Build-time parity check FAILED')
+  console.error('   Registry has', registryNames.size, 'tools, executor has', executorNames.size, 'cases')
+  console.error('   Missing executor cases for:', missingExecutor.join(', '))
+  console.error('   Fix: add case handlers in src/tool-executor.ts')
+  process.exit(1)
+}
+console.log(`✓ Build parity: ${registryNames.size} tools ↔ ${executorNames.size} executor cases`)
+
 const pkg = JSON.parse(readFileSync('./package.json', 'utf8'))
 const PKG_VERSION = pkg.version
 

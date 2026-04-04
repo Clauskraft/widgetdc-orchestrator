@@ -41,6 +41,10 @@ const ADVANCED_TOOLS = new Set(
 
 // ─── recordToolCall — call site hook ────────────────────────────────────────
 
+// Bulletproof W4: Throttled error logging (max 1 warning per 5 min per tool)
+const lastErrorLog = new Map<string, number>()
+const ERROR_THROTTLE_MS = 5 * 60 * 1000
+
 /**
  * Increment call counters for a tool.  Fire-and-forget (errors are logged,
  * never thrown — the tool call itself has already succeeded by this point).
@@ -58,7 +62,15 @@ export function recordToolCall(toolName: string): void {
     .expire(windowKey, WINDOW_TTL)
     .hset(KEY_LAST, toolName, now)
     .exec()
-    .catch((err: unknown) => logger.warn({ err: String(err), tool: toolName }, 'telemetry: Redis write failed'))
+    .catch((err: unknown) => {
+      // Throttle: log each tool's error at most once per 5 min
+      const nowMs = Date.now()
+      const last = lastErrorLog.get(toolName) ?? 0
+      if (nowMs - last > ERROR_THROTTLE_MS) {
+        lastErrorLog.set(toolName, nowMs)
+        logger.warn({ err: String(err), tool: toolName }, 'telemetry: Redis write failed (throttled)')
+      }
+    })
 }
 
 // ─── computeTelemetry — KPI calculation ─────────────────────────────────────
