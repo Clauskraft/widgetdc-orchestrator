@@ -284,8 +284,14 @@ export async function createEngagement(req: CreateEngagementRequest): Promise<En
   }
 
   await saveEngagement(e)
-  // Fire-and-forget: Neo4j node + raptor index (non-blocking)
-  mergeEngagementNode(e).catch(() => {})
+  // Await Neo4j MERGE to prevent race condition where recordOutcome runs before
+  // the engagement node exists — caused seed-script to lose 24/25 outcomes.
+  // raptor.index remains fire-and-forget (non-critical, idempotent).
+  try {
+    await mergeEngagementNode(e)
+  } catch (err) {
+    logger.warn({ id: e.$id, error: String(err) }, 'Engagement: Neo4j MERGE await failed — non-blocking')
+  }
   indexEngagementForPrecedent(e).catch(() => {})
 
   logger.info({ id: e.$id, client: e.client, domain: e.domain }, 'Engagement: created')

@@ -29727,8 +29727,11 @@ async function createEngagement(req) {
     updated_at: now
   };
   await saveEngagement(e);
-  mergeEngagementNode(e).catch(() => {
-  });
+  try {
+    await mergeEngagementNode(e);
+  } catch (err) {
+    logger.warn({ id: e.$id, error: String(err) }, "Engagement: Neo4j MERGE await failed \u2014 non-blocking");
+  }
   indexEngagementForPrecedent(e).catch(() => {
   });
   logger.info({ id: e.$id, client: e.client, domain: e.domain }, "Engagement: created");
