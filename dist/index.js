@@ -28496,10 +28496,10 @@ var AGENT_SEEDS = [
     agent_id: "omega",
     display_name: "Omega Sentinel",
     source: "core",
-    version: "2.0",
+    version: "3.0",
     status: "online",
-    capabilities: ["sitrep", "compliance", "circuit_breakers", "swarm", "pheromones", "architecture"],
-    allowed_tool_namespaces: ["omega", "audit", "graph", "*"]
+    capabilities: ["sitrep", "compliance", "circuit_breakers", "swarm", "pheromones", "architecture", "adoption_audit", "integrity_scoring", "judge_response"],
+    allowed_tool_namespaces: ["omega", "audit", "graph", "intelligence", "*"]
   },
   {
     agent_id: "trident",
@@ -28523,10 +28523,10 @@ var AGENT_SEEDS = [
     agent_id: "master",
     display_name: "Master Orchestrator",
     source: "core",
-    version: "1.0",
+    version: "3.0",
     status: "online",
-    capabilities: ["delegation", "introspection", "task_management", "agent_coordination"],
-    allowed_tool_namespaces: ["master", "agent", "action", "*"]
+    capabilities: ["delegation", "introspection", "task_management", "agent_coordination", "moa_routing", "skill_forging", "critique_refine"],
+    allowed_tool_namespaces: ["master", "agent", "action", "intelligence", "*"]
   },
   {
     agent_id: "harvest",
@@ -28550,19 +28550,19 @@ var AGENT_SEEDS = [
     agent_id: "graph",
     display_name: "Neo4j Graph Agent",
     source: "core",
-    version: "1.0",
+    version: "3.0",
     status: "online",
-    capabilities: ["cypher_read", "cypher_write", "graph_search", "graph_stats", "hygiene"],
-    allowed_tool_namespaces: ["graph", "kg_rag", "srag", "*"]
+    capabilities: ["cypher_read", "cypher_write", "graph_search", "graph_stats", "hygiene", "graph_hygiene_run", "self_correct", "community_detection", "build_communities"],
+    allowed_tool_namespaces: ["graph", "kg_rag", "srag", "monitor", "*"]
   },
   {
     agent_id: "consulting",
     display_name: "Consulting Intelligence",
     source: "core",
-    version: "1.0",
+    version: "3.0",
     status: "online",
-    capabilities: ["insight_search", "pattern_search", "failure_search"],
-    allowed_tool_namespaces: ["consulting", "vidensarkiv", "kg_rag", "*"]
+    capabilities: ["insight_search", "pattern_search", "failure_search", "precedent_search", "generate_deliverable", "ingest_document"],
+    allowed_tool_namespaces: ["consulting", "vidensarkiv", "kg_rag", "knowledge", "assembly", "*"]
   },
   {
     agent_id: "legal",
@@ -28595,10 +28595,10 @@ var AGENT_SEEDS = [
     agent_id: "rlm",
     display_name: "RLM Reasoning Engine",
     source: "rlm-engine",
-    version: "7.0.0",
+    version: "7.1.5",
     status: "online",
-    capabilities: ["reasoning", "planning", "context_folding", "missions", "rag"],
-    allowed_tool_namespaces: ["rlm", "context_folding", "specialist", "*"]
+    capabilities: ["reasoning", "planning", "context_folding", "missions", "rag", "adaptive_rag_query", "critique_refine", "judge_response"],
+    allowed_tool_namespaces: ["rlm", "context_folding", "specialist", "intelligence", "knowledge", "*"]
   },
   {
     agent_id: "llm-router",
@@ -28631,18 +28631,18 @@ var AGENT_SEEDS = [
     agent_id: "autonomous",
     display_name: "Autonomous Swarm",
     source: "core",
-    version: "1.0",
+    version: "3.0",
     status: "online",
-    capabilities: ["graphrag", "stategraph", "evolution", "agent_teams"],
-    allowed_tool_namespaces: ["autonomous", "loop", "*"]
+    capabilities: ["graphrag", "stategraph", "evolution", "agent_teams", "moa_routing", "forge_tool", "run_evolution"],
+    allowed_tool_namespaces: ["autonomous", "loop", "intelligence", "chains", "*"]
   },
   {
     agent_id: "cma",
     display_name: "Context Memory Agent",
     source: "core",
-    version: "1.0",
+    version: "3.0",
     status: "online",
-    capabilities: ["context_management", "memory_store", "memory_retrieve"],
+    capabilities: ["context_management", "memory_store", "memory_retrieve", "working_memory", "blackboard", "checkpoint_saver"],
     allowed_tool_namespaces: ["cma", "*"]
   },
   {
