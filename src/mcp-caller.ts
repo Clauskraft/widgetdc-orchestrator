@@ -13,7 +13,7 @@
  */
 import type { OrchestratorToolResult } from '@widgetdc/contracts/orchestrator'
 import { config } from './config.js'
-import { childLogger } from './logger.js'
+import { childLogger, logger } from './logger.js'
 import { validateBeforeMerge } from './write-gate.js'
 import { withMcpSpan } from './tracing.js'
 
