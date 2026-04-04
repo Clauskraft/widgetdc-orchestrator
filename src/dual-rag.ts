@@ -79,10 +79,10 @@ function classifyQuery(query: string): QueryComplexity {
 
 // ─── Channel Callers ────────────────────────────────────────────────────────
 
-async function callGraphRAG(query: string, maxResults: number): Promise<RAGResult[]> {
+async function callGraphRAG(query: string, maxResults: number, maxHops = 2): Promise<RAGResult[]> {
   const result = await callMcpTool({
     toolName: 'autonomous.graphrag',
-    args: { query, maxHops: 2 },
+    args: { query, maxHops },
     callId: uuid(),
     timeoutMs: 60000, // graphrag is slower but higher quality
   })
@@ -217,10 +217,12 @@ export async function dualChannelRAG(query: string, options?: {
   cypherDepth?: number
   includePatterns?: boolean
   forceChannels?: ('graphrag' | 'srag' | 'cypher')[]
+  maxHops?: number  // v4.0.2: autonomous.graphrag hop depth (default 2, 3 for deep reasoning)
 }): Promise<DualRAGResponse> {
   const t0 = Date.now()
   const maxResults = options?.maxResults ?? 10
   const depth = options?.cypherDepth ?? 2
+  const maxHops = options?.maxHops ?? 2
   const complexity = classifyQuery(query)
 
   logger.info({ query: query.slice(0, 80), complexity }, 'Hybrid RAG: routing query')
@@ -231,7 +233,7 @@ export async function dualChannelRAG(query: string, options?: {
   const channelsUsed: string[] = []
 
   if (channels.includes('graphrag')) {
-    channelPromises.push(callGraphRAG(query, maxResults))
+    channelPromises.push(callGraphRAG(query, maxResults, maxHops))
     channelsUsed.push('graphrag')
   }
   if (channels.includes('srag')) {

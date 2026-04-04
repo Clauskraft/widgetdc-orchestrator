@@ -10531,10 +10531,10 @@ function classifyQuery(query) {
   }
   return "simple";
 }
-async function callGraphRAG(query, maxResults) {
+async function callGraphRAG(query, maxResults, maxHops = 2) {
   const result = await callMcpTool({
     toolName: "autonomous.graphrag",
-    args: { query, maxHops: 2 },
+    args: { query, maxHops },
     callId: uuid3(),
     timeoutMs: 6e4
     // graphrag is slower but higher quality
@@ -10632,13 +10632,14 @@ async function dualChannelRAG(query, options) {
   const t0 = Date.now();
   const maxResults = options?.maxResults ?? 10;
   const depth = options?.cypherDepth ?? 2;
+  const maxHops = options?.maxHops ?? 2;
   const complexity = classifyQuery(query);
   logger.info({ query: query.slice(0, 80), complexity }, "Hybrid RAG: routing query");
   const channels = options?.forceChannels ?? await getChannelsForComplexity(complexity);
   const channelPromises = [];
   const channelsUsed = [];
   if (channels.includes("graphrag")) {
-    channelPromises.push(callGraphRAG(query, maxResults));
+    channelPromises.push(callGraphRAG(query, maxResults, maxHops));
     channelsUsed.push("graphrag");
   }
   if (channels.includes("srag")) {
@@ -29733,28 +29734,100 @@ async function createEngagement(req) {
   logger.info({ id: e.$id, client: e.client, domain: e.domain }, "Engagement: created");
   return e;
 }
+var STALE_PRECEDENT_DAYS = 540;
 async function matchPrecedents(req) {
   const t0 = Date.now();
   const maxResults = Math.min(req.max_results ?? 5, 20);
-  const query = `${req.domain} consulting engagement: ${req.objective}`;
-  let rag;
-  try {
-    rag = await dualChannelRAG(query, { maxResults: maxResults * 2, queryType: "multi_hop" });
-  } catch (err) {
-    logger.warn({ error: String(err) }, "Engagement match: dualChannelRAG failed");
-    return { matches: [], query_ms: Date.now() - t0 };
+  const cypherMatches = await matchEngagementsViaCypher(req, maxResults * 2);
+  let ragMatches = [];
+  if (cypherMatches.length < maxResults) {
+    try {
+      const rag = await dualChannelRAG(
+        `${req.domain} consulting engagement: ${req.objective}`,
+        { maxResults: maxResults * 2, maxHops: 3 }
+      );
+      ragMatches = rag.results.filter((r) => r.score >= 0.5 && !cypherMatches.some((c) => c.engagement_id === r.source)).slice(0, maxResults - cypherMatches.length).map((r) => ({
+        engagement_id: r.source,
+        title: r.content.slice(0, 120),
+        domain: req.domain,
+        similarity: Number(r.score.toFixed(3)),
+        match_reasoning: `Semantic similarity ${(r.score * 100).toFixed(0)}% (fallback \u2014 no direct engagement node matched)`,
+        stale: false
+      }));
+    } catch (err) {
+      logger.warn({ error: String(err) }, "Engagement match: RAG fallback failed");
+    }
   }
-  const matches = rag.results.filter((r) => r.score >= 0.3).slice(0, maxResults).map((r) => ({
-    engagement_id: r.source,
-    title: r.content.slice(0, 120),
-    domain: req.domain,
-    similarity: Number(r.score.toFixed(3)),
-    match_reasoning: `Graph similarity ${(r.score * 100).toFixed(0)}% via ${r.source.startsWith("eng-") ? "engagement precedent" : "methodology knowledge"}`,
-    stale: false
-    // TODO: compare against createdAt once outcome data exists
-  }));
-  logger.info({ query: req.objective.slice(0, 60), count: matches.length, ms: Date.now() - t0 }, "Engagement: precedents matched");
+  const matches = [...cypherMatches, ...ragMatches].slice(0, maxResults);
+  logger.info(
+    { query: req.objective.slice(0, 60), cypher: cypherMatches.length, rag: ragMatches.length, total: matches.length, ms: Date.now() - t0 },
+    "Engagement: precedents matched"
+  );
   return { matches, query_ms: Date.now() - t0 };
+}
+async function matchEngagementsViaCypher(req, limit) {
+  try {
+    const result = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: `MATCH (e:Engagement)
+WHERE e.domain = $domain OR toLower(e.domain) CONTAINS toLower($domain)
+OPTIONAL MATCH (e)-[:HAS_OUTCOME]->(o:EngagementOutcome)
+OPTIONAL MATCH (e)-[:USES_METHODOLOGY]->(m)
+WITH e, o, collect(DISTINCT coalesce(m.title, m.name)) AS methodologies
+RETURN e.id AS id,
+       e.client AS client,
+       e.objective AS objective,
+       e.domain AS domain,
+       e.startDate AS startDate,
+       e.targetEndDate AS targetEndDate,
+       e.status AS status,
+       o.grade AS outcomeGrade,
+       o.precedentAccuracy AS precedentAccuracy,
+       methodologies,
+       duration.inDays(datetime(coalesce(e.startDate, datetime())), datetime()).days AS ageDays
+ORDER BY
+  CASE o.grade WHEN 'exceeded' THEN 0 WHEN 'met' THEN 1 WHEN 'partial' THEN 2 WHEN 'missed' THEN 3 ELSE 4 END,
+  ageDays ASC
+LIMIT $limit`,
+        params: { domain: req.domain, limit }
+      },
+      callId: uuid30(),
+      timeoutMs: 15e3
+    });
+    if (result.status !== "success") return [];
+    const data = result.result;
+    const rows = data?.results ?? data?.rows ?? data ?? [];
+    if (!Array.isArray(rows) || rows.length === 0) return [];
+    const objectiveLower = req.objective.toLowerCase();
+    return rows.map((row) => {
+      const client = String(row.client ?? "Unknown");
+      const objective = String(row.objective ?? "");
+      const grade = row.outcomeGrade ?? null;
+      const methodologies = Array.isArray(row.methodologies) ? row.methodologies : [];
+      const ageDays = Number(row.ageDays ?? 0);
+      const stale = ageDays > STALE_PRECEDENT_DAYS;
+      const gradeWeight = grade === "exceeded" ? 0.3 : grade === "met" ? 0.25 : grade === "partial" ? 0.15 : grade === "missed" ? 0.05 : 0.1;
+      const objWords = new Set(objectiveLower.split(/\W+/).filter((w) => w.length > 3));
+      const targetWords = (objective + " " + methodologies.join(" ")).toLowerCase().split(/\W+/);
+      const overlap = targetWords.filter((w) => objWords.has(w)).length;
+      const overlapScore = Math.min(0.5, overlap * 0.08);
+      const freshness = stale ? 0 : Math.max(0, 0.2 - ageDays / STALE_PRECEDENT_DAYS * 0.2);
+      const similarity = Math.min(0.99, gradeWeight + overlapScore + freshness);
+      return {
+        engagement_id: String(row.id ?? "unknown"),
+        title: `${client} \u2014 ${objective.slice(0, 80)}`,
+        domain: String(row.domain ?? req.domain),
+        similarity: Number(similarity.toFixed(3)),
+        match_reasoning: `Cypher match: ${grade ?? "no outcome"} grade, ${methodologies.length} shared methodologies, ${ageDays}d old${stale ? " (STALE)" : ""}`,
+        precedent_outcome: grade ?? void 0,
+        stale
+      };
+    });
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Cypher precedent match failed");
+    return [];
+  }
 }
 async function queryKgRag(query, maxEvidence = 10) {
   try {
@@ -29806,8 +29879,8 @@ async function generatePlan(req) {
   const engagementId = req.engagement_id ?? `eng-${uuid30()}`;
   const [precedents, methodologyBundle, riskBundle, kgRagBundle] = await Promise.all([
     matchPrecedents({ objective: req.objective, domain: req.domain, max_results: 5 }),
-    dualChannelRAG(`consulting methodology framework for ${req.domain} ${req.objective}`, { maxResults: 5 }),
-    dualChannelRAG(`risks challenges pitfalls for ${req.domain} consulting engagement ${req.objective}`, { maxResults: 5 }),
+    dualChannelRAG(`consulting methodology framework for ${req.domain} ${req.objective}`, { maxResults: 5, maxHops: 3 }),
+    dualChannelRAG(`risks challenges pitfalls for ${req.domain} consulting engagement ${req.objective}`, { maxResults: 5, maxHops: 3 }),
     queryKgRag(`${req.domain} engagement approach: ${req.objective}`, 8)
   ]);
   let methodologyEvidence = methodologyBundle.results.map((r) => r.content).join("\n\n").slice(0, 3500);
