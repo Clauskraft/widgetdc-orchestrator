@@ -1225,11 +1225,15 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
           timeoutMs: 25000,
         })
         if (result.status !== 'success') return `Folding failed: ${result.error_message}`
+        // Backend returns: { folded_context, summary, original_tokens, folded_tokens, compression_ratio, strategy }
         const data = result.result as Record<string, unknown> | null
-        const folded = data?.compressed_text ?? data?.folded_text ?? data?.result
-        const ratio = data?.compression_ratio ?? 'unknown'
-        const strategy = data?.strategy_used ?? 'auto'
-        return `Folded (${strategy}, ratio: ${ratio}):\n\n${typeof folded === 'string' ? folded : JSON.stringify(folded)}`
+        if (!data || data.success === false) return `Folding failed: ${JSON.stringify(data).slice(0, 200)}`
+        const summary = typeof data.summary === 'string' ? data.summary : JSON.stringify(data.folded_context ?? data)
+        const ratio = data.compression_ratio ?? 'unknown'
+        const strategy = data.strategy ?? 'auto'
+        const originalTokens = data.original_tokens ?? 0
+        const foldedTokens = data.folded_tokens ?? 0
+        return `Folded (${strategy}, ${originalTokens}→${foldedTokens} tokens, ratio: ${ratio}):\n\n${summary}`
       } catch (err) {
         return `Context fold failed: ${err instanceof Error ? err.message : String(err)}`
       }

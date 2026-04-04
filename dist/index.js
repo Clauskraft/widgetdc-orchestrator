@@ -17797,12 +17797,15 @@ ${entries.map((e) => `- ${e.key}`).join("\n")}`;
         });
         if (result.status !== "success") return `Folding failed: ${result.error_message}`;
         const data = result.result;
-        const folded = data?.compressed_text ?? data?.folded_text ?? data?.result;
-        const ratio = data?.compression_ratio ?? "unknown";
-        const strategy = data?.strategy_used ?? "auto";
-        return `Folded (${strategy}, ratio: ${ratio}):
+        if (!data || data.success === false) return `Folding failed: ${JSON.stringify(data).slice(0, 200)}`;
+        const summary = typeof data.summary === "string" ? data.summary : JSON.stringify(data.folded_context ?? data);
+        const ratio = data.compression_ratio ?? "unknown";
+        const strategy = data.strategy ?? "auto";
+        const originalTokens = data.original_tokens ?? 0;
+        const foldedTokens = data.folded_tokens ?? 0;
+        return `Folded (${strategy}, ${originalTokens}\u2192${foldedTokens} tokens, ratio: ${ratio}):
 
-${typeof folded === "string" ? folded : JSON.stringify(folded)}`;
+${summary}`;
       } catch (err) {
         return `Context fold failed: ${err instanceof Error ? err.message : String(err)}`;
       }
