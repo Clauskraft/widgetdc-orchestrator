@@ -29787,15 +29787,19 @@ RETURN e.id AS id,
 ORDER BY
   CASE o.grade WHEN 'exceeded' THEN 0 WHEN 'met' THEN 1 WHEN 'partial' THEN 2 WHEN 'missed' THEN 3 ELSE 4 END,
   e.startDate DESC
-LIMIT $limit`,
-        params: { domain: req.domain, limit }
+LIMIT ${Math.floor(limit)}`,
+        params: { domain: req.domain }
       },
       callId: uuid30(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return [];
     const data = result.result;
-    const rows = data?.results ?? data?.rows ?? data ?? [];
+    if (!data || data.success === false) {
+      logger.warn({ error: data?.error }, "Cypher precedent match: backend returned error");
+      return [];
+    }
+    const rows = data?.results ?? data?.rows ?? [];
     if (!Array.isArray(rows) || rows.length === 0) return [];
     const objectiveLower = req.objective.toLowerCase();
     const now = Date.now();

@@ -372,15 +372,20 @@ RETURN e.id AS id,
 ORDER BY
   CASE o.grade WHEN 'exceeded' THEN 0 WHEN 'met' THEN 1 WHEN 'partial' THEN 2 WHEN 'missed' THEN 3 ELSE 4 END,
   e.startDate DESC
-LIMIT $limit`,
-        params: { domain: req.domain, limit },
+LIMIT ${Math.floor(limit)}`,
+        params: { domain: req.domain },
       },
       callId: uuid(),
       timeoutMs: 15000,
     })
     if (result.status !== 'success') return []
     const data = result.result as Record<string, unknown> | null
-    const rows = (data?.results ?? data?.rows ?? data ?? []) as Array<Record<string, unknown>>
+    // Backend wraps as { success, results, count, query, _upgrade_hint }. Check inner success.
+    if (!data || (data as Record<string, unknown>).success === false) {
+      logger.warn({ error: (data as Record<string, unknown>)?.error }, 'Cypher precedent match: backend returned error')
+      return []
+    }
+    const rows = (data?.results ?? data?.rows ?? []) as Array<Record<string, unknown>>
     if (!Array.isArray(rows) || rows.length === 0) return []
 
     const objectiveLower = req.objective.toLowerCase()
