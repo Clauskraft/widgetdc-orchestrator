@@ -28383,6 +28383,9 @@ toolGatewayRouter.post("/:name", async (req, res) => {
     source_protocol: "openapi",
     fold: req.query.fold !== "false"
   });
+  if (result.status === "success") {
+    recordToolCall(name);
+  }
   const httpStatus = result.status === "success" ? 200 : result.status === "timeout" ? 504 : 500;
   res.status(httpStatus).json({
     success: result.status === "success",
@@ -29480,7 +29483,6 @@ init_mcp_caller();
 init_dual_rag();
 init_redis();
 init_logger();
-init_config();
 init_adaptive_rag();
 import { v4 as uuid30 } from "uuid";
 var REDIS_PREFIX8 = "orchestrator:engagement:";
@@ -29677,43 +29679,6 @@ async function matchPrecedents(req) {
   }));
   logger.info({ query: req.objective.slice(0, 60), count: matches.length, ms: Date.now() - t0 }, "Engagement: precedents matched");
   return { matches, query_ms: Date.now() - t0 };
-}
-async function callRlmAnalyze(task, context, constraints, timeoutMs = 6e4) {
-  if (!config.rlmUrl) return null;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(`${config.rlmUrl}/cognitive/analyze`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
-      },
-      body: JSON.stringify({
-        task,
-        context,
-        analysis_dimensions: [
-          "phase_breakdown",
-          "resource_allocation",
-          "methodology_integration",
-          "key_challenges_and_mitigations"
-        ],
-        constraints,
-        agent_id: "engagement-planner"
-      }),
-      signal: controller.signal
-    });
-    if (!res.ok) {
-      logger.warn({ status: res.status }, "RLM /cognitive/analyze non-OK");
-      return null;
-    }
-    return await res.json();
-  } catch (err) {
-    logger.debug({ error: String(err) }, "RLM /cognitive/analyze failed");
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
 }
 async function generatePlan(req) {
   const t0 = Date.now();

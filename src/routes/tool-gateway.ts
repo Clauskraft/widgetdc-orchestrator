@@ -13,6 +13,7 @@ import { Router, Request, Response } from 'express'
 import { executeToolUnified } from '../tool-executor.js'
 import { getTool, TOOL_REGISTRY } from '../tool-registry.js'
 import { logger } from '../logger.js'
+import { recordToolCall } from '../adoption-telemetry.js'
 import { v4 as uuid } from 'uuid'
 
 export const toolGatewayRouter = Router()
@@ -50,6 +51,11 @@ toolGatewayRouter.post('/:name', async (req: Request, res: Response) => {
     source_protocol: 'openapi',
     fold: req.query.fold !== 'false',
   })
+
+  // Adoption telemetry: record successful tool calls (fire-and-forget)
+  if (result.status === 'success') {
+    recordToolCall(name)
+  }
 
   const httpStatus = result.status === 'success' ? 200
     : result.status === 'timeout' ? 504
