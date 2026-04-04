@@ -43,8 +43,8 @@ export interface AdaptiveWeights {
 // ─── Default Weights (matching current dual-rag.ts) ─────────────────────────
 
 const DEFAULT_WEIGHTS: AdaptiveWeights = {
-  simple_channels: ['graphrag', 'srag'],
-  multi_hop_channels: ['graphrag', 'cypher', 'community'],
+  simple_channels: ['graphrag', 'srag', 'cypher'],
+  multi_hop_channels: ['graphrag', 'cypher', 'community', 'srag'],
   structured_channels: ['cypher', 'graphrag'],
   confidence_threshold: 0.4,
   updated_at: new Date().toISOString(),
@@ -148,13 +148,17 @@ export async function retrainRoutingWeights(): Promise<{
   const newWeights = { ...cachedWeights }
 
   for (const s of stats) {
-    // Rule 1: If a strategy has >30% zero-result rate, add srag as fallback
+    // Rule 1: If a strategy has >30% zero-result rate, ensure cypher + srag are present
     if (s.zero_result_rate > 0.3) {
       const channelKey = `${s.strategy}_channels` as keyof AdaptiveWeights
       const channels = newWeights[channelKey]
-      if (Array.isArray(channels) && !channels.includes('srag')) {
-        (channels as string[]).push('srag')
-        adjustments.push(`${s.strategy}: added srag fallback (${(s.zero_result_rate * 100).toFixed(0)}% zero-result rate)`)
+      if (Array.isArray(channels)) {
+        for (const fallback of ['cypher', 'srag']) {
+          if (!channels.includes(fallback)) {
+            (channels as string[]).push(fallback)
+            adjustments.push(`${s.strategy}: added ${fallback} fallback (${(s.zero_result_rate * 100).toFixed(0)}% zero-result rate)`)
+          }
+        }
       }
     }
 

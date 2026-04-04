@@ -335,12 +335,13 @@ async function getChannelsForComplexity(complexity: QueryComplexity): Promise<('
     }
   } catch { /* fallback to defaults */ }
 
-  // Default routing (pre-training)
+  // Default routing — cypher is ALWAYS included (most reliable channel)
+  // graphrag and srag are backend-dependent and may return empty
   switch (complexity) {
     case 'simple':
-      return ['graphrag', 'srag']
+      return ['graphrag', 'srag', 'cypher']
     case 'multi_hop':
-      return ['graphrag', 'cypher']
+      return ['graphrag', 'cypher', 'srag']
     case 'structured':
       return ['cypher', 'graphrag']
   }

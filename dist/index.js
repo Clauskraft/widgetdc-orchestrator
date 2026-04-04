@@ -2155,9 +2155,13 @@ async function retrainRoutingWeights() {
     if (s.zero_result_rate > 0.3) {
       const channelKey = `${s.strategy}_channels`;
       const channels = newWeights[channelKey];
-      if (Array.isArray(channels) && !channels.includes("srag")) {
-        channels.push("srag");
-        adjustments.push(`${s.strategy}: added srag fallback (${(s.zero_result_rate * 100).toFixed(0)}% zero-result rate)`);
+      if (Array.isArray(channels)) {
+        for (const fallback of ["cypher", "srag"]) {
+          if (!channels.includes(fallback)) {
+            channels.push(fallback);
+            adjustments.push(`${s.strategy}: added ${fallback} fallback (${(s.zero_result_rate * 100).toFixed(0)}% zero-result rate)`);
+          }
+        }
       }
     }
     if (s.avg_confidence < 0.3) {
@@ -2248,8 +2252,8 @@ var init_adaptive_rag = __esm({
     init_cognitive_proxy();
     init_logger();
     DEFAULT_WEIGHTS = {
-      simple_channels: ["graphrag", "srag"],
-      multi_hop_channels: ["graphrag", "cypher", "community"],
+      simple_channels: ["graphrag", "srag", "cypher"],
+      multi_hop_channels: ["graphrag", "cypher", "community", "srag"],
       structured_channels: ["cypher", "graphrag"],
       confidence_threshold: 0.4,
       updated_at: (/* @__PURE__ */ new Date()).toISOString(),
@@ -2483,9 +2487,9 @@ async function getChannelsForComplexity(complexity) {
   }
   switch (complexity) {
     case "simple":
-      return ["graphrag", "srag"];
+      return ["graphrag", "srag", "cypher"];
     case "multi_hop":
-      return ["graphrag", "cypher"];
+      return ["graphrag", "cypher", "srag"];
     case "structured":
       return ["cypher", "graphrag"];
   }
