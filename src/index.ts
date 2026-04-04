@@ -15,6 +15,7 @@
  */
 import './tracing.js'  // OTel must be first (LIN-589)
 import 'dotenv/config'
+import rateLimit from 'express-rate-limit'
 
 // S1+S6: Build-time version injection (esbuild define)
 declare const __PKG_VERSION__: string
@@ -131,6 +132,19 @@ app.use(cors({
 app.use(express.json({ limit: '100kb' }))
 app.use(express.urlencoded({ extended: false }))
 
+// AEGIS fix: payload-too-large handler — return 413 instead of crashing to 500
+app.use((err: Error & { type?: string; status?: number }, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err.type === 'entity.too.large' || err.status === 413) {
+    res.status(413).json({ success: false, error: { code: 'PAYLOAD_TOO_LARGE', message: 'Request body exceeds 100kb limit', status_code: 413 } })
+    return
+  }
+  if (err.type === 'entity.parse.failed') {
+    res.status(400).json({ success: false, error: { code: 'INVALID_JSON', message: 'Request body is not valid JSON', status_code: 400 } })
+    return
+  }
+  next(err)
+})
+
 // F4: IP deny list — block known scanner ranges (env: IP_DENY_LIST, comma-separated CIDRs or IPs)
 const ipDenyRaw = process.env.IP_DENY_LIST ?? ''
 const ipDenyList = ipDenyRaw.split(',').map(s => s.trim()).filter(Boolean)
@@ -226,7 +240,22 @@ app.use('/api/abi', requireApiKey, abiHealthRouter)
 app.use('/api/abi', requireApiKey, abiVersioningRouter)
 
 // Tool Gateway — REST access to ALL orchestrator tools (Triple-Protocol ABI)
-app.use('/api/tools', requireApiKey, toolGatewayRouter)
+// AEGIS fix: rate limiter on /api/tools/* — prevent valid-key DoS / cost runaway
+const toolsRateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 120, // 120 req/min per API key (2/sec average, allows burst)
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    // Use API key as rate limit key (not IP — same key from different IPs = same budget)
+    const auth = req.headers.authorization ?? ''
+    const apiKey = req.headers['x-api-key'] as string ?? (req.query.api_key as string) ?? auth.replace(/^Bearer\s+/i, '')
+    return apiKey || (req.ip ?? 'unknown')
+  },
+  message: { success: false, error: { code: 'RATE_LIMITED', message: 'Too many tool calls — max 120/min per API key', status_code: 429 } },
+  skip: (req) => req.method === 'GET', // Only limit writes (POST); GET /api/tools list is fine
+})
+app.use('/api/tools', requireApiKey, toolsRateLimiter, toolGatewayRouter)
 
 // Prompt Generator (no auth — utility endpoint)
 app.use('/api/prompt-generator', promptGeneratorRouter)

@@ -470,12 +470,18 @@ export async function executeToolUnified(
   }
 }
 
+/** ENTROPY fix: clamp max_results to sane bounds (1-100) — prevents overflow/negative exploits */
+function clampMaxResults(v: unknown, fallback = 10): number {
+  const n = typeof v === 'number' && Number.isFinite(v) ? Math.floor(v) : fallback
+  return Math.max(1, Math.min(100, n))
+}
+
 async function executeToolByName(name: string, args: Record<string, unknown>): Promise<string> {
   switch (name) {
     case 'search_knowledge': {
       if (!args.query || typeof args.query !== 'string') return 'Error: query is required and must be a string'
       const result = await dualChannelRAG(args.query as string, {
-        maxResults: (args.max_results as number) ?? 10,
+        maxResults: clampMaxResults(args.max_results),
       })
       if (result.merged_context.length === 0) return 'No results found for this query.'
       // F4: Auto-enrichment hook — extract new entities from RAG answer (non-blocking)
@@ -805,8 +811,8 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
         const result = await findSimilarClients({
           query,
           dimensions: args.dimensions as any,
-          max_results: (typeof args.max_results === 'number' && Number.isInteger(args.max_results)) ? args.max_results : undefined,
-          structural_weight: (typeof args.structural_weight === 'number') ? args.structural_weight : undefined,
+          max_results: args.max_results !== undefined ? clampMaxResults(args.max_results) : undefined,
+          structural_weight: (typeof args.structural_weight === 'number' && args.structural_weight >= 0 && args.structural_weight <= 1) ? args.structural_weight : undefined,
         })
         if (result.matches.length === 0) return `No similar clients found for "${query}" (method: ${result.method}, ${result.duration_ms}ms)`
         const lines = result.matches.map((m, i) => {
@@ -909,7 +915,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       if (!query || query.length < 2) return 'Error: query is required (min 2 chars)'
       try {
         const result = await dualChannelRAG(query, {
-          maxResults: (args.max_results as number) ?? 10,
+          maxResults: clampMaxResults(args.max_results),
         })
         if (result.merged_context.length === 0) return `No results found for "${query}" (strategy: ${result.route_strategy}, ${result.duration_ms}ms)`
         const header = `[Adaptive RAG: ${result.route_strategy}] ${result.graphrag_count} graphrag + ${result.srag_count} semantic + ${result.cypher_count} graph (${result.duration_ms}ms, channels: ${result.channels_used.join(',')})`

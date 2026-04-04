@@ -18215,12 +18215,16 @@ ${folded}` : folded;
     };
   }
 }
+function clampMaxResults(v, fallback = 10) {
+  const n = typeof v === "number" && Number.isFinite(v) ? Math.floor(v) : fallback;
+  return Math.max(1, Math.min(100, n));
+}
 async function executeToolByName(name, args) {
   switch (name) {
     case "search_knowledge": {
       if (!args.query || typeof args.query !== "string") return "Error: query is required and must be a string";
       const result = await dualChannelRAG(args.query, {
-        maxResults: args.max_results ?? 10
+        maxResults: clampMaxResults(args.max_results)
       });
       if (result.merged_context.length === 0) return "No results found for this query.";
       try {
@@ -18529,8 +18533,8 @@ ALERTS: ${result.alerts.map((a) => a.message).join("; ")}` : "\nNo alerts \u2014
         const result = await findSimilarClients2({
           query,
           dimensions: args.dimensions,
-          max_results: typeof args.max_results === "number" && Number.isInteger(args.max_results) ? args.max_results : void 0,
-          structural_weight: typeof args.structural_weight === "number" ? args.structural_weight : void 0
+          max_results: args.max_results !== void 0 ? clampMaxResults(args.max_results) : void 0,
+          structural_weight: typeof args.structural_weight === "number" && args.structural_weight >= 0 && args.structural_weight <= 1 ? args.structural_weight : void 0
         });
         if (result.matches.length === 0) return `No similar clients found for "${query}" (method: ${result.method}, ${result.duration_ms}ms)`;
         const lines = result.matches.map((m, i) => {
@@ -18637,7 +18641,7 @@ ${summary.join("\n")}`;
       if (!query || query.length < 2) return "Error: query is required (min 2 chars)";
       try {
         const result = await dualChannelRAG(query, {
-          maxResults: args.max_results ?? 10
+          maxResults: clampMaxResults(args.max_results)
         });
         if (result.merged_context.length === 0) return `No results found for "${query}" (strategy: ${result.route_strategy}, ${result.duration_ms}ms)`;
         const header = `[Adaptive RAG: ${result.route_strategy}] ${result.graphrag_count} graphrag + ${result.srag_count} semantic + ${result.cypher_count} graph (${result.duration_ms}ms, channels: ${result.channels_used.join(",")})`;
@@ -19321,6 +19325,7 @@ init_logger();
 init_chat_broadcaster();
 init_redis();
 import "dotenv/config";
+import rateLimit from "express-rate-limit";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -32696,6 +32701,17 @@ app.use(cors({
 }));
 app.use(express.json({ limit: "100kb" }));
 app.use(express.urlencoded({ extended: false }));
+app.use((err, _req, res, next) => {
+  if (err.type === "entity.too.large" || err.status === 413) {
+    res.status(413).json({ success: false, error: { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds 100kb limit", status_code: 413 } });
+    return;
+  }
+  if (err.type === "entity.parse.failed") {
+    res.status(400).json({ success: false, error: { code: "INVALID_JSON", message: "Request body is not valid JSON", status_code: 400 } });
+    return;
+  }
+  next(err);
+});
 var ipDenyRaw = process.env.IP_DENY_LIST ?? "";
 var ipDenyList = ipDenyRaw.split(",").map((s) => s.trim()).filter(Boolean);
 if (ipDenyList.length > 0) {
@@ -32766,7 +32782,23 @@ app.use("/api/memory", requireApiKey, memoryRouter);
 app.use("/api/abi", requireApiKey, abiDocsRouter);
 app.use("/api/abi", requireApiKey, abiHealthRouter);
 app.use("/api/abi", requireApiKey, abiVersioningRouter);
-app.use("/api/tools", requireApiKey, toolGatewayRouter);
+var toolsRateLimiter = rateLimit({
+  windowMs: 60 * 1e3,
+  // 1 minute
+  max: 120,
+  // 120 req/min per API key (2/sec average, allows burst)
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    const auth = req.headers.authorization ?? "";
+    const apiKey = req.headers["x-api-key"] ?? req.query.api_key ?? auth.replace(/^Bearer\s+/i, "");
+    return apiKey || (req.ip ?? "unknown");
+  },
+  message: { success: false, error: { code: "RATE_LIMITED", message: "Too many tool calls \u2014 max 120/min per API key", status_code: 429 } },
+  skip: (req) => req.method === "GET"
+  // Only limit writes (POST); GET /api/tools list is fine
+});
+app.use("/api/tools", requireApiKey, toolsRateLimiter, toolGatewayRouter);
 app.use("/api/prompt-generator", promptGeneratorRouter);
 app.use(openapiRouter);
 app.use("/mcp", requireApiKey, mcpGatewayRouter);
