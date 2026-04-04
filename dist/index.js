@@ -1618,6 +1618,292 @@ var init_hierarchical_intelligence = __esm({
   }
 });
 
+// src/llm-proxy.ts
+var llm_proxy_exports = {};
+__export(llm_proxy_exports, {
+  chatLLM: () => chatLLM,
+  listProviders: () => listProviders
+});
+function getProviders() {
+  const providers = {};
+  if (config.deepseekApiKey) {
+    providers.deepseek = {
+      name: "DeepSeek",
+      baseUrl: "https://api.deepseek.com/v1",
+      apiKey: config.deepseekApiKey,
+      defaultModel: "deepseek-chat",
+      type: "openai-compat"
+    };
+  }
+  if (config.dashscopeApiKey) {
+    providers.qwen = {
+      name: "Qwen",
+      baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      apiKey: config.dashscopeApiKey,
+      defaultModel: "qwen-plus",
+      type: "openai-compat"
+    };
+  }
+  if (config.openaiApiKey) {
+    providers.openai = {
+      name: "OpenAI",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: config.openaiApiKey,
+      defaultModel: "gpt-4o-mini",
+      type: "openai-compat"
+    };
+    providers.chatgpt = providers.openai;
+  }
+  if (config.groqApiKey) {
+    providers.groq = {
+      name: "Groq",
+      baseUrl: "https://api.groq.com/openai/v1",
+      apiKey: config.groqApiKey,
+      defaultModel: "llama-3.3-70b-versatile",
+      type: "openai-compat"
+    };
+  }
+  if (config.geminiApiKey) {
+    providers.gemini = {
+      name: "Gemini",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+      apiKey: config.geminiApiKey,
+      defaultModel: "gemini-2.0-flash",
+      type: "gemini"
+    };
+  }
+  if (config.anthropicApiKey) {
+    providers.claude = {
+      name: "Claude",
+      baseUrl: "https://api.anthropic.com/v1",
+      apiKey: config.anthropicApiKey,
+      defaultModel: "claude-sonnet-4-20250514",
+      type: "anthropic"
+    };
+    providers.anthropic = providers.claude;
+  }
+  return providers;
+}
+async function callOpenAICompat(provider, req) {
+  const start = Date.now();
+  const model = req.model || provider.defaultModel;
+  const body = {
+    model,
+    messages: req.messages,
+    temperature: req.temperature ?? 0.7,
+    max_tokens: req.max_tokens ?? 2048
+  };
+  if (req.tools && req.tools.length > 0) {
+    body.tools = req.tools;
+  }
+  const res = await fetch(`${provider.baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${provider.apiKey}`
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(6e4)
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => `HTTP ${res.status}`);
+    throw new Error(`${provider.name} error: ${err}`);
+  }
+  const data = await res.json();
+  const message = data.choices?.[0]?.message;
+  return {
+    provider: req.provider,
+    model: data.model || model,
+    content: message?.content || "",
+    tool_calls: message?.tool_calls,
+    usage: data.usage,
+    duration_ms: Date.now() - start
+  };
+}
+async function callGemini(provider, req) {
+  const start = Date.now();
+  const model = req.model || provider.defaultModel;
+  const contents = req.messages.filter((m) => m.role !== "system").map((m) => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: m.content }]
+  }));
+  const systemInstruction = req.messages.find((m) => m.role === "system");
+  const geminiTools = req.tools && req.tools.length > 0 ? [{
+    functionDeclarations: req.tools.map((t) => ({
+      name: t.function.name,
+      description: t.function.description,
+      parameters: t.function.parameters
+    }))
+  }] : void 0;
+  const res = await fetch(
+    `${provider.baseUrl}/models/${model}:generateContent?key=${provider.apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents,
+        ...systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction.content }] } } : {},
+        ...geminiTools ? { tools: geminiTools } : {},
+        generationConfig: {
+          temperature: req.temperature ?? 0.7,
+          maxOutputTokens: req.max_tokens ?? 2048
+        }
+      }),
+      signal: AbortSignal.timeout(6e4)
+    }
+  );
+  if (!res.ok) {
+    const err = await res.text().catch(() => `HTTP ${res.status}`);
+    throw new Error(`Gemini error: ${err}`);
+  }
+  const data = await res.json();
+  const parts = data.candidates?.[0]?.content?.parts || [];
+  const textParts = parts.filter((p) => p.text).map((p) => p.text);
+  const functionCalls = parts.filter((p) => p.functionCall);
+  const tool_calls = functionCalls.length > 0 ? functionCalls.map((fc, i) => ({
+    id: `call_gemini_${i}_${Date.now()}`,
+    type: "function",
+    function: {
+      name: fc.functionCall.name,
+      arguments: JSON.stringify(fc.functionCall.args || {})
+    }
+  })) : void 0;
+  return {
+    provider: "gemini",
+    model,
+    content: textParts.join("") || "",
+    tool_calls,
+    usage: data.usageMetadata ? {
+      prompt_tokens: data.usageMetadata.promptTokenCount || 0,
+      completion_tokens: data.usageMetadata.candidatesTokenCount || 0,
+      total_tokens: data.usageMetadata.totalTokenCount || 0
+    } : void 0,
+    duration_ms: Date.now() - start
+  };
+}
+async function callAnthropic(provider, req) {
+  const start = Date.now();
+  const model = req.model || provider.defaultModel;
+  const systemMsg = req.messages.find((m) => m.role === "system");
+  const nonSystem = req.messages.filter((m) => m.role !== "system");
+  const anthropicTools = req.tools?.map((t) => ({
+    name: t.function.name,
+    description: t.function.description,
+    input_schema: t.function.parameters
+  }));
+  const anthropicMessages = nonSystem.map((m) => {
+    if (m.role === "assistant" && m.tool_calls) {
+      const content = [];
+      if (m.content) content.push({ type: "text", text: m.content });
+      for (const tc of m.tool_calls) {
+        content.push({
+          type: "tool_use",
+          id: tc.id,
+          name: tc.function.name,
+          input: JSON.parse(tc.function.arguments || "{}")
+        });
+      }
+      return { role: "assistant", content };
+    }
+    if (m.role === "tool" && m.tool_call_id) {
+      return {
+        role: "user",
+        content: [{
+          type: "tool_result",
+          tool_use_id: m.tool_call_id,
+          content: m.content
+        }]
+      };
+    }
+    return { role: m.role === "tool" ? "user" : m.role, content: m.content };
+  });
+  const body = {
+    model,
+    max_tokens: req.max_tokens ?? 2048,
+    ...systemMsg ? { system: systemMsg.content } : {},
+    messages: anthropicMessages
+  };
+  if (anthropicTools && anthropicTools.length > 0) {
+    body.tools = anthropicTools;
+  }
+  const res = await fetch(`${provider.baseUrl}/messages`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": provider.apiKey,
+      "anthropic-version": "2023-06-01"
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(6e4)
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => `HTTP ${res.status}`);
+    throw new Error(`Claude error: ${err}`);
+  }
+  const data = await res.json();
+  const contentBlocks = data.content || [];
+  const textBlocks = contentBlocks.filter((b) => b.type === "text");
+  const toolUseBlocks = contentBlocks.filter((b) => b.type === "tool_use");
+  const tool_calls = toolUseBlocks.length > 0 ? toolUseBlocks.map((tu) => ({
+    id: tu.id,
+    type: "function",
+    function: {
+      name: tu.name,
+      arguments: JSON.stringify(tu.input || {})
+    }
+  })) : void 0;
+  return {
+    provider: "claude",
+    model: data.model || model,
+    content: textBlocks.map((b) => b.text).join("") || "",
+    tool_calls,
+    usage: data.usage ? {
+      prompt_tokens: data.usage.input_tokens || 0,
+      completion_tokens: data.usage.output_tokens || 0,
+      total_tokens: (data.usage.input_tokens || 0) + (data.usage.output_tokens || 0)
+    } : void 0,
+    duration_ms: Date.now() - start
+  };
+}
+async function chatLLM(req) {
+  const providers = getProviders();
+  const provider = providers[req.provider.toLowerCase()];
+  if (!provider) {
+    const available = Object.keys(providers);
+    throw new Error(`Unknown provider '${req.provider}'. Available: ${available.join(", ")}`);
+  }
+  logger2.info({ provider: req.provider, model: req.model, messages: req.messages.length }, "LLM proxy call");
+  switch (provider.type) {
+    case "openai-compat":
+      return callOpenAICompat(provider, req);
+    case "gemini":
+      return callGemini(provider, req);
+    case "anthropic":
+      return callAnthropic(provider, req);
+    default:
+      throw new Error(`Unsupported provider type: ${provider.type}`);
+  }
+}
+function listProviders() {
+  const providers = getProviders();
+  const all = [
+    { id: "deepseek", name: "DeepSeek", model: "deepseek-chat" },
+    { id: "qwen", name: "Qwen", model: "qwen-plus" },
+    { id: "gemini", name: "Gemini", model: "gemini-2.0-flash" },
+    { id: "openai", name: "OpenAI/ChatGPT", model: "gpt-4o-mini" },
+    { id: "groq", name: "Groq", model: "llama-3.3-70b-versatile" },
+    { id: "claude", name: "Claude", model: "claude-sonnet-4-20250514" }
+  ];
+  return all.map((p) => ({ ...p, available: !!providers[p.id] }));
+}
+var init_llm_proxy = __esm({
+  "src/llm-proxy.ts"() {
+    "use strict";
+    init_config();
+    init_logger();
+  }
+});
+
 // src/compound-hooks.ts
 var compound_hooks_exports = {};
 __export(compound_hooks_exports, {
@@ -1666,54 +1952,66 @@ function hookAutoEnrichment(answer, query) {
 }
 async function extractAndMerge(answer, query) {
   if (answer.length < 50) return;
+  const prompt = `Extract named entities. Reply ONLY as JSON, no markdown.
+{"entities": [{"name": "...", "type": "Organization|Regulation|Technology|Framework", "domain": "..."}]}
+Max 5. If none: {"entities": []}
+
+Content: ${answer.slice(0, 2e3)}`;
+  let entities = [];
   try {
-    const llmResult = await callMcpTool({
+    const mercResult = await callMcpTool({
       toolName: "llm.generate",
-      args: {
-        prompt: `Extract specific named entities from this AI-generated answer. Only NAMED entities (organizations, regulations, technologies, frameworks). Reply ONLY as valid JSON, no markdown.
-
-QUERY: ${query}
-ANSWER: ${answer.slice(0, 2e3)}
-
-JSON: {"entities": [{"name": "...", "type": "Organization|Regulation|Technology|Framework", "domain": "..."}]}
-Max 5 entities. If none specific enough: {"entities": []}`
-      },
+      args: { prompt },
       callId: uuid2(),
-      timeoutMs: 15e3
+      timeoutMs: 1e4
     });
-    if (llmResult.status !== "success") return;
-    const raw = llmResult.result;
-    const text = raw?.content ?? (typeof raw === "string" ? raw : "");
-    const match = String(text).match(/\{[\s\S]*"entities"[\s\S]*\}/);
-    if (!match) return;
-    const parsed = JSON.parse(match[0]);
-    if (!parsed.entities?.length) return;
-    const entities = Array.isArray(parsed.entities) ? parsed.entities.slice(0, 5) : [];
-    for (const entity of entities) {
-      if (!entity.name || entity.name.length < 3) continue;
-      try {
-        const safeLabel = (entity.type ?? "Knowledge").replace(/[^A-Za-z0-9_]/g, "_").slice(0, 64);
-        await callMcpTool({
-          toolName: "graph.write_cypher",
-          args: {
-            query: `MERGE (n:${safeLabel} {name: $name})
-ON CREATE SET n.domain = $domain, n.source = 'auto-enrichment', n.createdAt = datetime()
-SET n.updatedAt = datetime()`,
-            params: {
-              name: entity.name,
-              domain: entity.domain ?? "general"
-            }
-          },
-          callId: uuid2(),
-          timeoutMs: 5e3
-        });
-      } catch {
+    const mercRaw = mercResult.result;
+    if (mercResult.status === "success" && mercRaw?.success !== false) {
+      const parsed = parseEnrichmentJSON(mercRaw?.content ?? "");
+      if (parsed.length > 0) {
+        entities = parsed;
       }
     }
-    if (entities.length > 0) {
-      logger2.info({ count: entities.length }, "Hook: Auto-enrichment \u2014 new entities merged");
-    }
   } catch {
+  }
+  if (entities.length === 0) {
+    try {
+      const groqResult = await chatLLM({ provider: "groq", messages: [{ role: "user", content: prompt }], temperature: 0.1, max_tokens: 500 });
+      entities = parseEnrichmentJSON(groqResult.content ?? "");
+    } catch {
+    }
+  }
+  if (entities.length === 0) {
+    try {
+      const gemResult = await chatLLM({ provider: "gemini", messages: [{ role: "user", content: prompt }], temperature: 0.1, max_tokens: 500 });
+      entities = parseEnrichmentJSON(gemResult.content ?? "");
+    } catch {
+    }
+  }
+  if (entities.length === 0) return;
+  for (const entity of entities) {
+    if (!entity.name || entity.name.length < 3) continue;
+    try {
+      const safeLabel = (entity.type ?? "Knowledge").replace(/[^A-Za-z0-9_]/g, "_").slice(0, 64);
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `MERGE (n:${safeLabel} {name: $name})
+ON CREATE SET n.domain = $domain, n.source = 'auto-enrichment', n.createdAt = datetime()
+SET n.updatedAt = datetime()`,
+          params: {
+            name: entity.name,
+            domain: entity.domain ?? "general"
+          }
+        },
+        callId: uuid2(),
+        timeoutMs: 5e3
+      });
+    } catch {
+    }
+  }
+  if (entities.length > 0) {
+    logger2.info({ count: entities.length }, "Hook: Auto-enrichment \u2014 new entities merged");
   }
 }
 async function hookQualitySignal(query, strategy, channels, resultCount, confidenceAvg) {
@@ -1758,10 +2056,28 @@ SET p.count = coalesce(p.count, 0) + 1, p.lastSeen = datetime()`,
   } catch {
   }
 }
+function parseEnrichmentJSON(text) {
+  if (!text || text.length < 5) return [];
+  const cleaned = text.replace(/```json\s*/g, "").replace(/```\s*/g, "").trim();
+  try {
+    const direct = JSON.parse(cleaned);
+    if (Array.isArray(direct.entities)) return direct.entities.slice(0, 5);
+  } catch {
+  }
+  const match = cleaned.match(/\{[\s\S]*"entities"[\s\S]*\}/);
+  if (match) {
+    try {
+      return JSON.parse(match[0]).entities?.slice(0, 5) ?? [];
+    } catch {
+    }
+  }
+  return [];
+}
 var init_compound_hooks = __esm({
   "src/compound-hooks.ts"() {
     "use strict";
     init_mcp_caller();
+    init_llm_proxy();
     init_logger();
     init_redis();
   }
@@ -3505,62 +3821,79 @@ async function tryDoclingParse(req) {
   return null;
 }
 async function extractEntities(content, filename, domain) {
-  try {
-    logger2.info({ filename, domain, contentLen: content.length }, "Entity extraction: calling Mercury llm.generate");
-    const extractPrompt = `Extract named entities and relationships. Reply ONLY as JSON, no markdown.
+  const extractPrompt = `Extract named entities and relationships. Reply ONLY as JSON, no markdown.
 
 {"entities": [{"name": "...", "type": "Organization|Regulation|Technology|Framework|Service", "properties": {"domain": "..."}}], "relations": [{"from": "...", "to": "...", "type": "USES|COMPLIES_WITH|PART_OF"}]}
 
 Content: ${content.slice(0, 6e3)}`;
-    const llmResult = await callMcpTool({
+  const mercuryResult = await tryMercuryExtract(extractPrompt);
+  if (mercuryResult) {
+    logger2.info({ provider: "mercury", entities: mercuryResult.entities.length }, "Entity extraction: Mercury OK");
+    return mercuryResult;
+  }
+  const groqResult = await tryChatLLMExtract(extractPrompt, "groq");
+  if (groqResult) {
+    logger2.info({ provider: "groq", entities: groqResult.entities.length }, "Entity extraction: Groq fallback OK");
+    return groqResult;
+  }
+  const geminiResult = await tryChatLLMExtract(extractPrompt, "gemini");
+  if (geminiResult) {
+    logger2.info({ provider: "gemini", entities: geminiResult.entities.length }, "Entity extraction: Gemini fallback OK");
+    return geminiResult;
+  }
+  logger2.warn({ filename }, "Entity extraction: ALL providers failed");
+  return { entities: [], relations: [] };
+}
+async function tryMercuryExtract(prompt) {
+  try {
+    const result = await callMcpTool({
       toolName: "llm.generate",
-      args: { prompt: extractPrompt },
+      args: { prompt },
       callId: uuid7(),
-      timeoutMs: 3e4
+      timeoutMs: 15e3
     });
-    const rawResult = llmResult.result;
-    logger2.info({
-      mcpStatus: llmResult.status,
-      resultType: typeof rawResult,
-      resultKeys: rawResult && typeof rawResult === "object" ? Object.keys(rawResult) : null,
-      innerSuccess: rawResult?.success,
-      hasContent: !!rawResult?.content,
-      contentPreview: String(rawResult?.content ?? "").slice(0, 100)
-    }, "Entity extraction: Mercury response debug");
-    if (llmResult.status !== "success") {
-      logger2.warn({ error: llmResult.error_message }, "Mercury entity extraction: MCP call failed");
-      return { entities: [], relations: [] };
+    if (result.status !== "success") return null;
+    const raw = result.result;
+    if (raw?.success === false) return null;
+    return parseEntityJSON(raw?.content ?? "");
+  } catch {
+    return null;
+  }
+}
+async function tryChatLLMExtract(prompt, provider) {
+  try {
+    const result = await chatLLM({
+      provider,
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.1,
+      max_tokens: 2e3
+    });
+    return parseEntityJSON(result.content ?? "");
+  } catch {
+    return null;
+  }
+}
+function parseEntityJSON(text) {
+  if (!text || text.length < 5) return null;
+  const cleaned = text.replace(/```json\s*/g, "").replace(/```\s*/g, "").trim();
+  try {
+    const direct = JSON.parse(cleaned);
+    if (Array.isArray(direct.entities) && direct.entities.length > 0) {
+      return { entities: direct.entities.slice(0, 20), relations: Array.isArray(direct.relations) ? direct.relations.slice(0, 30) : [] };
     }
-    const raw = llmResult.result;
-    if (raw?.success === false) {
-      logger2.warn({ error: raw?.error }, "Mercury entity extraction: Mercury returned error");
-      return { entities: [], relations: [] };
-    }
-    const text = raw?.content ?? (typeof raw === "string" ? raw : "");
-    logger2.info({ textLen: String(text).length, textSnippet: String(text).slice(0, 150) }, "Entity extraction: Mercury text to parse");
+  } catch {
+  }
+  const match = cleaned.match(/\{[\s\S]*"entities"[\s\S]*\}/);
+  if (match) {
     try {
-      const direct = JSON.parse(String(text));
-      if (Array.isArray(direct.entities)) {
-        logger2.info({ count: direct.entities.length }, "Entity extraction: direct parse OK");
-        return { entities: direct.entities.slice(0, 20), relations: Array.isArray(direct.relations) ? direct.relations.slice(0, 30) : [] };
+      const parsed = JSON.parse(match[0]);
+      if (Array.isArray(parsed.entities) && parsed.entities.length > 0) {
+        return { entities: parsed.entities.slice(0, 20), relations: Array.isArray(parsed.relations) ? parsed.relations.slice(0, 30) : [] };
       }
     } catch {
     }
-    const match = String(text).match(/\{[\s\S]*"entities"[\s\S]*\}/);
-    if (match) {
-      try {
-        const parsed = JSON.parse(match[0]);
-        logger2.info({ count: parsed.entities?.length }, "Entity extraction: regex parse OK");
-        return { entities: Array.isArray(parsed.entities) ? parsed.entities.slice(0, 20) : [], relations: Array.isArray(parsed.relations) ? parsed.relations.slice(0, 30) : [] };
-      } catch (e) {
-        logger2.warn({ error: String(e) }, "Entity extraction: regex match found but JSON parse failed");
-      }
-    }
-    logger2.warn({ textLen: String(text).length, snippet: String(text).slice(0, 200) }, "Entity extraction: NO entities found in Mercury response");
-  } catch (err) {
-    logger2.warn({ error: String(err), filename }, "Entity extraction failed");
   }
-  return { entities: [], relations: [] };
+  return null;
 }
 async function mergeToGraph(entities, relations, req) {
   let merged = 0;
@@ -3625,6 +3958,7 @@ var init_document_intelligence = __esm({
     "use strict";
     init_mcp_caller();
     init_cognitive_proxy();
+    init_llm_proxy();
     init_logger();
     init_redis();
     REDIS_PREFIX = "orchestrator:ingestion:";
@@ -5440,292 +5774,6 @@ var init_evolution_loop = __esm({
     REDIS_PREFIX3 = "orchestrator:evolution:";
     REDIS_HISTORY_KEY = "orchestrator:evolution:history";
     REDIS_TTL = 7 * 86400;
-  }
-});
-
-// src/llm-proxy.ts
-var llm_proxy_exports = {};
-__export(llm_proxy_exports, {
-  chatLLM: () => chatLLM,
-  listProviders: () => listProviders
-});
-function getProviders() {
-  const providers = {};
-  if (config.deepseekApiKey) {
-    providers.deepseek = {
-      name: "DeepSeek",
-      baseUrl: "https://api.deepseek.com/v1",
-      apiKey: config.deepseekApiKey,
-      defaultModel: "deepseek-chat",
-      type: "openai-compat"
-    };
-  }
-  if (config.dashscopeApiKey) {
-    providers.qwen = {
-      name: "Qwen",
-      baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-      apiKey: config.dashscopeApiKey,
-      defaultModel: "qwen-plus",
-      type: "openai-compat"
-    };
-  }
-  if (config.openaiApiKey) {
-    providers.openai = {
-      name: "OpenAI",
-      baseUrl: "https://api.openai.com/v1",
-      apiKey: config.openaiApiKey,
-      defaultModel: "gpt-4o-mini",
-      type: "openai-compat"
-    };
-    providers.chatgpt = providers.openai;
-  }
-  if (config.groqApiKey) {
-    providers.groq = {
-      name: "Groq",
-      baseUrl: "https://api.groq.com/openai/v1",
-      apiKey: config.groqApiKey,
-      defaultModel: "llama-3.3-70b-versatile",
-      type: "openai-compat"
-    };
-  }
-  if (config.geminiApiKey) {
-    providers.gemini = {
-      name: "Gemini",
-      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
-      apiKey: config.geminiApiKey,
-      defaultModel: "gemini-2.0-flash",
-      type: "gemini"
-    };
-  }
-  if (config.anthropicApiKey) {
-    providers.claude = {
-      name: "Claude",
-      baseUrl: "https://api.anthropic.com/v1",
-      apiKey: config.anthropicApiKey,
-      defaultModel: "claude-sonnet-4-20250514",
-      type: "anthropic"
-    };
-    providers.anthropic = providers.claude;
-  }
-  return providers;
-}
-async function callOpenAICompat(provider, req) {
-  const start = Date.now();
-  const model = req.model || provider.defaultModel;
-  const body = {
-    model,
-    messages: req.messages,
-    temperature: req.temperature ?? 0.7,
-    max_tokens: req.max_tokens ?? 2048
-  };
-  if (req.tools && req.tools.length > 0) {
-    body.tools = req.tools;
-  }
-  const res = await fetch(`${provider.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${provider.apiKey}`
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(6e4)
-  });
-  if (!res.ok) {
-    const err = await res.text().catch(() => `HTTP ${res.status}`);
-    throw new Error(`${provider.name} error: ${err}`);
-  }
-  const data = await res.json();
-  const message = data.choices?.[0]?.message;
-  return {
-    provider: req.provider,
-    model: data.model || model,
-    content: message?.content || "",
-    tool_calls: message?.tool_calls,
-    usage: data.usage,
-    duration_ms: Date.now() - start
-  };
-}
-async function callGemini(provider, req) {
-  const start = Date.now();
-  const model = req.model || provider.defaultModel;
-  const contents = req.messages.filter((m) => m.role !== "system").map((m) => ({
-    role: m.role === "assistant" ? "model" : "user",
-    parts: [{ text: m.content }]
-  }));
-  const systemInstruction = req.messages.find((m) => m.role === "system");
-  const geminiTools = req.tools && req.tools.length > 0 ? [{
-    functionDeclarations: req.tools.map((t) => ({
-      name: t.function.name,
-      description: t.function.description,
-      parameters: t.function.parameters
-    }))
-  }] : void 0;
-  const res = await fetch(
-    `${provider.baseUrl}/models/${model}:generateContent?key=${provider.apiKey}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents,
-        ...systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction.content }] } } : {},
-        ...geminiTools ? { tools: geminiTools } : {},
-        generationConfig: {
-          temperature: req.temperature ?? 0.7,
-          maxOutputTokens: req.max_tokens ?? 2048
-        }
-      }),
-      signal: AbortSignal.timeout(6e4)
-    }
-  );
-  if (!res.ok) {
-    const err = await res.text().catch(() => `HTTP ${res.status}`);
-    throw new Error(`Gemini error: ${err}`);
-  }
-  const data = await res.json();
-  const parts = data.candidates?.[0]?.content?.parts || [];
-  const textParts = parts.filter((p) => p.text).map((p) => p.text);
-  const functionCalls = parts.filter((p) => p.functionCall);
-  const tool_calls = functionCalls.length > 0 ? functionCalls.map((fc, i) => ({
-    id: `call_gemini_${i}_${Date.now()}`,
-    type: "function",
-    function: {
-      name: fc.functionCall.name,
-      arguments: JSON.stringify(fc.functionCall.args || {})
-    }
-  })) : void 0;
-  return {
-    provider: "gemini",
-    model,
-    content: textParts.join("") || "",
-    tool_calls,
-    usage: data.usageMetadata ? {
-      prompt_tokens: data.usageMetadata.promptTokenCount || 0,
-      completion_tokens: data.usageMetadata.candidatesTokenCount || 0,
-      total_tokens: data.usageMetadata.totalTokenCount || 0
-    } : void 0,
-    duration_ms: Date.now() - start
-  };
-}
-async function callAnthropic(provider, req) {
-  const start = Date.now();
-  const model = req.model || provider.defaultModel;
-  const systemMsg = req.messages.find((m) => m.role === "system");
-  const nonSystem = req.messages.filter((m) => m.role !== "system");
-  const anthropicTools = req.tools?.map((t) => ({
-    name: t.function.name,
-    description: t.function.description,
-    input_schema: t.function.parameters
-  }));
-  const anthropicMessages = nonSystem.map((m) => {
-    if (m.role === "assistant" && m.tool_calls) {
-      const content = [];
-      if (m.content) content.push({ type: "text", text: m.content });
-      for (const tc of m.tool_calls) {
-        content.push({
-          type: "tool_use",
-          id: tc.id,
-          name: tc.function.name,
-          input: JSON.parse(tc.function.arguments || "{}")
-        });
-      }
-      return { role: "assistant", content };
-    }
-    if (m.role === "tool" && m.tool_call_id) {
-      return {
-        role: "user",
-        content: [{
-          type: "tool_result",
-          tool_use_id: m.tool_call_id,
-          content: m.content
-        }]
-      };
-    }
-    return { role: m.role === "tool" ? "user" : m.role, content: m.content };
-  });
-  const body = {
-    model,
-    max_tokens: req.max_tokens ?? 2048,
-    ...systemMsg ? { system: systemMsg.content } : {},
-    messages: anthropicMessages
-  };
-  if (anthropicTools && anthropicTools.length > 0) {
-    body.tools = anthropicTools;
-  }
-  const res = await fetch(`${provider.baseUrl}/messages`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": provider.apiKey,
-      "anthropic-version": "2023-06-01"
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(6e4)
-  });
-  if (!res.ok) {
-    const err = await res.text().catch(() => `HTTP ${res.status}`);
-    throw new Error(`Claude error: ${err}`);
-  }
-  const data = await res.json();
-  const contentBlocks = data.content || [];
-  const textBlocks = contentBlocks.filter((b) => b.type === "text");
-  const toolUseBlocks = contentBlocks.filter((b) => b.type === "tool_use");
-  const tool_calls = toolUseBlocks.length > 0 ? toolUseBlocks.map((tu) => ({
-    id: tu.id,
-    type: "function",
-    function: {
-      name: tu.name,
-      arguments: JSON.stringify(tu.input || {})
-    }
-  })) : void 0;
-  return {
-    provider: "claude",
-    model: data.model || model,
-    content: textBlocks.map((b) => b.text).join("") || "",
-    tool_calls,
-    usage: data.usage ? {
-      prompt_tokens: data.usage.input_tokens || 0,
-      completion_tokens: data.usage.output_tokens || 0,
-      total_tokens: (data.usage.input_tokens || 0) + (data.usage.output_tokens || 0)
-    } : void 0,
-    duration_ms: Date.now() - start
-  };
-}
-async function chatLLM(req) {
-  const providers = getProviders();
-  const provider = providers[req.provider.toLowerCase()];
-  if (!provider) {
-    const available = Object.keys(providers);
-    throw new Error(`Unknown provider '${req.provider}'. Available: ${available.join(", ")}`);
-  }
-  logger2.info({ provider: req.provider, model: req.model, messages: req.messages.length }, "LLM proxy call");
-  switch (provider.type) {
-    case "openai-compat":
-      return callOpenAICompat(provider, req);
-    case "gemini":
-      return callGemini(provider, req);
-    case "anthropic":
-      return callAnthropic(provider, req);
-    default:
-      throw new Error(`Unsupported provider type: ${provider.type}`);
-  }
-}
-function listProviders() {
-  const providers = getProviders();
-  const all = [
-    { id: "deepseek", name: "DeepSeek", model: "deepseek-chat" },
-    { id: "qwen", name: "Qwen", model: "qwen-plus" },
-    { id: "gemini", name: "Gemini", model: "gemini-2.0-flash" },
-    { id: "openai", name: "OpenAI/ChatGPT", model: "gpt-4o-mini" },
-    { id: "groq", name: "Groq", model: "llama-3.3-70b-versatile" },
-    { id: "claude", name: "Claude", model: "claude-sonnet-4-20250514" }
-  ];
-  return all.map((p) => ({ ...p, available: !!providers[p.id] }));
-}
-var init_llm_proxy = __esm({
-  "src/llm-proxy.ts"() {
-    "use strict";
-    init_config();
-    init_logger();
   }
 });
 

@@ -11,7 +11,7 @@
  */
 import { v4 as uuid } from 'uuid'
 import { callMcpTool } from './mcp-caller.js'
-import { callCognitive } from './cognitive-proxy.js'
+import { chatLLM } from './llm-proxy.js'
 import { logger } from './logger.js'
 import { getRedis } from './redis.js'
 
@@ -76,57 +76,67 @@ export function hookAutoEnrichment(answer: string, query: string): void {
 async function extractAndMerge(answer: string, query: string): Promise<void> {
   if (answer.length < 50) return
 
+  const prompt = `Extract named entities. Reply ONLY as JSON, no markdown.\n{"entities": [{"name": "...", "type": "Organization|Regulation|Technology|Framework", "domain": "..."}]}\nMax 5. If none: {"entities": []}\n\nContent: ${answer.slice(0, 2000)}`
+
+  // Cascading fallback: Mercury → Groq → Gemini
+  let entities: any[] = []
   try {
-    const llmResult = await callMcpTool({
+    // Try Mercury first
+    const mercResult = await callMcpTool({
       toolName: 'llm.generate',
-      args: {
-        prompt: `Extract specific named entities from this AI-generated answer. Only NAMED entities (organizations, regulations, technologies, frameworks). Reply ONLY as valid JSON, no markdown.
-
-QUERY: ${query}
-ANSWER: ${answer.slice(0, 2000)}
-
-JSON: {"entities": [{"name": "...", "type": "Organization|Regulation|Technology|Framework", "domain": "..."}]}
-Max 5 entities. If none specific enough: {"entities": []}`,
-      },
+      args: { prompt },
       callId: uuid(),
-      timeoutMs: 15000,
+      timeoutMs: 10000,
     })
+    const mercRaw = mercResult.result as any
+    if (mercResult.status === 'success' && mercRaw?.success !== false) {
+      const parsed = parseEnrichmentJSON(mercRaw?.content ?? '')
+      if (parsed.length > 0) { entities = parsed }
+    }
+  } catch { /* Mercury failed */ }
 
-    if (llmResult.status !== 'success') return
-    const raw = llmResult.result as any
-    const text = raw?.content ?? (typeof raw === 'string' ? raw : '')
-    const match = String(text).match(/\{[\s\S]*"entities"[\s\S]*\}/)
-    if (!match) return
+  // Fallback: Groq
+  if (entities.length === 0) {
+    try {
+      const groqResult = await chatLLM({ provider: 'groq', messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 500 })
+      entities = parseEnrichmentJSON(groqResult.content ?? '')
+    } catch { /* Groq failed */ }
+  }
 
-    const parsed = JSON.parse(match[0])
-    if (!parsed.entities?.length) return
-    const entities = Array.isArray(parsed.entities) ? parsed.entities.slice(0, 5) : []
+  // Fallback: Gemini
+  if (entities.length === 0) {
+    try {
+      const gemResult = await chatLLM({ provider: 'gemini', messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 500 })
+      entities = parseEnrichmentJSON(gemResult.content ?? '')
+    } catch { /* all failed */ }
+  }
 
-    for (const entity of entities) {
-      if (!entity.name || entity.name.length < 3) continue
-      try {
-        const safeLabel = (entity.type ?? 'Knowledge').replace(/[^A-Za-z0-9_]/g, '_').slice(0, 64)
-        await callMcpTool({
-          toolName: 'graph.write_cypher',
-          args: {
-            query: `MERGE (n:${safeLabel} {name: $name})
+  if (entities.length === 0) return
+
+  for (const entity of entities) {
+    if (!entity.name || entity.name.length < 3) continue
+    try {
+      const safeLabel = (entity.type ?? 'Knowledge').replace(/[^A-Za-z0-9_]/g, '_').slice(0, 64)
+      await callMcpTool({
+        toolName: 'graph.write_cypher',
+        args: {
+          query: `MERGE (n:${safeLabel} {name: $name})
 ON CREATE SET n.domain = $domain, n.source = 'auto-enrichment', n.createdAt = datetime()
 SET n.updatedAt = datetime()`,
-            params: {
-              name: entity.name,
-              domain: entity.domain ?? 'general',
-            },
+          params: {
+            name: entity.name,
+            domain: entity.domain ?? 'general',
           },
-          callId: uuid(),
-          timeoutMs: 5000,
-        })
-      } catch { /* individual entity merge failures are ok */ }
-    }
+        },
+        callId: uuid(),
+        timeoutMs: 5000,
+      })
+    } catch { /* individual entity merge failures are ok */ }
+  }
 
-    if (entities.length > 0) {
-      logger.info({ count: entities.length }, 'Hook: Auto-enrichment — new entities merged')
-    }
-  } catch { /* entire enrichment failure is ok — non-blocking */ }
+  if (entities.length > 0) {
+    logger.info({ count: entities.length }, 'Hook: Auto-enrichment — new entities merged')
+  }
 }
 
 // ─── Hook 3: Quality Signal ─────────────────────────────────────────────────
@@ -193,4 +203,20 @@ SET p.count = coalesce(p.count, 0) + 1, p.lastSeen = datetime()`,
     })
     logger.info({ selected: selectedMatchId, rejected: rejectedMatchIds.length }, 'Hook: Similarity preference logged')
   } catch { /* non-critical */ }
+}
+
+// ─── Shared JSON Parser ─────────────────────────────────────────────────────
+
+function parseEnrichmentJSON(text: string): any[] {
+  if (!text || text.length < 5) return []
+  const cleaned = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim()
+  try {
+    const direct = JSON.parse(cleaned)
+    if (Array.isArray(direct.entities)) return direct.entities.slice(0, 5)
+  } catch { /* try regex */ }
+  const match = cleaned.match(/\{[\s\S]*"entities"[\s\S]*\}/)
+  if (match) {
+    try { return JSON.parse(match[0]).entities?.slice(0, 5) ?? [] } catch { /* failed */ }
+  }
+  return []
 }

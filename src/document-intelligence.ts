@@ -227,72 +227,104 @@ async function tryDoclingParse(req: DocumentIngestionRequest): Promise<{ markdow
 
 // ─── Step 3: Entity Extraction ──────────────────────────────────────────────
 
+/**
+ * Extract entities using cascading LLM fallback:
+ *   1. Mercury (via backend llm.generate) — fastest, cheapest
+ *   2. Groq (via orchestrator chatLLM) — fast fallback
+ *   3. Gemini (via orchestrator chatLLM) — reliable fallback
+ */
 async function extractEntities(
   content: string,
   filename: string,
   domain?: string,
 ): Promise<{ entities: ExtractedEntity[]; relations: ExtractedRelation[] }> {
-  try {
-    // Use Mercury 2 via backend MCP llm.generate — ultra-fast entity extraction
-    logger.info({ filename, domain, contentLen: content.length }, 'Entity extraction: calling Mercury llm.generate')
-    const extractPrompt = `Extract named entities and relationships. Reply ONLY as JSON, no markdown.\n\n{"entities": [{"name": "...", "type": "Organization|Regulation|Technology|Framework|Service", "properties": {"domain": "..."}}], "relations": [{"from": "...", "to": "...", "type": "USES|COMPLIES_WITH|PART_OF"}]}\n\nContent: ${content.slice(0, 6000)}`
-    const llmResult = await callMcpTool({
-      toolName: 'llm.generate',
-      args: { prompt: extractPrompt },
-      callId: uuid(),
-      timeoutMs: 30000,
-    })
+  const extractPrompt = `Extract named entities and relationships. Reply ONLY as JSON, no markdown.\n\n{"entities": [{"name": "...", "type": "Organization|Regulation|Technology|Framework|Service", "properties": {"domain": "..."}}], "relations": [{"from": "...", "to": "...", "type": "USES|COMPLIES_WITH|PART_OF"}]}\n\nContent: ${content.slice(0, 6000)}`
 
-    const rawResult = llmResult.result
-    logger.info({
-      mcpStatus: llmResult.status,
-      resultType: typeof rawResult,
-      resultKeys: rawResult && typeof rawResult === 'object' ? Object.keys(rawResult as object) : null,
-      innerSuccess: (rawResult as any)?.success,
-      hasContent: !!(rawResult as any)?.content,
-      contentPreview: String((rawResult as any)?.content ?? '').slice(0, 100),
-    }, 'Entity extraction: Mercury response debug')
-
-    if (llmResult.status !== 'success') {
-      logger.warn({ error: llmResult.error_message }, 'Mercury entity extraction: MCP call failed')
-      return { entities: [], relations: [] }
-    }
-
-    const raw = llmResult.result as any
-    // Mercury wraps in { success, content } — check inner success
-    if (raw?.success === false) {
-      logger.warn({ error: raw?.error }, 'Mercury entity extraction: Mercury returned error')
-      return { entities: [], relations: [] }
-    }
-    const text = raw?.content ?? (typeof raw === 'string' ? raw : '')
-    logger.info({ textLen: String(text).length, textSnippet: String(text).slice(0, 150) }, 'Entity extraction: Mercury text to parse')
-
-    // Try direct JSON parse first
-    try {
-      const direct = JSON.parse(String(text))
-      if (Array.isArray(direct.entities)) {
-        logger.info({ count: direct.entities.length }, 'Entity extraction: direct parse OK')
-        return { entities: direct.entities.slice(0, 20), relations: Array.isArray(direct.relations) ? direct.relations.slice(0, 30) : [] }
-      }
-    } catch { /* try regex */ }
-
-    // Regex fallback
-    const match = String(text).match(/\{[\s\S]*"entities"[\s\S]*\}/)
-    if (match) {
-      try {
-        const parsed = JSON.parse(match[0])
-        logger.info({ count: parsed.entities?.length }, 'Entity extraction: regex parse OK')
-        return { entities: Array.isArray(parsed.entities) ? parsed.entities.slice(0, 20) : [], relations: Array.isArray(parsed.relations) ? parsed.relations.slice(0, 30) : [] }
-      } catch (e) {
-        logger.warn({ error: String(e) }, 'Entity extraction: regex match found but JSON parse failed')
-      }
-    }
-
-    logger.warn({ textLen: String(text).length, snippet: String(text).slice(0, 200) }, 'Entity extraction: NO entities found in Mercury response')
-  } catch (err) {
-    logger.warn({ error: String(err), filename }, 'Entity extraction failed')
+  // Strategy 1: Mercury via backend MCP (fastest — 500ms, $0.00025/1k tokens)
+  const mercuryResult = await tryMercuryExtract(extractPrompt)
+  if (mercuryResult) {
+    logger.info({ provider: 'mercury', entities: mercuryResult.entities.length }, 'Entity extraction: Mercury OK')
+    return mercuryResult
   }
+
+  // Strategy 2: Groq via chatLLM (fast fallback — ~1s, free tier)
+  const groqResult = await tryChatLLMExtract(extractPrompt, 'groq')
+  if (groqResult) {
+    logger.info({ provider: 'groq', entities: groqResult.entities.length }, 'Entity extraction: Groq fallback OK')
+    return groqResult
+  }
+
+  // Strategy 3: Gemini via chatLLM (reliable fallback — ~2s)
+  const geminiResult = await tryChatLLMExtract(extractPrompt, 'gemini')
+  if (geminiResult) {
+    logger.info({ provider: 'gemini', entities: geminiResult.entities.length }, 'Entity extraction: Gemini fallback OK')
+    return geminiResult
+  }
+
+  logger.warn({ filename }, 'Entity extraction: ALL providers failed')
   return { entities: [], relations: [] }
+}
+
+/** Mercury extraction via backend MCP */
+async function tryMercuryExtract(prompt: string): Promise<{ entities: ExtractedEntity[]; relations: ExtractedRelation[] } | null> {
+  try {
+    const result = await callMcpTool({
+      toolName: 'llm.generate',
+      args: { prompt },
+      callId: uuid(),
+      timeoutMs: 15000,
+    })
+    if (result.status !== 'success') return null
+    const raw = result.result as any
+    if (raw?.success === false) return null
+    return parseEntityJSON(raw?.content ?? '')
+  } catch {
+    return null
+  }
+}
+
+/** chatLLM extraction via orchestrator's direct LLM proxy (Groq/Gemini/DeepSeek) */
+async function tryChatLLMExtract(prompt: string, provider: string): Promise<{ entities: ExtractedEntity[]; relations: ExtractedRelation[] } | null> {
+  try {
+    const result = await chatLLM({
+      provider,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.1,
+      max_tokens: 2000,
+    })
+    return parseEntityJSON(result.content ?? '')
+  } catch {
+    return null
+  }
+}
+
+/** Parse entity JSON from LLM response text */
+function parseEntityJSON(text: string): { entities: ExtractedEntity[]; relations: ExtractedRelation[] } | null {
+  if (!text || text.length < 5) return null
+
+  // Strip markdown code blocks if present
+  const cleaned = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim()
+
+  // Try direct parse
+  try {
+    const direct = JSON.parse(cleaned)
+    if (Array.isArray(direct.entities) && direct.entities.length > 0) {
+      return { entities: direct.entities.slice(0, 20), relations: Array.isArray(direct.relations) ? direct.relations.slice(0, 30) : [] }
+    }
+  } catch { /* try regex */ }
+
+  // Regex fallback
+  const match = cleaned.match(/\{[\s\S]*"entities"[\s\S]*\}/)
+  if (match) {
+    try {
+      const parsed = JSON.parse(match[0])
+      if (Array.isArray(parsed.entities) && parsed.entities.length > 0) {
+        return { entities: parsed.entities.slice(0, 20), relations: Array.isArray(parsed.relations) ? parsed.relations.slice(0, 30) : [] }
+      }
+    } catch { /* failed */ }
+  }
+
+  return null
 }
 
 // ─── Step 4: Neo4j MERGE ────────────────────────────────────────────────────
