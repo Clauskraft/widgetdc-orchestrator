@@ -1051,6 +1051,111 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    // ─── v4.0.4 — Engagement Intelligence Engine (LIN-607) ─────────────────
+    // All 5 cases delegate to engagement-engine.ts — zero duplicated logic.
+    // Registry entries in tool-registry.ts surface these via REST tool-gateway,
+    // Universal MCP gateway, OpenAPI /docs, and adoption telemetry.
+
+    case 'engagement_create': {
+      try {
+        const { createEngagement } = await import('./engagement-engine.js')
+        const result = await createEngagement({
+          client: String(args.client ?? ''),
+          domain: String(args.domain ?? ''),
+          objective: String(args.objective ?? ''),
+          start_date: String(args.start_date ?? ''),
+          target_end_date: String(args.target_end_date ?? ''),
+          budget_dkk: typeof args.budget_dkk === 'number' ? args.budget_dkk : undefined,
+          team_size: typeof args.team_size === 'number' ? args.team_size : undefined,
+          methodology_refs: Array.isArray(args.methodology_refs) ? (args.methodology_refs as unknown[]).map(String) : undefined,
+        })
+        return JSON.stringify({ engagement_id: result.$id, client: result.client, domain: result.domain, status: result.status, created_at: result.created_at })
+      } catch (err) {
+        return `Engagement create failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'engagement_match': {
+      try {
+        const { matchPrecedents } = await import('./engagement-engine.js')
+        const result = await matchPrecedents({
+          objective: String(args.objective ?? ''),
+          domain: String(args.domain ?? ''),
+          max_results: typeof args.max_results === 'number' ? args.max_results : undefined,
+        })
+        if (result.matches.length === 0) {
+          return `No precedents found for "${String(args.objective).slice(0, 60)}" in ${args.domain} (${result.query_ms}ms)`
+        }
+        const lines = result.matches.map((m, i) =>
+          `${i + 1}. ${m.title} — similarity ${m.similarity}${m.precedent_outcome ? `, outcome: ${m.precedent_outcome}` : ''}${m.stale ? ' [STALE]' : ''}\n   ${m.match_reasoning}`,
+        )
+        return `Found ${result.matches.length} precedents (${result.query_ms}ms):\n\n${lines.join('\n\n')}`
+      } catch (err) {
+        return `Engagement match failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'engagement_plan': {
+      try {
+        const { generatePlan, PlanGateRejection } = await import('./engagement-engine.js')
+        const result = await generatePlan({
+          objective: String(args.objective ?? ''),
+          domain: String(args.domain ?? ''),
+          duration_weeks: Number(args.duration_weeks),
+          team_size: Number(args.team_size),
+          budget_dkk: typeof args.budget_dkk === 'number' ? args.budget_dkk : undefined,
+          engagement_id: typeof args.engagement_id === 'string' ? args.engagement_id : undefined,
+        })
+        const phaseList = result.phases.map((p, i) => `${i + 1}. ${p.name} (${p.duration_weeks}w) — ${p.deliverables.join(', ')}`).join('\n')
+        const riskList = result.risks.map(r => `[${r.severity}] ${r.description} → ${r.mitigation}`).join('\n')
+        const gateInfo = result.high_stakes
+          ? `\n\nGates: high_stakes=true, consensus=${result.consensus_proposal_id ?? 'none'}${result.rlm_mission_id ? `, rlm_mission=${result.rlm_mission_id} (${result.rlm_steps_executed} steps)` : ''}`
+          : ''
+        return `Plan generated (${result.generation_ms}ms, source: ${result.plan_source}, citations: ${result.total_citations}, confidence: ${result.avg_confidence}):\n\nPhases:\n${phaseList}\n\nRisks:\n${riskList}\n\nSkills: ${result.required_skills.join(', ')}${gateInfo}`
+      } catch (err) {
+        // Surface gate rejections with clear code so LLMs can retry with adjusted inputs.
+        const errObj = err as { name?: string; code?: string; reason?: string; message?: string }
+        if (errObj?.name === 'PlanGateRejection') {
+          return `Plan rejected by gate: ${errObj.code ?? 'UNKNOWN'} — ${errObj.reason ?? errObj.message ?? 'no reason'}`
+        }
+        return `Plan generation failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'engagement_outcome': {
+      try {
+        const { recordOutcome } = await import('./engagement-engine.js')
+        const result = await recordOutcome({
+          engagement_id: String(args.engagement_id ?? ''),
+          grade: args.grade as 'exceeded' | 'met' | 'partial' | 'missed',
+          actual_end_date: String(args.actual_end_date ?? ''),
+          deliverables_shipped: Array.isArray(args.deliverables_shipped) ? (args.deliverables_shipped as unknown[]).map(String) : [],
+          what_went_well: String(args.what_went_well ?? ''),
+          what_went_wrong: String(args.what_went_wrong ?? ''),
+          recorded_by: String(args.recorded_by ?? 'tool-executor'),
+          precedent_match_accuracy: typeof args.precedent_match_accuracy === 'number' ? args.precedent_match_accuracy : undefined,
+        })
+        return `Outcome recorded: ${result.engagement_id} grade=${result.grade}, Q-learning reward sent`
+      } catch (err) {
+        return `Outcome recording failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'engagement_list': {
+      try {
+        const { listEngagements } = await import('./engagement-engine.js')
+        const limit = Math.min(Math.max(typeof args.limit === 'number' ? args.limit : 20, 1), 100)
+        const engagements = await listEngagements(limit)
+        if (engagements.length === 0) return 'No engagements found'
+        const lines = engagements.map((e, i) =>
+          `${i + 1}. ${e.client} (${e.domain}) — ${e.objective.slice(0, 60)}... [${e.status}]`,
+        )
+        return `${engagements.length} engagements:\n${lines.join('\n')}`
+      } catch (err) {
+        return `Engagement list failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
     default: {
       // Check forged tools before giving up
       try {

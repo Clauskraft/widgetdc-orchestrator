@@ -972,6 +972,7 @@ curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/call_
 |-----------|-------|----------|
 | knowledge | 7 | Semantic + graph search, RAG, document ingestion, OSINT |
 | intelligence | 8 | Self-improvement, critique, MoA, tool forging |
+| engagement | 5 | First-class consulting engagement entities (v4.0.4 LIN-607) |
 | monitor | 4 | Platform health, RAG dashboard, hygiene, tool listing |
 | linear | 3 | Project tasks and issue tracking |
 | cognitive | 2 | Deep reasoning, multi-agent investigation |
@@ -980,6 +981,53 @@ curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/call_
 | compliance | 2 | Output verification, governance matrix |
 | mcp | 1 | Dynamic MCP tool proxy (449+ backend tools) |
 | assembly | 1 | Consulting deliverable generation |
+
+---
+
+## v4.0.4 Engagement Intelligence Engine Tools (LIN-607)
+
+First-class consulting engagement entities with precedent matching, plan generation via RLM `/cognitive/analyze`, smart gates (sanity + consensus + RLM missions), and outcome-driven Q-learning feedback. Five tools surface via REST tool-gateway, Universal MCP gateway, OpenAPI `/docs`, and adoption telemetry.
+
+### `engagement_create`
+**Namespace:** engagement | **Timeout:** 15s | **Handler:** orchestrator
+
+Create a first-class Engagement entity. Writes to Neo4j via MERGE (`:Engagement` + `:USES_METHODOLOGY` edges) and indexes in `raptor.index` for semantic precedent retrieval.
+
+**Required:** `client`, `domain`, `objective`, `start_date`, `target_end_date`
+**Optional:** `budget_dkk`, `team_size`, `methodology_refs[]`
+
+### `engagement_match`
+**Namespace:** engagement | **Timeout:** 30s | **Handler:** orchestrator
+
+Find similar past engagements via Cypher (actual `:Engagement` nodes ranked by outcome grade + methodology overlap + freshness) with `dualChannelRAG` 3-hop fallback. Returns top precedents with outcome grades (`exceeded`/`met`/`partial`/`missed`) and staleness flags (>540 days).
+
+**Required:** `objective`, `domain` | **Optional:** `max_results` (default 5)
+
+### `engagement_plan`
+**Namespace:** engagement | **Timeout:** 120s | **Handler:** orchestrator | **Advanced: true**
+
+Generate structured consulting plan (phases, risks, skills) via RLM `/cognitive/analyze` + 4-channel retrieval (`autonomous.graphrag` 3-hop + `srag.query` + `cypher` + `kg_rag.query`) + context folding. Enforces smart gates:
+- **Gate 0 (sanity):** objective ≥15 chars, duration 1-260w, team 1-100, budget 0-500M DKK → 422 `PlanGateRejection`
+- **Gate 1 (consensus):** `budget >20M` OR `team >20` OR `duration >40w` → `consensus.propose` + self-vote, fail-closed
+- **Gate 2 (complex):** `duration >40w` → `rlm.start_mission` × 3 steps, insights injected into cognitive context
+
+**Required:** `objective`, `domain`, `duration_weeks`, `team_size`
+**Optional:** `budget_dkk`, `engagement_id`
+
+### `engagement_outcome`
+**Namespace:** engagement | **Timeout:** 15s | **Handler:** orchestrator
+
+Record engagement completion outcome. Writes `:EngagementOutcome` node + `:HAS_OUTCOME` edge to Neo4j, sets engagement status=`completed`, and sends Q-learning reward to `adaptive-rag` based on grade + precedent accuracy.
+
+**Required:** `engagement_id`, `grade` (exceeded/met/partial/missed), `actual_end_date`, `what_went_well`, `what_went_wrong`, `recorded_by`
+**Optional:** `deliverables_shipped[]`, `precedent_match_accuracy` (0-1)
+
+### `engagement_list`
+**Namespace:** engagement | **Timeout:** 10s | **Handler:** orchestrator
+
+List recent engagements from Redis + Neo4j. Returns most recent first by `createdAt`.
+
+**Optional:** `limit` (default 20, max 100)
 
 ---
 

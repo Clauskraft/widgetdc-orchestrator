@@ -11735,7 +11735,8 @@ function inferCategory(namespace) {
     compliance: "compliance",
     llm: "llm",
     monitor: "monitor",
-    mcp: "mcp"
+    mcp: "mcp",
+    engagement: "engagement"
   };
   return map3[namespace] ?? "mcp";
 }
@@ -12247,6 +12248,82 @@ var init_tool_registry = __esm({
         input: z.object({}),
         timeoutMs: 5e3,
         outputDescription: "List of forged tools with specs"
+      }),
+      // ─── v4.0.4 — Engagement Intelligence Engine (LIN-607) ─────────────────────
+      // First-class consulting engagement entities with precedent matching, plan
+      // generation via /cognitive/analyze, smart gates (sanity + consensus + RLM
+      // mission), and outcome-driven Q-learning. All 5 entries surface via REST
+      // tool-gateway, Universal MCP gateway, OpenAPI /docs, and adoption telemetry.
+      defineTool({
+        name: "engagement_create",
+        namespace: "engagement",
+        description: "Create a first-class Engagement entity. Writes to Neo4j via MERGE (Engagement + USES_METHODOLOGY edges) and indexes in raptor.index for semantic precedent retrieval. Required: client, domain, objective, start_date, target_end_date.",
+        input: z.object({
+          client: z.string().describe("Client name"),
+          domain: z.string().describe("Engagement domain (Finance, Healthcare, Operations, etc.)"),
+          objective: z.string().describe("Engagement objective (min 10 chars)"),
+          start_date: z.string().describe("ISO date string"),
+          target_end_date: z.string().describe("ISO date string"),
+          budget_dkk: z.number().optional().describe("Budget in DKK (optional)"),
+          team_size: z.number().optional().describe("Team size (optional)"),
+          methodology_refs: z.array(z.string()).optional().describe("Methodology framework names")
+        }),
+        timeoutMs: 15e3,
+        outputDescription: "Created Engagement with $id, status=draft, timestamps"
+      }),
+      defineTool({
+        name: "engagement_match",
+        namespace: "engagement",
+        description: "Find similar past engagements via Cypher (actual :Engagement nodes ranked by outcome grade + methodology overlap + freshness) with dualChannelRAG fallback. Returns top precedents with outcome grades and staleness flags.",
+        input: z.object({
+          objective: z.string().describe("Engagement objective to match against"),
+          domain: z.string().describe("Domain filter"),
+          max_results: z.number().optional().describe("Max precedents returned (default 5)")
+        }),
+        timeoutMs: 3e4,
+        outputDescription: "Ranked EngagementMatch[] with similarity, outcome grade, reasoning, stale flag"
+      }),
+      defineTool({
+        name: "engagement_plan",
+        namespace: "engagement",
+        description: "Generate structured consulting plan (phases, risks, skills) via RLM /cognitive/analyze + 4-channel retrieval (graphrag 3-hop + srag + cypher + kg_rag) + context folding. Enforces smart gates: sanity validation, consensus gate for high-stakes (>20M DKK or >20 team or >40w), RLM mission for complex (>40w).",
+        input: z.object({
+          objective: z.string().describe("Engagement objective"),
+          domain: z.string().describe("Consulting domain"),
+          duration_weeks: z.number().describe("Plan duration 1-260 weeks (hard cap)"),
+          team_size: z.number().describe("Team size 1-100 (hard cap)"),
+          budget_dkk: z.number().optional().describe("Budget in DKK, max 500M hard cap"),
+          engagement_id: z.string().optional().describe("Attach plan to existing engagement")
+        }),
+        timeoutMs: 12e4,
+        outputDescription: "EngagementPlan with phases, risks, skills, precedents, citations, confidence, consensus_proposal_id, rlm_mission_id"
+      }),
+      defineTool({
+        name: "engagement_outcome",
+        namespace: "engagement",
+        description: "Record engagement completion outcome. Writes EngagementOutcome node + HAS_OUTCOME edge to Neo4j, sets engagement status=completed, and sends Q-learning reward to adaptive-rag based on grade + precedent accuracy.",
+        input: z.object({
+          engagement_id: z.string().describe("Target engagement ID"),
+          grade: z.enum(["exceeded", "met", "partial", "missed"]).describe("Outcome grade"),
+          actual_end_date: z.string().describe("ISO date actual completion"),
+          deliverables_shipped: z.array(z.string()).describe("List of shipped deliverables"),
+          what_went_well: z.string().describe("Success narrative"),
+          what_went_wrong: z.string().describe("Failure narrative"),
+          recorded_by: z.string().describe("Recorder agent/user ID"),
+          precedent_match_accuracy: z.number().optional().describe("0-1 how well top precedent predicted outcome")
+        }),
+        timeoutMs: 15e3,
+        outputDescription: "EngagementOutcome with timestamps, Q-learning reward sent"
+      }),
+      defineTool({
+        name: "engagement_list",
+        namespace: "engagement",
+        description: "List recent engagements from Redis + Neo4j. Supports limit filter. Returns most recent first by createdAt.",
+        input: z.object({
+          limit: z.number().optional().describe("Max engagements returned (default 20, max 100)")
+        }),
+        timeoutMs: 1e4,
+        outputDescription: "Engagement[] sorted newest first"
       })
     ];
   }
@@ -15085,8 +15162,898 @@ var init_skill_forge = __esm({
   }
 });
 
-// src/tool-executor.ts
+// src/engagement-engine.ts
+var engagement_engine_exports = {};
+__export(engagement_engine_exports, {
+  PlanGateRejection: () => PlanGateRejection,
+  createEngagement: () => createEngagement,
+  generatePlan: () => generatePlan,
+  getEngagement: () => getEngagement,
+  getOutcome: () => getOutcome,
+  getPlan: () => getPlan,
+  listEngagements: () => listEngagements,
+  matchPrecedents: () => matchPrecedents,
+  recordOutcome: () => recordOutcome
+});
 import { v4 as uuid15 } from "uuid";
+async function saveEngagement(e) {
+  engagementCache.set(e.$id, e);
+  const redis2 = getRedis();
+  if (redis2) {
+    try {
+      await redis2.set(`${REDIS_PREFIX5}${e.$id}`, JSON.stringify(e), "EX", TTL_SECONDS4);
+      await redis2.zadd(REDIS_INDEX2, Date.now(), e.$id);
+    } catch (err) {
+      logger.warn({ error: String(err) }, "Engagement: Redis save failed");
+    }
+  }
+}
+async function getEngagement(id) {
+  const cached = engagementCache.get(id);
+  if (cached) return cached;
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${REDIS_PREFIX5}${id}`);
+    if (!raw) return null;
+    const e = JSON.parse(raw);
+    engagementCache.set(id, e);
+    return e;
+  } catch {
+    return null;
+  }
+}
+async function listEngagements(limit = 20) {
+  const redis2 = getRedis();
+  if (!redis2) return Array.from(engagementCache.values()).slice(0, limit);
+  try {
+    const ids = await redis2.zrevrange(REDIS_INDEX2, 0, limit - 1);
+    const out = [];
+    for (const id of ids) {
+      const e = await getEngagement(id);
+      if (e) out.push(e);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+async function mergeEngagementNode(e) {
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (eng:Engagement {id: $id})
+SET eng.client = $client,
+    eng.domain = $domain,
+    eng.objective = $objective,
+    eng.startDate = $startDate,
+    eng.targetEndDate = $targetEndDate,
+    eng.status = $status,
+    eng.budgetDkk = $budgetDkk,
+    eng.teamSize = $teamSize,
+    eng.updatedAt = datetime(),
+    eng.createdAt = coalesce(eng.createdAt, datetime())
+WITH eng
+UNWIND $methodologyRefs AS mref
+MERGE (m {title: mref})
+MERGE (eng)-[:USES_METHODOLOGY]->(m)`,
+        params: {
+          id: e.$id,
+          client: e.client,
+          domain: e.domain,
+          objective: e.objective.slice(0, 500),
+          startDate: e.start_date,
+          targetEndDate: e.target_end_date,
+          status: e.status,
+          budgetDkk: e.budget_dkk ?? 0,
+          teamSize: e.team_size ?? 0,
+          methodologyRefs: (e.methodology_refs ?? []).slice(0, 10)
+        },
+        _force: true
+      },
+      callId: uuid15(),
+      timeoutMs: 1e4
+    });
+  } catch (err) {
+    logger.warn({ id: e.$id, error: String(err) }, "Engagement: Neo4j MERGE failed (non-fatal)");
+  }
+}
+async function mergeOutcomeNode(o) {
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MATCH (eng:Engagement {id: $engId})
+MERGE (out:EngagementOutcome {engagementId: $engId})
+SET out.grade = $grade,
+    out.completedAt = datetime($completedAt),
+    out.actualEndDate = $actualEndDate,
+    out.whatWentWell = $wellText,
+    out.whatWentWrong = $wrongText,
+    out.precedentAccuracy = $precAcc,
+    out.recordedBy = $recordedBy,
+    out.updatedAt = datetime()
+MERGE (eng)-[:HAS_OUTCOME]->(out)
+SET eng.status = 'completed'`,
+        params: {
+          engId: o.engagement_id,
+          grade: o.grade,
+          completedAt: o.completed_at,
+          actualEndDate: o.actual_end_date,
+          wellText: o.what_went_well.slice(0, 1e3),
+          wrongText: o.what_went_wrong.slice(0, 1e3),
+          precAcc: o.precedent_match_accuracy,
+          recordedBy: o.recorded_by
+        },
+        _force: true
+      },
+      callId: uuid15(),
+      timeoutMs: 1e4
+    });
+  } catch (err) {
+    logger.warn({ id: o.engagement_id, error: String(err) }, "Engagement outcome: Neo4j MERGE failed");
+  }
+}
+async function indexEngagementForPrecedent(e) {
+  const content = `Consulting engagement: ${e.objective}. Client domain: ${e.domain}. Duration: ${e.start_date} to ${e.target_end_date}. Team size: ${e.team_size ?? "unspecified"}. Methodologies: ${(e.methodology_refs ?? []).join(", ") || "none specified"}.`;
+  try {
+    await callMcpTool({
+      toolName: "raptor.index",
+      args: {
+        content,
+        metadata: {
+          title: `Engagement: ${e.client} \u2014 ${e.objective.slice(0, 60)}`,
+          domain: "Engagement",
+          engagement_id: e.$id,
+          type: "engagement"
+        },
+        orgId: "default",
+        _force: true
+      },
+      callId: uuid15(),
+      timeoutMs: 15e3
+    });
+  } catch (err) {
+    logger.warn({ id: e.$id, error: String(err) }, "Engagement: raptor.index failed (non-fatal)");
+  }
+}
+async function createEngagement(req) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const e = {
+    $id: `eng-${uuid15()}`,
+    $schema: "https://widgetdc.io/schemas/engagement/v1",
+    client: req.client.slice(0, 120),
+    domain: req.domain.slice(0, 60),
+    objective: req.objective.slice(0, 500),
+    start_date: req.start_date,
+    target_end_date: req.target_end_date,
+    budget_dkk: req.budget_dkk,
+    team_size: req.team_size,
+    status: "draft",
+    methodology_refs: (req.methodology_refs ?? []).slice(0, 10),
+    created_at: now,
+    updated_at: now
+  };
+  await saveEngagement(e);
+  try {
+    await mergeEngagementNode(e);
+  } catch (err) {
+    logger.warn({ id: e.$id, error: String(err) }, "Engagement: Neo4j MERGE await failed \u2014 non-blocking");
+  }
+  indexEngagementForPrecedent(e).catch(() => {
+  });
+  logger.info({ id: e.$id, client: e.client, domain: e.domain }, "Engagement: created");
+  return e;
+}
+async function matchPrecedents(req) {
+  const t0 = Date.now();
+  const maxResults = Math.min(req.max_results ?? 5, 20);
+  const cypherMatches = await matchEngagementsViaCypher(req, maxResults * 2);
+  let ragMatches = [];
+  if (cypherMatches.length < maxResults) {
+    try {
+      const rag = await dualChannelRAG(
+        `${req.domain} consulting engagement: ${req.objective}`,
+        { maxResults: maxResults * 2, maxHops: 3 }
+      );
+      ragMatches = rag.results.filter((r) => r.score >= 0.5 && !cypherMatches.some((c) => c.engagement_id === r.source)).slice(0, maxResults - cypherMatches.length).map((r) => ({
+        engagement_id: r.source,
+        title: r.content.slice(0, 120),
+        domain: req.domain,
+        similarity: Number(r.score.toFixed(3)),
+        match_reasoning: `Semantic similarity ${(r.score * 100).toFixed(0)}% (fallback \u2014 no direct engagement node matched)`,
+        stale: false
+      }));
+    } catch (err) {
+      logger.warn({ error: String(err) }, "Engagement match: RAG fallback failed");
+    }
+  }
+  const matches = [...cypherMatches, ...ragMatches].slice(0, maxResults);
+  logger.info(
+    { query: req.objective.slice(0, 60), cypher: cypherMatches.length, rag: ragMatches.length, total: matches.length, ms: Date.now() - t0 },
+    "Engagement: precedents matched"
+  );
+  return { matches, query_ms: Date.now() - t0 };
+}
+async function matchEngagementsViaCypher(req, limit) {
+  try {
+    const result = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: `MATCH (e:Engagement)
+WHERE e.domain = $domain OR toLower(e.domain) CONTAINS toLower($domain)
+OPTIONAL MATCH (e)-[:HAS_OUTCOME]->(o:EngagementOutcome)
+OPTIONAL MATCH (e)-[:USES_METHODOLOGY]->(m)
+WITH e, o, collect(DISTINCT coalesce(m.title, m.name)) AS methodologies
+RETURN e.id AS id,
+       e.client AS client,
+       e.objective AS objective,
+       e.domain AS domain,
+       e.startDate AS startDate,
+       e.status AS status,
+       o.grade AS outcomeGrade,
+       o.precedentAccuracy AS precedentAccuracy,
+       methodologies
+ORDER BY
+  CASE o.grade WHEN 'exceeded' THEN 0 WHEN 'met' THEN 1 WHEN 'partial' THEN 2 WHEN 'missed' THEN 3 ELSE 4 END,
+  e.startDate DESC
+LIMIT ${Math.floor(limit)}`,
+        params: { domain: req.domain }
+      },
+      callId: uuid15(),
+      timeoutMs: 15e3
+    });
+    if (result.status !== "success") return [];
+    const data = result.result;
+    if (!data || data.success === false) {
+      logger.warn({ error: data?.error }, "Cypher precedent match: backend returned error");
+      return [];
+    }
+    const rows = data?.results ?? data?.rows ?? [];
+    if (!Array.isArray(rows) || rows.length === 0) return [];
+    const objectiveLower = req.objective.toLowerCase();
+    const now = Date.now();
+    return rows.map((row) => {
+      const client = String(row.client ?? "Unknown");
+      const objective = String(row.objective ?? "");
+      const grade = row.outcomeGrade ?? null;
+      const methodologies = Array.isArray(row.methodologies) ? row.methodologies : [];
+      const startDateStr = row.startDate ? String(row.startDate) : null;
+      const startMs = startDateStr ? Date.parse(startDateStr) : now;
+      const ageDays = Math.max(0, Math.floor((now - startMs) / 864e5));
+      const stale = ageDays > STALE_PRECEDENT_DAYS;
+      const gradeWeight = grade === "exceeded" ? 0.3 : grade === "met" ? 0.25 : grade === "partial" ? 0.15 : grade === "missed" ? 0.05 : 0.1;
+      const objWords = new Set(objectiveLower.split(/\W+/).filter((w) => w.length > 3));
+      const targetWords = (objective + " " + methodologies.join(" ")).toLowerCase().split(/\W+/);
+      const overlap = targetWords.filter((w) => objWords.has(w)).length;
+      const overlapScore = Math.min(0.5, overlap * 0.08);
+      const freshness = stale ? 0 : Math.max(0, 0.2 - ageDays / STALE_PRECEDENT_DAYS * 0.2);
+      const similarity = Math.min(0.99, gradeWeight + overlapScore + freshness);
+      return {
+        engagement_id: String(row.id ?? "unknown"),
+        title: `${client} \u2014 ${objective.slice(0, 80)}`,
+        domain: String(row.domain ?? req.domain),
+        similarity: Number(similarity.toFixed(3)),
+        match_reasoning: `Cypher match: ${grade ?? "no outcome"} grade, ${methodologies.length} shared methodologies, ${ageDays}d old${stale ? " (STALE)" : ""}`,
+        precedent_outcome: grade ?? void 0,
+        stale
+      };
+    });
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Cypher precedent match failed");
+    return [];
+  }
+}
+async function queryKgRag(query, maxEvidence = 10) {
+  try {
+    const result = await callMcpTool({
+      toolName: "kg_rag.query",
+      args: { question: query, max_evidence: maxEvidence },
+      callId: uuid15(),
+      timeoutMs: 45e3
+    });
+    if (result.status !== "success") return { answer: "", sources: [] };
+    const data = result.result;
+    if (!data) return { answer: "", sources: [] };
+    const answer = typeof data.answer === "string" ? data.answer : "";
+    const sources = Array.isArray(data.sources) ? data.sources.map((s) => ({
+      id: String(s.id ?? "unknown"),
+      content: String(s.content ?? ""),
+      score: typeof s.score === "number" ? s.score : 0.5
+    })) : [];
+    return { answer, sources };
+  } catch (err) {
+    logger.debug({ error: String(err) }, "kg_rag.query failed");
+    return { answer: "", sources: [] };
+  }
+}
+async function foldContext(text, query, maxTokens = 1500) {
+  if (!text || text.length < 500) return null;
+  try {
+    const result = await callMcpTool({
+      toolName: "context_folding.fold",
+      args: {
+        task: query,
+        context: { text },
+        max_tokens: maxTokens,
+        domain: "consulting"
+      },
+      callId: uuid15(),
+      timeoutMs: 2e4
+    });
+    if (result.status !== "success") return null;
+    const data = result.result;
+    const folded = data?.compressed_text ?? data?.folded_text ?? data?.result;
+    return typeof folded === "string" && folded.length > 50 ? folded : null;
+  } catch {
+    return null;
+  }
+}
+function isHighStakesPlan(req) {
+  return (req.budget_dkk ?? 0) > 2e7 || req.team_size > 20 || req.duration_weeks > 40;
+}
+async function proposeViaConsensus(engagementId, req, planSummary) {
+  try {
+    const result = await callMcpTool({
+      toolName: "consensus.propose",
+      args: {
+        title: `EIE plan: ${req.domain} \u2014 ${req.objective.slice(0, 80)}`,
+        description: `${req.duration_weeks}w, team ${req.team_size}, budget ${req.budget_dkk ?? "unspecified"} DKK. Plan summary: ${planSummary.slice(0, 400)}`,
+        proposer: "engagement-planner",
+        severity: "P2",
+        metadata: {
+          engagement_id: engagementId,
+          domain: req.domain,
+          duration_weeks: req.duration_weeks,
+          team_size: req.team_size,
+          budget_dkk: req.budget_dkk ?? 0
+        }
+      },
+      callId: uuid15(),
+      timeoutMs: 15e3
+    });
+    if (result.status !== "success") return { proposalId: null, quorum: 0 };
+    const data = result.result;
+    if (!data || data.success === false) return { proposalId: null, quorum: 0 };
+    const proposalId = data.proposalId ?? null;
+    const quorum = Number(data.quorum ?? 3);
+    logger.info({ proposalId, quorum, engagement_id: engagementId }, "Engagement plan: consensus proposal created");
+    return { proposalId, quorum };
+  } catch (err) {
+    logger.debug({ error: String(err) }, "consensus.propose failed");
+    return { proposalId: null, quorum: 0 };
+  }
+}
+async function voteOnConsensus(proposalId, decision, confidence, reasoning) {
+  try {
+    const result = await callMcpTool({
+      toolName: "consensus.vote",
+      args: {
+        proposalId,
+        voter: "engagement-planner",
+        decision,
+        confidence: Math.min(1, Math.max(0, confidence)),
+        reasoning: reasoning.slice(0, 500)
+      },
+      callId: uuid15(),
+      timeoutMs: 1e4
+    });
+    if (result.status !== "success") return false;
+    const data = result.result;
+    return Boolean(data && data.success !== false);
+  } catch (err) {
+    logger.debug({ error: String(err) }, "consensus.vote failed");
+    return false;
+  }
+}
+async function planViaRlmMission(engagementId, req, maxSteps = 3) {
+  try {
+    const startResult = await callMcpTool({
+      toolName: "rlm.start_mission",
+      args: {
+        name: `eie-plan-${engagementId}`,
+        objective: `Design ${req.duration_weeks}-week ${req.domain} consulting engagement: ${req.objective}`,
+        maxSteps,
+        maxDepth: 2
+      },
+      callId: uuid15(),
+      timeoutMs: 2e4
+    });
+    if (startResult.status !== "success") return { missionId: null, insights: [], stepsExecuted: 0 };
+    const startData = startResult.result;
+    if (!startData || startData.success === false) return { missionId: null, insights: [], stepsExecuted: 0 };
+    const missionId = startData.missionId ?? null;
+    if (!missionId) return { missionId: null, insights: [], stepsExecuted: 0 };
+    const insights = [];
+    let stepsExecuted = 0;
+    for (let i = 0; i < maxSteps; i++) {
+      const stepResult = await callMcpTool({
+        toolName: "rlm.execute_step",
+        args: { missionId },
+        callId: uuid15(),
+        timeoutMs: 6e4
+      });
+      if (stepResult.status !== "success") break;
+      const stepData = stepResult.result;
+      if (!stepData || stepData.success === false) break;
+      stepsExecuted++;
+      const step = stepData.result;
+      const summary = step?.data?.summary ?? step?.summary;
+      if (typeof summary === "string" && summary.length > 20) {
+        insights.push(summary.slice(0, 300));
+      }
+      if (stepData.status === "COMPLETED" || step === null) break;
+    }
+    logger.info({ missionId, stepsExecuted, insights: insights.length, engagement_id: engagementId }, "Engagement plan: RLM mission executed");
+    return { missionId, insights, stepsExecuted };
+  } catch (err) {
+    logger.debug({ error: String(err) }, "rlm.start_mission failed");
+    return { missionId: null, insights: [], stepsExecuted: 0 };
+  }
+}
+function enforceInputSanityGate(req) {
+  if (!req.objective || req.objective.trim().length < GATE_MIN_OBJECTIVE_LEN) {
+    throw new PlanGateRejection("INVALID_OBJECTIVE", `objective must be at least ${GATE_MIN_OBJECTIVE_LEN} chars`, { given: req.objective?.length ?? 0 });
+  }
+  if (!req.domain || req.domain.trim().length === 0) {
+    throw new PlanGateRejection("INVALID_DOMAIN", "domain required");
+  }
+  if (!Number.isFinite(req.duration_weeks) || req.duration_weeks < 1) {
+    throw new PlanGateRejection("INVALID_DURATION", "duration_weeks must be \u22651", { given: req.duration_weeks });
+  }
+  if (req.duration_weeks > GATE_MAX_DURATION_WEEKS) {
+    throw new PlanGateRejection("DURATION_OVER_HARD_LIMIT", `duration >${GATE_MAX_DURATION_WEEKS} weeks rejected`, { given: req.duration_weeks, limit: GATE_MAX_DURATION_WEEKS });
+  }
+  if (!Number.isFinite(req.team_size) || req.team_size < 1) {
+    throw new PlanGateRejection("INVALID_TEAM", "team_size must be \u22651", { given: req.team_size });
+  }
+  if (req.team_size > GATE_MAX_TEAM_SIZE) {
+    throw new PlanGateRejection("TEAM_OVER_HARD_LIMIT", `team_size >${GATE_MAX_TEAM_SIZE} rejected`, { given: req.team_size, limit: GATE_MAX_TEAM_SIZE });
+  }
+  if (req.budget_dkk !== void 0) {
+    if (!Number.isFinite(req.budget_dkk) || req.budget_dkk < 0) {
+      throw new PlanGateRejection("INVALID_BUDGET", "budget_dkk must be \u22650", { given: req.budget_dkk });
+    }
+    if (req.budget_dkk > GATE_MAX_BUDGET_DKK) {
+      throw new PlanGateRejection("BUDGET_OVER_HARD_LIMIT", `budget >${GATE_MAX_BUDGET_DKK} DKK rejected`, { given: req.budget_dkk, limit: GATE_MAX_BUDGET_DKK });
+    }
+  }
+}
+async function enforceConsensusGate(engagementId, req) {
+  const summary = `High-stakes plan: ${req.domain}, ${req.duration_weeks}w, team ${req.team_size}, budget ${req.budget_dkk ?? "?"} DKK. ${req.objective.slice(0, 200)}`;
+  const proposeResult = await Promise.race([
+    proposeViaConsensus(engagementId, req, summary),
+    new Promise(
+      (resolve) => setTimeout(() => resolve({ proposalId: null, quorum: 0 }), GATE_CONSENSUS_TIMEOUT_MS)
+    )
+  ]);
+  if (!proposeResult.proposalId) {
+    if (GATE_REQUIRE_CONSENSUS) {
+      throw new PlanGateRejection(
+        "CONSENSUS_UNAVAILABLE",
+        "High-stakes plan requires consensus proposal, but consensus.propose is unavailable or timed out. Set EIE_GATE_REQUIRE_CONSENSUS=false to override (not recommended).",
+        { timeout_ms: GATE_CONSENSUS_TIMEOUT_MS }
+      );
+    }
+    logger.warn({ engagementId }, "EIE gate: consensus unavailable, proceeding under override flag");
+    return { proposalId: "", quorum: 0 };
+  }
+  await voteOnConsensus(
+    proposeResult.proposalId,
+    "approve",
+    0.85,
+    `Plan ${engagementId}: domain=${req.domain}, ${req.duration_weeks}w, team=${req.team_size}, budget=${req.budget_dkk ?? 0}. Self-vote as proposer.`
+  );
+  return proposeResult;
+}
+async function generatePlan(req) {
+  const t0 = Date.now();
+  const engagementId = req.engagement_id ?? `eng-${uuid15()}`;
+  enforceInputSanityGate(req);
+  const highStakes = isHighStakesPlan(req);
+  const complex = req.duration_weeks > GATE_DURATION_WEEKS;
+  const gatesTriggered = [];
+  if ((req.budget_dkk ?? 0) > GATE_BUDGET_DKK) gatesTriggered.push(`budget>${GATE_BUDGET_DKK}`);
+  if (req.team_size > GATE_TEAM_SIZE) gatesTriggered.push(`team>${GATE_TEAM_SIZE}`);
+  if (req.duration_weeks > GATE_DURATION_WEEKS) gatesTriggered.push(`duration>${GATE_DURATION_WEEKS}w`);
+  logger.info({ engagementId, gates: gatesTriggered, high_stakes: highStakes, complex }, "EIE gates: classified");
+  let consensusProposalId = "";
+  let consensusQuorum = 0;
+  if (highStakes) {
+    const gate = await enforceConsensusGate(engagementId, req);
+    consensusProposalId = gate.proposalId;
+    consensusQuorum = gate.quorum;
+    logger.info({ engagementId, proposalId: consensusProposalId, quorum: consensusQuorum }, "EIE gate: consensus opened");
+  }
+  let rlmMissionId = null;
+  let rlmStepsExecuted = 0;
+  let rlmInsights = [];
+  if (complex) {
+    const mission = await planViaRlmMission(engagementId, req, 3);
+    rlmMissionId = mission.missionId;
+    rlmStepsExecuted = mission.stepsExecuted;
+    rlmInsights = mission.insights;
+    logger.info({ engagementId, missionId: rlmMissionId, steps: rlmStepsExecuted }, "EIE gate: RLM mission completed");
+  }
+  const [precedents, methodologyBundle, riskBundle, kgRagBundle] = await Promise.all([
+    matchPrecedents({ objective: req.objective, domain: req.domain, max_results: 5 }),
+    dualChannelRAG(`consulting methodology framework for ${req.domain} ${req.objective}`, { maxResults: 5, maxHops: 3 }),
+    dualChannelRAG(`risks challenges pitfalls for ${req.domain} consulting engagement ${req.objective}`, { maxResults: 5, maxHops: 3 }),
+    queryKgRag(`${req.domain} engagement approach: ${req.objective}`, 8)
+  ]);
+  let methodologyEvidence = methodologyBundle.results.map((r) => r.content).join("\n\n").slice(0, 3500);
+  let riskEvidence = riskBundle.results.map((r) => r.content).join("\n\n").slice(0, 2500);
+  const kgRagEvidence = kgRagBundle.answer.slice(0, 2500);
+  const precedentText = precedents.matches.map((m, i) => `[${i + 1}] ${m.title} (similarity: ${m.similarity})`).join("\n");
+  const totalEvidenceLen = methodologyEvidence.length + riskEvidence.length + kgRagEvidence.length;
+  if (totalEvidenceLen > 6e3) {
+    const foldedMethod = await foldContext(methodologyEvidence, `consulting methodology for ${req.domain}`, 1500);
+    const foldedRisk = await foldContext(riskEvidence, `risks for ${req.domain} engagement`, 1e3);
+    if (foldedMethod) methodologyEvidence = foldedMethod;
+    if (foldedRisk) riskEvidence = foldedRisk;
+    logger.info({ original: totalEvidenceLen, folded: methodologyEvidence.length + riskEvidence.length }, "Engagement plan: context folded");
+  }
+  const totalCitations = precedents.matches.length + methodologyBundle.results.length + riskBundle.results.length + kgRagBundle.sources.length;
+  const avgConfidence = [
+    ...methodologyBundle.results.map((r) => r.score),
+    ...riskBundle.results.map((r) => r.score),
+    ...precedents.matches.map((m) => m.similarity)
+  ].reduce((s, x) => s + x, 0) / Math.max(
+    1,
+    methodologyBundle.results.length + riskBundle.results.length + precedents.matches.length
+  ) || 0;
+  const planPrompt = `You are planning a ${req.duration_weeks}-week consulting engagement.
+
+OBJECTIVE: ${req.objective}
+DOMAIN: ${req.domain}
+TEAM SIZE: ${req.team_size}
+${req.budget_dkk ? `BUDGET: ${req.budget_dkk} DKK` : ""}
+
+METHODOLOGY EVIDENCE FROM KNOWLEDGE GRAPH:
+${methodologyEvidence || "[limited evidence]"}
+
+RISK EVIDENCE FROM KNOWLEDGE GRAPH:
+${riskEvidence || "[limited evidence]"}
+
+GRAPH-AUGMENTED CONTEXT (kg_rag multi-hop synthesis):
+${kgRagEvidence || "[no kg_rag context]"}
+
+SIMILAR PRECEDENT ENGAGEMENTS:
+${precedentText || "[no precedents \u2014 cold start]"}
+
+OUTPUT STRICT JSON with this schema:
+{
+  "phases": [
+    {"name": "...", "duration_weeks": N, "deliverables": ["...", "..."], "methodology": "..."}
+  ],
+  "risks": [
+    {"description": "...", "severity": "high|medium|low", "mitigation": "..."}
+  ],
+  "required_skills": ["skill1", "skill2", ...]
+}
+
+Rules:
+- Phase durations must sum to ${req.duration_weeks}
+- Include 3-6 phases, 3-8 risks, 5-12 skills
+- Be concrete and cite evidence where possible
+- Return ONLY JSON, no markdown fences, no commentary`;
+  let phases = [];
+  let risks = [];
+  let skills = [];
+  let planSource = "fallback-template";
+  let platformConfidence = 0;
+  let routingMeta = null;
+  const analyzed = await callCognitiveRaw(
+    "analyze",
+    {
+      prompt: `Design a ${req.duration_weeks}-week consulting engagement for: ${req.objective}`,
+      context: {
+        domain: req.domain,
+        team_size: req.team_size,
+        budget_dkk: req.budget_dkk,
+        precedent_summaries: precedents.matches.slice(0, 3).map((m) => m.title),
+        methodology_evidence: methodologyEvidence.slice(0, 2e3),
+        risk_evidence: riskEvidence.slice(0, 1500),
+        kg_rag_synthesis: kgRagEvidence.slice(0, 1500),
+        rlm_mission_insights: rlmInsights.slice(0, 3)
+      },
+      agent_id: "engagement-planner",
+      // Custom fields consumed by callCognitiveRaw passthrough
+      ...{
+        task: `Design a ${req.duration_weeks}-week consulting engagement for: ${req.objective}`,
+        analysis_dimensions: [
+          "phase_breakdown",
+          "resource_allocation",
+          "methodology_integration",
+          "key_challenges_and_mitigations"
+        ],
+        constraints: [
+          `duration: ${req.duration_weeks} weeks`,
+          `team: ${req.team_size} people`,
+          req.budget_dkk ? `budget: ${req.budget_dkk} DKK` : ""
+        ].filter(Boolean)
+      }
+    },
+    6e4
+  );
+  if (analyzed?.analysis) {
+    const a = analyzed.analysis;
+    const phaseBreakdown = a.phase_breakdown ?? a.phases;
+    const challenges = a.key_challenges_and_mitigations ?? a.risks;
+    const resourceAlloc = a.resource_allocation;
+    if (Array.isArray(phaseBreakdown) && phaseBreakdown.length > 0) {
+      phases = phaseBreakdown.slice(0, 10).map((p) => ({
+        name: String(p.phase_name ?? p.name ?? "Unnamed phase"),
+        duration_weeks: Number(p.duration_weeks ?? 1),
+        deliverables: Array.isArray(p.deliverables) ? p.deliverables.map(String).slice(0, 8) : [],
+        methodology: String(p.objective ?? p.methodology ?? p.description ?? "")
+      }));
+    }
+    if (Array.isArray(challenges) && challenges.length > 0) {
+      risks = challenges.slice(0, 10).map((c) => ({
+        description: String(c.challenge ?? c.description ?? c.name ?? ""),
+        severity: ["high", "medium", "low"].includes(String(c.severity)) ? c.severity : "medium",
+        mitigation: String(c.mitigation ?? "")
+      }));
+    }
+    if (resourceAlloc && Array.isArray(resourceAlloc.roles)) {
+      skills = resourceAlloc.roles.map(String).slice(0, 15);
+    } else if (Array.isArray(a.skills)) {
+      skills = a.skills.map((s) => String(s.name ?? s)).slice(0, 15);
+    }
+    const analysisConfidence = typeof analyzed.confidence === "number" ? analyzed.confidence : 0;
+    const qualityScore = typeof analyzed.quality?.overall_score === "number" ? analyzed.quality.overall_score : 0;
+    platformConfidence = Math.max(analysisConfidence, qualityScore);
+    routingMeta = analyzed.routing ?? null;
+    if (phases.length > 0 || risks.length > 0) {
+      planSource = "rlm-cognitive-analyze";
+      logger.info(
+        {
+          phases: phases.length,
+          risks: risks.length,
+          skills: skills.length,
+          provider: routingMeta?.provider,
+          model: routingMeta?.model,
+          cost: routingMeta?.cost,
+          platform_confidence: platformConfidence
+        },
+        "Engagement plan: RLM /cognitive/analyze OK"
+      );
+    }
+  }
+  if (phases.length === 0) {
+    logger.warn({ engagementId }, "Engagement plan: /cognitive/analyze returned empty, trying llm.generate fallback");
+    try {
+      const mercuryPrompt = `${planPrompt}
+
+Return ONLY JSON matching the schema, no prose.`;
+      const r = await callMcpTool({
+        toolName: "llm.generate",
+        args: { prompt: mercuryPrompt },
+        callId: uuid15(),
+        timeoutMs: 3e4
+      });
+      if (r.status === "success") {
+        const raw = r.result;
+        const text = String(raw?.content ?? raw?.response ?? "");
+        if (text.length > 20) {
+          const parsed = parsePlanJSON(text);
+          if (parsed.phases.length > 0) {
+            phases = parsed.phases;
+            risks = parsed.risks;
+            skills = parsed.required_skills;
+            planSource = "mercury-llm-generate-fallback";
+            logger.info({ phases: phases.length }, "Engagement plan: Mercury fallback OK");
+          }
+        }
+      }
+    } catch (err) {
+      logger.debug({ error: String(err) }, "Engagement plan: Mercury fallback failed");
+    }
+  }
+  if (phases.length === 0) {
+    phases = synthesizeFallbackPhases(req.duration_weeks);
+  }
+  if (risks.length === 0) {
+    risks = [
+      { description: "Scope creep beyond initial objectives", severity: "medium", mitigation: "Weekly steering committee with change control board" },
+      { description: "Stakeholder alignment drift", severity: "medium", mitigation: "Bi-weekly alignment sessions with documented decisions" }
+    ];
+  }
+  if (skills.length === 0) {
+    skills = ["Strategic consulting", "Stakeholder management", "Data analysis", req.domain];
+  }
+  const finalConfidence = platformConfidence > 0 ? Math.max(platformConfidence, avgConfidence) : avgConfidence;
+  const plan = {
+    engagement_id: engagementId,
+    generated_at: (/* @__PURE__ */ new Date()).toISOString(),
+    phases,
+    risks,
+    required_skills: skills,
+    precedents_used: precedents.matches,
+    total_citations: totalCitations,
+    avg_confidence: Number(finalConfidence.toFixed(3)),
+    generation_ms: Date.now() - t0,
+    high_stakes: highStakes,
+    consensus_proposal_id: consensusProposalId || void 0,
+    consensus_quorum: consensusQuorum || void 0,
+    rlm_mission_id: rlmMissionId || void 0,
+    rlm_steps_executed: rlmStepsExecuted || void 0,
+    plan_source: planSource
+  };
+  const redis2 = getRedis();
+  if (redis2) {
+    try {
+      await redis2.set(`${REDIS_PLAN_PREFIX}${engagementId}`, JSON.stringify(plan), "EX", TTL_SECONDS4);
+    } catch {
+    }
+  }
+  logger.info(
+    {
+      engagement_id: engagementId,
+      phases: phases.length,
+      risks: risks.length,
+      skills: skills.length,
+      citations: totalCitations,
+      confidence: plan.avg_confidence,
+      ms: plan.generation_ms,
+      plan_source: planSource,
+      provider: routingMeta?.provider ?? null,
+      cost: routingMeta?.cost ?? null
+    },
+    "Engagement: plan generated"
+  );
+  return plan;
+}
+function parsePlanJSON(text) {
+  const cleaned = text.replace(/```json\s*/g, "").replace(/```\s*/g, "").trim();
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+  if (firstBrace < 0 || lastBrace < 0) {
+    return { phases: [], risks: [], required_skills: [] };
+  }
+  const jsonSlice = cleaned.slice(firstBrace, lastBrace + 1);
+  try {
+    const obj = JSON.parse(jsonSlice);
+    const phases = Array.isArray(obj.phases) ? obj.phases.slice(0, 10).map((p) => ({
+      name: String(p.name ?? "Unnamed phase"),
+      duration_weeks: Number(p.duration_weeks ?? 1),
+      deliverables: Array.isArray(p.deliverables) ? p.deliverables.map(String).slice(0, 8) : [],
+      methodology: String(p.methodology ?? "")
+    })) : [];
+    const risks = Array.isArray(obj.risks) ? obj.risks.slice(0, 10).map((r) => ({
+      description: String(r.description ?? ""),
+      severity: ["high", "medium", "low"].includes(String(r.severity)) ? r.severity : "medium",
+      mitigation: String(r.mitigation ?? "")
+    })) : [];
+    const skills = Array.isArray(obj.required_skills) ? obj.required_skills.map(String).slice(0, 15) : [];
+    return { phases, risks, required_skills: skills };
+  } catch {
+    return { phases: [], risks: [], required_skills: [] };
+  }
+}
+function synthesizeFallbackPhases(totalWeeks) {
+  const w = Math.max(1, Math.floor(totalWeeks / 4));
+  return [
+    { name: "Discover", duration_weeks: w, deliverables: ["Stakeholder map", "Current state assessment"], methodology: "McKinsey 7-step problem solving" },
+    { name: "Diagnose", duration_weeks: w, deliverables: ["Root cause analysis", "Opportunity sizing"], methodology: "MECE issue tree decomposition" },
+    { name: "Design", duration_weeks: w, deliverables: ["Target operating model", "Implementation roadmap"], methodology: "Capability-based planning" },
+    { name: "Deploy", duration_weeks: Math.max(1, totalWeeks - 3 * w), deliverables: ["Pilot rollout", "Change management plan"], methodology: "Kotter 8-step change" }
+  ];
+}
+async function recordOutcome(req) {
+  const engagement = await getEngagement(req.engagement_id);
+  if (!engagement) {
+    throw new Error(`Engagement ${req.engagement_id} not found`);
+  }
+  const outcome = {
+    engagement_id: req.engagement_id,
+    completed_at: (/* @__PURE__ */ new Date()).toISOString(),
+    actual_end_date: req.actual_end_date,
+    grade: req.grade,
+    deliverables_shipped: req.deliverables_shipped.slice(0, 20),
+    what_went_well: req.what_went_well.slice(0, 2e3),
+    what_went_wrong: req.what_went_wrong.slice(0, 2e3),
+    precedent_match_accuracy: Math.min(1, Math.max(0, req.precedent_match_accuracy ?? 0.5)),
+    recorded_by: req.recorded_by
+  };
+  engagement.status = "completed";
+  engagement.updated_at = (/* @__PURE__ */ new Date()).toISOString();
+  await saveEngagement(engagement);
+  const redis2 = getRedis();
+  if (redis2) {
+    try {
+      await redis2.set(`${REDIS_PREFIX5}outcome:${req.engagement_id}`, JSON.stringify(outcome), "EX", TTL_SECONDS4);
+    } catch {
+    }
+  }
+  mergeOutcomeNode(outcome).catch(() => {
+  });
+  const reward = gradeToReward(outcome.grade) * outcome.precedent_match_accuracy;
+  sendQLearningReward(
+    { query_type: "multi_hop", channels_used: ["graphrag", "srag", "cypher"], result_count: 5 },
+    { strategy: "engagement-precedent-match", confidence_threshold: 0.4 },
+    reward
+  ).catch(() => {
+  });
+  logger.info(
+    { engagement_id: req.engagement_id, grade: req.grade, reward },
+    "Engagement: outcome recorded, Q-learning reward sent"
+  );
+  return outcome;
+}
+function gradeToReward(grade) {
+  switch (grade) {
+    case "exceeded":
+      return 1;
+    case "met":
+      return 0.8;
+    case "partial":
+      return 0.4;
+    case "missed":
+      return 0.1;
+  }
+}
+async function getOutcome(engagementId) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${REDIS_PREFIX5}outcome:${engagementId}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+async function getPlan(engagementId) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${REDIS_PLAN_PREFIX}${engagementId}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+var REDIS_PREFIX5, REDIS_INDEX2, REDIS_PLAN_PREFIX, TTL_SECONDS4, engagementCache, STALE_PRECEDENT_DAYS, GATE_BUDGET_DKK, GATE_TEAM_SIZE, GATE_DURATION_WEEKS, GATE_REQUIRE_CONSENSUS, GATE_CONSENSUS_TIMEOUT_MS, GATE_MAX_BUDGET_DKK, GATE_MAX_TEAM_SIZE, GATE_MAX_DURATION_WEEKS, GATE_MIN_OBJECTIVE_LEN, PlanGateRejection;
+var init_engagement_engine = __esm({
+  "src/engagement-engine.ts"() {
+    "use strict";
+    init_mcp_caller();
+    init_cognitive_proxy();
+    init_dual_rag();
+    init_redis();
+    init_logger();
+    init_adaptive_rag();
+    REDIS_PREFIX5 = "orchestrator:engagement:";
+    REDIS_INDEX2 = "orchestrator:engagements:index";
+    REDIS_PLAN_PREFIX = "orchestrator:engagement:plan:";
+    TTL_SECONDS4 = 60 * 60 * 24 * 30;
+    engagementCache = /* @__PURE__ */ new Map();
+    STALE_PRECEDENT_DAYS = 540;
+    GATE_BUDGET_DKK = Number(process.env.EIE_GATE_BUDGET_DKK ?? 2e7);
+    GATE_TEAM_SIZE = Number(process.env.EIE_GATE_TEAM_SIZE ?? 20);
+    GATE_DURATION_WEEKS = Number(process.env.EIE_GATE_DURATION_WEEKS ?? 40);
+    GATE_REQUIRE_CONSENSUS = process.env.EIE_GATE_REQUIRE_CONSENSUS !== "false";
+    GATE_CONSENSUS_TIMEOUT_MS = Number(process.env.EIE_GATE_CONSENSUS_TIMEOUT_MS ?? 3e4);
+    GATE_MAX_BUDGET_DKK = Number(process.env.EIE_GATE_MAX_BUDGET_DKK ?? 5e8);
+    GATE_MAX_TEAM_SIZE = Number(process.env.EIE_GATE_MAX_TEAM_SIZE ?? 100);
+    GATE_MAX_DURATION_WEEKS = Number(process.env.EIE_GATE_MAX_DURATION_WEEKS ?? 260);
+    GATE_MIN_OBJECTIVE_LEN = 15;
+    PlanGateRejection = class extends Error {
+      constructor(code, reason, details = {}) {
+        super(`Plan gate rejection: ${code} \u2014 ${reason}`);
+        this.code = code;
+        this.reason = reason;
+        this.details = details;
+        this.name = "PlanGateRejection";
+      }
+    };
+  }
+});
+
+// src/tool-executor.ts
+import { v4 as uuid16 } from "uuid";
 function getTokenSavings() {
   return { totalTokensSaved, totalFoldingCalls, avgSavingsPerFold: totalFoldingCalls > 0 ? Math.round(totalTokensSaved / totalFoldingCalls) : 0 };
 }
@@ -15178,7 +16145,7 @@ function buildToolFallback(toolName, error) {
   }
 }
 async function executeToolUnified(toolName, args, opts) {
-  const callId = opts?.call_id ?? uuid15();
+  const callId = opts?.call_id ?? uuid16();
   const t0 = Date.now();
   let deprecation_notice;
   const toolDef = getTool(toolName);
@@ -15266,7 +16233,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher, params: args.params ?? {} },
-        callId: uuid15(),
+        callId: uuid16(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
@@ -15287,7 +16254,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher },
-        callId: uuid15(),
+        callId: uuid16(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Task query failed: ${result.error_message}`;
@@ -15299,7 +16266,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: args.tool_name,
         args: args.payload ?? {},
-        callId: uuid15(),
+        callId: uuid16(),
         timeoutMs: 3e4
       });
       if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
@@ -15307,8 +16274,8 @@ ${result.merged_context}`;
     }
     case "get_platform_health": {
       const [backendHealth, graphHealth] = await Promise.allSettled([
-        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid15(), timeoutMs: 1e4 }),
-        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid15(), timeoutMs: 1e4 })
+        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid16(), timeoutMs: 1e4 }),
+        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid16(), timeoutMs: 1e4 })
       ]);
       const parts = [];
       if (backendHealth.status === "fulfilled" && backendHealth.value.status === "success") {
@@ -15324,7 +16291,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: args.query },
-        callId: uuid15(),
+        callId: uuid16(),
         timeoutMs: 2e4
       });
       if (result.status !== "success") return `Document search failed: ${result.error_message}`;
@@ -15342,7 +16309,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issues",
         args: payload,
-        callId: uuid15(),
+        callId: uuid16(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
@@ -15358,7 +16325,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issue_get",
         args: { identifier },
-        callId: uuid15(),
+        callId: uuid16(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
@@ -15804,6 +16771,116 @@ ${gapLines.join("\n")}`;
 ${tools.map((t) => `- ${t.name} (${t.handler_type}, ${t.verified ? "verified" : "unverified"}) \u2014 ${t.description.slice(0, 80)}`).join("\n")}`;
       } catch (err) {
         return `List failed: ${err}`;
+      }
+    }
+    // ─── v4.0.4 — Engagement Intelligence Engine (LIN-607) ─────────────────
+    // All 5 cases delegate to engagement-engine.ts — zero duplicated logic.
+    // Registry entries in tool-registry.ts surface these via REST tool-gateway,
+    // Universal MCP gateway, OpenAPI /docs, and adoption telemetry.
+    case "engagement_create": {
+      try {
+        const { createEngagement: createEngagement2 } = await Promise.resolve().then(() => (init_engagement_engine(), engagement_engine_exports));
+        const result = await createEngagement2({
+          client: String(args.client ?? ""),
+          domain: String(args.domain ?? ""),
+          objective: String(args.objective ?? ""),
+          start_date: String(args.start_date ?? ""),
+          target_end_date: String(args.target_end_date ?? ""),
+          budget_dkk: typeof args.budget_dkk === "number" ? args.budget_dkk : void 0,
+          team_size: typeof args.team_size === "number" ? args.team_size : void 0,
+          methodology_refs: Array.isArray(args.methodology_refs) ? args.methodology_refs.map(String) : void 0
+        });
+        return JSON.stringify({ engagement_id: result.$id, client: result.client, domain: result.domain, status: result.status, created_at: result.created_at });
+      } catch (err) {
+        return `Engagement create failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "engagement_match": {
+      try {
+        const { matchPrecedents: matchPrecedents2 } = await Promise.resolve().then(() => (init_engagement_engine(), engagement_engine_exports));
+        const result = await matchPrecedents2({
+          objective: String(args.objective ?? ""),
+          domain: String(args.domain ?? ""),
+          max_results: typeof args.max_results === "number" ? args.max_results : void 0
+        });
+        if (result.matches.length === 0) {
+          return `No precedents found for "${String(args.objective).slice(0, 60)}" in ${args.domain} (${result.query_ms}ms)`;
+        }
+        const lines = result.matches.map(
+          (m, i) => `${i + 1}. ${m.title} \u2014 similarity ${m.similarity}${m.precedent_outcome ? `, outcome: ${m.precedent_outcome}` : ""}${m.stale ? " [STALE]" : ""}
+   ${m.match_reasoning}`
+        );
+        return `Found ${result.matches.length} precedents (${result.query_ms}ms):
+
+${lines.join("\n\n")}`;
+      } catch (err) {
+        return `Engagement match failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "engagement_plan": {
+      try {
+        const { generatePlan: generatePlan2, PlanGateRejection: PlanGateRejection2 } = await Promise.resolve().then(() => (init_engagement_engine(), engagement_engine_exports));
+        const result = await generatePlan2({
+          objective: String(args.objective ?? ""),
+          domain: String(args.domain ?? ""),
+          duration_weeks: Number(args.duration_weeks),
+          team_size: Number(args.team_size),
+          budget_dkk: typeof args.budget_dkk === "number" ? args.budget_dkk : void 0,
+          engagement_id: typeof args.engagement_id === "string" ? args.engagement_id : void 0
+        });
+        const phaseList = result.phases.map((p, i) => `${i + 1}. ${p.name} (${p.duration_weeks}w) \u2014 ${p.deliverables.join(", ")}`).join("\n");
+        const riskList = result.risks.map((r) => `[${r.severity}] ${r.description} \u2192 ${r.mitigation}`).join("\n");
+        const gateInfo = result.high_stakes ? `
+
+Gates: high_stakes=true, consensus=${result.consensus_proposal_id ?? "none"}${result.rlm_mission_id ? `, rlm_mission=${result.rlm_mission_id} (${result.rlm_steps_executed} steps)` : ""}` : "";
+        return `Plan generated (${result.generation_ms}ms, source: ${result.plan_source}, citations: ${result.total_citations}, confidence: ${result.avg_confidence}):
+
+Phases:
+${phaseList}
+
+Risks:
+${riskList}
+
+Skills: ${result.required_skills.join(", ")}${gateInfo}`;
+      } catch (err) {
+        const errObj = err;
+        if (errObj?.name === "PlanGateRejection") {
+          return `Plan rejected by gate: ${errObj.code ?? "UNKNOWN"} \u2014 ${errObj.reason ?? errObj.message ?? "no reason"}`;
+        }
+        return `Plan generation failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "engagement_outcome": {
+      try {
+        const { recordOutcome: recordOutcome2 } = await Promise.resolve().then(() => (init_engagement_engine(), engagement_engine_exports));
+        const result = await recordOutcome2({
+          engagement_id: String(args.engagement_id ?? ""),
+          grade: args.grade,
+          actual_end_date: String(args.actual_end_date ?? ""),
+          deliverables_shipped: Array.isArray(args.deliverables_shipped) ? args.deliverables_shipped.map(String) : [],
+          what_went_well: String(args.what_went_well ?? ""),
+          what_went_wrong: String(args.what_went_wrong ?? ""),
+          recorded_by: String(args.recorded_by ?? "tool-executor"),
+          precedent_match_accuracy: typeof args.precedent_match_accuracy === "number" ? args.precedent_match_accuracy : void 0
+        });
+        return `Outcome recorded: ${result.engagement_id} grade=${result.grade}, Q-learning reward sent`;
+      } catch (err) {
+        return `Outcome recording failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "engagement_list": {
+      try {
+        const { listEngagements: listEngagements2 } = await Promise.resolve().then(() => (init_engagement_engine(), engagement_engine_exports));
+        const limit = Math.min(Math.max(typeof args.limit === "number" ? args.limit : 20, 1), 100);
+        const engagements = await listEngagements2(limit);
+        if (engagements.length === 0) return "No engagements found";
+        const lines = engagements.map(
+          (e, i) => `${i + 1}. ${e.client} (${e.domain}) \u2014 ${e.objective.slice(0, 60)}... [${e.status}]`
+        );
+        return `${engagements.length} engagements:
+${lines.join("\n")}`;
+      } catch (err) {
+        return `Engagement list failed: ${err instanceof Error ? err.message : String(err)}`;
       }
     }
     default: {
@@ -21779,12 +22856,12 @@ import cron from "node-cron";
 // src/graph-self-correct.ts
 init_mcp_caller();
 init_logger();
-import { v4 as uuid16 } from "uuid";
+import { v4 as uuid17 } from "uuid";
 async function graphRead(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid16(),
+    callId: uuid17(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -21795,7 +22872,7 @@ async function graphWrite(cypher, params, force = true) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {}, _force: force },
-    callId: uuid16(),
+    callId: uuid17(),
     timeoutMs: 15e3
   });
   return result.status === "success";
@@ -22251,7 +23328,7 @@ init_redis();
 init_mcp_caller();
 init_logger();
 init_sse();
-import { v4 as uuid17 } from "uuid";
+import { v4 as uuid18 } from "uuid";
 function categorizeFailure(error) {
   const lower = error.toLowerCase();
   if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) return "timeout";
@@ -22284,7 +23361,7 @@ async function harvestFailures(windowHours = 24) {
           const failedSteps = exec.results?.filter((r) => r.status === "error") ?? [];
           const errorMsg = exec.error ?? failedSteps.map((s) => String(s.output)).join("; ") ?? "unknown";
           events.push({
-            $id: `failure-event:${uuid17()}`,
+            $id: `failure-event:${uuid18()}`,
             execution_id: execId,
             chain_name: exec.name,
             category: categorizeFailure(errorMsg),
@@ -22330,7 +23407,7 @@ async function persistToGraph(events) {
             timestamp: evt.timestamp
           }
         },
-        callId: uuid17(),
+        callId: uuid18(),
         timeoutMs: 1e4
       });
       persisted++;
@@ -22350,7 +23427,7 @@ async function persistToGraph(events) {
           `,
           params: {}
         },
-        callId: uuid17(),
+        callId: uuid18(),
         timeoutMs: 1e4
       });
       await callMcpTool({
@@ -22363,7 +23440,7 @@ async function persistToGraph(events) {
           `,
           params: {}
         },
-        callId: uuid17(),
+        callId: uuid18(),
         timeoutMs: 1e4
       });
     } catch {
@@ -22424,7 +23501,7 @@ init_mcp_caller();
 init_llm_proxy();
 init_logger();
 init_sse();
-import { v4 as uuid18 } from "uuid";
+import { v4 as uuid19 } from "uuid";
 var COMPETITOR_TARGETS = [
   {
     name: "Palantir AIP",
@@ -22524,7 +23601,7 @@ async function extractCapabilities(target) {
         const cap = line.replace(/^[\s\-\*]+/, "").trim();
         if (cap.length > 10 && cap.length < 200) {
           capabilities.push({
-            $id: `capability:${target.slug}:${uuid18().slice(0, 8)}`,
+            $id: `capability:${target.slug}:${uuid19().slice(0, 8)}`,
             competitor: target.name,
             capability: cap,
             category: categorizeCapability(cap),
@@ -22574,7 +23651,7 @@ async function persistCapabilities(capabilities) {
             extracted_at: cap.extracted_at
           }
         },
-        callId: uuid18(),
+        callId: uuid19(),
         timeoutMs: 1e4
       });
       persisted++;
@@ -22598,7 +23675,7 @@ async function analyzeGaps(capabilities) {
     const result = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: "MATCH (t:Tool) RETURN t.name AS name LIMIT 200" },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -22667,7 +23744,7 @@ init_redis();
 init_logger();
 init_mcp_caller();
 import { Router as Router6 } from "express";
-import { v4 as uuid19 } from "uuid";
+import { v4 as uuid20 } from "uuid";
 var adoptionRouter = Router6();
 var REDIS_KEY3 = "orchestrator:adoption-metrics";
 var REDIS_TRENDS_KEY = "orchestrator:adoption-trends";
@@ -22764,7 +23841,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (c:Conversation) WHERE c.createdAt > datetime() - duration('P1D') RETURN count(c) AS count"
       },
-      callId: uuid19(),
+      callId: uuid20(),
       timeoutMs: 1e4
     }),
     // Count artifacts from last 24h
@@ -22773,7 +23850,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (a:AnalysisArtifact) WHERE a.createdAt > datetime() - duration('P1D') RETURN count(a) AS count"
       },
-      callId: uuid19(),
+      callId: uuid20(),
       timeoutMs: 1e4
     }),
     // Count tool calls from audit trail
@@ -22782,7 +23859,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (e:AuditEvent) WHERE e.timestamp > datetime() - duration('P1D') AND e.action = 'tool_call' RETURN count(e) AS count"
       },
-      callId: uuid19(),
+      callId: uuid20(),
       timeoutMs: 1e4
     })
   ]);
@@ -22887,7 +23964,7 @@ SET m.conversations_24h = $conversations,
           featuresPct: snapshot.features_pct
         }
       },
-      callId: uuid19(),
+      callId: uuid20(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -22934,7 +24011,7 @@ init_logger();
 init_mcp_caller();
 init_sse();
 import { Router as Router7 } from "express";
-import { v4 as uuid20 } from "uuid";
+import { v4 as uuid21 } from "uuid";
 var looseEndsRouter = Router7();
 var REDIS_KEY4 = "orchestrator:loose-ends:latest";
 var REDIS_HISTORY = "orchestrator:loose-ends:history";
@@ -22948,7 +24025,7 @@ AND NOT (b)<-[:COMPOSED_OF]-(:Assembly)
 RETURN b.id AS id, b.name AS name, b.domain AS domain, labels(b)[0] AS type
 LIMIT 25`,
     buildFinding: (records) => records.map((r) => ({
-      id: `orphan-${r.id ?? uuid20().slice(0, 8)}`,
+      id: `orphan-${r.id ?? uuid21().slice(0, 8)}`,
       severity: "warning",
       category: "orphan_block",
       title: `Orphan block: ${r.name ?? r.id}`,
@@ -22966,7 +24043,7 @@ AND NOT (a)<-[:BASED_ON]-(:Decision)
 RETURN a.id AS id, a.name AS name, a.composite AS score
 LIMIT 15`,
     buildFinding: (records) => records.map((r) => ({
-      id: `dangling-asm-${r.id ?? uuid20().slice(0, 8)}`,
+      id: `dangling-asm-${r.id ?? uuid21().slice(0, 8)}`,
       severity: "warning",
       category: "dangling_assembly",
       title: `Accepted assembly without decision: ${r.name ?? r.id}`,
@@ -22984,7 +24061,7 @@ AND NOT (d)-[:DERIVES_FROM]->()
 RETURN d.id AS id, d.title AS title, d.certified_at AS certified_at
 LIMIT 10`,
     buildFinding: (records) => records.map((r) => ({
-      id: `no-lineage-${r.id ?? uuid20().slice(0, 8)}`,
+      id: `no-lineage-${r.id ?? uuid21().slice(0, 8)}`,
       severity: "critical",
       category: "missing_lineage",
       title: `Decision without lineage: ${r.title ?? r.id}`,
@@ -23002,7 +24079,7 @@ AND NOT (n)-[]-()
 RETURN n.id AS id, labels(n)[0] AS type, n.domain AS domain, n.insight AS title
 LIMIT 20`,
     buildFinding: (records) => records.map((r) => ({
-      id: `disconnected-${r.id ?? uuid20().slice(0, 8)}`,
+      id: `disconnected-${r.id ?? uuid21().slice(0, 8)}`,
       severity: "info",
       category: "disconnected_node",
       title: `Disconnected ${r.type}: ${(r.title ?? r.id ?? "").toString().slice(0, 60)}`,
@@ -23020,7 +24097,7 @@ AND d.created_at < datetime() - duration('P7D')
 RETURN d.id AS id, d.title AS title, d.created_at AS created_at
 LIMIT 10`,
     buildFinding: (records) => records.map((r) => ({
-      id: `stale-decision-${r.id ?? uuid20().slice(0, 8)}`,
+      id: `stale-decision-${r.id ?? uuid21().slice(0, 8)}`,
       severity: "warning",
       category: "unresolved_decision",
       title: `Stale draft decision: ${r.title ?? r.id}`,
@@ -23031,7 +24108,7 @@ LIMIT 10`,
   }
 ];
 async function runLooseEndScan() {
-  const scanId = uuid20();
+  const scanId = uuid21();
   const t0 = Date.now();
   const findings = [];
   logger.info({ scan_id: scanId }, "Loose-end scan started");
@@ -23041,7 +24118,7 @@ async function runLooseEndScan() {
         const result = await callMcpTool({
           toolName: "graph.read_cypher",
           args: { query: dq.cypher },
-          callId: uuid20(),
+          callId: uuid21(),
           timeoutMs: 15e3
         });
         if (result.status !== "success") return [];
@@ -23102,7 +24179,7 @@ SET s.scanned_at = datetime(), s.duration_ms = $duration,
           total: summary.total
         }
       },
-      callId: uuid20(),
+      callId: uuid21(),
       timeoutMs: 1e4
     });
   } catch {
@@ -24717,7 +25794,7 @@ init_redis();
 init_logger();
 var REDIS_KEY5 = "orchestrator:audit";
 var MAX_ENTRIES = 1e3;
-var TTL_SECONDS4 = 30 * 24 * 3600;
+var TTL_SECONDS5 = 30 * 24 * 3600;
 var memoryAudit = [];
 async function logAudit(entry) {
   try {
@@ -24726,7 +25803,7 @@ async function logAudit(entry) {
       if (redis2) {
         await redis2.lpush(REDIS_KEY5, JSON.stringify(entry));
         await redis2.ltrim(REDIS_KEY5, 0, MAX_ENTRIES - 1);
-        await redis2.expire(REDIS_KEY5, TTL_SECONDS4);
+        await redis2.expire(REDIS_KEY5, TTL_SECONDS5);
         return;
       }
     }
@@ -24976,13 +26053,13 @@ import { randomUUID } from "crypto";
 var artifactRouter = Router14();
 var ARTIFACT_PREFIX = "orchestrator:artifact:";
 var ARTIFACT_INDEX = "orchestrator:artifacts:index";
-var TTL_SECONDS5 = 2592e3;
+var TTL_SECONDS6 = 2592e3;
 async function storeArtifact(artifact) {
   const redis2 = getRedis();
   if (!redis2) return false;
   const key = `${ARTIFACT_PREFIX}${artifact.$id}`;
   try {
-    await redis2.set(key, JSON.stringify(artifact), "EX", TTL_SECONDS5);
+    await redis2.set(key, JSON.stringify(artifact), "EX", TTL_SECONDS6);
     await redis2.sadd(ARTIFACT_INDEX, artifact.$id);
     return true;
   } catch (err) {
@@ -25301,17 +26378,17 @@ init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router15 } from "express";
 import { randomUUID as randomUUID2 } from "crypto";
-import { v4 as uuid21 } from "uuid";
+import { v4 as uuid22 } from "uuid";
 var notebookRouter = Router15();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
-var TTL_SECONDS6 = 2592e3;
+var TTL_SECONDS7 = 2592e3;
 async function storeNotebook(notebook) {
   const redis2 = getRedis();
   if (!redis2) return false;
   const key = `${NOTEBOOK_PREFIX}${notebook.$id}`;
   try {
-    await redis2.set(key, JSON.stringify(notebook), "EX", TTL_SECONDS6);
+    await redis2.set(key, JSON.stringify(notebook), "EX", TTL_SECONDS7);
     await redis2.sadd(NOTEBOOK_INDEX, notebook.$id);
     return true;
   } catch (err) {
@@ -25341,7 +26418,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query, params: {} },
-        callId: uuid21(),
+        callId: uuid22(),
         timeoutMs: 15e3
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -25349,7 +26426,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "kg_rag.query",
         args: { question: query, max_evidence: 10 },
-        callId: uuid21(),
+        callId: uuid22(),
         timeoutMs: 2e4
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -26025,13 +27102,13 @@ ${compressed}`,
 init_chain_engine();
 init_cognitive_proxy();
 init_logger();
-import { v4 as uuid22 } from "uuid";
+import { v4 as uuid23 } from "uuid";
 var monitorRouter = Router17();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid22(),
+    callId: uuid23(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];
@@ -26248,17 +27325,17 @@ init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router18 } from "express";
-import { v4 as uuid23 } from "uuid";
+import { v4 as uuid24 } from "uuid";
 var assemblyRouter = Router18();
-var REDIS_PREFIX5 = "orchestrator:assembly:";
-var REDIS_INDEX2 = "orchestrator:assemblies:index";
-var TTL_SECONDS7 = 2592e3;
+var REDIS_PREFIX6 = "orchestrator:assembly:";
+var REDIS_INDEX3 = "orchestrator:assemblies:index";
+var TTL_SECONDS8 = 2592e3;
 async function storeAssembly(assembly) {
   const redis2 = getRedis();
   if (!redis2) return false;
   try {
-    await redis2.set(`${REDIS_PREFIX5}${assembly.$id}`, JSON.stringify(assembly), "EX", TTL_SECONDS7);
-    await redis2.sadd(REDIS_INDEX2, assembly.$id);
+    await redis2.set(`${REDIS_PREFIX6}${assembly.$id}`, JSON.stringify(assembly), "EX", TTL_SECONDS8);
+    await redis2.sadd(REDIS_INDEX3, assembly.$id);
     return true;
   } catch (err) {
     logger.warn({ err: String(err) }, "Redis store failed for assembly");
@@ -26269,7 +27346,7 @@ async function loadAssembly(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX5}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX6}${id}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -26279,7 +27356,7 @@ async function listAllIds2() {
   const redis2 = getRedis();
   if (!redis2) return [];
   try {
-    return await redis2.smembers(REDIS_INDEX2);
+    return await redis2.smembers(REDIS_INDEX3);
   } catch {
     return [];
   }
@@ -26312,7 +27389,7 @@ ORDER BY b.domain, b.name LIMIT 50`;
     const graphResult = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params },
-      callId: uuid23(),
+      callId: uuid24(),
       timeoutMs: 15e3
     });
     if (graphResult.status === "success" && graphResult.result) {
@@ -26378,7 +27455,7 @@ Reply as JSON:
   const assemblies = [];
   const now = (/* @__PURE__ */ new Date()).toISOString();
   for (const candidate of analysis.candidates.slice(0, maxCandidates)) {
-    const assemblyId = `widgetdc:assembly:${uuid23()}`;
+    const assemblyId = `widgetdc:assembly:${uuid24()}`;
     const selectedBlocks = blocks.filter((b) => candidate.block_ids.includes(b.block_id));
     const conflictCount = candidate.conflicts?.length ?? 0;
     const coherence = Math.max(0, Math.min(1, candidate.coherence ?? 0.5));
@@ -26437,7 +27514,7 @@ MERGE (a)-[:COMPOSED_OF]->(b)`,
             blockIds: selectedBlocks.map((b) => b.block_id)
           }
         },
-        callId: uuid23(),
+        callId: uuid24(),
         timeoutMs: 1e4
       });
     } catch (err) {
@@ -26473,7 +27550,7 @@ assemblyRouter.get("/", async (req, res) => {
   try {
     const pipeline = redis2.pipeline();
     for (const id of allIds) {
-      pipeline.get(`${REDIS_PREFIX5}${id}`);
+      pipeline.get(`${REDIS_PREFIX6}${id}`);
     }
     const results = await pipeline.exec();
     if (results) {
@@ -26527,7 +27604,7 @@ assemblyRouter.put("/:id", async (req, res) => {
         query: "MATCH (a:Assembly {id: $id}) SET a.status = $status, a.updated_at = datetime()",
         params: { id: assembly.$id, status: assembly.status }
       },
-      callId: uuid23(),
+      callId: uuid24(),
       timeoutMs: 5e3
     });
   } catch {
@@ -26542,17 +27619,17 @@ init_mcp_caller();
 init_cognitive_proxy();
 init_sse();
 import { Router as Router19 } from "express";
-import { v4 as uuid24 } from "uuid";
+import { v4 as uuid25 } from "uuid";
 var decisionsRouter = Router19();
-var REDIS_PREFIX6 = "orchestrator:decision:";
-var REDIS_INDEX3 = "orchestrator:decisions:index";
-var TTL_SECONDS8 = 7776e3;
+var REDIS_PREFIX7 = "orchestrator:decision:";
+var REDIS_INDEX4 = "orchestrator:decisions:index";
+var TTL_SECONDS9 = 7776e3;
 async function storeDecision(decision) {
   const redis2 = getRedis();
   if (!redis2) return false;
   try {
-    await redis2.set(`${REDIS_PREFIX6}${decision.$id}`, JSON.stringify(decision), "EX", TTL_SECONDS8);
-    await redis2.sadd(REDIS_INDEX3, decision.$id);
+    await redis2.set(`${REDIS_PREFIX7}${decision.$id}`, JSON.stringify(decision), "EX", TTL_SECONDS9);
+    await redis2.sadd(REDIS_INDEX4, decision.$id);
     return true;
   } catch (err) {
     logger.warn({ err: String(err) }, "Redis store failed for decision");
@@ -26563,7 +27640,7 @@ async function loadDecision(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX6}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX7}${id}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -26573,7 +27650,7 @@ async function listAllIds3() {
   const redis2 = getRedis();
   if (!redis2) return [];
   try {
-    return await redis2.smembers(REDIS_INDEX3);
+    return await redis2.smembers(REDIS_INDEX4);
   } catch {
     return [];
   }
@@ -26595,7 +27672,7 @@ RETURN a.id AS asm_id, a.name AS asm_name, a.created_at AS asm_ts,
 ORDER BY b.name`,
         params: { assemblyId }
       },
-      callId: uuid24(),
+      callId: uuid25(),
       timeoutMs: 15e3
     });
     if (result.status === "success") {
@@ -26654,7 +27731,7 @@ decisionsRouter.post("/certify", async (req, res) => {
   const assemblyId = String(body.assembly_id);
   const title = String(body.title);
   const now = (/* @__PURE__ */ new Date()).toISOString();
-  const decisionId = `widgetdc:decision:${uuid24()}`;
+  const decisionId = `widgetdc:decision:${uuid25()}`;
   const lineageChain = await buildLineageChain(assemblyId);
   let rationale = String(body.rationale ?? "");
   let summary = String(body.summary ?? "");
@@ -26757,7 +27834,7 @@ CREATE (d)-[:CERTIFIED_BY_EVIDENCE]->(e)`,
           // Cap for query size
         }
       },
-      callId: uuid24(),
+      callId: uuid25(),
       timeoutMs: 15e3
     });
   } catch (err) {
@@ -26791,7 +27868,7 @@ decisionsRouter.get("/", async (req, res) => {
   try {
     const pipeline = redis2.pipeline();
     for (const id of allIds) {
-      pipeline.get(`${REDIS_PREFIX6}${id}`);
+      pipeline.get(`${REDIS_PREFIX7}${id}`);
     }
     const results = await pipeline.exec();
     if (results) {
@@ -26981,9 +28058,9 @@ async function listPlans() {
 // src/harvest-pipeline.ts
 init_logger();
 init_mcp_caller();
-import { v4 as uuid25 } from "uuid";
+import { v4 as uuid26 } from "uuid";
 async function extract(domain) {
-  const callId = `harvest-extract-${uuid25().substring(0, 8)}`;
+  const callId = `harvest-extract-${uuid26().substring(0, 8)}`;
   try {
     const result = await callMcpTool({
       toolName: "srag.query",
@@ -27009,7 +28086,7 @@ function generalize(items, domain) {
     if (content.length > 2e3 || name.toLowerCase().includes("framework")) tier = "framework";
     else if (content.length > 500 || name.toLowerCase().includes("template")) tier = "template";
     return {
-      id: `harvest-${uuid25().substring(0, 12)}`,
+      id: `harvest-${uuid26().substring(0, 12)}`,
       name,
       tier,
       description: content.substring(0, 300),
@@ -27026,7 +28103,7 @@ function generalize(items, domain) {
 }
 async function store(components) {
   if (components.length === 0) return 0;
-  const callId = `harvest-store-${uuid25().substring(0, 8)}`;
+  const callId = `harvest-store-${uuid26().substring(0, 8)}`;
   const labelMap = {
     framework: "Framework",
     template: "Template",
@@ -27078,7 +28155,7 @@ async function verify(components) {
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: `${comp.tier} for ${comp.industries[0]}: ${comp.name}` },
-        callId: `harvest-verify-${uuid25().substring(0, 8)}`,
+        callId: `harvest-verify-${uuid26().substring(0, 8)}`,
         timeoutMs: 15e3
       });
       const resultStr = JSON.stringify(result).toLowerCase();
@@ -27133,7 +28210,7 @@ init_tool_executor();
 init_logger();
 init_config();
 import { Router as Router21 } from "express";
-import { v4 as uuid26 } from "uuid";
+import { v4 as uuid27 } from "uuid";
 var MAX_TOOL_ROUNDS = 2;
 var MAX_TOOL_ROUNDS_ASSISTANT = 4;
 var TOOL_CATEGORIES = [
@@ -27343,7 +28420,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     return;
   }
   const { model, messages, stream, temperature, max_tokens } = req.body;
-  const requestId = `chatcmpl-${uuid26().substring(0, 12)}`;
+  const requestId = `chatcmpl-${uuid27().substring(0, 12)}`;
   const assistant = ASSISTANT_MAP.get(model);
   const resolvedModel = assistant ? assistant.baseModel : model;
   const mapping = MODEL_TO_PROVIDER[resolvedModel] || MODEL_TO_PROVIDER["gemini-flash"];
@@ -28308,7 +29385,7 @@ init_mcp_caller();
 init_config();
 init_logger();
 import { Router as Router24 } from "express";
-import { v4 as uuid27 } from "uuid";
+import { v4 as uuid28 } from "uuid";
 var mcpGatewayRouter = Router24();
 var backendToolsCache = [];
 var backendToolsCacheTime = 0;
@@ -28390,7 +29467,7 @@ async function handleToolsCall(id, params) {
   if (isOrchestratorTool) {
     try {
       const results = await executeToolCalls([{
-        id: uuid27(),
+        id: uuid28(),
         function: { name: toolName, arguments: JSON.stringify(args) }
       }]);
       const result = results[0];
@@ -28418,7 +29495,7 @@ async function handleToolsCall(id, params) {
     const mcpResult = await callMcpTool({
       toolName: backendName,
       args,
-      callId: uuid27(),
+      callId: uuid28(),
       timeoutMs: 3e4
     });
     if (mcpResult.status !== "success") {
@@ -28525,7 +29602,7 @@ init_tool_executor();
 init_tool_registry();
 init_logger();
 import { Router as Router25 } from "express";
-import { v4 as uuid28 } from "uuid";
+import { v4 as uuid29 } from "uuid";
 var toolGatewayRouter = Router25();
 toolGatewayRouter.post("/:name", async (req, res) => {
   const { name } = req.params;
@@ -28542,7 +29619,7 @@ toolGatewayRouter.post("/:name", async (req, res) => {
     });
     return;
   }
-  const callId = req.body?.call_id ?? uuid28();
+  const callId = req.body?.call_id ?? uuid29();
   const args = req.body ?? {};
   logger.info({ tool: name, call_id: callId }, "REST tool gateway call");
   const result = await executeToolUnified(name, args, {
@@ -28950,12 +30027,12 @@ init_logger();
 import { Router as Router28 } from "express";
 var foldRouter = Router28();
 var DAILY_LIMIT = 100;
-var REDIS_PREFIX7 = "caas:usage:";
+var REDIS_PREFIX8 = "caas:usage:";
 async function getUsageCount(apiKey) {
   const redis2 = getRedis();
   if (!redis2) return 0;
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  const key = `${REDIS_PREFIX7}${today}:${apiKey}`;
+  const key = `${REDIS_PREFIX8}${today}:${apiKey}`;
   const count = await redis2.get(key);
   return parseInt(count ?? "0", 10);
 }
@@ -28963,7 +30040,7 @@ async function incrementUsage(apiKey) {
   const redis2 = getRedis();
   if (!redis2) return;
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  const key = `${REDIS_PREFIX7}${today}:${apiKey}`;
+  const key = `${REDIS_PREFIX8}${today}:${apiKey}`;
   await redis2.incr(key);
   await redis2.expire(key, 86400 * 2);
 }
@@ -29108,12 +30185,12 @@ import { Router as Router29 } from "express";
 init_mcp_caller();
 init_logger();
 init_sse();
-import { v4 as uuid29 } from "uuid";
+import { v4 as uuid30 } from "uuid";
 async function graphRead3(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid29(),
+    callId: uuid30(),
     timeoutMs: 3e4
   });
   if (result.status !== "success") return [];
@@ -29124,7 +30201,7 @@ async function graphWrite2(cypher, params) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {} },
-    callId: uuid29(),
+    callId: uuid30(),
     timeoutMs: 6e4
   });
   return result.status === "success";
@@ -29643,882 +30720,9 @@ similarityRouter.get("/client/:id", async (req, res) => {
 });
 
 // src/routes/engagements.ts
+init_engagement_engine();
+init_logger();
 import { Router as Router32 } from "express";
-
-// src/engagement-engine.ts
-init_mcp_caller();
-init_cognitive_proxy();
-init_dual_rag();
-init_redis();
-init_logger();
-init_adaptive_rag();
-import { v4 as uuid30 } from "uuid";
-var REDIS_PREFIX8 = "orchestrator:engagement:";
-var REDIS_INDEX4 = "orchestrator:engagements:index";
-var REDIS_PLAN_PREFIX = "orchestrator:engagement:plan:";
-var TTL_SECONDS9 = 60 * 60 * 24 * 30;
-var engagementCache = /* @__PURE__ */ new Map();
-async function saveEngagement(e) {
-  engagementCache.set(e.$id, e);
-  const redis2 = getRedis();
-  if (redis2) {
-    try {
-      await redis2.set(`${REDIS_PREFIX8}${e.$id}`, JSON.stringify(e), "EX", TTL_SECONDS9);
-      await redis2.zadd(REDIS_INDEX4, Date.now(), e.$id);
-    } catch (err) {
-      logger.warn({ error: String(err) }, "Engagement: Redis save failed");
-    }
-  }
-}
-async function getEngagement(id) {
-  const cached = engagementCache.get(id);
-  if (cached) return cached;
-  const redis2 = getRedis();
-  if (!redis2) return null;
-  try {
-    const raw = await redis2.get(`${REDIS_PREFIX8}${id}`);
-    if (!raw) return null;
-    const e = JSON.parse(raw);
-    engagementCache.set(id, e);
-    return e;
-  } catch {
-    return null;
-  }
-}
-async function listEngagements(limit = 20) {
-  const redis2 = getRedis();
-  if (!redis2) return Array.from(engagementCache.values()).slice(0, limit);
-  try {
-    const ids = await redis2.zrevrange(REDIS_INDEX4, 0, limit - 1);
-    const out = [];
-    for (const id of ids) {
-      const e = await getEngagement(id);
-      if (e) out.push(e);
-    }
-    return out;
-  } catch {
-    return [];
-  }
-}
-async function mergeEngagementNode(e) {
-  try {
-    await callMcpTool({
-      toolName: "graph.write_cypher",
-      args: {
-        query: `MERGE (eng:Engagement {id: $id})
-SET eng.client = $client,
-    eng.domain = $domain,
-    eng.objective = $objective,
-    eng.startDate = $startDate,
-    eng.targetEndDate = $targetEndDate,
-    eng.status = $status,
-    eng.budgetDkk = $budgetDkk,
-    eng.teamSize = $teamSize,
-    eng.updatedAt = datetime(),
-    eng.createdAt = coalesce(eng.createdAt, datetime())
-WITH eng
-UNWIND $methodologyRefs AS mref
-MERGE (m {title: mref})
-MERGE (eng)-[:USES_METHODOLOGY]->(m)`,
-        params: {
-          id: e.$id,
-          client: e.client,
-          domain: e.domain,
-          objective: e.objective.slice(0, 500),
-          startDate: e.start_date,
-          targetEndDate: e.target_end_date,
-          status: e.status,
-          budgetDkk: e.budget_dkk ?? 0,
-          teamSize: e.team_size ?? 0,
-          methodologyRefs: (e.methodology_refs ?? []).slice(0, 10)
-        },
-        _force: true
-      },
-      callId: uuid30(),
-      timeoutMs: 1e4
-    });
-  } catch (err) {
-    logger.warn({ id: e.$id, error: String(err) }, "Engagement: Neo4j MERGE failed (non-fatal)");
-  }
-}
-async function mergeOutcomeNode(o) {
-  try {
-    await callMcpTool({
-      toolName: "graph.write_cypher",
-      args: {
-        query: `MATCH (eng:Engagement {id: $engId})
-MERGE (out:EngagementOutcome {engagementId: $engId})
-SET out.grade = $grade,
-    out.completedAt = datetime($completedAt),
-    out.actualEndDate = $actualEndDate,
-    out.whatWentWell = $wellText,
-    out.whatWentWrong = $wrongText,
-    out.precedentAccuracy = $precAcc,
-    out.recordedBy = $recordedBy,
-    out.updatedAt = datetime()
-MERGE (eng)-[:HAS_OUTCOME]->(out)
-SET eng.status = 'completed'`,
-        params: {
-          engId: o.engagement_id,
-          grade: o.grade,
-          completedAt: o.completed_at,
-          actualEndDate: o.actual_end_date,
-          wellText: o.what_went_well.slice(0, 1e3),
-          wrongText: o.what_went_wrong.slice(0, 1e3),
-          precAcc: o.precedent_match_accuracy,
-          recordedBy: o.recorded_by
-        },
-        _force: true
-      },
-      callId: uuid30(),
-      timeoutMs: 1e4
-    });
-  } catch (err) {
-    logger.warn({ id: o.engagement_id, error: String(err) }, "Engagement outcome: Neo4j MERGE failed");
-  }
-}
-async function indexEngagementForPrecedent(e) {
-  const content = `Consulting engagement: ${e.objective}. Client domain: ${e.domain}. Duration: ${e.start_date} to ${e.target_end_date}. Team size: ${e.team_size ?? "unspecified"}. Methodologies: ${(e.methodology_refs ?? []).join(", ") || "none specified"}.`;
-  try {
-    await callMcpTool({
-      toolName: "raptor.index",
-      args: {
-        content,
-        metadata: {
-          title: `Engagement: ${e.client} \u2014 ${e.objective.slice(0, 60)}`,
-          domain: "Engagement",
-          engagement_id: e.$id,
-          type: "engagement"
-        },
-        orgId: "default",
-        _force: true
-      },
-      callId: uuid30(),
-      timeoutMs: 15e3
-    });
-  } catch (err) {
-    logger.warn({ id: e.$id, error: String(err) }, "Engagement: raptor.index failed (non-fatal)");
-  }
-}
-async function createEngagement(req) {
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  const e = {
-    $id: `eng-${uuid30()}`,
-    $schema: "https://widgetdc.io/schemas/engagement/v1",
-    client: req.client.slice(0, 120),
-    domain: req.domain.slice(0, 60),
-    objective: req.objective.slice(0, 500),
-    start_date: req.start_date,
-    target_end_date: req.target_end_date,
-    budget_dkk: req.budget_dkk,
-    team_size: req.team_size,
-    status: "draft",
-    methodology_refs: (req.methodology_refs ?? []).slice(0, 10),
-    created_at: now,
-    updated_at: now
-  };
-  await saveEngagement(e);
-  try {
-    await mergeEngagementNode(e);
-  } catch (err) {
-    logger.warn({ id: e.$id, error: String(err) }, "Engagement: Neo4j MERGE await failed \u2014 non-blocking");
-  }
-  indexEngagementForPrecedent(e).catch(() => {
-  });
-  logger.info({ id: e.$id, client: e.client, domain: e.domain }, "Engagement: created");
-  return e;
-}
-var STALE_PRECEDENT_DAYS = 540;
-async function matchPrecedents(req) {
-  const t0 = Date.now();
-  const maxResults = Math.min(req.max_results ?? 5, 20);
-  const cypherMatches = await matchEngagementsViaCypher(req, maxResults * 2);
-  let ragMatches = [];
-  if (cypherMatches.length < maxResults) {
-    try {
-      const rag = await dualChannelRAG(
-        `${req.domain} consulting engagement: ${req.objective}`,
-        { maxResults: maxResults * 2, maxHops: 3 }
-      );
-      ragMatches = rag.results.filter((r) => r.score >= 0.5 && !cypherMatches.some((c) => c.engagement_id === r.source)).slice(0, maxResults - cypherMatches.length).map((r) => ({
-        engagement_id: r.source,
-        title: r.content.slice(0, 120),
-        domain: req.domain,
-        similarity: Number(r.score.toFixed(3)),
-        match_reasoning: `Semantic similarity ${(r.score * 100).toFixed(0)}% (fallback \u2014 no direct engagement node matched)`,
-        stale: false
-      }));
-    } catch (err) {
-      logger.warn({ error: String(err) }, "Engagement match: RAG fallback failed");
-    }
-  }
-  const matches = [...cypherMatches, ...ragMatches].slice(0, maxResults);
-  logger.info(
-    { query: req.objective.slice(0, 60), cypher: cypherMatches.length, rag: ragMatches.length, total: matches.length, ms: Date.now() - t0 },
-    "Engagement: precedents matched"
-  );
-  return { matches, query_ms: Date.now() - t0 };
-}
-async function matchEngagementsViaCypher(req, limit) {
-  try {
-    const result = await callMcpTool({
-      toolName: "graph.read_cypher",
-      args: {
-        query: `MATCH (e:Engagement)
-WHERE e.domain = $domain OR toLower(e.domain) CONTAINS toLower($domain)
-OPTIONAL MATCH (e)-[:HAS_OUTCOME]->(o:EngagementOutcome)
-OPTIONAL MATCH (e)-[:USES_METHODOLOGY]->(m)
-WITH e, o, collect(DISTINCT coalesce(m.title, m.name)) AS methodologies
-RETURN e.id AS id,
-       e.client AS client,
-       e.objective AS objective,
-       e.domain AS domain,
-       e.startDate AS startDate,
-       e.status AS status,
-       o.grade AS outcomeGrade,
-       o.precedentAccuracy AS precedentAccuracy,
-       methodologies
-ORDER BY
-  CASE o.grade WHEN 'exceeded' THEN 0 WHEN 'met' THEN 1 WHEN 'partial' THEN 2 WHEN 'missed' THEN 3 ELSE 4 END,
-  e.startDate DESC
-LIMIT ${Math.floor(limit)}`,
-        params: { domain: req.domain }
-      },
-      callId: uuid30(),
-      timeoutMs: 15e3
-    });
-    if (result.status !== "success") return [];
-    const data = result.result;
-    if (!data || data.success === false) {
-      logger.warn({ error: data?.error }, "Cypher precedent match: backend returned error");
-      return [];
-    }
-    const rows = data?.results ?? data?.rows ?? [];
-    if (!Array.isArray(rows) || rows.length === 0) return [];
-    const objectiveLower = req.objective.toLowerCase();
-    const now = Date.now();
-    return rows.map((row) => {
-      const client = String(row.client ?? "Unknown");
-      const objective = String(row.objective ?? "");
-      const grade = row.outcomeGrade ?? null;
-      const methodologies = Array.isArray(row.methodologies) ? row.methodologies : [];
-      const startDateStr = row.startDate ? String(row.startDate) : null;
-      const startMs = startDateStr ? Date.parse(startDateStr) : now;
-      const ageDays = Math.max(0, Math.floor((now - startMs) / 864e5));
-      const stale = ageDays > STALE_PRECEDENT_DAYS;
-      const gradeWeight = grade === "exceeded" ? 0.3 : grade === "met" ? 0.25 : grade === "partial" ? 0.15 : grade === "missed" ? 0.05 : 0.1;
-      const objWords = new Set(objectiveLower.split(/\W+/).filter((w) => w.length > 3));
-      const targetWords = (objective + " " + methodologies.join(" ")).toLowerCase().split(/\W+/);
-      const overlap = targetWords.filter((w) => objWords.has(w)).length;
-      const overlapScore = Math.min(0.5, overlap * 0.08);
-      const freshness = stale ? 0 : Math.max(0, 0.2 - ageDays / STALE_PRECEDENT_DAYS * 0.2);
-      const similarity = Math.min(0.99, gradeWeight + overlapScore + freshness);
-      return {
-        engagement_id: String(row.id ?? "unknown"),
-        title: `${client} \u2014 ${objective.slice(0, 80)}`,
-        domain: String(row.domain ?? req.domain),
-        similarity: Number(similarity.toFixed(3)),
-        match_reasoning: `Cypher match: ${grade ?? "no outcome"} grade, ${methodologies.length} shared methodologies, ${ageDays}d old${stale ? " (STALE)" : ""}`,
-        precedent_outcome: grade ?? void 0,
-        stale
-      };
-    });
-  } catch (err) {
-    logger.warn({ error: String(err) }, "Cypher precedent match failed");
-    return [];
-  }
-}
-async function queryKgRag(query, maxEvidence = 10) {
-  try {
-    const result = await callMcpTool({
-      toolName: "kg_rag.query",
-      args: { question: query, max_evidence: maxEvidence },
-      callId: uuid30(),
-      timeoutMs: 45e3
-    });
-    if (result.status !== "success") return { answer: "", sources: [] };
-    const data = result.result;
-    if (!data) return { answer: "", sources: [] };
-    const answer = typeof data.answer === "string" ? data.answer : "";
-    const sources = Array.isArray(data.sources) ? data.sources.map((s) => ({
-      id: String(s.id ?? "unknown"),
-      content: String(s.content ?? ""),
-      score: typeof s.score === "number" ? s.score : 0.5
-    })) : [];
-    return { answer, sources };
-  } catch (err) {
-    logger.debug({ error: String(err) }, "kg_rag.query failed");
-    return { answer: "", sources: [] };
-  }
-}
-async function foldContext(text, query, maxTokens = 1500) {
-  if (!text || text.length < 500) return null;
-  try {
-    const result = await callMcpTool({
-      toolName: "context_folding.fold",
-      args: {
-        task: query,
-        context: { text },
-        max_tokens: maxTokens,
-        domain: "consulting"
-      },
-      callId: uuid30(),
-      timeoutMs: 2e4
-    });
-    if (result.status !== "success") return null;
-    const data = result.result;
-    const folded = data?.compressed_text ?? data?.folded_text ?? data?.result;
-    return typeof folded === "string" && folded.length > 50 ? folded : null;
-  } catch {
-    return null;
-  }
-}
-function isHighStakesPlan(req) {
-  return (req.budget_dkk ?? 0) > 2e7 || req.team_size > 20 || req.duration_weeks > 40;
-}
-async function proposeViaConsensus(engagementId, req, planSummary) {
-  try {
-    const result = await callMcpTool({
-      toolName: "consensus.propose",
-      args: {
-        title: `EIE plan: ${req.domain} \u2014 ${req.objective.slice(0, 80)}`,
-        description: `${req.duration_weeks}w, team ${req.team_size}, budget ${req.budget_dkk ?? "unspecified"} DKK. Plan summary: ${planSummary.slice(0, 400)}`,
-        proposer: "engagement-planner",
-        severity: "P2",
-        metadata: {
-          engagement_id: engagementId,
-          domain: req.domain,
-          duration_weeks: req.duration_weeks,
-          team_size: req.team_size,
-          budget_dkk: req.budget_dkk ?? 0
-        }
-      },
-      callId: uuid30(),
-      timeoutMs: 15e3
-    });
-    if (result.status !== "success") return { proposalId: null, quorum: 0 };
-    const data = result.result;
-    if (!data || data.success === false) return { proposalId: null, quorum: 0 };
-    const proposalId = data.proposalId ?? null;
-    const quorum = Number(data.quorum ?? 3);
-    logger.info({ proposalId, quorum, engagement_id: engagementId }, "Engagement plan: consensus proposal created");
-    return { proposalId, quorum };
-  } catch (err) {
-    logger.debug({ error: String(err) }, "consensus.propose failed");
-    return { proposalId: null, quorum: 0 };
-  }
-}
-async function voteOnConsensus(proposalId, decision, confidence, reasoning) {
-  try {
-    const result = await callMcpTool({
-      toolName: "consensus.vote",
-      args: {
-        proposalId,
-        voter: "engagement-planner",
-        decision,
-        confidence: Math.min(1, Math.max(0, confidence)),
-        reasoning: reasoning.slice(0, 500)
-      },
-      callId: uuid30(),
-      timeoutMs: 1e4
-    });
-    if (result.status !== "success") return false;
-    const data = result.result;
-    return Boolean(data && data.success !== false);
-  } catch (err) {
-    logger.debug({ error: String(err) }, "consensus.vote failed");
-    return false;
-  }
-}
-async function planViaRlmMission(engagementId, req, maxSteps = 3) {
-  try {
-    const startResult = await callMcpTool({
-      toolName: "rlm.start_mission",
-      args: {
-        name: `eie-plan-${engagementId}`,
-        objective: `Design ${req.duration_weeks}-week ${req.domain} consulting engagement: ${req.objective}`,
-        maxSteps,
-        maxDepth: 2
-      },
-      callId: uuid30(),
-      timeoutMs: 2e4
-    });
-    if (startResult.status !== "success") return { missionId: null, insights: [], stepsExecuted: 0 };
-    const startData = startResult.result;
-    if (!startData || startData.success === false) return { missionId: null, insights: [], stepsExecuted: 0 };
-    const missionId = startData.missionId ?? null;
-    if (!missionId) return { missionId: null, insights: [], stepsExecuted: 0 };
-    const insights = [];
-    let stepsExecuted = 0;
-    for (let i = 0; i < maxSteps; i++) {
-      const stepResult = await callMcpTool({
-        toolName: "rlm.execute_step",
-        args: { missionId },
-        callId: uuid30(),
-        timeoutMs: 6e4
-      });
-      if (stepResult.status !== "success") break;
-      const stepData = stepResult.result;
-      if (!stepData || stepData.success === false) break;
-      stepsExecuted++;
-      const step = stepData.result;
-      const summary = step?.data?.summary ?? step?.summary;
-      if (typeof summary === "string" && summary.length > 20) {
-        insights.push(summary.slice(0, 300));
-      }
-      if (stepData.status === "COMPLETED" || step === null) break;
-    }
-    logger.info({ missionId, stepsExecuted, insights: insights.length, engagement_id: engagementId }, "Engagement plan: RLM mission executed");
-    return { missionId, insights, stepsExecuted };
-  } catch (err) {
-    logger.debug({ error: String(err) }, "rlm.start_mission failed");
-    return { missionId: null, insights: [], stepsExecuted: 0 };
-  }
-}
-var GATE_BUDGET_DKK = Number(process.env.EIE_GATE_BUDGET_DKK ?? 2e7);
-var GATE_TEAM_SIZE = Number(process.env.EIE_GATE_TEAM_SIZE ?? 20);
-var GATE_DURATION_WEEKS = Number(process.env.EIE_GATE_DURATION_WEEKS ?? 40);
-var GATE_REQUIRE_CONSENSUS = process.env.EIE_GATE_REQUIRE_CONSENSUS !== "false";
-var GATE_CONSENSUS_TIMEOUT_MS = Number(process.env.EIE_GATE_CONSENSUS_TIMEOUT_MS ?? 3e4);
-var GATE_MAX_BUDGET_DKK = Number(process.env.EIE_GATE_MAX_BUDGET_DKK ?? 5e8);
-var GATE_MAX_TEAM_SIZE = Number(process.env.EIE_GATE_MAX_TEAM_SIZE ?? 100);
-var GATE_MAX_DURATION_WEEKS = Number(process.env.EIE_GATE_MAX_DURATION_WEEKS ?? 260);
-var GATE_MIN_OBJECTIVE_LEN = 15;
-var PlanGateRejection = class extends Error {
-  constructor(code, reason, details = {}) {
-    super(`Plan gate rejection: ${code} \u2014 ${reason}`);
-    this.code = code;
-    this.reason = reason;
-    this.details = details;
-    this.name = "PlanGateRejection";
-  }
-};
-function enforceInputSanityGate(req) {
-  if (!req.objective || req.objective.trim().length < GATE_MIN_OBJECTIVE_LEN) {
-    throw new PlanGateRejection("INVALID_OBJECTIVE", `objective must be at least ${GATE_MIN_OBJECTIVE_LEN} chars`, { given: req.objective?.length ?? 0 });
-  }
-  if (!req.domain || req.domain.trim().length === 0) {
-    throw new PlanGateRejection("INVALID_DOMAIN", "domain required");
-  }
-  if (!Number.isFinite(req.duration_weeks) || req.duration_weeks < 1) {
-    throw new PlanGateRejection("INVALID_DURATION", "duration_weeks must be \u22651", { given: req.duration_weeks });
-  }
-  if (req.duration_weeks > GATE_MAX_DURATION_WEEKS) {
-    throw new PlanGateRejection("DURATION_OVER_HARD_LIMIT", `duration >${GATE_MAX_DURATION_WEEKS} weeks rejected`, { given: req.duration_weeks, limit: GATE_MAX_DURATION_WEEKS });
-  }
-  if (!Number.isFinite(req.team_size) || req.team_size < 1) {
-    throw new PlanGateRejection("INVALID_TEAM", "team_size must be \u22651", { given: req.team_size });
-  }
-  if (req.team_size > GATE_MAX_TEAM_SIZE) {
-    throw new PlanGateRejection("TEAM_OVER_HARD_LIMIT", `team_size >${GATE_MAX_TEAM_SIZE} rejected`, { given: req.team_size, limit: GATE_MAX_TEAM_SIZE });
-  }
-  if (req.budget_dkk !== void 0) {
-    if (!Number.isFinite(req.budget_dkk) || req.budget_dkk < 0) {
-      throw new PlanGateRejection("INVALID_BUDGET", "budget_dkk must be \u22650", { given: req.budget_dkk });
-    }
-    if (req.budget_dkk > GATE_MAX_BUDGET_DKK) {
-      throw new PlanGateRejection("BUDGET_OVER_HARD_LIMIT", `budget >${GATE_MAX_BUDGET_DKK} DKK rejected`, { given: req.budget_dkk, limit: GATE_MAX_BUDGET_DKK });
-    }
-  }
-}
-async function enforceConsensusGate(engagementId, req) {
-  const summary = `High-stakes plan: ${req.domain}, ${req.duration_weeks}w, team ${req.team_size}, budget ${req.budget_dkk ?? "?"} DKK. ${req.objective.slice(0, 200)}`;
-  const proposeResult = await Promise.race([
-    proposeViaConsensus(engagementId, req, summary),
-    new Promise(
-      (resolve) => setTimeout(() => resolve({ proposalId: null, quorum: 0 }), GATE_CONSENSUS_TIMEOUT_MS)
-    )
-  ]);
-  if (!proposeResult.proposalId) {
-    if (GATE_REQUIRE_CONSENSUS) {
-      throw new PlanGateRejection(
-        "CONSENSUS_UNAVAILABLE",
-        "High-stakes plan requires consensus proposal, but consensus.propose is unavailable or timed out. Set EIE_GATE_REQUIRE_CONSENSUS=false to override (not recommended).",
-        { timeout_ms: GATE_CONSENSUS_TIMEOUT_MS }
-      );
-    }
-    logger.warn({ engagementId }, "EIE gate: consensus unavailable, proceeding under override flag");
-    return { proposalId: "", quorum: 0 };
-  }
-  await voteOnConsensus(
-    proposeResult.proposalId,
-    "approve",
-    0.85,
-    `Plan ${engagementId}: domain=${req.domain}, ${req.duration_weeks}w, team=${req.team_size}, budget=${req.budget_dkk ?? 0}. Self-vote as proposer.`
-  );
-  return proposeResult;
-}
-async function generatePlan(req) {
-  const t0 = Date.now();
-  const engagementId = req.engagement_id ?? `eng-${uuid30()}`;
-  enforceInputSanityGate(req);
-  const highStakes = isHighStakesPlan(req);
-  const complex = req.duration_weeks > GATE_DURATION_WEEKS;
-  const gatesTriggered = [];
-  if ((req.budget_dkk ?? 0) > GATE_BUDGET_DKK) gatesTriggered.push(`budget>${GATE_BUDGET_DKK}`);
-  if (req.team_size > GATE_TEAM_SIZE) gatesTriggered.push(`team>${GATE_TEAM_SIZE}`);
-  if (req.duration_weeks > GATE_DURATION_WEEKS) gatesTriggered.push(`duration>${GATE_DURATION_WEEKS}w`);
-  logger.info({ engagementId, gates: gatesTriggered, high_stakes: highStakes, complex }, "EIE gates: classified");
-  let consensusProposalId = "";
-  let consensusQuorum = 0;
-  if (highStakes) {
-    const gate = await enforceConsensusGate(engagementId, req);
-    consensusProposalId = gate.proposalId;
-    consensusQuorum = gate.quorum;
-    logger.info({ engagementId, proposalId: consensusProposalId, quorum: consensusQuorum }, "EIE gate: consensus opened");
-  }
-  let rlmMissionId = null;
-  let rlmStepsExecuted = 0;
-  let rlmInsights = [];
-  if (complex) {
-    const mission = await planViaRlmMission(engagementId, req, 3);
-    rlmMissionId = mission.missionId;
-    rlmStepsExecuted = mission.stepsExecuted;
-    rlmInsights = mission.insights;
-    logger.info({ engagementId, missionId: rlmMissionId, steps: rlmStepsExecuted }, "EIE gate: RLM mission completed");
-  }
-  const [precedents, methodologyBundle, riskBundle, kgRagBundle] = await Promise.all([
-    matchPrecedents({ objective: req.objective, domain: req.domain, max_results: 5 }),
-    dualChannelRAG(`consulting methodology framework for ${req.domain} ${req.objective}`, { maxResults: 5, maxHops: 3 }),
-    dualChannelRAG(`risks challenges pitfalls for ${req.domain} consulting engagement ${req.objective}`, { maxResults: 5, maxHops: 3 }),
-    queryKgRag(`${req.domain} engagement approach: ${req.objective}`, 8)
-  ]);
-  let methodologyEvidence = methodologyBundle.results.map((r) => r.content).join("\n\n").slice(0, 3500);
-  let riskEvidence = riskBundle.results.map((r) => r.content).join("\n\n").slice(0, 2500);
-  const kgRagEvidence = kgRagBundle.answer.slice(0, 2500);
-  const precedentText = precedents.matches.map((m, i) => `[${i + 1}] ${m.title} (similarity: ${m.similarity})`).join("\n");
-  const totalEvidenceLen = methodologyEvidence.length + riskEvidence.length + kgRagEvidence.length;
-  if (totalEvidenceLen > 6e3) {
-    const foldedMethod = await foldContext(methodologyEvidence, `consulting methodology for ${req.domain}`, 1500);
-    const foldedRisk = await foldContext(riskEvidence, `risks for ${req.domain} engagement`, 1e3);
-    if (foldedMethod) methodologyEvidence = foldedMethod;
-    if (foldedRisk) riskEvidence = foldedRisk;
-    logger.info({ original: totalEvidenceLen, folded: methodologyEvidence.length + riskEvidence.length }, "Engagement plan: context folded");
-  }
-  const totalCitations = precedents.matches.length + methodologyBundle.results.length + riskBundle.results.length + kgRagBundle.sources.length;
-  const avgConfidence = [
-    ...methodologyBundle.results.map((r) => r.score),
-    ...riskBundle.results.map((r) => r.score),
-    ...precedents.matches.map((m) => m.similarity)
-  ].reduce((s, x) => s + x, 0) / Math.max(
-    1,
-    methodologyBundle.results.length + riskBundle.results.length + precedents.matches.length
-  ) || 0;
-  const planPrompt = `You are planning a ${req.duration_weeks}-week consulting engagement.
-
-OBJECTIVE: ${req.objective}
-DOMAIN: ${req.domain}
-TEAM SIZE: ${req.team_size}
-${req.budget_dkk ? `BUDGET: ${req.budget_dkk} DKK` : ""}
-
-METHODOLOGY EVIDENCE FROM KNOWLEDGE GRAPH:
-${methodologyEvidence || "[limited evidence]"}
-
-RISK EVIDENCE FROM KNOWLEDGE GRAPH:
-${riskEvidence || "[limited evidence]"}
-
-GRAPH-AUGMENTED CONTEXT (kg_rag multi-hop synthesis):
-${kgRagEvidence || "[no kg_rag context]"}
-
-SIMILAR PRECEDENT ENGAGEMENTS:
-${precedentText || "[no precedents \u2014 cold start]"}
-
-OUTPUT STRICT JSON with this schema:
-{
-  "phases": [
-    {"name": "...", "duration_weeks": N, "deliverables": ["...", "..."], "methodology": "..."}
-  ],
-  "risks": [
-    {"description": "...", "severity": "high|medium|low", "mitigation": "..."}
-  ],
-  "required_skills": ["skill1", "skill2", ...]
-}
-
-Rules:
-- Phase durations must sum to ${req.duration_weeks}
-- Include 3-6 phases, 3-8 risks, 5-12 skills
-- Be concrete and cite evidence where possible
-- Return ONLY JSON, no markdown fences, no commentary`;
-  let phases = [];
-  let risks = [];
-  let skills = [];
-  let planSource = "fallback-template";
-  let platformConfidence = 0;
-  let routingMeta = null;
-  const analyzed = await callCognitiveRaw(
-    "analyze",
-    {
-      prompt: `Design a ${req.duration_weeks}-week consulting engagement for: ${req.objective}`,
-      context: {
-        domain: req.domain,
-        team_size: req.team_size,
-        budget_dkk: req.budget_dkk,
-        precedent_summaries: precedents.matches.slice(0, 3).map((m) => m.title),
-        methodology_evidence: methodologyEvidence.slice(0, 2e3),
-        risk_evidence: riskEvidence.slice(0, 1500),
-        kg_rag_synthesis: kgRagEvidence.slice(0, 1500),
-        rlm_mission_insights: rlmInsights.slice(0, 3)
-      },
-      agent_id: "engagement-planner",
-      // Custom fields consumed by callCognitiveRaw passthrough
-      ...{
-        task: `Design a ${req.duration_weeks}-week consulting engagement for: ${req.objective}`,
-        analysis_dimensions: [
-          "phase_breakdown",
-          "resource_allocation",
-          "methodology_integration",
-          "key_challenges_and_mitigations"
-        ],
-        constraints: [
-          `duration: ${req.duration_weeks} weeks`,
-          `team: ${req.team_size} people`,
-          req.budget_dkk ? `budget: ${req.budget_dkk} DKK` : ""
-        ].filter(Boolean)
-      }
-    },
-    6e4
-  );
-  if (analyzed?.analysis) {
-    const a = analyzed.analysis;
-    const phaseBreakdown = a.phase_breakdown ?? a.phases;
-    const challenges = a.key_challenges_and_mitigations ?? a.risks;
-    const resourceAlloc = a.resource_allocation;
-    if (Array.isArray(phaseBreakdown) && phaseBreakdown.length > 0) {
-      phases = phaseBreakdown.slice(0, 10).map((p) => ({
-        name: String(p.phase_name ?? p.name ?? "Unnamed phase"),
-        duration_weeks: Number(p.duration_weeks ?? 1),
-        deliverables: Array.isArray(p.deliverables) ? p.deliverables.map(String).slice(0, 8) : [],
-        methodology: String(p.objective ?? p.methodology ?? p.description ?? "")
-      }));
-    }
-    if (Array.isArray(challenges) && challenges.length > 0) {
-      risks = challenges.slice(0, 10).map((c) => ({
-        description: String(c.challenge ?? c.description ?? c.name ?? ""),
-        severity: ["high", "medium", "low"].includes(String(c.severity)) ? c.severity : "medium",
-        mitigation: String(c.mitigation ?? "")
-      }));
-    }
-    if (resourceAlloc && Array.isArray(resourceAlloc.roles)) {
-      skills = resourceAlloc.roles.map(String).slice(0, 15);
-    } else if (Array.isArray(a.skills)) {
-      skills = a.skills.map((s) => String(s.name ?? s)).slice(0, 15);
-    }
-    const analysisConfidence = typeof analyzed.confidence === "number" ? analyzed.confidence : 0;
-    const qualityScore = typeof analyzed.quality?.overall_score === "number" ? analyzed.quality.overall_score : 0;
-    platformConfidence = Math.max(analysisConfidence, qualityScore);
-    routingMeta = analyzed.routing ?? null;
-    if (phases.length > 0 || risks.length > 0) {
-      planSource = "rlm-cognitive-analyze";
-      logger.info(
-        {
-          phases: phases.length,
-          risks: risks.length,
-          skills: skills.length,
-          provider: routingMeta?.provider,
-          model: routingMeta?.model,
-          cost: routingMeta?.cost,
-          platform_confidence: platformConfidence
-        },
-        "Engagement plan: RLM /cognitive/analyze OK"
-      );
-    }
-  }
-  if (phases.length === 0) {
-    logger.warn({ engagementId }, "Engagement plan: /cognitive/analyze returned empty, trying llm.generate fallback");
-    try {
-      const mercuryPrompt = `${planPrompt}
-
-Return ONLY JSON matching the schema, no prose.`;
-      const r = await callMcpTool({
-        toolName: "llm.generate",
-        args: { prompt: mercuryPrompt },
-        callId: uuid30(),
-        timeoutMs: 3e4
-      });
-      if (r.status === "success") {
-        const raw = r.result;
-        const text = String(raw?.content ?? raw?.response ?? "");
-        if (text.length > 20) {
-          const parsed = parsePlanJSON(text);
-          if (parsed.phases.length > 0) {
-            phases = parsed.phases;
-            risks = parsed.risks;
-            skills = parsed.required_skills;
-            planSource = "mercury-llm-generate-fallback";
-            logger.info({ phases: phases.length }, "Engagement plan: Mercury fallback OK");
-          }
-        }
-      }
-    } catch (err) {
-      logger.debug({ error: String(err) }, "Engagement plan: Mercury fallback failed");
-    }
-  }
-  if (phases.length === 0) {
-    phases = synthesizeFallbackPhases(req.duration_weeks);
-  }
-  if (risks.length === 0) {
-    risks = [
-      { description: "Scope creep beyond initial objectives", severity: "medium", mitigation: "Weekly steering committee with change control board" },
-      { description: "Stakeholder alignment drift", severity: "medium", mitigation: "Bi-weekly alignment sessions with documented decisions" }
-    ];
-  }
-  if (skills.length === 0) {
-    skills = ["Strategic consulting", "Stakeholder management", "Data analysis", req.domain];
-  }
-  const finalConfidence = platformConfidence > 0 ? Math.max(platformConfidence, avgConfidence) : avgConfidence;
-  const plan = {
-    engagement_id: engagementId,
-    generated_at: (/* @__PURE__ */ new Date()).toISOString(),
-    phases,
-    risks,
-    required_skills: skills,
-    precedents_used: precedents.matches,
-    total_citations: totalCitations,
-    avg_confidence: Number(finalConfidence.toFixed(3)),
-    generation_ms: Date.now() - t0,
-    high_stakes: highStakes,
-    consensus_proposal_id: consensusProposalId || void 0,
-    consensus_quorum: consensusQuorum || void 0,
-    rlm_mission_id: rlmMissionId || void 0,
-    rlm_steps_executed: rlmStepsExecuted || void 0,
-    plan_source: planSource
-  };
-  const redis2 = getRedis();
-  if (redis2) {
-    try {
-      await redis2.set(`${REDIS_PLAN_PREFIX}${engagementId}`, JSON.stringify(plan), "EX", TTL_SECONDS9);
-    } catch {
-    }
-  }
-  logger.info(
-    {
-      engagement_id: engagementId,
-      phases: phases.length,
-      risks: risks.length,
-      skills: skills.length,
-      citations: totalCitations,
-      confidence: plan.avg_confidence,
-      ms: plan.generation_ms,
-      plan_source: planSource,
-      provider: routingMeta?.provider ?? null,
-      cost: routingMeta?.cost ?? null
-    },
-    "Engagement: plan generated"
-  );
-  return plan;
-}
-function parsePlanJSON(text) {
-  const cleaned = text.replace(/```json\s*/g, "").replace(/```\s*/g, "").trim();
-  const firstBrace = cleaned.indexOf("{");
-  const lastBrace = cleaned.lastIndexOf("}");
-  if (firstBrace < 0 || lastBrace < 0) {
-    return { phases: [], risks: [], required_skills: [] };
-  }
-  const jsonSlice = cleaned.slice(firstBrace, lastBrace + 1);
-  try {
-    const obj = JSON.parse(jsonSlice);
-    const phases = Array.isArray(obj.phases) ? obj.phases.slice(0, 10).map((p) => ({
-      name: String(p.name ?? "Unnamed phase"),
-      duration_weeks: Number(p.duration_weeks ?? 1),
-      deliverables: Array.isArray(p.deliverables) ? p.deliverables.map(String).slice(0, 8) : [],
-      methodology: String(p.methodology ?? "")
-    })) : [];
-    const risks = Array.isArray(obj.risks) ? obj.risks.slice(0, 10).map((r) => ({
-      description: String(r.description ?? ""),
-      severity: ["high", "medium", "low"].includes(String(r.severity)) ? r.severity : "medium",
-      mitigation: String(r.mitigation ?? "")
-    })) : [];
-    const skills = Array.isArray(obj.required_skills) ? obj.required_skills.map(String).slice(0, 15) : [];
-    return { phases, risks, required_skills: skills };
-  } catch {
-    return { phases: [], risks: [], required_skills: [] };
-  }
-}
-function synthesizeFallbackPhases(totalWeeks) {
-  const w = Math.max(1, Math.floor(totalWeeks / 4));
-  return [
-    { name: "Discover", duration_weeks: w, deliverables: ["Stakeholder map", "Current state assessment"], methodology: "McKinsey 7-step problem solving" },
-    { name: "Diagnose", duration_weeks: w, deliverables: ["Root cause analysis", "Opportunity sizing"], methodology: "MECE issue tree decomposition" },
-    { name: "Design", duration_weeks: w, deliverables: ["Target operating model", "Implementation roadmap"], methodology: "Capability-based planning" },
-    { name: "Deploy", duration_weeks: Math.max(1, totalWeeks - 3 * w), deliverables: ["Pilot rollout", "Change management plan"], methodology: "Kotter 8-step change" }
-  ];
-}
-async function recordOutcome(req) {
-  const engagement = await getEngagement(req.engagement_id);
-  if (!engagement) {
-    throw new Error(`Engagement ${req.engagement_id} not found`);
-  }
-  const outcome = {
-    engagement_id: req.engagement_id,
-    completed_at: (/* @__PURE__ */ new Date()).toISOString(),
-    actual_end_date: req.actual_end_date,
-    grade: req.grade,
-    deliverables_shipped: req.deliverables_shipped.slice(0, 20),
-    what_went_well: req.what_went_well.slice(0, 2e3),
-    what_went_wrong: req.what_went_wrong.slice(0, 2e3),
-    precedent_match_accuracy: Math.min(1, Math.max(0, req.precedent_match_accuracy ?? 0.5)),
-    recorded_by: req.recorded_by
-  };
-  engagement.status = "completed";
-  engagement.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-  await saveEngagement(engagement);
-  const redis2 = getRedis();
-  if (redis2) {
-    try {
-      await redis2.set(`${REDIS_PREFIX8}outcome:${req.engagement_id}`, JSON.stringify(outcome), "EX", TTL_SECONDS9);
-    } catch {
-    }
-  }
-  mergeOutcomeNode(outcome).catch(() => {
-  });
-  const reward = gradeToReward(outcome.grade) * outcome.precedent_match_accuracy;
-  sendQLearningReward(
-    { query_type: "multi_hop", channels_used: ["graphrag", "srag", "cypher"], result_count: 5 },
-    { strategy: "engagement-precedent-match", confidence_threshold: 0.4 },
-    reward
-  ).catch(() => {
-  });
-  logger.info(
-    { engagement_id: req.engagement_id, grade: req.grade, reward },
-    "Engagement: outcome recorded, Q-learning reward sent"
-  );
-  return outcome;
-}
-function gradeToReward(grade) {
-  switch (grade) {
-    case "exceeded":
-      return 1;
-    case "met":
-      return 0.8;
-    case "partial":
-      return 0.4;
-    case "missed":
-      return 0.1;
-  }
-}
-async function getOutcome(engagementId) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
-  try {
-    const raw = await redis2.get(`${REDIS_PREFIX8}outcome:${engagementId}`);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-async function getPlan(engagementId) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
-  try {
-    const raw = await redis2.get(`${REDIS_PLAN_PREFIX}${engagementId}`);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-
-// src/routes/engagements.ts
-init_logger();
 var engagementsRouter = Router32();
 var VALID_GRADES = ["exceeded", "met", "partial", "missed"];
 var rateLimitMap3 = /* @__PURE__ */ new Map();
@@ -30764,6 +30968,7 @@ init_hierarchical_intelligence();
 init_graph_hygiene_cron();
 init_write_gate();
 init_adaptive_rag();
+init_engagement_engine();
 init_logger();
 import { Router as Router33 } from "express";
 var intelligenceRouter = Router33();
@@ -30872,19 +31077,69 @@ Content: ${content.slice(0, 2e3)}`
 });
 intelligenceRouter.get("/health", async (_req, res) => {
   try {
-    const [hygiene, writeGate] = await Promise.allSettled([
+    const [hygiene, writeGate, engagements] = await Promise.allSettled([
       runGraphHygiene(),
-      Promise.resolve(getWriteGateStats())
+      Promise.resolve(getWriteGateStats()),
+      listEngagements(5)
     ]);
     res.json({
       success: true,
       data: {
         graph_health: hygiene.status === "fulfilled" ? hygiene.value : { error: "unavailable" },
-        write_gate: writeGate.status === "fulfilled" ? writeGate.value : { error: "unavailable" }
+        write_gate: writeGate.status === "fulfilled" ? writeGate.value : { error: "unavailable" },
+        engagement_intelligence: engagements.status === "fulfilled" ? {
+          active_engagements_sample: engagements.value.length,
+          latest_engagement_ids: engagements.value.slice(0, 3).map((e) => e.$id)
+        } : { error: "unavailable" }
       }
     });
   } catch (err) {
     res.status(500).json({ success: false, error: { code: "HEALTH_CHECK_FAILED", message: String(err), status_code: 500 } });
+  }
+});
+intelligenceRouter.post("/engagement/match", async (req, res) => {
+  const body = req.body;
+  const objective = typeof body.objective === "string" ? body.objective : "";
+  const domain = typeof body.domain === "string" ? body.domain : "";
+  if (objective.length < 5 || domain.length === 0) {
+    res.status(400).json({ success: false, error: { code: "VALIDATION_ERROR", message: "objective (min 5) and domain required", status_code: 400 } });
+    return;
+  }
+  try {
+    const result = await matchPrecedents({
+      objective,
+      domain,
+      max_results: typeof body.max_results === "number" ? body.max_results : void 0
+    });
+    res.json({ success: true, data: result });
+  } catch (err) {
+    logger.warn({ error: String(err) }, "intelligence/engagement/match failed");
+    res.status(500).json({ success: false, error: { code: "MATCH_FAILED", message: err instanceof Error ? err.message : String(err), status_code: 500 } });
+  }
+});
+intelligenceRouter.post("/engagement/plan", async (req, res) => {
+  const body = req.body;
+  if (typeof body.objective !== "string" || typeof body.domain !== "string" || typeof body.duration_weeks !== "number" || typeof body.team_size !== "number") {
+    res.status(400).json({ success: false, error: { code: "VALIDATION_ERROR", message: "objective, domain, duration_weeks, team_size required", status_code: 400 } });
+    return;
+  }
+  try {
+    const plan = await generatePlan({
+      objective: body.objective,
+      domain: body.domain,
+      duration_weeks: body.duration_weeks,
+      team_size: body.team_size,
+      budget_dkk: typeof body.budget_dkk === "number" ? body.budget_dkk : void 0,
+      engagement_id: typeof body.engagement_id === "string" ? body.engagement_id : void 0
+    });
+    res.json({ success: true, data: plan });
+  } catch (err) {
+    if (err instanceof PlanGateRejection) {
+      res.status(422).json({ success: false, error: { code: err.code, message: err.reason, details: err.details, status_code: 422 } });
+      return;
+    }
+    logger.warn({ error: String(err) }, "intelligence/engagement/plan failed");
+    res.status(500).json({ success: false, error: { code: "PLAN_FAILED", message: err instanceof Error ? err.message : String(err), status_code: 500 } });
   }
 });
 

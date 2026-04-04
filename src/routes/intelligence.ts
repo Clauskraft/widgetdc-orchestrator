@@ -11,6 +11,7 @@ import { buildCommunitySummaries, searchCommunitySummaries } from '../hierarchic
 import { runGraphHygiene } from '../graph-hygiene-cron.js'
 import { getWriteGateStats } from '../write-gate.js'
 import { getAdaptiveRAGDashboard, retrainRoutingWeights } from '../adaptive-rag.js'
+import { generatePlan, matchPrecedents, listEngagements, PlanGateRejection } from '../engagement-engine.js'
 import { logger } from '../logger.js'
 
 export const intelligenceRouter = Router()
@@ -141,9 +142,10 @@ intelligenceRouter.post('/extract-test', async (req: Request, res: Response) => 
 
 intelligenceRouter.get('/health', async (_req: Request, res: Response) => {
   try {
-    const [hygiene, writeGate] = await Promise.allSettled([
+    const [hygiene, writeGate, engagements] = await Promise.allSettled([
       runGraphHygiene(),
       Promise.resolve(getWriteGateStats()),
+      listEngagements(5),
     ])
 
     res.json({
@@ -151,9 +153,68 @@ intelligenceRouter.get('/health', async (_req: Request, res: Response) => {
       data: {
         graph_health: hygiene.status === 'fulfilled' ? hygiene.value : { error: 'unavailable' },
         write_gate: writeGate.status === 'fulfilled' ? writeGate.value : { error: 'unavailable' },
+        engagement_intelligence: engagements.status === 'fulfilled' ? {
+          active_engagements_sample: engagements.value.length,
+          latest_engagement_ids: engagements.value.slice(0, 3).map(e => e.$id),
+        } : { error: 'unavailable' },
       },
     })
   } catch (err) {
     res.status(500).json({ success: false, error: { code: 'HEALTH_CHECK_FAILED', message: String(err), status_code: 500 } })
+  }
+})
+
+// ─── v4.0.4 — Engagement Intelligence endpoints (LIN-607) ─────────────────
+// EIE joins the intelligence cohort alongside document-intelligence,
+// hierarchical-intelligence, and adaptive-rag. These endpoints delegate to
+// engagement-engine.ts — the canonical /api/engagements/* routes remain the
+// primary surface, these mirror them under /api/intelligence/* for cohort
+// consistency and discoverability.
+
+intelligenceRouter.post('/engagement/match', async (req: Request, res: Response) => {
+  const body = req.body as Record<string, unknown>
+  const objective = typeof body.objective === 'string' ? body.objective : ''
+  const domain = typeof body.domain === 'string' ? body.domain : ''
+  if (objective.length < 5 || domain.length === 0) {
+    res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'objective (min 5) and domain required', status_code: 400 } })
+    return
+  }
+  try {
+    const result = await matchPrecedents({
+      objective,
+      domain,
+      max_results: typeof body.max_results === 'number' ? body.max_results : undefined,
+    })
+    res.json({ success: true, data: result })
+  } catch (err) {
+    logger.warn({ error: String(err) }, 'intelligence/engagement/match failed')
+    res.status(500).json({ success: false, error: { code: 'MATCH_FAILED', message: err instanceof Error ? err.message : String(err), status_code: 500 } })
+  }
+})
+
+intelligenceRouter.post('/engagement/plan', async (req: Request, res: Response) => {
+  const body = req.body as Record<string, unknown>
+  if (typeof body.objective !== 'string' || typeof body.domain !== 'string'
+      || typeof body.duration_weeks !== 'number' || typeof body.team_size !== 'number') {
+    res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'objective, domain, duration_weeks, team_size required', status_code: 400 } })
+    return
+  }
+  try {
+    const plan = await generatePlan({
+      objective: body.objective,
+      domain: body.domain,
+      duration_weeks: body.duration_weeks,
+      team_size: body.team_size,
+      budget_dkk: typeof body.budget_dkk === 'number' ? body.budget_dkk : undefined,
+      engagement_id: typeof body.engagement_id === 'string' ? body.engagement_id : undefined,
+    })
+    res.json({ success: true, data: plan })
+  } catch (err) {
+    if (err instanceof PlanGateRejection) {
+      res.status(422).json({ success: false, error: { code: err.code, message: err.reason, details: err.details, status_code: 422 } })
+      return
+    }
+    logger.warn({ error: String(err) }, 'intelligence/engagement/plan failed')
+    res.status(500).json({ success: false, error: { code: 'PLAN_FAILED', message: err instanceof Error ? err.message : String(err), status_code: 500 } })
   }
 })

@@ -1081,6 +1081,46 @@ await test('111. POST /api/tools/adaptive_rag_retrain exists', async () => {
 })
 
 // ═══════════════════════════════════════════════════════════════
+// Section 16: v4.0.4 LIN-607 — Engagement Intelligence Engine tools
+// ═══════════════════════════════════════════════════════════════
+
+// ── 112. engagement_list — exists and responds ──
+await test('112. POST /api/tools/engagement_list responds', async () => {
+  const r = await api('/api/tools/engagement_list', { method: 'POST', body: JSON.stringify({ limit: 3 }) })
+  assert(r.status !== 404, `engagement_list not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'engagement_list', `wrong tool_name: ${r.body?.data?.tool_name}`)
+})
+
+// ── 113. engagement_match — rejects missing objective ──
+await test('113. POST /api/tools/engagement_match rejects missing args', async () => {
+  const r = await api('/api/tools/engagement_match', { method: 'POST', body: JSON.stringify({ domain: 'Finance' }) })
+  assert(r.status !== 404, `engagement_match not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'engagement_match', `wrong tool_name`)
+})
+
+// ── 114. engagement_create — exists ──
+await test('114. POST /api/tools/engagement_create responds', async () => {
+  const r = await api('/api/tools/engagement_create', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `engagement_create not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'engagement_create', `wrong tool_name`)
+})
+
+// ── 115. engagement_plan — gate rejects short objective ──
+await test('115. POST /api/tools/engagement_plan exists', async () => {
+  const r = await api('/api/tools/engagement_plan', { method: 'POST', body: JSON.stringify({ objective: 'too short', domain: 'Finance', duration_weeks: 4, team_size: 3 }) })
+  assert(r.status !== 404, `engagement_plan not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'engagement_plan', `wrong tool_name`)
+})
+
+// ── 116. engagement_outcome — exists ──
+await test('116. POST /api/tools/engagement_outcome responds', async () => {
+  const r = await api('/api/tools/engagement_outcome', { method: 'POST', body: JSON.stringify({ engagement_id: 'nonexistent' }) })
+  assert(r.status !== 404, `engagement_outcome not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'engagement_outcome', `wrong tool_name`)
+})
+
+// ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped
 console.log(`  RESULTS: ${passed} passed, ${failed} failed, ${skipped} skipped / ${total} total`)

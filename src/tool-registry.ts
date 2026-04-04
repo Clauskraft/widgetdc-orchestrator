@@ -17,7 +17,7 @@ import { z } from 'zod'
 export type ToolCategory =
   | 'knowledge' | 'graph' | 'cognitive' | 'chains' | 'agents'
   | 'assembly' | 'decisions' | 'adoption' | 'linear' | 'compliance'
-  | 'llm' | 'monitor' | 'mcp'
+  | 'llm' | 'monitor' | 'mcp' | 'engagement'
 
 export interface CanonicalTool {
   name: string
@@ -68,6 +68,7 @@ function inferCategory(namespace: string): ToolCategory {
     chains: 'chains', agents: 'agents', assembly: 'assembly',
     decisions: 'decisions', adoption: 'adoption', linear: 'linear',
     compliance: 'compliance', llm: 'llm', monitor: 'monitor', mcp: 'mcp',
+    engagement: 'engagement',
   }
   return map[namespace] ?? 'mcp'
 }
@@ -553,6 +554,88 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     input: z.object({}),
     timeoutMs: 5000,
     outputDescription: 'List of forged tools with specs',
+  }),
+
+  // ─── v4.0.4 — Engagement Intelligence Engine (LIN-607) ─────────────────────
+  // First-class consulting engagement entities with precedent matching, plan
+  // generation via /cognitive/analyze, smart gates (sanity + consensus + RLM
+  // mission), and outcome-driven Q-learning. All 5 entries surface via REST
+  // tool-gateway, Universal MCP gateway, OpenAPI /docs, and adoption telemetry.
+
+  defineTool({
+    name: 'engagement_create',
+    namespace: 'engagement',
+    description: 'Create a first-class Engagement entity. Writes to Neo4j via MERGE (Engagement + USES_METHODOLOGY edges) and indexes in raptor.index for semantic precedent retrieval. Required: client, domain, objective, start_date, target_end_date.',
+    input: z.object({
+      client: z.string().describe('Client name'),
+      domain: z.string().describe('Engagement domain (Finance, Healthcare, Operations, etc.)'),
+      objective: z.string().describe('Engagement objective (min 10 chars)'),
+      start_date: z.string().describe('ISO date string'),
+      target_end_date: z.string().describe('ISO date string'),
+      budget_dkk: z.number().optional().describe('Budget in DKK (optional)'),
+      team_size: z.number().optional().describe('Team size (optional)'),
+      methodology_refs: z.array(z.string()).optional().describe('Methodology framework names'),
+    }),
+    timeoutMs: 15000,
+    outputDescription: 'Created Engagement with $id, status=draft, timestamps',
+  }),
+
+  defineTool({
+    name: 'engagement_match',
+    namespace: 'engagement',
+    description: 'Find similar past engagements via Cypher (actual :Engagement nodes ranked by outcome grade + methodology overlap + freshness) with dualChannelRAG fallback. Returns top precedents with outcome grades and staleness flags.',
+    input: z.object({
+      objective: z.string().describe('Engagement objective to match against'),
+      domain: z.string().describe('Domain filter'),
+      max_results: z.number().optional().describe('Max precedents returned (default 5)'),
+    }),
+    timeoutMs: 30000,
+    outputDescription: 'Ranked EngagementMatch[] with similarity, outcome grade, reasoning, stale flag',
+  }),
+
+  defineTool({
+    name: 'engagement_plan',
+    namespace: 'engagement',
+    description: 'Generate structured consulting plan (phases, risks, skills) via RLM /cognitive/analyze + 4-channel retrieval (graphrag 3-hop + srag + cypher + kg_rag) + context folding. Enforces smart gates: sanity validation, consensus gate for high-stakes (>20M DKK or >20 team or >40w), RLM mission for complex (>40w).',
+    input: z.object({
+      objective: z.string().describe('Engagement objective'),
+      domain: z.string().describe('Consulting domain'),
+      duration_weeks: z.number().describe('Plan duration 1-260 weeks (hard cap)'),
+      team_size: z.number().describe('Team size 1-100 (hard cap)'),
+      budget_dkk: z.number().optional().describe('Budget in DKK, max 500M hard cap'),
+      engagement_id: z.string().optional().describe('Attach plan to existing engagement'),
+    }),
+    timeoutMs: 120000,
+    outputDescription: 'EngagementPlan with phases, risks, skills, precedents, citations, confidence, consensus_proposal_id, rlm_mission_id',
+  }),
+
+  defineTool({
+    name: 'engagement_outcome',
+    namespace: 'engagement',
+    description: 'Record engagement completion outcome. Writes EngagementOutcome node + HAS_OUTCOME edge to Neo4j, sets engagement status=completed, and sends Q-learning reward to adaptive-rag based on grade + precedent accuracy.',
+    input: z.object({
+      engagement_id: z.string().describe('Target engagement ID'),
+      grade: z.enum(['exceeded', 'met', 'partial', 'missed']).describe('Outcome grade'),
+      actual_end_date: z.string().describe('ISO date actual completion'),
+      deliverables_shipped: z.array(z.string()).describe('List of shipped deliverables'),
+      what_went_well: z.string().describe('Success narrative'),
+      what_went_wrong: z.string().describe('Failure narrative'),
+      recorded_by: z.string().describe('Recorder agent/user ID'),
+      precedent_match_accuracy: z.number().optional().describe('0-1 how well top precedent predicted outcome'),
+    }),
+    timeoutMs: 15000,
+    outputDescription: 'EngagementOutcome with timestamps, Q-learning reward sent',
+  }),
+
+  defineTool({
+    name: 'engagement_list',
+    namespace: 'engagement',
+    description: 'List recent engagements from Redis + Neo4j. Supports limit filter. Returns most recent first by createdAt.',
+    input: z.object({
+      limit: z.number().optional().describe('Max engagements returned (default 20, max 100)'),
+    }),
+    timeoutMs: 10000,
+    outputDescription: 'Engagement[] sorted newest first',
   }),
 ]
 
