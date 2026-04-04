@@ -15,6 +15,9 @@
  */
 import './tracing.js'  // OTel must be first (LIN-589)
 import 'dotenv/config'
+
+// S1+S6: Build-time version injection (esbuild define)
+declare const __PKG_VERSION__: string
 import express from 'express'
 import cors from 'cors'
 import helmet from 'helmet'
@@ -270,7 +273,7 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'healthy',
     service: 'widgetdc-orchestrator',
-    version: '3.2.0',
+    version: typeof __PKG_VERSION__ !== 'undefined' ? __PKG_VERSION__ : '0.0.0',
     uptime_seconds: Math.floor(process.uptime()),
     agents_registered: AgentRegistry.all().length,
     ws_connections: getConnectionStats().total,

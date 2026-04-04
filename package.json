@@ -1,6 +1,6 @@
 {
   "name": "widgetdc-orchestrator",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "description": "WidgeTDC Orchestrator — bridges AI agents to Railway MCP backend",
   "type": "module",
   "main": "dist/index.js",
@@ -13,8 +13,11 @@
     "build:tsc": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "echo \"No tests yet\" && exit 0",
+    "test": "node test/abi-snapshot.test.mjs && node scripts/ci-adoption-check.mjs --no-build --no-abi",
+    "test:e2e": "node test-e2e.mjs",
     "test:abi": "node test/abi-snapshot.test.mjs",
+    "test:ci": "node scripts/ci-adoption-check.mjs",
+    "test:ci:fast": "node scripts/ci-adoption-check.mjs --no-build --no-abi",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

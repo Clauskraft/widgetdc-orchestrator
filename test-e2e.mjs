@@ -8,8 +8,8 @@
  * Usage: node test-e2e.mjs [base_url] [api_key]
  */
 
-const BASE = process.argv[2] || 'https://orchestrator-production-c27e.up.railway.app'
-const API_KEY = process.argv[3] || 'WidgeTDC_Orch_2026'
+const BASE = process.argv[2] || process.env.ORCH_URL || 'https://orchestrator-production-c27e.up.railway.app'
+const API_KEY = process.argv[3] || process.env.ORCH_API_KEY || 'WidgeTDC_Orch_2026'
 
 let passed = 0, failed = 0, skipped = 0
 const results = []

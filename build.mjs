@@ -2,9 +2,19 @@
 // Bundles everything into a single dist/index.js (ESM, Node 20 target)
 // @widgetdc/contracts is bundled IN (file: dep, not available on Railway)
 import * as esbuild from 'esbuild'
-import { readFileSync, mkdirSync, copyFileSync } from 'fs'
+import { readFileSync, mkdirSync, copyFileSync, existsSync } from 'fs'
+
+// S2: Verify contracts symlink before build
+const contractsDist = './node_modules/@widgetdc/contracts/dist/orchestrator'
+if (!existsSync(contractsDist)) {
+  console.error('❌ @widgetdc/contracts dist not found at', contractsDist)
+  console.error('   Fix: cd ../widgetdc-contracts && npm install && npm run build')
+  console.error('   Then: cd ../widgetdc-orchestrator && npm install')
+  process.exit(1)
+}
 
 const pkg = JSON.parse(readFileSync('./package.json', 'utf8'))
+const PKG_VERSION = pkg.version
 
 // External = npm deps that Railway installs via npm ci.
 // Contracts + TypeBox are bundled IN (devDeps, not available at Railway runtime).
@@ -28,6 +38,9 @@ await esbuild.build({
   minify: false,
   banner: {
     js: `import { createRequire } from 'module'; const require = createRequire(import.meta.url);`,
+  },
+  define: {
+    '__PKG_VERSION__': JSON.stringify(PKG_VERSION),
   },
 })
 
