@@ -2294,7 +2294,7 @@ function classifyQuery(query) {
 async function callGraphRAG(query, maxResults) {
   const result = await callMcpTool({
     toolName: "autonomous.graphrag",
-    args: { question: query, max_evidence: maxResults },
+    args: { query, maxHops: 2 },
     callId: uuid3(),
     timeoutMs: 6e4
     // graphrag is slower but higher quality
@@ -2304,7 +2304,7 @@ async function callGraphRAG(query, maxResults) {
     return [];
   }
   const data = result.result;
-  const evidence = data?.evidence ?? data?.results ?? data?.chunks ?? [];
+  const evidence = data?.sources ?? data?.nodes ?? data?.evidence ?? data?.results ?? [];
   const answer = data?.answer ?? data?.synthesis ?? "";
   const confidence = data?.confidence ?? 0.8;
   const results = [];
@@ -2338,6 +2338,19 @@ async function callSRAG(query, maxResults) {
   });
   if (result.status !== "success") return [];
   const sragData = result.result;
+  const response = sragData?.response ?? sragData?.answer ?? "";
+  if (typeof response === "string" && response.length > 20) {
+    return [{
+      source: "srag",
+      content: response.slice(0, 1500),
+      score: sragData?.result?.hasContext ? 0.75 : 0.4,
+      metadata: {
+        type: sragData?.type,
+        graphNodes: sragData?.result?.graphNodes,
+        vectorResults: sragData?.result?.vectorResults
+      }
+    }];
+  }
   const items = Array.isArray(sragData) ? sragData : sragData?.results ? sragData.results : sragData?.chunks ? sragData.chunks : [];
   const results = [];
   for (const item of items.slice(0, maxResults)) {
@@ -17619,6 +17632,7 @@ import { Router as Router8 } from "express";
 
 // src/cron-scheduler.ts
 init_chain_engine();
+init_config();
 init_logger();
 init_redis();
 init_chat_broadcaster();
@@ -19274,6 +19288,46 @@ async function runCronJob(jobId) {
       }
       return;
     }
+    if (job.id === "data-lifecycle" || job.id === "graph-overflow" || job.id === "skill-forge") {
+      try {
+        const endpoint2 = `${config.backendUrl}/api/cron/${job.id}`;
+        const res = await fetch(endpoint2, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${config.backendApiKey}`,
+            "X-Call-Id": `cron-${job.id}-${Date.now()}`
+          },
+          signal: AbortSignal.timeout(12e4)
+        });
+        const body = await res.json().catch(() => null);
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = res.ok ? "completed" : `failed:${res.status}`;
+        job.run_count++;
+        persistCronJobs();
+        const status = res.ok ? "\u2705" : "\u274C";
+        broadcastMessage({
+          from: "Orchestrator",
+          to: "All",
+          source: "orchestrator",
+          type: "Message",
+          message: `${status} Backend cron "${job.name}": ${res.ok ? "completed" : `HTTP ${res.status}`}${body?.summary ? ` \u2014 ${body.summary}` : ""}`,
+          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        });
+        if (res.ok) {
+          broadcastSSE(`cron-${job.id}`, { status: "completed", result: body });
+        } else {
+          logger2.warn({ id: job.id, status: res.status, body }, `Backend cron ${job.id} returned non-OK`);
+        }
+      } catch (err) {
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = "failed";
+        job.run_count++;
+        persistCronJobs();
+        logger2.error({ id: job.id, err: String(err) }, `Backend cron ${job.id} failed`);
+      }
+      return;
+    }
     if (job.id === "graph-self-correct") {
       const report = await runSelfCorrect();
       job.last_run = (/* @__PURE__ */ new Date()).toISOString();
@@ -19923,6 +19977,42 @@ function registerDefaultLoops() {
     enabled: false,
     chain: {
       name: "Evolution OODA Cycle",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
+    }
+  });
+  registerCronJob({
+    id: "data-lifecycle",
+    name: "Data Lifecycle (Retention Policies)",
+    schedule: "0 3 * * *",
+    // Daily 03:00 UTC
+    enabled: true,
+    chain: {
+      name: "Data Lifecycle",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
+    }
+  });
+  registerCronJob({
+    id: "graph-overflow",
+    name: "Graph Overflow (Quota & Archival)",
+    schedule: "0 */6 * * *",
+    // Every 6 hours
+    enabled: true,
+    chain: {
+      name: "Graph Overflow",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
+    }
+  });
+  registerCronJob({
+    id: "skill-forge",
+    name: "Skill Forge (Composite Tool Generation)",
+    schedule: "0 4 * * 0",
+    // Sunday 04:00 UTC
+    enabled: true,
+    chain: {
+      name: "Skill Forge",
       mode: "sequential",
       steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
     }

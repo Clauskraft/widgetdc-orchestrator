@@ -82,7 +82,7 @@ function classifyQuery(query: string): QueryComplexity {
 async function callGraphRAG(query: string, maxResults: number): Promise<RAGResult[]> {
   const result = await callMcpTool({
     toolName: 'autonomous.graphrag',
-    args: { question: query, max_evidence: maxResults },
+    args: { query, maxHops: 2 },
     callId: uuid(),
     timeoutMs: 60000, // graphrag is slower but higher quality
   })
@@ -93,8 +93,8 @@ async function callGraphRAG(query: string, maxResults: number): Promise<RAGResul
   }
 
   const data = result.result as any
-  // autonomous.graphrag returns { answer, evidence[], confidence }
-  const evidence = data?.evidence ?? data?.results ?? data?.chunks ?? []
+  // autonomous.graphrag returns { answer, reasoning_path, nodes, confidence, sources }
+  const evidence = data?.sources ?? data?.nodes ?? data?.evidence ?? data?.results ?? []
   const answer = data?.answer ?? data?.synthesis ?? ''
   const confidence = data?.confidence ?? 0.8
 
@@ -138,6 +138,24 @@ async function callSRAG(query: string, maxResults: number): Promise<RAGResult[]>
   if (result.status !== 'success') return []
 
   const sragData = result.result as any
+
+  // SRAG returns { response, answer, result: { graphNodes, vectorResults } }
+  // The 'response' is an LLM-generated answer, not an array of chunks
+  const response = sragData?.response ?? sragData?.answer ?? ''
+  if (typeof response === 'string' && response.length > 20) {
+    return [{
+      source: 'srag',
+      content: response.slice(0, 1500),
+      score: sragData?.result?.hasContext ? 0.75 : 0.4,
+      metadata: {
+        type: sragData?.type,
+        graphNodes: sragData?.result?.graphNodes,
+        vectorResults: sragData?.result?.vectorResults,
+      },
+    }]
+  }
+
+  // Fallback: try array-based parsing for other SRAG response formats
   const items = Array.isArray(sragData) ? sragData
     : sragData?.results ? sragData.results
     : sragData?.chunks ? sragData.chunks
