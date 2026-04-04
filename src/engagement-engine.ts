@@ -393,10 +393,6 @@ LIMIT ${Math.floor(limit)}`,
     }
     const rows = (data?.results ?? data?.rows ?? []) as Array<Record<string, unknown>>
     if (!Array.isArray(rows) || rows.length === 0) return []
-    // Debug: log the first row to diagnose outcomeGrade missing
-    if (rows[0]) {
-      logger.info({ row_keys: Object.keys(rows[0]), sample: JSON.stringify(rows[0]).slice(0, 400) }, 'Cypher precedent: row sample')
-    }
 
     const objectiveLower = req.objective.toLowerCase()
     const now = Date.now()

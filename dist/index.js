@@ -29804,9 +29804,6 @@ LIMIT ${Math.floor(limit)}`,
     }
     const rows = data?.results ?? data?.rows ?? [];
     if (!Array.isArray(rows) || rows.length === 0) return [];
-    if (rows[0]) {
-      logger.info({ row_keys: Object.keys(rows[0]), sample: JSON.stringify(rows[0]).slice(0, 400) }, "Cypher precedent: row sample");
-    }
     const objectiveLower = req.objective.toLowerCase();
     const now = Date.now();
     return rows.map((row) => {
