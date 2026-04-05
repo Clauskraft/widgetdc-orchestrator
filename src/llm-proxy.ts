@@ -411,14 +411,20 @@ async function callOpenRouterClaude(req: LLMRequest): Promise<LLMResponse> {
 
 /**
  * v4.1.1 — Is this error from Anthropic a billing/credit/quota issue that
- * warrants falling back to an alternative provider? We keep the detector
- * conservative: 402, "credit balance", "insufficient", "quota", "billing".
- * Other errors (network, 5xx, auth) propagate unchanged so operators see the
- * real failure mode instead of a silent degraded response.
+ * warrants falling back to an alternative provider? The detector is
+ * deliberately narrow: only matches Anthropic's documented credit-exhaustion
+ * wording + HTTP 402 status. Other errors (network, 5xx, auth, context-length,
+ * schema) propagate unchanged so operators see the real failure mode.
+ *
+ * v4.1.3 fix: removed bare `insufficient` arm — it was too broad and could
+ * match unrelated errors like "insufficient context" or "insufficient
+ * permissions", silently cascading to fallback when the caller should fix the
+ * request. Anthropic's actual credit-depletion message reads "Your credit
+ * balance is too low" which is already caught by the `credit\s*balance` arm.
  */
 function isAnthropicBillingError(err: unknown): boolean {
   const msg = String((err as any)?.message ?? err ?? '').toLowerCase()
-  return /credit\s*balance|insufficient|quota\s*exceeded|billing|payment|402\b/.test(msg)
+  return /credit[\s_]*balance|out[\s_]*of[\s_]*credits|quota[\s_]*exceeded|billing|payment|402\b/.test(msg)
 }
 
 /**
@@ -427,11 +433,25 @@ function isAnthropicBillingError(err: unknown): boolean {
  * response annotated with `fallback_provider` + `fallback_reason`. Throws an
  * aggregated error if every fallback in the chain also fails.
  */
-async function callAnthropicFallback(req: LLMRequest, reason: string): Promise<LLMResponse> {
+async function callAnthropicFallback(
+  req: LLMRequest,
+  reason: string,
+  allProviders: Record<string, ProviderConfig>,
+): Promise<LLMResponse> {
   const chain = config.anthropicFallbackChain
     .split(',')
     .map(s => s.trim().toLowerCase())
     .filter(Boolean)
+
+  // F4 (v4.1.3 fix): sanitize fallback_reason before returning to callers.
+  // The raw Anthropic error body may contain partial API key fragments or
+  // account identifiers. We extract only the error type + HTTP status for the
+  // response, keeping the full text in server logs only.
+  const safeReason = reason
+    .replace(/x-api-key[^"'\s]*/gi, '[key-redacted]')
+    .replace(/"api_key"\s*:\s*"[^"]*"/g, '"api_key":"[redacted]"')
+    .replace(/sk-ant-[a-zA-Z0-9_-]+/g, '[key-redacted]')
+    .slice(0, 300)
 
   const attemptErrors: string[] = []
 
@@ -444,12 +464,11 @@ async function callAnthropicFallback(req: LLMRequest, reason: string): Promise<L
         }
         logger.warn({ reason }, '[llm-proxy] Anthropic billing failure → fallback to openrouter/claude')
         const res = await callOpenRouterClaude(req)
-        return { ...res, fallback_provider: 'openrouter', fallback_reason: reason }
+        return { ...res, fallback_provider: 'openrouter', fallback_reason: safeReason }
       }
 
       if (fallback === 'deepseek') {
-        const providers = getProviders()
-        const deepseek = providers.deepseek
+        const deepseek = allProviders.deepseek
         if (!deepseek) {
           attemptErrors.push('deepseek: not configured')
           continue
@@ -460,7 +479,7 @@ async function callAnthropicFallback(req: LLMRequest, reason: string): Promise<L
           provider: 'deepseek',
           model: deepseek.defaultModel,
         })
-        return { ...res, fallback_provider: 'deepseek', fallback_reason: reason }
+        return { ...res, fallback_provider: 'deepseek', fallback_reason: safeReason }
       }
 
       attemptErrors.push(`${fallback}: unknown fallback target`)
@@ -498,7 +517,7 @@ export async function chatLLM(req: LLMRequest): Promise<LLMResponse> {
       } catch (err) {
         if (!isAnthropicBillingError(err)) throw err
         const reason = String((err as any)?.message ?? err)
-        return callAnthropicFallback(req, reason)
+        return callAnthropicFallback(req, reason, providers)
       }
     }
     default: throw new Error(`Unsupported provider type: ${provider.type}`)

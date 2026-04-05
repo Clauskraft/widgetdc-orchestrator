@@ -652,7 +652,12 @@ function isJobOverdue(job: CronJob): boolean {
 
   const ageMs = Date.now() - lastRunMs
   const parts = job.schedule.trim().split(/\s+/)
-  if (parts.length < 5) return false
+  // Exactly 5 fields required (minute hour dom month dow). node-cron supports
+  // an optional 6-field format with a leading seconds field — if we destructure
+  // a 6-field expression with our 5-field logic, minute/hour/dom offsets are
+  // wrong and the overdue threshold would be computed incorrectly (potentially
+  // causing double-fire at every boot). Reject non-5-field expressions cleanly.
+  if (parts.length !== 5) return false
 
   const [minute, hour, dayOfMonth, month, dayOfWeek] = parts
 

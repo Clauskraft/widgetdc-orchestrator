@@ -10304,10 +10304,11 @@ async function callOpenRouterClaude(req) {
 }
 function isAnthropicBillingError(err) {
   const msg = String(err?.message ?? err ?? "").toLowerCase();
-  return /credit\s*balance|insufficient|quota\s*exceeded|billing|payment|402\b/.test(msg);
+  return /credit[\s_]*balance|out[\s_]*of[\s_]*credits|quota[\s_]*exceeded|billing|payment|402\b/.test(msg);
 }
-async function callAnthropicFallback(req, reason) {
+async function callAnthropicFallback(req, reason, allProviders) {
   const chain = config.anthropicFallbackChain.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  const safeReason = reason.replace(/x-api-key[^"'\s]*/gi, "[key-redacted]").replace(/"api_key"\s*:\s*"[^"]*"/g, '"api_key":"[redacted]"').replace(/sk-ant-[a-zA-Z0-9_-]+/g, "[key-redacted]").slice(0, 300);
   const attemptErrors = [];
   for (const fallback of chain) {
     try {
@@ -10318,11 +10319,10 @@ async function callAnthropicFallback(req, reason) {
         }
         logger.warn({ reason }, "[llm-proxy] Anthropic billing failure \u2192 fallback to openrouter/claude");
         const res = await callOpenRouterClaude(req);
-        return { ...res, fallback_provider: "openrouter", fallback_reason: reason };
+        return { ...res, fallback_provider: "openrouter", fallback_reason: safeReason };
       }
       if (fallback === "deepseek") {
-        const providers = getProviders();
-        const deepseek = providers.deepseek;
+        const deepseek = allProviders.deepseek;
         if (!deepseek) {
           attemptErrors.push("deepseek: not configured");
           continue;
@@ -10333,7 +10333,7 @@ async function callAnthropicFallback(req, reason) {
           provider: "deepseek",
           model: deepseek.defaultModel
         });
-        return { ...res, fallback_provider: "deepseek", fallback_reason: reason };
+        return { ...res, fallback_provider: "deepseek", fallback_reason: safeReason };
       }
       attemptErrors.push(`${fallback}: unknown fallback target`);
     } catch (err) {
@@ -10363,7 +10363,7 @@ async function chatLLM(req) {
       } catch (err) {
         if (!isAnthropicBillingError(err)) throw err;
         const reason = String(err?.message ?? err);
-        return callAnthropicFallback(req, reason);
+        return callAnthropicFallback(req, reason, providers);
       }
     }
     default:
@@ -26744,7 +26744,7 @@ function isJobOverdue(job) {
   if (Number.isNaN(lastRunMs)) return true;
   const ageMs = Date.now() - lastRunMs;
   const parts = job.schedule.trim().split(/\s+/);
-  if (parts.length < 5) return false;
+  if (parts.length !== 5) return false;
   const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
   if (minute.includes("/") || hour.includes("/")) return false;
   const HOUR = 60 * 60 * 1e3;
@@ -33295,7 +33295,7 @@ app.get("/health", (_req, res) => {
   res.json({
     status: "healthy",
     service: "widgetdc-orchestrator",
-    version: true ? "4.1.3" : "0.0.0",
+    version: true ? "4.1.4" : "0.0.0",
     uptime_seconds: Math.floor(process.uptime()),
     agents_registered: AgentRegistry.all().length,
     ws_connections: getConnectionStats().total,

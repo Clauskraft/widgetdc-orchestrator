@@ -74,6 +74,15 @@ const UPSTREAM_PATH = FIXTURE
   : path.join(ROOT, 'node_modules/@widgetdc/contracts/dist/llm/llm-matrix.json')
 const BUNDLED_PATH = path.join(ROOT, 'dist/llm-matrix.json')
 
+// F5 (v4.1.3 fix): Reject --fixture paths outside the repo root to prevent
+// file-content leakage when the script is invoked from CI with untrusted input.
+if (FIXTURE && !UPSTREAM_PATH.startsWith(ROOT)) {
+  log(`${RED}✗${RESET} Fixture path outside repo root: ${UPSTREAM_PATH}`)
+  log(`  Resolved ROOT: ${ROOT}`)
+  log(`  This is a security boundary — fixture must be inside the repo.`)
+  process.exit(2)
+}
+
 if (!existsSync(UPSTREAM_PATH)) {
   log(`${RED}✗${RESET} Upstream matrix not found: ${UPSTREAM_PATH}`)
   log(`  Fix: cd ../widgetdc-contracts && npm install && npm run build`)
