@@ -1064,15 +1064,28 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'engagement_create': {
       try {
+        // v4.0.11: apply same validation as /api/engagements route — prevents empty records
+        // in Redis when tool is called via /api/tools/* or /mcp (omega-test-003 P2 finding).
+        const clientStr = String(args.client ?? '').trim()
+        const domainStr = String(args.domain ?? '').trim()
+        const objectiveStr = String(args.objective ?? '').trim()
+        const startDateStr = String(args.start_date ?? '').trim()
+        const targetEndDateStr = String(args.target_end_date ?? '').trim()
+        if (clientStr.length < 2) return 'Error: client is required (min 2 chars)'
+        if (!domainStr) return 'Error: domain is required'
+        if (objectiveStr.length < 10) return 'Error: objective is required (min 10 chars)'
+        if (!startDateStr || Number.isNaN(Date.parse(startDateStr))) return 'Error: start_date must be ISO date'
+        if (!targetEndDateStr || Number.isNaN(Date.parse(targetEndDateStr))) return 'Error: target_end_date must be ISO date'
+        if (new Date(targetEndDateStr) <= new Date(startDateStr)) return 'Error: target_end_date must be after start_date'
         const { createEngagement } = await import('./engagement-engine.js')
         const result = await createEngagement({
-          client: String(args.client ?? ''),
-          domain: String(args.domain ?? ''),
-          objective: String(args.objective ?? ''),
-          start_date: String(args.start_date ?? ''),
-          target_end_date: String(args.target_end_date ?? ''),
-          budget_dkk: typeof args.budget_dkk === 'number' ? args.budget_dkk : undefined,
-          team_size: typeof args.team_size === 'number' ? args.team_size : undefined,
+          client: clientStr,
+          domain: domainStr,
+          objective: objectiveStr,
+          start_date: startDateStr,
+          target_end_date: targetEndDateStr,
+          budget_dkk: typeof args.budget_dkk === 'number' && args.budget_dkk >= 0 ? args.budget_dkk : undefined,
+          team_size: typeof args.team_size === 'number' && args.team_size > 0 && args.team_size < 500 ? args.team_size : undefined,
           methodology_refs: Array.isArray(args.methodology_refs) ? (args.methodology_refs as unknown[]).map(String) : undefined,
         })
         return JSON.stringify({ engagement_id: result.$id, client: result.client, domain: result.domain, status: result.status, created_at: result.created_at })

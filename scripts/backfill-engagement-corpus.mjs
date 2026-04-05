@@ -138,7 +138,7 @@ SET e.domain = $domain,
     e.legacy = true
 WITH e
 UNWIND $methodologies AS mref
-MERGE (m {title: mref})
+MERGE (m:Methodology {title: mref})
 MERGE (e)-[:USES_METHODOLOGY]->(m)
 WITH e
 MERGE (out:EngagementOutcome {engagementId: e.id})
