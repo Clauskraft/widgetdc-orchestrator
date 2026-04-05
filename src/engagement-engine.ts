@@ -495,7 +495,17 @@ async function foldContext(text: string, query: string, maxTokens = 1500): Promi
     })
     if (result.status !== 'success') return null
     const data = result.result as Record<string, unknown> | null
-    const folded = data?.compressed_text ?? data?.folded_text ?? data?.result
+    if (!data || data.success === false) return null
+    // Backend returns: { folded_context, summary, original_tokens, folded_tokens, compression_ratio, strategy }
+    // Mirror the v4.0.5 fix that was applied to the context_fold tool-executor case.
+    const summary = typeof data.summary === 'string' ? data.summary : null
+    const foldedContext = data.folded_context as Record<string, unknown> | string | null
+    const fallback = typeof foldedContext === 'string'
+      ? foldedContext
+      : (foldedContext && typeof (foldedContext as Record<string, unknown>).text === 'string'
+          ? (foldedContext as Record<string, unknown>).text as string
+          : null)
+    const folded = summary ?? fallback
     return typeof folded === 'string' && folded.length > 50 ? folded : null
   } catch {
     return null
@@ -505,15 +515,23 @@ async function foldContext(text: string, query: string, maxTokens = 1500): Promi
 // ─── Swarm consensus (v4.0.3) ────────────────────────────────────────────────
 
 /**
- * High-stakes plan gate: budget >20M DKK OR team >20 OR duration >40 weeks.
- * These plans trigger consensus.propose + self-vote via engagement-planner agent.
- * The proposal ID is attached to the plan for audit trail.
+ * High-stakes plan gate: budget > GATE_BUDGET_DKK OR team > GATE_TEAM_SIZE
+ * OR duration > GATE_DURATION_WEEKS. These plans trigger consensus.propose +
+ * self-vote via engagement-planner agent. Uses env-configurable thresholds
+ * (defaults 20M DKK / 20 / 40w) so this stays consistent with generatePlan's
+ * gates classification and the consensus gate enforcement.
+ *
+ * Fix v4.0.10: previously hardcoded — caused config drift when operators
+ * set EIE_GATE_* env vars but isHighStakesPlan still used the old defaults.
+ * NB: module-level GATE_* constants are declared below this function but
+ * initialized before any call to generatePlan → isHighStakesPlan, so
+ * lexical order is fine (TDZ is only an issue for invocation before init).
  */
 function isHighStakesPlan(req: PlanRequest): boolean {
   return (
-    (req.budget_dkk ?? 0) > 20_000_000 ||
-    req.team_size > 20 ||
-    req.duration_weeks > 40
+    (req.budget_dkk ?? 0) > GATE_BUDGET_DKK ||
+    req.team_size > GATE_TEAM_SIZE ||
+    req.duration_weeks > GATE_DURATION_WEEKS
   )
 }
 

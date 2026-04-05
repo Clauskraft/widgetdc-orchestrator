@@ -15695,14 +15695,18 @@ async function foldContext(text, query, maxTokens = 1500) {
     });
     if (result.status !== "success") return null;
     const data = result.result;
-    const folded = data?.compressed_text ?? data?.folded_text ?? data?.result;
+    if (!data || data.success === false) return null;
+    const summary = typeof data.summary === "string" ? data.summary : null;
+    const foldedContext = data.folded_context;
+    const fallback = typeof foldedContext === "string" ? foldedContext : foldedContext && typeof foldedContext.text === "string" ? foldedContext.text : null;
+    const folded = summary ?? fallback;
     return typeof folded === "string" && folded.length > 50 ? folded : null;
   } catch {
     return null;
   }
 }
 function isHighStakesPlan(req) {
-  return (req.budget_dkk ?? 0) > 2e7 || req.team_size > 20 || req.duration_weeks > 40;
+  return (req.budget_dkk ?? 0) > GATE_BUDGET_DKK || req.team_size > GATE_TEAM_SIZE || req.duration_weeks > GATE_DURATION_WEEKS;
 }
 async function proposeViaConsensus(engagementId, req, planSummary) {
   try {
