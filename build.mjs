@@ -3,6 +3,7 @@
 // @widgetdc/contracts is bundled IN (file: dep, not available on Railway)
 import * as esbuild from 'esbuild'
 import { readFileSync, mkdirSync, copyFileSync, existsSync } from 'fs'
+import { spawnSync } from 'child_process'
 
 // S2: Verify contracts symlink before build
 const contractsDist = './node_modules/@widgetdc/contracts/dist/orchestrator'
@@ -87,6 +88,18 @@ if (existsSync(matrixJsonSrc)) {
 } else {
   console.error('❌ llm-matrix.json not found at', matrixJsonSrc)
   console.error('   Fix: cd ../widgetdc-contracts && npm run build')
+  process.exit(1)
+}
+
+// LIN-625 Wave 5 — CI drift gate. The copy we just made should be content-identical
+// to upstream. This check proves it and catches the reverse direction too: a dev
+// hand-editing dist/llm-matrix.json would get flagged on the next build. Content
+// comparison normalizes whitespace/line-endings so cross-platform builds aren't
+// falsely flagged by Windows CRLF or git autocrlf.
+const driftCheck = spawnSync('node', ['scripts/check-matrix-drift.mjs'], { stdio: 'inherit' })
+if (driftCheck.status !== 0) {
+  console.error('❌ LIN-625 matrix drift gate FAILED — bundle diverged from canonical @widgetdc/contracts/llm')
+  console.error('   See drift report above. This is a hard build failure to prevent shipping stale bundles.')
   process.exit(1)
 }
 

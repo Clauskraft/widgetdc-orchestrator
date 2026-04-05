@@ -242,6 +242,39 @@ if (NO_BUILD) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// CHECK 6 — LLM Matrix drift gate (LIN-625 Wave 5)
+// ══════════════════════════════════════════════════════════════════════════════
+
+console.log(label('CHECK 6 — LLM Matrix drift gate (LIN-625)'))
+
+if (!existsSync(path.join(ROOT, 'scripts/check-matrix-drift.mjs'))) {
+  console.log(`  ${warn('scripts/check-matrix-drift.mjs not found — skipping')}`)
+  addResult('LLM Matrix drift gate', true, ['Skipped — script not present'])
+} else if (!existsSync(path.join(ROOT, 'dist/llm-matrix.json'))) {
+  // Fresh checkout before first build — defer to build verification which will
+  // run the drift check after the copy step.
+  console.log(`  ${warn('dist/llm-matrix.json not yet built — deferred to build step')}`)
+  addResult('LLM Matrix drift gate', true, ['Skipped — dist/ not yet built'])
+} else {
+  const driftResult = run('node scripts/check-matrix-drift.mjs')
+  if (driftResult.ok) {
+    console.log(`  ${ok('No drift between @widgetdc/contracts/llm and bundled dist/llm-matrix.json')}`)
+    // Echo the counts line (last non-empty line, stripped of ANSI) for the log
+    const lines = driftResult.out.trim().split('\n').map(l => l.replace(/\x1b\[[0-9;]*m/g, '').trim())
+    const countsLine = lines.reverse().find(l => l.startsWith('providers='))
+    if (countsLine) console.log(`    ${countsLine}`)
+    addResult('LLM Matrix drift gate', true)
+  } else {
+    const lines = (driftResult.out + driftResult.err).trim().split('\n')
+    lines.forEach(l => console.log(`  ${l}`))
+    console.log(`  ${fail('Matrix drift detected — bundle diverged from canonical contracts')}`)
+    addResult('LLM Matrix drift gate', false, [
+      'Bundle diverged from @widgetdc/contracts/llm. Fix: npm run build',
+    ])
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // SUMMARY TABLE
 // ══════════════════════════════════════════════════════════════════════════════
 
