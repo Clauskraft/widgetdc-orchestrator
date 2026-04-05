@@ -15,11 +15,42 @@
  *   → route to LLM → final response with REAL platform data
  */
 import { Router, Request, Response } from 'express'
+import { LlmMatrix } from '@widgetdc/contracts/llm'
 import { chatLLM, type LLMMessage } from '../llm-proxy.js'
 import { ORCHESTRATOR_TOOLS, executeToolCalls, getTokenSavings } from '../tool-executor.js'
 import { logger } from '../logger.js'
 import { config } from '../config.js'
 import { v4 as uuid } from 'uuid'
+
+// Wave 3 (2026-04-05): alias→full-model-name mapping resolved via LlmMatrix.
+// The Open WebUI UI sends short alias IDs ('claude-sonnet', 'gemini-flash')
+// which orchestrator resolves to full matrix model names before dispatching
+// to llm-proxy. The alias IDs are a stable UI contract and are defined
+// locally; the target full-model names come from the matrix.
+const MATRIX_ALIAS_TARGETS: Record<string, string> = {
+  'claude-sonnet': 'claude-sonnet-4-20250514',
+  'claude-opus': 'claude-sonnet-4-20250514', // opus not in matrix — route to sonnet
+  'gemini-flash': 'gemini-2.0-flash',
+  'deepseek-chat': 'deepseek-chat',
+  'qwen-plus': 'qwen-plus',
+  'gpt-4o': 'gpt-4o',
+}
+
+/**
+ * Resolve an Open WebUI alias to a { provider, model } pair by looking up the
+ * target model in the canonical matrix. Throws if the alias target is not a
+ * known matrix model, which surfaces drift between local aliases and the
+ * matrix at request time (Wave 5 CI gate will catch this at build time).
+ */
+function resolveAlias(alias: string): { provider: string; model: string } {
+  const target = MATRIX_ALIAS_TARGETS[alias]
+  if (!target) {
+    throw new Error(`Unknown model alias '${alias}'. Known: ${Object.keys(MATRIX_ALIAS_TARGETS).join(', ')}`)
+  }
+  const modelCfg = LlmMatrix.getModel(target)
+  // Orchestrator uses the matrix provider id as the llm-proxy provider key.
+  return { provider: modelCfg.provider, model: target }
+}
 
 const MAX_TOOL_ROUNDS = 2
 const MAX_TOOL_ROUNDS_ASSISTANT = 4
@@ -203,14 +234,23 @@ const MODELS: ModelEntry[] = [
   ...ASSISTANTS.map(a => ({ id: a.id, provider: 'widgetdc', displayName: a.displayName })),
 ]
 
-const MODEL_TO_PROVIDER: Record<string, { provider: string; model?: string }> = {
-  'claude-sonnet': { provider: 'claude', model: 'claude-sonnet-4-20250514' },
-  'claude-opus': { provider: 'claude', model: 'claude-opus-4-20250514' },
-  'gemini-flash': { provider: 'gemini', model: 'gemini-2.0-flash' },
-  'deepseek-chat': { provider: 'deepseek', model: 'deepseek-chat' },
-  'qwen-plus': { provider: 'qwen', model: 'qwen-plus' },
-  'gpt-4o': { provider: 'openai', model: 'gpt-4o' },
+// Wave 3: alias→{provider, model} map is now derived lazily from the matrix
+// via resolveAlias(). This constant is kept for the groq-llama case only,
+// since 'llama-3.3-70b-versatile' is not in the matrix (groq is a hosting
+// provider, not a model vendor). Everything else flows through resolveAlias().
+const MODEL_TO_PROVIDER_FALLBACK: Record<string, { provider: string; model?: string }> = {
   'groq-llama': { provider: 'groq', model: 'llama-3.3-70b-versatile' },
+}
+
+function resolveModelToProvider(alias: string): { provider: string; model?: string } | undefined {
+  if (MATRIX_ALIAS_TARGETS[alias]) {
+    try {
+      return resolveAlias(alias)
+    } catch {
+      return undefined
+    }
+  }
+  return MODEL_TO_PROVIDER_FALLBACK[alias]
 }
 
 // ─── GET /v1/metrics — Tool call analytics ─────────────────────────────────
@@ -312,9 +352,14 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
   // Check if this is a consulting assistant (LIN-524)
   const assistant = ASSISTANT_MAP.get(model)
 
-  // Resolve provider — assistants route through their base model's provider
+  // Resolve provider — assistants route through their base model's provider.
+  // Wave 3: alias→{provider, model} is matrix-driven via resolveModelToProvider().
   const resolvedModel = assistant ? assistant.baseModel : model
-  const mapping = MODEL_TO_PROVIDER[resolvedModel] || MODEL_TO_PROVIDER['gemini-flash']
+  const mapping = resolveModelToProvider(resolvedModel) ?? resolveModelToProvider('gemini-flash')
+  if (!mapping) {
+    res.status(500).json({ error: { message: `Unable to resolve any provider for model '${resolvedModel}'`, type: 'server_error' } })
+    return
+  }
   const provider = mapping.provider
   const providerModel = mapping.model
 
