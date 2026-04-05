@@ -18082,12 +18082,34 @@ import { v4 as uuid20 } from "uuid";
 function getTokenSavings() {
   return { totalTokensSaved, totalFoldingCalls, avgSavingsPerFold: totalFoldingCalls > 0 ? Math.round(totalTokensSaved / totalFoldingCalls) : 0 };
 }
-function foldToolResult(content, toolName) {
+async function saveFullToolOutput(content, toolName) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  const id = uuid20();
+  try {
+    const payload = JSON.stringify({
+      $id: `tool-output-${id}`,
+      $schema: "https://widgetdc.io/schemas/tool-output/v1",
+      tool_name: toolName,
+      content,
+      size_bytes: Buffer.byteLength(content, "utf8"),
+      created_at: (/* @__PURE__ */ new Date()).toISOString(),
+      ttl_seconds: TOOL_OUTPUT_TTL_SECONDS
+    });
+    await redis2.set(`${TOOL_OUTPUT_PREFIX}${id}`, payload, "EX", TOOL_OUTPUT_TTL_SECONDS);
+    return id;
+  } catch (err) {
+    logger.debug({ error: String(err), tool: toolName }, "Tool output save failed (non-fatal)");
+    return null;
+  }
+}
+async function foldToolResult(content, toolName) {
   const MAX_CHARS = 800;
   const TARGET_CHARS = 500;
   if (content.length <= MAX_CHARS) return content;
   const originalTokens = Math.ceil(content.length / 4);
   totalFoldingCalls++;
+  const fullOutputId = await saveFullToolOutput(content, toolName);
   let folded;
   try {
     const parsed = JSON.parse(content);
@@ -18117,24 +18139,35 @@ function foldToolResult(content, toolName) {
     if (lines.length > 15) folded += `
 ... (${lines.length} total lines)`;
   }
+  if (fullOutputId) {
+    const downloadUrl = `${PUBLIC_URL_BASE}/api/tool-output/${fullOutputId}`;
+    const sizeKb = (content.length / 1024).toFixed(1);
+    folded += `
+
+\u{1F4C4} Full output (${sizeKb}KB, ${content.length} chars) \u2014 expires in ${Math.round(TOOL_OUTPUT_TTL_SECONDS / 3600)}h:
+${downloadUrl}`;
+  }
   const foldedTokens = Math.ceil(folded.length / 4);
   const saved = originalTokens - foldedTokens;
   totalTokensSaved += saved;
-  logger.debug({ tool: toolName, originalTokens, foldedTokens, saved }, "Tool result folded");
+  logger.debug({ tool: toolName, originalTokens, foldedTokens, saved, full_output_id: fullOutputId }, "Tool result folded");
   return folded;
 }
 async function executeToolCalls(toolCalls) {
   const results = await Promise.allSettled(
     toolCalls.map((tc) => executeOne(tc))
   );
-  return results.map((r, i) => {
-    const raw = r.status === "fulfilled" ? r.value : `Error: ${r.reason}`;
-    return {
-      tool_call_id: toolCalls[i].id,
-      role: "tool",
-      content: foldToolResult(raw, toolCalls[i].function.name)
-    };
-  });
+  const folded = await Promise.all(
+    results.map(async (r, i) => {
+      const raw = r.status === "fulfilled" ? r.value : `Error: ${r.reason}`;
+      return {
+        tool_call_id: toolCalls[i].id,
+        role: "tool",
+        content: await foldToolResult(raw, toolCalls[i].function.name)
+      };
+    })
+  );
+  return folded;
 }
 async function executeOne(tc) {
   let args;
@@ -18188,7 +18221,7 @@ async function executeToolUnified(toolName, args, opts) {
     const rawResult = await executeToolByName(toolName, args);
     const duration = Date.now() - t0;
     const shouldFold = opts?.fold !== false;
-    const folded = shouldFold ? foldToolResult(rawResult, toolName) : rawResult;
+    const folded = shouldFold ? await foldToolResult(rawResult, toolName) : rawResult;
     const resultWithWarning = deprecation_notice ? `[DEPRECATED] ${toolDef?.deprecatedMessage ?? `Tool "${toolName}" is deprecated.`}${toolDef?.replacedBy ? ` Use "${toolDef.replacedBy}" instead.` : ""}
 
 ${folded}` : folded;
@@ -19253,7 +19286,7 @@ ${lines.join("\n")}`;
     }
   }
 }
-var ORCHESTRATOR_TOOLS, totalTokensSaved, totalFoldingCalls;
+var ORCHESTRATOR_TOOLS, totalTokensSaved, totalFoldingCalls, TOOL_OUTPUT_PREFIX, TOOL_OUTPUT_TTL_SECONDS, PUBLIC_URL_BASE;
 var init_tool_executor = __esm({
   "src/tool-executor.ts"() {
     "use strict";
@@ -19264,10 +19297,14 @@ var init_tool_executor = __esm({
     init_verification_gate();
     init_investigate_chain();
     init_logger();
+    init_redis();
     init_tool_registry();
     ORCHESTRATOR_TOOLS = toOpenAITools();
     totalTokensSaved = 0;
     totalFoldingCalls = 0;
+    TOOL_OUTPUT_PREFIX = "orchestrator:tool-output:";
+    TOOL_OUTPUT_TTL_SECONDS = Number(process.env.TOOL_OUTPUT_TTL_SECONDS ?? 86400);
+    PUBLIC_URL_BASE = process.env.PUBLIC_URL_BASE ?? "https://orchestrator-production-c27e.up.railway.app";
   }
 });
 
@@ -27587,12 +27624,87 @@ auditRouter.get("/log", async (req, res) => {
   res.json({ success: true, data: { entries: filtered, total: filtered.length, limit, offset } });
 });
 
+// src/routes/tool-output.ts
+init_redis();
+init_logger();
+import { Router as Router16 } from "express";
+var toolOutputRouter = Router16();
+var TOOL_OUTPUT_PREFIX2 = "orchestrator:tool-output:";
+var ID_PATTERN = /^[a-f0-9-]{36}$/;
+toolOutputRouter.get("/:id", async (req, res) => {
+  const id = req.params.id;
+  if (!ID_PATTERN.test(id)) {
+    res.status(400).json({
+      success: false,
+      error: { code: "INVALID_ID", message: "Tool output ID must be a UUID", status_code: 400 }
+    });
+    return;
+  }
+  const redis2 = getRedis();
+  if (!redis2) {
+    res.status(503).json({
+      success: false,
+      error: { code: "REDIS_UNAVAILABLE", message: "Tool output store not available", status_code: 503 }
+    });
+    return;
+  }
+  try {
+    const raw = await redis2.get(`${TOOL_OUTPUT_PREFIX2}${id}`);
+    if (!raw) {
+      res.status(404).json({
+        success: false,
+        error: { code: "NOT_FOUND", message: "Tool output not found or expired", status_code: 404 }
+      });
+      return;
+    }
+    const parsed = JSON.parse(raw);
+    const ttl = await redis2.ttl(`${TOOL_OUTPUT_PREFIX2}${id}`);
+    res.json({
+      success: true,
+      data: {
+        ...parsed,
+        ttl_remaining_seconds: ttl
+      }
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn({ id, error: message }, "Tool output fetch failed");
+    res.status(500).json({
+      success: false,
+      error: { code: "FETCH_FAILED", message, status_code: 500 }
+    });
+  }
+});
+toolOutputRouter.get("/:id/raw", async (req, res) => {
+  const id = req.params.id;
+  if (!ID_PATTERN.test(id)) {
+    res.status(400).json({ success: false, error: { code: "INVALID_ID", message: "UUID required", status_code: 400 } });
+    return;
+  }
+  const redis2 = getRedis();
+  if (!redis2) {
+    res.status(503).json({ success: false, error: { code: "REDIS_UNAVAILABLE", message: "Tool output store not available", status_code: 503 } });
+    return;
+  }
+  try {
+    const raw = await redis2.get(`${TOOL_OUTPUT_PREFIX2}${id}`);
+    if (!raw) {
+      res.status(404).type("text/plain").send("Not found or expired");
+      return;
+    }
+    const parsed = JSON.parse(raw);
+    res.type("text/plain; charset=utf-8").send(String(parsed.content ?? ""));
+  } catch (err) {
+    res.status(500).type("text/plain").send(`Error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+});
+
 // src/routes/knowledge.ts
 init_config();
 init_redis();
 init_logger();
-import { Router as Router16 } from "express";
-var knowledgeRouter = Router16();
+import { Router as Router17 } from "express";
+var knowledgeRouter = Router17();
 var FEED_CACHE_KEY = "orchestrator:knowledge-feed";
 var BRIEFING_CACHE_KEY = "orchestrator:knowledge-briefing-prompt";
 var FEED_TTL_SECONDS = 86400;
@@ -27756,10 +27868,10 @@ init_redis();
 init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
-import { Router as Router17 } from "express";
+import { Router as Router18 } from "express";
 import { randomUUID as randomUUID3 } from "crypto";
 import { v4 as uuid23 } from "uuid";
-var notebookRouter = Router17();
+var notebookRouter = Router18();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
 var TTL_SECONDS8 = 2592e3;
@@ -28015,7 +28127,7 @@ init_drill();
 
 // src/routes/monitor.ts
 init_mcp_caller();
-import { Router as Router18 } from "express";
+import { Router as Router19 } from "express";
 
 // src/context-compress.ts
 init_cognitive_proxy();
@@ -28142,7 +28254,7 @@ init_chain_engine();
 init_cognitive_proxy();
 init_logger();
 import { v4 as uuid24 } from "uuid";
-var monitorRouter = Router18();
+var monitorRouter = Router19();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
@@ -28363,9 +28475,9 @@ init_redis();
 init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
-import { Router as Router19 } from "express";
+import { Router as Router20 } from "express";
 import { v4 as uuid25 } from "uuid";
-var assemblyRouter = Router19();
+var assemblyRouter = Router20();
 var REDIS_PREFIX7 = "orchestrator:assembly:";
 var REDIS_INDEX4 = "orchestrator:assemblies:index";
 var TTL_SECONDS9 = 2592e3;
@@ -28658,8 +28770,8 @@ init_decisions();
 // src/routes/s1-s4.ts
 init_chain_engine();
 init_logger();
-import { Router as Router20 } from "express";
-var s1s4Router = Router20();
+import { Router as Router21 } from "express";
+var s1s4Router = Router21();
 s1s4Router.post("/trigger", async (req, res) => {
   const { url, source_type, topic, weights } = req.body;
   if (!url) {
@@ -28931,7 +29043,7 @@ init_llm_proxy();
 init_tool_executor();
 init_logger();
 init_config();
-import { Router as Router21 } from "express";
+import { Router as Router22 } from "express";
 import { v4 as uuid27 } from "uuid";
 var MAX_TOOL_ROUNDS = 2;
 var MAX_TOOL_ROUNDS_ASSISTANT = 4;
@@ -28966,7 +29078,7 @@ function recordMetrics(model, toolCalls, toolRounds, totalTokens, toolsOffered) 
   metricsBuffer.push({ model, tool_calls: toolCalls, tool_rounds: toolRounds, total_tokens: totalTokens, timestamp: Date.now() });
   if (metricsBuffer.length > MAX_METRICS) metricsBuffer.splice(0, metricsBuffer.length - MAX_METRICS);
 }
-var openaiCompatRouter = Router21();
+var openaiCompatRouter = Router22();
 var rateLimitMap = /* @__PURE__ */ new Map();
 var RATE_LIMIT_WINDOW_MS = 6e4;
 var RATE_LIMIT_MAX = 30;
@@ -29291,8 +29403,8 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
 
 // src/routes/prompt-generator.ts
 init_logger();
-import { Router as Router22 } from "express";
-var promptGeneratorRouter = Router22();
+import { Router as Router23 } from "express";
+var promptGeneratorRouter = Router23();
 var intentRules = [
   {
     keywords: ["pr\xE6sentation", "praesentation", "presentation", "slides", "deck", "slide"],
@@ -29516,7 +29628,7 @@ promptGeneratorRouter.get("/skills", (_req, res) => {
 
 // src/openapi.ts
 init_tool_registry();
-import { Router as Router23 } from "express";
+import { Router as Router24 } from "express";
 import swaggerUi from "swagger-ui-express";
 function buildOpenAPISpec() {
   return {
@@ -30084,7 +30196,7 @@ function buildOpenAPISpec() {
     ]
   };
 }
-var openapiRouter = Router23();
+var openapiRouter = Router24();
 var spec = buildOpenAPISpec();
 openapiRouter.get("/openapi.json", (_req, res) => {
   res.json(spec);
@@ -30106,9 +30218,9 @@ init_tool_registry();
 init_mcp_caller();
 init_config();
 init_logger();
-import { Router as Router24 } from "express";
+import { Router as Router25 } from "express";
 import { v4 as uuid28 } from "uuid";
-var mcpGatewayRouter = Router24();
+var mcpGatewayRouter = Router25();
 var backendToolsCache = [];
 var backendToolsCacheTime = 0;
 var CACHE_TTL_MS2 = 3e5;
@@ -30323,9 +30435,9 @@ mcpGatewayRouter.delete("/", (_req, res) => {
 init_tool_executor();
 init_tool_registry();
 init_logger();
-import { Router as Router25 } from "express";
+import { Router as Router26 } from "express";
 import { v4 as uuid29 } from "uuid";
-var toolGatewayRouter = Router25();
+var toolGatewayRouter = Router26();
 toolGatewayRouter.post("/:name", async (req, res) => {
   const { name } = req.params;
   const tool = getTool(name);
@@ -30637,8 +30749,8 @@ init_chat_store();
 init_failure_harvester();
 init_redis();
 init_logger();
-import { Router as Router26 } from "express";
-var failuresRouter = Router26();
+import { Router as Router27 } from "express";
+var failuresRouter = Router27();
 failuresRouter.get("/summary", async (_req, res) => {
   try {
     const redis2 = getRedis();
@@ -30680,8 +30792,8 @@ failuresRouter.post("/harvest", async (req, res) => {
 init_competitive_crawler();
 init_redis();
 init_logger();
-import { Router as Router27 } from "express";
-var competitiveRouter = Router27();
+import { Router as Router28 } from "express";
+var competitiveRouter = Router28();
 var crawlInProgress = false;
 var lastCrawlAt = 0;
 var CRAWL_COOLDOWN_MS = 36e5;
@@ -30748,8 +30860,8 @@ competitiveRouter.get("/targets", (_req, res) => {
 init_cognitive_proxy();
 init_redis();
 init_logger();
-import { Router as Router28 } from "express";
-var foldRouter = Router28();
+import { Router as Router29 } from "express";
+var foldRouter = Router29();
 var DAILY_LIMIT = 100;
 var REDIS_PREFIX8 = "caas:usage:";
 async function getUsageCount(apiKey) {
@@ -30903,7 +31015,7 @@ foldRouter.get("/usage", async (req, res) => {
 });
 
 // src/routes/graph-hygiene.ts
-import { Router as Router29 } from "express";
+import { Router as Router30 } from "express";
 
 // src/graph-hygiene.ts
 init_mcp_caller();
@@ -31135,7 +31247,7 @@ async function runGraphHygiene2() {
 
 // src/routes/graph-hygiene.ts
 init_logger();
-var graphHygieneRouter = Router29();
+var graphHygieneRouter = Router30();
 var hygieneInProgress = false;
 graphHygieneRouter.post("/run", async (_req, res) => {
   if (hygieneInProgress) {
@@ -31183,8 +31295,8 @@ graphHygieneRouter.post("/fix/:op", async (req, res) => {
 // src/routes/deliverables.ts
 init_deliverable_engine();
 init_logger();
-import { Router as Router30 } from "express";
-var deliverablesRouter = Router30();
+import { Router as Router31 } from "express";
+var deliverablesRouter = Router31();
 var VALID_TYPES = ["analysis", "roadmap", "assessment"];
 var VALID_FORMATS = ["pdf", "markdown"];
 var rateLimitMap2 = /* @__PURE__ */ new Map();
@@ -31321,8 +31433,8 @@ deliverablesRouter.get("/:id/markdown", async (req, res) => {
 init_similarity_engine();
 init_compound_hooks();
 init_logger();
-import { Router as Router31 } from "express";
-var similarityRouter = Router31();
+import { Router as Router32 } from "express";
+var similarityRouter = Router32();
 var VALID_DIMENSIONS = [
   "industry",
   "service",
@@ -31446,8 +31558,8 @@ similarityRouter.get("/client/:id", async (req, res) => {
 // src/routes/engagements.ts
 init_engagement_engine();
 init_logger();
-import { Router as Router32 } from "express";
-var engagementsRouter = Router32();
+import { Router as Router33 } from "express";
+var engagementsRouter = Router33();
 var VALID_GRADES = ["exceeded", "met", "partial", "missed"];
 var rateLimitMap3 = /* @__PURE__ */ new Map();
 var RATE_LIMIT2 = 20;
@@ -31694,8 +31806,8 @@ init_write_gate();
 init_adaptive_rag();
 init_engagement_engine();
 init_logger();
-import { Router as Router33 } from "express";
-var intelligenceRouter = Router33();
+import { Router as Router34 } from "express";
+var intelligenceRouter = Router34();
 intelligenceRouter.post("/ingest", async (req, res) => {
   const body = req.body;
   const content = body.content;
@@ -31871,9 +31983,9 @@ intelligenceRouter.post("/engagement/plan", async (req, res) => {
 init_manifesto_governance();
 init_mcp_caller();
 init_logger();
-import { Router as Router34 } from "express";
+import { Router as Router35 } from "express";
 import { v4 as uuid31 } from "uuid";
-var governanceRouter = Router34();
+var governanceRouter = Router35();
 governanceRouter.get("/matrix", (_req, res) => {
   res.json({
     success: true,
@@ -31963,8 +32075,8 @@ RETURN p.name as name, p.status as status`,
 // src/routes/osint.ts
 init_osint_scanner();
 init_logger();
-import { Router as Router35 } from "express";
-var osintRouter = Router35();
+import { Router as Router36 } from "express";
+var osintRouter = Router36();
 osintRouter.post("/scan", async (req, res) => {
   try {
     const body = req.body;
@@ -32099,8 +32211,8 @@ osintRouter.get("/domains", (_req, res) => {
 // src/routes/evolution.ts
 init_evolution_loop();
 init_logger();
-import { Router as Router36 } from "express";
-var evolutionRouter = Router36();
+import { Router as Router37 } from "express";
+var evolutionRouter = Router37();
 evolutionRouter.post("/run", async (req, res) => {
   const { focus_area, dry_run } = req.body ?? {};
   try {
@@ -32167,8 +32279,8 @@ evolutionRouter.get("/history", async (req, res) => {
 // src/routes/memory.ts
 init_working_memory();
 init_logger();
-import { Router as Router37 } from "express";
-var memoryRouter = Router37();
+import { Router as Router38 } from "express";
+var memoryRouter = Router38();
 memoryRouter.post("/store", async (req, res) => {
   const body = req.body;
   const agentId = body.agent_id;
@@ -32227,8 +32339,8 @@ memoryRouter.delete("/:agent_id", async (req, res) => {
 init_tool_registry();
 init_tool_executor();
 init_logger();
-import { Router as Router38 } from "express";
-var abiDocsRouter = Router38();
+import { Router as Router39 } from "express";
+var abiDocsRouter = Router39();
 abiDocsRouter.get("/docs", (_req, res) => {
   const namespace = _req.query.namespace ?? void 0;
   const category = _req.query.category ?? void 0;
@@ -32370,12 +32482,12 @@ var CURATED_EXAMPLES = {
 // src/routes/abi-health.ts
 init_tool_registry();
 init_logger();
-import { Router as Router39 } from "express";
+import { Router as Router40 } from "express";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 var __dirname = path.dirname(fileURLToPath(import.meta.url));
-var abiHealthRouter = Router39();
+var abiHealthRouter = Router40();
 function getSnapshotPath() {
   const testPath = path.resolve(__dirname, "..", "..", "test", "snapshots", "abi-snapshot.json");
   if (existsSync(testPath)) return testPath;
@@ -32564,8 +32676,8 @@ abiHealthRouter.post("/snapshot", (_req, res) => {
 
 // src/routes/abi-versioning.ts
 init_tool_registry();
-import { Router as Router40 } from "express";
-var abiVersioningRouter = Router40();
+import { Router as Router41 } from "express";
+var abiVersioningRouter = Router41();
 abiVersioningRouter.get("/versions", (_req, res) => {
   const tools = TOOL_REGISTRY.map((t) => ({
     name: t.name,
@@ -32791,6 +32903,7 @@ app.use("/cron", requireApiKey, cronRouter);
 app.use("/api/dashboard", dashboardRouter);
 app.use("/api/openclaw", requireApiKey, openclawRouter);
 app.use("/api/audit", requireApiKey, auditRouter);
+app.use("/api/tool-output", requireApiKey, toolOutputRouter);
 app.use("/api/knowledge", requireApiKey, knowledgeRouter);
 app.use("/api/adoption", requireApiKey, adoptionRouter);
 app.use("/api/artifacts", requireApiKey, artifactRouter);
@@ -32851,7 +32964,7 @@ app.get("/health", (_req, res) => {
   res.json({
     status: "healthy",
     service: "widgetdc-orchestrator",
-    version: true ? "4.0.11" : "0.0.0",
+    version: true ? "4.0.12" : "0.0.0",
     uptime_seconds: Math.floor(process.uptime()),
     agents_registered: AgentRegistry.all().length,
     ws_connections: getConnectionStats().total,

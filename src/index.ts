@@ -39,6 +39,7 @@ import { dashboardRouter } from './routes/dashboard.js'
 import { openclawRouter, initOpenClaw, isOpenClawHealthy } from './routes/openclaw.js'
 import { llmRouter } from './routes/llm.js'
 import { auditRouter } from './routes/audit.js'
+import { toolOutputRouter } from './routes/tool-output.js'
 import { knowledgeRouter } from './routes/knowledge.js'
 import { adoptionRouter } from './routes/adoption.js'
 import { artifactRouter } from './routes/artifacts.js'
@@ -228,6 +229,7 @@ app.use('/cron', requireApiKey, cronRouter)
 app.use('/api/dashboard', dashboardRouter)
 app.use('/api/openclaw', requireApiKey, openclawRouter)
 app.use('/api/audit', requireApiKey, auditRouter)
+app.use('/api/tool-output', requireApiKey, toolOutputRouter)
 app.use('/api/knowledge', requireApiKey, knowledgeRouter)
 app.use('/api/adoption', requireApiKey, adoptionRouter)
 app.use('/api/artifacts', requireApiKey, artifactRouter)

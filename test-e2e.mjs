@@ -1259,6 +1259,30 @@ await test('134. POST /api/tools/research_harvest responds', async () => {
 })
 
 // ═══════════════════════════════════════════════════════════════
+// Section 20: v4.0.12 LIN-611 — Output truncation with download URL (SNOUT-22)
+// ═══════════════════════════════════════════════════════════════
+
+// ── 135. tool-output route: invalid UUID returns 400 ──
+await test('135. GET /api/tool-output/:id rejects non-UUID', async () => {
+  const r = await api('/api/tool-output/not-a-uuid')
+  assert(r.status === 400, `expected 400, got ${r.status}`)
+  assert(r.body?.error?.code === 'INVALID_ID', `wrong code: ${r.body?.error?.code}`)
+})
+
+// ── 136. tool-output route: valid UUID but not stored returns 404 ──
+await test('136. GET /api/tool-output/:id returns 404 for missing', async () => {
+  const r = await api('/api/tool-output/00000000-0000-4000-8000-000000000000')
+  assert(r.status === 404, `expected 404, got ${r.status}`)
+  assert(r.body?.error?.code === 'NOT_FOUND', `wrong code: ${r.body?.error?.code}`)
+})
+
+// ── 137. tool-output /raw variant returns 404 on missing ──
+await test('137. GET /api/tool-output/:id/raw returns 404 for missing', async () => {
+  const r = await api('/api/tool-output/00000000-0000-4000-8000-000000000000/raw')
+  assert(r.status === 404, `expected 404, got ${r.status}`)
+})
+
+// ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped
 console.log(`  RESULTS: ${passed} passed, ${failed} failed, ${skipped} skipped / ${total} total`)

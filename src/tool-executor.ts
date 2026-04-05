@@ -17,6 +17,7 @@ import { verifyChainOutput } from './verification-gate.js'
 import { runInvestigation } from './investigate-chain.js'
 import { logger } from './logger.js'
 import { v4 as uuid } from 'uuid'
+import { getRedis } from './redis.js'
 import { toOpenAITools, getTool } from './tool-registry.js'
 
 // ─── OpenAI-format tool definitions (compiled from canonical registry) ──────
@@ -263,11 +264,46 @@ export function getTokenSavings() {
   return { totalTokensSaved, totalFoldingCalls, avgSavingsPerFold: totalFoldingCalls > 0 ? Math.round(totalTokensSaved / totalFoldingCalls) : 0 }
 }
 
+// ─── LIN-611 SNOUT-22: Output truncation with download URL fallback ────────
+// Store full outputs in Redis when folded; folded summary gets a download URL
+// so callers can fetch the complete payload within TTL.
+
+const TOOL_OUTPUT_PREFIX = 'orchestrator:tool-output:'
+const TOOL_OUTPUT_TTL_SECONDS = Number(process.env.TOOL_OUTPUT_TTL_SECONDS ?? 86400) // 24h default
+const PUBLIC_URL_BASE = process.env.PUBLIC_URL_BASE ?? 'https://orchestrator-production-c27e.up.railway.app'
+
+/**
+ * Save a full tool output to Redis with TTL. Returns the reference ID.
+ * Used by foldToolResult to make oversized outputs retrievable via URL.
+ */
+async function saveFullToolOutput(content: string, toolName: string): Promise<string | null> {
+  const redis = getRedis()
+  if (!redis) return null
+  const id = uuid()
+  try {
+    const payload = JSON.stringify({
+      $id: `tool-output-${id}`,
+      $schema: 'https://widgetdc.io/schemas/tool-output/v1',
+      tool_name: toolName,
+      content,
+      size_bytes: Buffer.byteLength(content, 'utf8'),
+      created_at: new Date().toISOString(),
+      ttl_seconds: TOOL_OUTPUT_TTL_SECONDS,
+    })
+    await redis.set(`${TOOL_OUTPUT_PREFIX}${id}`, payload, 'EX', TOOL_OUTPUT_TTL_SECONDS)
+    return id
+  } catch (err) {
+    logger.debug({ error: String(err), tool: toolName }, 'Tool output save failed (non-fatal)')
+    return null
+  }
+}
+
 /**
  * Compress tool result if too large. Estimates ~4 chars per token.
- * Results over 1500 chars (~375 tokens) get folded to max 800 chars.
+ * Results over 800 chars get folded to max 500 chars, with full content
+ * saved to Redis and accessible via a download URL appended to the summary.
  */
-function foldToolResult(content: string, toolName: string): string {
+async function foldToolResult(content: string, toolName: string): Promise<string> {
   const MAX_CHARS = 800
   const TARGET_CHARS = 500
 
@@ -275,6 +311,9 @@ function foldToolResult(content: string, toolName: string): string {
 
   const originalTokens = Math.ceil(content.length / 4)
   totalFoldingCalls++
+
+  // LIN-611: Save full output to Redis BEFORE folding so callers can retrieve it.
+  const fullOutputId = await saveFullToolOutput(content, toolName)
 
   // Smart truncation: keep structure, remove noise
   let folded: string
@@ -308,11 +347,18 @@ function foldToolResult(content: string, toolName: string): string {
     if (lines.length > 15) folded += `\n... (${lines.length} total lines)`
   }
 
+  // LIN-611: Append download URL for full output if Redis save succeeded.
+  if (fullOutputId) {
+    const downloadUrl = `${PUBLIC_URL_BASE}/api/tool-output/${fullOutputId}`
+    const sizeKb = (content.length / 1024).toFixed(1)
+    folded += `\n\n📄 Full output (${sizeKb}KB, ${content.length} chars) — expires in ${Math.round(TOOL_OUTPUT_TTL_SECONDS / 3600)}h:\n${downloadUrl}`
+  }
+
   const foldedTokens = Math.ceil(folded.length / 4)
   const saved = originalTokens - foldedTokens
   totalTokensSaved += saved
 
-  logger.debug({ tool: toolName, originalTokens, foldedTokens, saved }, 'Tool result folded')
+  logger.debug({ tool: toolName, originalTokens, foldedTokens, saved, full_output_id: fullOutputId }, 'Tool result folded')
   return folded
 }
 
@@ -337,14 +383,19 @@ export async function executeToolCalls(toolCalls: ToolCall[]): Promise<ToolResul
     toolCalls.map(tc => executeOne(tc))
   )
 
-  return results.map((r, i) => {
-    const raw = r.status === 'fulfilled' ? r.value : `Error: ${(r as PromiseRejectedResult).reason}`
-    return {
-      tool_call_id: toolCalls[i].id,
-      role: 'tool' as const,
-      content: foldToolResult(raw, toolCalls[i].function.name),
-    }
-  })
+  // LIN-611: foldToolResult is now async (writes full output to Redis).
+  // Map then resolve in parallel to preserve original ordering.
+  const folded = await Promise.all(
+    results.map(async (r, i) => {
+      const raw = r.status === 'fulfilled' ? r.value : `Error: ${(r as PromiseRejectedResult).reason}`
+      return {
+        tool_call_id: toolCalls[i].id,
+        role: 'tool' as const,
+        content: await foldToolResult(raw, toolCalls[i].function.name),
+      }
+    }),
+  )
+  return folded
 }
 
 async function executeOne(tc: ToolCall): Promise<string> {
@@ -435,7 +486,7 @@ export async function executeToolUnified(
     const rawResult = await executeToolByName(toolName, args)
     const duration = Date.now() - t0
     const shouldFold = opts?.fold !== false
-    const folded = shouldFold ? foldToolResult(rawResult, toolName) : rawResult
+    const folded = shouldFold ? await foldToolResult(rawResult, toolName) : rawResult
 
     // Prepend deprecation warning to result if deprecated
     const resultWithWarning = deprecation_notice
