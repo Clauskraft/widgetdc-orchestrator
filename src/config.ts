@@ -30,6 +30,13 @@ export const config = {
   anthropicApiKey: optional('ANTHROPIC_API_KEY', ''),
   groqApiKey: optional('GROQ_API_KEY', ''),
 
+  // v4.1.1: Claude dispatch fallback chain.
+  // When Anthropic direct returns a billing/credit/quota error, dispatch cascades
+  // through this comma-separated chain. Supported: openrouter, deepseek.
+  // Default: "openrouter,deepseek" — real Claude via OpenRouter first, DeepSeek last-resort.
+  openrouterApiKey: optional('OPENROUTER_API_KEY', ''),
+  anthropicFallbackChain: optional('ANTHROPIC_FALLBACK_CHAIN', 'openrouter,deepseek'),
+
   // RLM Engine (optional — cognitive reasoning proxy)
   rlmUrl: optional('RLM_URL', 'https://rlm-engine-production.up.railway.app'),
 

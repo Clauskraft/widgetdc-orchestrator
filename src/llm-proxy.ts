@@ -37,6 +37,10 @@ export interface LLMResponse {
   tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }
   duration_ms: number
+  /** v4.1.1: set when the original provider failed and a fallback was used. */
+  fallback_provider?: string
+  /** v4.1.1: human-readable reason the fallback was triggered. */
+  fallback_reason?: string
 }
 
 interface ProviderConfig {
@@ -340,6 +344,137 @@ async function callAnthropic(provider: ProviderConfig, req: LLMRequest): Promise
   }
 }
 
+/**
+ * v4.1.1 — OpenRouter Claude dispatch (fallback path for Anthropic direct).
+ *
+ * OpenRouter exposes an OpenAI-compatible endpoint at openrouter.ai/api/v1 and
+ * routes `anthropic/*` model slugs to real Anthropic models using OpenRouter's
+ * own prepaid balance (separate from Anthropic direct billing). This lets us
+ * keep serving genuine Claude responses when the user's Anthropic key is out
+ * of credits or rate-limited.
+ */
+async function callOpenRouterClaude(req: LLMRequest): Promise<LLMResponse> {
+  if (!config.openrouterApiKey) {
+    throw new Error('OPENROUTER_API_KEY not configured')
+  }
+  const start = Date.now()
+
+  // Map canonical matrix model names → OpenRouter model slugs.
+  const canonical = req.model || 'claude-sonnet-4-20250514'
+  const slugMap: Record<string, string> = {
+    'claude-sonnet-4-20250514': 'anthropic/claude-sonnet-4',
+    'claude-opus-4-20250514': 'anthropic/claude-opus-4',
+    'claude-3-5-sonnet-20241022': 'anthropic/claude-3.5-sonnet',
+    'claude-3-5-haiku-20241022': 'anthropic/claude-3.5-haiku',
+  }
+  const orModel = slugMap[canonical] || `anthropic/${canonical}`
+
+  const body: Record<string, unknown> = {
+    model: orModel,
+    messages: req.messages,
+    temperature: req.temperature ?? 0.7,
+    max_tokens: req.max_tokens ?? 2048,
+  }
+  if (req.tools && req.tools.length > 0) {
+    body.tools = req.tools
+  }
+
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${config.openrouterApiKey}`,
+      // OpenRouter recommends identifying the app for usage analytics + ranking.
+      'HTTP-Referer': 'https://orchestrator-production-c27e.up.railway.app',
+      'X-Title': 'WidgeTDC Orchestrator',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60000),
+  })
+
+  if (!res.ok) {
+    const err = await res.text().catch(() => `HTTP ${res.status}`)
+    throw new Error(`OpenRouter error: ${err}`)
+  }
+
+  const data = await res.json() as any
+  const message = data.choices?.[0]?.message
+  return {
+    provider: 'openrouter',
+    model: data.model || orModel,
+    content: message?.content || '',
+    tool_calls: message?.tool_calls,
+    usage: data.usage,
+    duration_ms: Date.now() - start,
+  }
+}
+
+/**
+ * v4.1.1 — Is this error from Anthropic a billing/credit/quota issue that
+ * warrants falling back to an alternative provider? We keep the detector
+ * conservative: 402, "credit balance", "insufficient", "quota", "billing".
+ * Other errors (network, 5xx, auth) propagate unchanged so operators see the
+ * real failure mode instead of a silent degraded response.
+ */
+function isAnthropicBillingError(err: unknown): boolean {
+  const msg = String((err as any)?.message ?? err ?? '').toLowerCase()
+  return /credit\s*balance|insufficient|quota\s*exceeded|billing|payment|402\b/.test(msg)
+}
+
+/**
+ * v4.1.1 — Execute the configured Anthropic fallback chain when the direct
+ * dispatch fails with a billing error. Returns the first successful fallback
+ * response annotated with `fallback_provider` + `fallback_reason`. Throws an
+ * aggregated error if every fallback in the chain also fails.
+ */
+async function callAnthropicFallback(req: LLMRequest, reason: string): Promise<LLMResponse> {
+  const chain = config.anthropicFallbackChain
+    .split(',')
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean)
+
+  const attemptErrors: string[] = []
+
+  for (const fallback of chain) {
+    try {
+      if (fallback === 'openrouter') {
+        if (!config.openrouterApiKey) {
+          attemptErrors.push('openrouter: no API key configured')
+          continue
+        }
+        logger.warn({ reason }, '[llm-proxy] Anthropic billing failure → fallback to openrouter/claude')
+        const res = await callOpenRouterClaude(req)
+        return { ...res, fallback_provider: 'openrouter', fallback_reason: reason }
+      }
+
+      if (fallback === 'deepseek') {
+        const providers = getProviders()
+        const deepseek = providers.deepseek
+        if (!deepseek) {
+          attemptErrors.push('deepseek: not configured')
+          continue
+        }
+        logger.warn({ reason }, '[llm-proxy] Anthropic billing failure → fallback to deepseek (last resort, UX-degraded)')
+        const res = await callOpenAICompat(deepseek, {
+          ...req,
+          provider: 'deepseek',
+          model: deepseek.defaultModel,
+        })
+        return { ...res, fallback_provider: 'deepseek', fallback_reason: reason }
+      }
+
+      attemptErrors.push(`${fallback}: unknown fallback target`)
+    } catch (err) {
+      attemptErrors.push(`${fallback}: ${String((err as any)?.message ?? err)}`)
+    }
+  }
+
+  throw new Error(
+    `Anthropic dispatch failed and all fallbacks exhausted. ` +
+    `Original: ${reason}. Fallback attempts: ${attemptErrors.join(' | ')}`,
+  )
+}
+
 export async function chatLLM(req: LLMRequest): Promise<LLMResponse> {
   const providers = getProviders()
   const provider = providers[req.provider.toLowerCase()]
@@ -354,7 +489,18 @@ export async function chatLLM(req: LLMRequest): Promise<LLMResponse> {
   switch (provider.type) {
     case 'openai-compat': return callOpenAICompat(provider, req)
     case 'gemini': return callGemini(provider, req)
-    case 'anthropic': return callAnthropic(provider, req)
+    case 'anthropic': {
+      // v4.1.1: Anthropic direct is primary. On billing/credit/quota errors
+      // only, cascade through OPENROUTER → DEEPSEEK fallback chain. All other
+      // errors (network, 5xx, auth, schema) propagate unchanged.
+      try {
+        return await callAnthropic(provider, req)
+      } catch (err) {
+        if (!isAnthropicBillingError(err)) throw err
+        const reason = String((err as any)?.message ?? err)
+        return callAnthropicFallback(req, reason)
+      }
+    }
     default: throw new Error(`Unsupported provider type: ${provider.type}`)
   }
 }
