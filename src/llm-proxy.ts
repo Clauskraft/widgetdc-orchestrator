@@ -1,9 +1,16 @@
 /**
  * llm-proxy.ts — Direct LLM chat proxy to multiple providers.
  *
- * Supports: DeepSeek, Qwen (DashScope), Gemini, OpenAI, Groq, Anthropic
- * All use OpenAI-compatible chat completions API except Gemini and Anthropic.
+ * Wave 3 (2026-04-05): provider base URLs and default models are now resolved
+ * through the canonical @widgetdc/contracts/llm LlmMatrix instead of being
+ * hardcoded. The matrix is the single source of truth for task→model routing.
+ * Local `type` field still discriminates dispatch (openai-compat / gemini /
+ * anthropic) since each non-OpenAI-compatible provider needs a bespoke
+ * request shape.
+ *
+ * Supports any provider declared in the matrix whose auth env var is set.
  */
+import { LlmMatrix, type ProviderId } from '@widgetdc/contracts/llm'
 import { config } from './config.js'
 import { logger } from './logger.js'
 
@@ -40,64 +47,79 @@ interface ProviderConfig {
   type: 'openai-compat' | 'gemini' | 'anthropic'
 }
 
+/** Display names for each matrix provider id. */
+const PROVIDER_DISPLAY_NAMES: Record<ProviderId, string> = {
+  deepseek: 'DeepSeek',
+  qwen: 'Qwen',
+  openai: 'OpenAI',
+  groq: 'Groq',
+  gemini: 'Gemini',
+  anthropic: 'Claude',
+  inception: 'Mercury',
+  local: 'Local',
+}
+
+/** Dispatch-type discriminator derived from matrix metadata + known SDK quirks. */
+function dispatchTypeFor(providerId: ProviderId, openaiCompatible: boolean): ProviderConfig['type'] {
+  if (openaiCompatible) return 'openai-compat'
+  if (providerId === 'gemini') return 'gemini'
+  if (providerId === 'anthropic') return 'anthropic'
+  return 'openai-compat' // defensive default — unknown non-compat providers are skipped upstream
+}
+
+/**
+ * First model in the matrix whose provider matches. Used as the per-provider
+ * default model when a caller omits `req.model`. Falls back to the first entry
+ * in the `chat_standard` task chain if no direct match exists.
+ */
+function firstModelForProvider(providerId: ProviderId): string | null {
+  for (const modelName of LlmMatrix.listModels()) {
+    const model = LlmMatrix.getModel(modelName)
+    if (model.provider === providerId) return modelName
+  }
+  return null
+}
+
 function getProviders(): Record<string, ProviderConfig> {
   const providers: Record<string, ProviderConfig> = {}
 
-  if (config.deepseekApiKey) {
-    providers.deepseek = {
-      name: 'DeepSeek',
-      baseUrl: 'https://api.deepseek.com/v1',
-      apiKey: config.deepseekApiKey,
-      defaultModel: 'deepseek-chat',
-      type: 'openai-compat',
-    }
+  // Map matrix provider id → orchestrator config apiKey field.
+  // We keep this explicit (not env-var lookup) because orchestrator's config
+  // layer already validates + normalizes the keys and we want to honor its
+  // empty-string defaults (= unconfigured).
+  const keyLookup: Partial<Record<ProviderId, string>> = {
+    deepseek: config.deepseekApiKey,
+    qwen: config.dashscopeApiKey,
+    openai: config.openaiApiKey,
+    groq: config.groqApiKey,
+    gemini: config.geminiApiKey,
+    anthropic: config.anthropicApiKey,
   }
-  if (config.dashscopeApiKey) {
-    providers.qwen = {
-      name: 'Qwen',
-      baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
-      apiKey: config.dashscopeApiKey,
-      defaultModel: 'qwen-plus',
-      type: 'openai-compat',
+
+  for (const providerId of LlmMatrix.listProviders()) {
+    const apiKey = keyLookup[providerId]
+    if (!apiKey) continue // no key configured in orchestrator → provider disabled
+
+    const providerCfg = LlmMatrix.getProvider(providerId)
+    const defaultModel = firstModelForProvider(providerId)
+    if (!defaultModel) {
+      logger.warn({ providerId }, '[llm-proxy] matrix has no model for provider — skipping')
+      continue
     }
-  }
-  if (config.openaiApiKey) {
-    providers.openai = {
-      name: 'OpenAI',
-      baseUrl: 'https://api.openai.com/v1',
-      apiKey: config.openaiApiKey,
-      defaultModel: 'gpt-4o-mini',
-      type: 'openai-compat',
+
+    const cfg: ProviderConfig = {
+      name: PROVIDER_DISPLAY_NAMES[providerId] ?? providerId,
+      baseUrl: providerCfg.base_url,
+      apiKey,
+      defaultModel,
+      type: dispatchTypeFor(providerId, providerCfg.openai_compatible),
     }
-    providers.chatgpt = providers.openai // alias
-  }
-  if (config.groqApiKey) {
-    providers.groq = {
-      name: 'Groq',
-      baseUrl: 'https://api.groq.com/openai/v1',
-      apiKey: config.groqApiKey,
-      defaultModel: 'llama-3.3-70b-versatile',
-      type: 'openai-compat',
-    }
-  }
-  if (config.geminiApiKey) {
-    providers.gemini = {
-      name: 'Gemini',
-      baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
-      apiKey: config.geminiApiKey,
-      defaultModel: 'gemini-2.0-flash',
-      type: 'gemini',
-    }
-  }
-  if (config.anthropicApiKey) {
-    providers.claude = {
-      name: 'Claude',
-      baseUrl: 'https://api.anthropic.com/v1',
-      apiKey: config.anthropicApiKey,
-      defaultModel: 'claude-sonnet-4-20250514',
-      type: 'anthropic',
-    }
-    providers.anthropic = providers.claude // alias
+    providers[providerId] = cfg
+
+    // Legacy aliases preserved for backwards-compat with callers using the
+    // human-friendly names instead of the canonical matrix provider id.
+    if (providerId === 'openai') providers.chatgpt = cfg
+    if (providerId === 'anthropic') providers.claude = cfg
   }
 
   return providers
@@ -338,14 +360,18 @@ export async function chatLLM(req: LLMRequest): Promise<LLMResponse> {
 }
 
 export function listProviders(): Array<{ id: string; name: string; model: string; available: boolean }> {
-  const providers = getProviders()
-  const all = [
-    { id: 'deepseek', name: 'DeepSeek', model: 'deepseek-chat' },
-    { id: 'qwen', name: 'Qwen', model: 'qwen-plus' },
-    { id: 'gemini', name: 'Gemini', model: 'gemini-2.0-flash' },
-    { id: 'openai', name: 'OpenAI/ChatGPT', model: 'gpt-4o-mini' },
-    { id: 'groq', name: 'Groq', model: 'llama-3.3-70b-versatile' },
-    { id: 'claude', name: 'Claude', model: 'claude-sonnet-4-20250514' },
-  ]
-  return all.map(p => ({ ...p, available: !!providers[p.id] }))
+  const configured = getProviders()
+  // Wave 3: catalog is now matrix-driven. Advertise every provider declared in
+  // the canonical matrix, marking each as available=true only when its API key
+  // is configured in orchestrator env.
+  return LlmMatrix.listProviders().map(providerId => {
+    const displayName = PROVIDER_DISPLAY_NAMES[providerId] ?? providerId
+    const defaultModel = firstModelForProvider(providerId) ?? providerId
+    return {
+      id: providerId,
+      name: displayName,
+      model: defaultModel,
+      available: !!configured[providerId],
+    }
+  })
 }

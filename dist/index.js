@@ -9858,69 +9858,211 @@ var init_hierarchical_intelligence = __esm({
   }
 });
 
+// ../widgetdc-contracts/dist/llm/LlmMatrix.js
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+function env(key) {
+  if (typeof process !== "undefined" && process.env)
+    return process.env[key];
+  return void 0;
+}
+var __dirname, matrix, LlmMatrix;
+var init_LlmMatrix = __esm({
+  "../widgetdc-contracts/dist/llm/LlmMatrix.js"() {
+    "use strict";
+    __dirname = dirname(fileURLToPath(import.meta.url));
+    matrix = JSON.parse(readFileSync(join(__dirname, "llm-matrix.json"), "utf-8"));
+    LlmMatrix = class {
+      /** Canonical matrix version (semver). */
+      static get version() {
+        return matrix.version;
+      }
+      /**
+       * Resolve the effective fallback chain for a task, applying env overrides
+       * and disable flags. Returns an empty chain if the task is disabled.
+       */
+      static resolve(task) {
+        const taskCfg = matrix.tasks[task];
+        if (!taskCfg) {
+          throw new Error(`[LlmMatrix] Unknown task: ${task}`);
+        }
+        if (taskCfg.disable_env) {
+          const disableVal = env(taskCfg.disable_env);
+          if (disableVal === "true") {
+            return { task, models: [], source: "disabled", disable_env: taskCfg.disable_env };
+          }
+        }
+        if (taskCfg.default_disabled) {
+          const disableVal = taskCfg.disable_env ? env(taskCfg.disable_env) : void 0;
+          if (disableVal !== "false") {
+            return {
+              task,
+              models: [],
+              source: "disabled_by_default",
+              disable_env: taskCfg.disable_env ?? void 0
+            };
+          }
+        }
+        if (taskCfg.override_env) {
+          const overrideVal = env(taskCfg.override_env);
+          if (overrideVal && overrideVal !== "default") {
+            if (overrideVal === "disabled") {
+              return { task, models: [], source: "disabled", override_env: taskCfg.override_env };
+            }
+            if (!matrix.models[overrideVal]) {
+              throw new Error(`[LlmMatrix] ${taskCfg.override_env}=${overrideVal} is not a known model. Known models: ${Object.keys(matrix.models).join(", ")}`);
+            }
+            return {
+              task,
+              models: [overrideVal],
+              source: "env_override",
+              override_env: taskCfg.override_env
+            };
+          }
+        }
+        return { task, models: [...taskCfg.chain], source: "default" };
+      }
+      /** Lookup a model by name. Throws if unknown. */
+      static getModel(name) {
+        const model = matrix.models[name];
+        if (!model) {
+          throw new Error(`[LlmMatrix] Unknown model: ${name}. Add it to llm-matrix.json under "models".`);
+        }
+        return model;
+      }
+      /** Lookup a provider by id. Throws if unknown. */
+      static getProvider(id) {
+        const provider = matrix.providers[id];
+        if (!provider) {
+          throw new Error(`[LlmMatrix] Unknown provider: ${id}`);
+        }
+        return provider;
+      }
+      /** List all defined task types. */
+      static listTasks() {
+        return Object.keys(matrix.tasks);
+      }
+      /** List all defined model names. */
+      static listModels() {
+        return Object.keys(matrix.models);
+      }
+      /** List all defined provider ids. */
+      static listProviders() {
+        return Object.keys(matrix.providers);
+      }
+      /** Get the raw task config (for introspection / tooling). */
+      static getTaskConfig(task) {
+        return matrix.tasks[task];
+      }
+      /**
+       * Validate the matrix for internal consistency:
+       *   - every task chain references known models
+       *   - every model references a known provider
+       *   - override/disable env names are not duplicated
+       * Returns an array of error strings (empty = valid).
+       */
+      static validate() {
+        const errors = [];
+        for (const [modelName, model] of Object.entries(matrix.models)) {
+          if (!matrix.providers[model.provider]) {
+            errors.push(`model "${modelName}" references unknown provider "${model.provider}"`);
+          }
+        }
+        for (const [taskName, task] of Object.entries(matrix.tasks)) {
+          if (!Array.isArray(task.chain) || task.chain.length === 0) {
+            errors.push(`task "${taskName}" has empty chain`);
+          }
+          for (const modelName of task.chain) {
+            if (!matrix.models[modelName]) {
+              errors.push(`task "${taskName}" chain references unknown model "${modelName}"`);
+            }
+          }
+        }
+        const envVars = /* @__PURE__ */ new Set();
+        for (const [taskName, task] of Object.entries(matrix.tasks)) {
+          for (const envName of [task.override_env, task.disable_env]) {
+            if (!envName)
+              continue;
+            if (envVars.has(envName)) {
+              errors.push(`env var "${envName}" (task "${taskName}") is used by multiple tasks`);
+            }
+            envVars.add(envName);
+          }
+        }
+        return errors;
+      }
+      /**
+       * Dump the effective chain for every task under current env. Useful for
+       * /health endpoints and debugging.
+       */
+      static dumpAll() {
+        const result = {};
+        for (const task of this.listTasks()) {
+          result[task] = this.resolve(task);
+        }
+        return result;
+      }
+    };
+  }
+});
+
+// ../widgetdc-contracts/dist/llm/index.js
+var init_llm = __esm({
+  "../widgetdc-contracts/dist/llm/index.js"() {
+    "use strict";
+    init_LlmMatrix();
+  }
+});
+
 // src/llm-proxy.ts
 var llm_proxy_exports = {};
 __export(llm_proxy_exports, {
   chatLLM: () => chatLLM,
   listProviders: () => listProviders
 });
+function dispatchTypeFor(providerId, openaiCompatible) {
+  if (openaiCompatible) return "openai-compat";
+  if (providerId === "gemini") return "gemini";
+  if (providerId === "anthropic") return "anthropic";
+  return "openai-compat";
+}
+function firstModelForProvider(providerId) {
+  for (const modelName of LlmMatrix.listModels()) {
+    const model = LlmMatrix.getModel(modelName);
+    if (model.provider === providerId) return modelName;
+  }
+  return null;
+}
 function getProviders() {
   const providers = {};
-  if (config.deepseekApiKey) {
-    providers.deepseek = {
-      name: "DeepSeek",
-      baseUrl: "https://api.deepseek.com/v1",
-      apiKey: config.deepseekApiKey,
-      defaultModel: "deepseek-chat",
-      type: "openai-compat"
+  const keyLookup = {
+    deepseek: config.deepseekApiKey,
+    qwen: config.dashscopeApiKey,
+    openai: config.openaiApiKey,
+    groq: config.groqApiKey,
+    gemini: config.geminiApiKey,
+    anthropic: config.anthropicApiKey
+  };
+  for (const providerId of LlmMatrix.listProviders()) {
+    const apiKey = keyLookup[providerId];
+    if (!apiKey) continue;
+    const providerCfg = LlmMatrix.getProvider(providerId);
+    const defaultModel = firstModelForProvider(providerId);
+    if (!defaultModel) {
+      logger.warn({ providerId }, "[llm-proxy] matrix has no model for provider \u2014 skipping");
+      continue;
+    }
+    const cfg = {
+      name: PROVIDER_DISPLAY_NAMES[providerId] ?? providerId,
+      baseUrl: providerCfg.base_url,
+      apiKey,
+      defaultModel,
+      type: dispatchTypeFor(providerId, providerCfg.openai_compatible)
     };
-  }
-  if (config.dashscopeApiKey) {
-    providers.qwen = {
-      name: "Qwen",
-      baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-      apiKey: config.dashscopeApiKey,
-      defaultModel: "qwen-plus",
-      type: "openai-compat"
-    };
-  }
-  if (config.openaiApiKey) {
-    providers.openai = {
-      name: "OpenAI",
-      baseUrl: "https://api.openai.com/v1",
-      apiKey: config.openaiApiKey,
-      defaultModel: "gpt-4o-mini",
-      type: "openai-compat"
-    };
-    providers.chatgpt = providers.openai;
-  }
-  if (config.groqApiKey) {
-    providers.groq = {
-      name: "Groq",
-      baseUrl: "https://api.groq.com/openai/v1",
-      apiKey: config.groqApiKey,
-      defaultModel: "llama-3.3-70b-versatile",
-      type: "openai-compat"
-    };
-  }
-  if (config.geminiApiKey) {
-    providers.gemini = {
-      name: "Gemini",
-      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
-      apiKey: config.geminiApiKey,
-      defaultModel: "gemini-2.0-flash",
-      type: "gemini"
-    };
-  }
-  if (config.anthropicApiKey) {
-    providers.claude = {
-      name: "Claude",
-      baseUrl: "https://api.anthropic.com/v1",
-      apiKey: config.anthropicApiKey,
-      defaultModel: "claude-sonnet-4-20250514",
-      type: "anthropic"
-    };
-    providers.anthropic = providers.claude;
+    providers[providerId] = cfg;
+    if (providerId === "openai") providers.chatgpt = cfg;
+    if (providerId === "anthropic") providers.claude = cfg;
   }
   return providers;
 }
@@ -10125,22 +10267,35 @@ async function chatLLM(req) {
   }
 }
 function listProviders() {
-  const providers = getProviders();
-  const all = [
-    { id: "deepseek", name: "DeepSeek", model: "deepseek-chat" },
-    { id: "qwen", name: "Qwen", model: "qwen-plus" },
-    { id: "gemini", name: "Gemini", model: "gemini-2.0-flash" },
-    { id: "openai", name: "OpenAI/ChatGPT", model: "gpt-4o-mini" },
-    { id: "groq", name: "Groq", model: "llama-3.3-70b-versatile" },
-    { id: "claude", name: "Claude", model: "claude-sonnet-4-20250514" }
-  ];
-  return all.map((p) => ({ ...p, available: !!providers[p.id] }));
+  const configured = getProviders();
+  return LlmMatrix.listProviders().map((providerId) => {
+    const displayName = PROVIDER_DISPLAY_NAMES[providerId] ?? providerId;
+    const defaultModel = firstModelForProvider(providerId) ?? providerId;
+    return {
+      id: providerId,
+      name: displayName,
+      model: defaultModel,
+      available: !!configured[providerId]
+    };
+  });
 }
+var PROVIDER_DISPLAY_NAMES;
 var init_llm_proxy = __esm({
   "src/llm-proxy.ts"() {
     "use strict";
+    init_llm();
     init_config();
     init_logger();
+    PROVIDER_DISPLAY_NAMES = {
+      deepseek: "DeepSeek",
+      qwen: "Qwen",
+      openai: "OpenAI",
+      groq: "Groq",
+      gemini: "Gemini",
+      anthropic: "Claude",
+      inception: "Mercury",
+      local: "Local"
+    };
   }
 });
 
@@ -19383,7 +19538,7 @@ import cors from "cors";
 import helmet from "helmet";
 import { createServer } from "http";
 import path2 from "path";
-import { fileURLToPath as fileURLToPath2 } from "url";
+import { fileURLToPath as fileURLToPath3 } from "url";
 
 // src/routes/agents.ts
 init_agent_registry();
@@ -29039,12 +29194,30 @@ async function runFullHarvest() {
 }
 
 // src/routes/openai-compat.ts
+init_llm();
 init_llm_proxy();
 init_tool_executor();
 init_logger();
 init_config();
 import { Router as Router22 } from "express";
 import { v4 as uuid27 } from "uuid";
+var MATRIX_ALIAS_TARGETS = {
+  "claude-sonnet": "claude-sonnet-4-20250514",
+  "claude-opus": "claude-sonnet-4-20250514",
+  // opus not in matrix — route to sonnet
+  "gemini-flash": "gemini-2.0-flash",
+  "deepseek-chat": "deepseek-chat",
+  "qwen-plus": "qwen-plus",
+  "gpt-4o": "gpt-4o"
+};
+function resolveAlias(alias) {
+  const target = MATRIX_ALIAS_TARGETS[alias];
+  if (!target) {
+    throw new Error(`Unknown model alias '${alias}'. Known: ${Object.keys(MATRIX_ALIAS_TARGETS).join(", ")}`);
+  }
+  const modelCfg = LlmMatrix.getModel(target);
+  return { provider: modelCfg.provider, model: target };
+}
 var MAX_TOOL_ROUNDS = 2;
 var MAX_TOOL_ROUNDS_ASSISTANT = 4;
 var TOOL_CATEGORIES = [
@@ -29169,15 +29342,19 @@ var MODELS = [
   // Consulting Assistants (LIN-524)
   ...ASSISTANTS.map((a) => ({ id: a.id, provider: "widgetdc", displayName: a.displayName }))
 ];
-var MODEL_TO_PROVIDER = {
-  "claude-sonnet": { provider: "claude", model: "claude-sonnet-4-20250514" },
-  "claude-opus": { provider: "claude", model: "claude-opus-4-20250514" },
-  "gemini-flash": { provider: "gemini", model: "gemini-2.0-flash" },
-  "deepseek-chat": { provider: "deepseek", model: "deepseek-chat" },
-  "qwen-plus": { provider: "qwen", model: "qwen-plus" },
-  "gpt-4o": { provider: "openai", model: "gpt-4o" },
+var MODEL_TO_PROVIDER_FALLBACK = {
   "groq-llama": { provider: "groq", model: "llama-3.3-70b-versatile" }
 };
+function resolveModelToProvider(alias) {
+  if (MATRIX_ALIAS_TARGETS[alias]) {
+    try {
+      return resolveAlias(alias);
+    } catch {
+      return void 0;
+    }
+  }
+  return MODEL_TO_PROVIDER_FALLBACK[alias];
+}
 openaiCompatRouter.get("/v1/metrics", (req, res) => {
   if (!validateApiKey(req, res)) return;
   const last24h = Date.now() - 864e5;
@@ -29257,7 +29434,11 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
   const requestId = `chatcmpl-${uuid27().substring(0, 12)}`;
   const assistant = ASSISTANT_MAP.get(model);
   const resolvedModel = assistant ? assistant.baseModel : model;
-  const mapping = MODEL_TO_PROVIDER[resolvedModel] || MODEL_TO_PROVIDER["gemini-flash"];
+  const mapping = resolveModelToProvider(resolvedModel) ?? resolveModelToProvider("gemini-flash");
+  if (!mapping) {
+    res.status(500).json({ error: { message: `Unable to resolve any provider for model '${resolvedModel}'`, type: "server_error" } });
+    return;
+  }
   const provider = mapping.provider;
   const providerModel = mapping.model;
   const llmMessages = [...messages || []];
@@ -32483,15 +32664,15 @@ var CURATED_EXAMPLES = {
 init_tool_registry();
 init_logger();
 import { Router as Router40 } from "express";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync as readFileSync2, writeFileSync, existsSync, mkdirSync } from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
-var __dirname = path.dirname(fileURLToPath(import.meta.url));
+import { fileURLToPath as fileURLToPath2 } from "url";
+var __dirname2 = path.dirname(fileURLToPath2(import.meta.url));
 var abiHealthRouter = Router40();
 function getSnapshotPath() {
-  const testPath = path.resolve(__dirname, "..", "..", "test", "snapshots", "abi-snapshot.json");
+  const testPath = path.resolve(__dirname2, "..", "..", "test", "snapshots", "abi-snapshot.json");
   if (existsSync(testPath)) return testPath;
-  const distPath = path.resolve(__dirname, "..", "abi-snapshot.json");
+  const distPath = path.resolve(__dirname2, "..", "abi-snapshot.json");
   return existsSync(distPath) ? distPath : testPath;
 }
 function buildCurrentSnapshot() {
@@ -32615,7 +32796,7 @@ abiHealthRouter.get("/diff", (_req, res) => {
     return;
   }
   try {
-    const baseline = JSON.parse(readFileSync(snapshotPath, "utf-8"));
+    const baseline = JSON.parse(readFileSync2(snapshotPath, "utf-8"));
     const current = buildCurrentSnapshot();
     const diff = diffSnapshots(baseline, current);
     const totalChanges = diff.breaking.length + diff.additive.length + diff.compatible.length;
@@ -32646,7 +32827,7 @@ abiHealthRouter.get("/diff", (_req, res) => {
 abiHealthRouter.post("/snapshot", (_req, res) => {
   try {
     const snapshot = buildCurrentSnapshot();
-    const snapshotPath = path.resolve(__dirname, "..", "..", "test", "snapshots", "abi-snapshot.json");
+    const snapshotPath = path.resolve(__dirname2, "..", "..", "test", "snapshots", "abi-snapshot.json");
     const dir = path.dirname(snapshotPath);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     writeFileSync(snapshotPath, JSON.stringify(snapshot, null, 2));
@@ -32785,7 +32966,7 @@ abiVersioningRouter.get("/changelog", (_req, res) => {
 });
 
 // src/index.ts
-var __dirname2 = path2.dirname(fileURLToPath2(import.meta.url));
+var __dirname3 = path2.dirname(fileURLToPath3(import.meta.url));
 var app = express();
 app.set("trust proxy", 1);
 var server = createServer(app);
@@ -32886,7 +33067,7 @@ app.use((req, _res, next) => {
   logger.debug({ method: req.method, path: req.path }, "Request");
   next();
 });
-app.use(express.static(path2.join(__dirname2, "public"), {
+app.use(express.static(path2.join(__dirname3, "public"), {
   etag: false,
   maxAge: 0,
   setHeaders: (res) => {
@@ -32982,7 +33163,7 @@ app.get("/health", (_req, res) => {
   });
 });
 app.get("/", (_req, res) => {
-  res.sendFile(path2.join(__dirname2, "public", "index.html"));
+  res.sendFile(path2.join(__dirname3, "public", "index.html"));
 });
 app.use((err, req, res, next) => {
   if (err.type === "entity.parse.failed") {

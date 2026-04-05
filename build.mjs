@@ -76,4 +76,18 @@ await esbuild.build({
 mkdirSync('dist/public', { recursive: true })
 copyFileSync('frontend/index.html', 'dist/public/index.html')
 
+// Wave 3 (2026-04-05): widgetdc-contracts' LlmMatrix reads llm-matrix.json via
+// fs.readFileSync from __dirname. After esbuild bundles the orchestrator, that
+// __dirname resolves to dist/, so the JSON must be copied alongside dist/index.js.
+// Upstream fix (contracts → JSON import) is queued as Wave 3.1 follow-up.
+const matrixJsonSrc = './node_modules/@widgetdc/contracts/dist/llm/llm-matrix.json'
+if (existsSync(matrixJsonSrc)) {
+  copyFileSync(matrixJsonSrc, 'dist/llm-matrix.json')
+  console.log('✓ Copied llm-matrix.json → dist/ (for bundled @widgetdc/contracts LlmMatrix)')
+} else {
+  console.error('❌ llm-matrix.json not found at', matrixJsonSrc)
+  console.error('   Fix: cd ../widgetdc-contracts && npm run build')
+  process.exit(1)
+}
+
 console.log('✅ Build complete → dist/index.js + dist/public/')
