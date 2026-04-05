@@ -795,7 +795,7 @@ var init_slack = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/guard/guard.mjs
+// node_modules/@sinclair/typebox/build/esm/value/guard/guard.mjs
 function IsAsyncIterator(value) {
   return IsObject(value) && globalThis.Symbol.asyncIterator in value;
 }
@@ -863,21 +863,21 @@ function IsValueType(value) {
   return IsBigInt(value) || IsBoolean(value) || IsNull(value) || IsNumber(value) || IsString(value) || IsSymbol(value) || IsUndefined(value);
 }
 var init_guard = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/guard/guard.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/guard/guard.mjs"() {
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/guard/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/guard/index.mjs
 var init_guard2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/guard/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/guard/index.mjs"() {
     init_guard();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/system/policy.mjs
+// node_modules/@sinclair/typebox/build/esm/system/policy.mjs
 var TypeSystemPolicy;
 var init_policy = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/system/policy.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/system/policy.mjs"() {
     init_guard2();
     (function(TypeSystemPolicy3) {
       TypeSystemPolicy3.InstanceMode = "default";
@@ -911,7 +911,7 @@ var init_policy = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/registry/format.mjs
+// node_modules/@sinclair/typebox/build/esm/type/registry/format.mjs
 var format_exports = {};
 __export(format_exports, {
   Clear: () => Clear,
@@ -941,12 +941,12 @@ function Get(format) {
 }
 var map;
 var init_format = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/registry/format.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/registry/format.mjs"() {
     map = /* @__PURE__ */ new Map();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/registry/type.mjs
+// node_modules/@sinclair/typebox/build/esm/type/registry/type.mjs
 var type_exports = {};
 __export(type_exports, {
   Clear: () => Clear2,
@@ -976,20 +976,20 @@ function Get2(kind) {
 }
 var map2;
 var init_type = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/registry/type.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/registry/type.mjs"() {
     map2 = /* @__PURE__ */ new Map();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/registry/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/registry/index.mjs
 var init_registry = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/registry/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/registry/index.mjs"() {
     init_format();
     init_type();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/guard/value.mjs
+// node_modules/@sinclair/typebox/build/esm/type/guard/value.mjs
 var value_exports = {};
 __export(value_exports, {
   HasPropertyKey: () => HasPropertyKey2,
@@ -1058,11 +1058,11 @@ function IsUndefined2(value) {
   return value === void 0;
 }
 var init_value = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/guard/value.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/guard/value.mjs"() {
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/create/immutable.mjs
+// node_modules/@sinclair/typebox/build/esm/type/create/immutable.mjs
 function ImmutableArray(value) {
   return globalThis.Object.freeze(value).map((value2) => Immutable(value2));
 }
@@ -1089,12 +1089,12 @@ function Immutable(value) {
   return IsArray2(value) ? ImmutableArray(value) : IsDate2(value) ? ImmutableDate(value) : IsUint8Array2(value) ? ImmutableUint8Array(value) : IsRegExp(value) ? ImmutableRegExp(value) : IsObject2(value) ? ImmutableObject(value) : value;
 }
 var init_immutable = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/create/immutable.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/create/immutable.mjs"() {
     init_value();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/clone/value.mjs
+// node_modules/@sinclair/typebox/build/esm/type/clone/value.mjs
 function ArrayType(value) {
   return value.map((value2) => Visit(value2));
 }
@@ -1124,12 +1124,12 @@ function Clone(value) {
   return Visit(value);
 }
 var init_value2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/clone/value.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/clone/value.mjs"() {
     init_value();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/create/type.mjs
+// node_modules/@sinclair/typebox/build/esm/type/create/type.mjs
 function CreateType(schema, options) {
   const result = options !== void 0 ? { ...options, ...schema } : schema;
   switch (TypeSystemPolicy.InstanceMode) {
@@ -1142,17 +1142,17 @@ function CreateType(schema, options) {
   }
 }
 var init_type2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/create/type.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/create/type.mjs"() {
     init_policy();
     init_immutable();
     init_value2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/symbols/symbols.mjs
+// node_modules/@sinclair/typebox/build/esm/type/symbols/symbols.mjs
 var TransformKind, ReadonlyKind, OptionalKind, Hint, Kind;
 var init_symbols = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/symbols/symbols.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/symbols/symbols.mjs"() {
     TransformKind = Symbol.for("TypeBox.Transform");
     ReadonlyKind = Symbol.for("TypeBox.Readonly");
     OptionalKind = Symbol.for("TypeBox.Optional");
@@ -1161,35 +1161,35 @@ var init_symbols = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/symbols/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/symbols/index.mjs
 var init_symbols2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/symbols/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/symbols/index.mjs"() {
     init_symbols();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/unsafe/unsafe.mjs
+// node_modules/@sinclair/typebox/build/esm/type/unsafe/unsafe.mjs
 function Unsafe(options = {}) {
   return CreateType({ [Kind]: options[Kind] ?? "Unsafe" }, options);
 }
 var init_unsafe = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/unsafe/unsafe.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/unsafe/unsafe.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/unsafe/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/unsafe/index.mjs
 var init_unsafe2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/unsafe/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/unsafe/index.mjs"() {
     init_unsafe();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/error/error.mjs
+// node_modules/@sinclair/typebox/build/esm/type/error/error.mjs
 var TypeBoxError;
 var init_error = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/error/error.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/error/error.mjs"() {
     TypeBoxError = class extends Error {
       constructor(message) {
         super(message);
@@ -1198,17 +1198,17 @@ var init_error = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/error/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/error/index.mjs
 var init_error2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/error/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/error/index.mjs"() {
     init_error();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/system/system.mjs
+// node_modules/@sinclair/typebox/build/esm/system/system.mjs
 var TypeSystemDuplicateTypeKind, TypeSystemDuplicateFormat, TypeSystem;
 var init_system = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/system/system.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/system/system.mjs"() {
     init_registry();
     init_unsafe2();
     init_symbols2();
@@ -1242,21 +1242,21 @@ var init_system = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/system/index.mjs
+// node_modules/@sinclair/typebox/build/esm/system/index.mjs
 var init_system2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/system/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/system/index.mjs"() {
     init_policy();
     init_system();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-key.mjs
+// node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-key.mjs
 var init_mapped_key = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-key.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-key.mjs"() {
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-result.mjs
+// node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-result.mjs
 function MappedResult(properties) {
   return CreateType({
     [Kind]: "MappedResult",
@@ -1264,13 +1264,13 @@ function MappedResult(properties) {
   });
 }
 var init_mapped_result = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-result.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-result.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/discard/discard.mjs
+// node_modules/@sinclair/typebox/build/esm/type/discard/discard.mjs
 function DiscardKey(value, key) {
   const { [key]: _, ...rest } = value;
   return rest;
@@ -1279,133 +1279,133 @@ function Discard(value, keys) {
   return keys.reduce((acc, key) => DiscardKey(acc, key), value);
 }
 var init_discard = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/discard/discard.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/discard/discard.mjs"() {
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/discard/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/discard/index.mjs
 var init_discard2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/discard/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/discard/index.mjs"() {
     init_discard();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/array/array.mjs
+// node_modules/@sinclair/typebox/build/esm/type/array/array.mjs
 function Array2(items, options) {
   return CreateType({ [Kind]: "Array", type: "array", items }, options);
 }
 var init_array = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/array/array.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/array/array.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/array/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/array/index.mjs
 var init_array2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/array/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/array/index.mjs"() {
     init_array();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/async-iterator/async-iterator.mjs
+// node_modules/@sinclair/typebox/build/esm/type/async-iterator/async-iterator.mjs
 function AsyncIterator(items, options) {
   return CreateType({ [Kind]: "AsyncIterator", type: "AsyncIterator", items }, options);
 }
 var init_async_iterator = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/async-iterator/async-iterator.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/async-iterator/async-iterator.mjs"() {
     init_symbols2();
     init_type2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/async-iterator/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/async-iterator/index.mjs
 var init_async_iterator2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/async-iterator/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/async-iterator/index.mjs"() {
     init_async_iterator();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/constructor/constructor.mjs
+// node_modules/@sinclair/typebox/build/esm/type/constructor/constructor.mjs
 function Constructor(parameters, returns, options) {
   return CreateType({ [Kind]: "Constructor", type: "Constructor", parameters, returns }, options);
 }
 var init_constructor = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/constructor/constructor.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/constructor/constructor.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/constructor/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/constructor/index.mjs
 var init_constructor2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/constructor/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/constructor/index.mjs"() {
     init_constructor();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/function/function.mjs
+// node_modules/@sinclair/typebox/build/esm/type/function/function.mjs
 function Function(parameters, returns, options) {
   return CreateType({ [Kind]: "Function", type: "Function", parameters, returns }, options);
 }
 var init_function = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/function/function.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/function/function.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/function/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/function/index.mjs
 var init_function2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/function/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/function/index.mjs"() {
     init_function();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/create/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/create/index.mjs
 var init_create = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/create/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/create/index.mjs"() {
     init_type2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/computed/computed.mjs
+// node_modules/@sinclair/typebox/build/esm/type/computed/computed.mjs
 function Computed(target, parameters, options) {
   return CreateType({ [Kind]: "Computed", target, parameters }, options);
 }
 var init_computed = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/computed/computed.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/computed/computed.mjs"() {
     init_create();
     init_symbols();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/computed/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/computed/index.mjs
 var init_computed2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/computed/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/computed/index.mjs"() {
     init_computed();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/never/never.mjs
+// node_modules/@sinclair/typebox/build/esm/type/never/never.mjs
 function Never(options) {
   return CreateType({ [Kind]: "Never", not: {} }, options);
 }
 var init_never = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/never/never.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/never/never.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/never/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/never/index.mjs
 var init_never2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/never/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/never/index.mjs"() {
     init_never();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/guard/kind.mjs
+// node_modules/@sinclair/typebox/build/esm/type/guard/kind.mjs
 function IsReadonly(value) {
   return IsObject2(value) && value[ReadonlyKind] === "Readonly";
 }
@@ -1536,13 +1536,13 @@ function IsSchema(value) {
   return IsAny(value) || IsArgument(value) || IsArray3(value) || IsBoolean3(value) || IsBigInt3(value) || IsAsyncIterator3(value) || IsComputed(value) || IsConstructor(value) || IsDate3(value) || IsFunction3(value) || IsInteger2(value) || IsIntersect(value) || IsIterator3(value) || IsLiteral(value) || IsMappedKey(value) || IsMappedResult(value) || IsNever(value) || IsNot(value) || IsNull3(value) || IsNumber3(value) || IsObject3(value) || IsPromise2(value) || IsRecord(value) || IsRef(value) || IsRegExp2(value) || IsString3(value) || IsSymbol3(value) || IsTemplateLiteral(value) || IsThis(value) || IsTuple(value) || IsUndefined3(value) || IsUnion(value) || IsUint8Array3(value) || IsUnknown(value) || IsUnsafe(value) || IsVoid(value) || IsKind(value);
 }
 var init_kind = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/guard/kind.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/guard/kind.mjs"() {
     init_value();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/optional/optional.mjs
+// node_modules/@sinclair/typebox/build/esm/type/optional/optional.mjs
 function RemoveOptional(schema) {
   return CreateType(Discard(schema, [OptionalKind]));
 }
@@ -1557,7 +1557,7 @@ function Optional(schema, enable) {
   return IsMappedResult(schema) ? OptionalFromMappedResult(schema, F) : OptionalWithFlag(schema, F);
 }
 var init_optional = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/optional/optional.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/optional/optional.mjs"() {
     init_type2();
     init_symbols2();
     init_discard2();
@@ -1566,7 +1566,7 @@ var init_optional = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/optional/optional-from-mapped-result.mjs
+// node_modules/@sinclair/typebox/build/esm/type/optional/optional-from-mapped-result.mjs
 function FromProperties(P, F) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(P))
@@ -1581,35 +1581,35 @@ function OptionalFromMappedResult(R, F) {
   return MappedResult(P);
 }
 var init_optional_from_mapped_result = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/optional/optional-from-mapped-result.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/optional/optional-from-mapped-result.mjs"() {
     init_mapped2();
     init_optional();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/optional/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/optional/index.mjs
 var init_optional2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/optional/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/optional/index.mjs"() {
     init_optional_from_mapped_result();
     init_optional();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-create.mjs
+// node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-create.mjs
 function IntersectCreate(T, options = {}) {
   const allObjects = T.every((schema) => IsObject3(schema));
   const clonedUnevaluatedProperties = IsSchema(options.unevaluatedProperties) ? { unevaluatedProperties: options.unevaluatedProperties } : {};
   return CreateType(options.unevaluatedProperties === false || IsSchema(options.unevaluatedProperties) || allObjects ? { ...clonedUnevaluatedProperties, [Kind]: "Intersect", type: "object", allOf: T } : { ...clonedUnevaluatedProperties, [Kind]: "Intersect", allOf: T }, options);
 }
 var init_intersect_create = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-create.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-create.mjs"() {
     init_type2();
     init_symbols2();
     init_kind();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-evaluated.mjs
+// node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-evaluated.mjs
 function IsIntersectOptional(types) {
   return types.every((left) => IsOptional(left));
 }
@@ -1632,7 +1632,7 @@ function IntersectEvaluated(types, options = {}) {
   return ResolveIntersect(types, options);
 }
 var init_intersect_evaluated = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-evaluated.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-evaluated.mjs"() {
     init_symbols2();
     init_type2();
     init_discard2();
@@ -1643,13 +1643,13 @@ var init_intersect_evaluated = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-type.mjs
+// node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-type.mjs
 var init_intersect_type = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-type.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-type.mjs"() {
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intersect/intersect.mjs
+// node_modules/@sinclair/typebox/build/esm/type/intersect/intersect.mjs
 function Intersect(types, options) {
   if (types.length === 1)
     return CreateType(types[0], options);
@@ -1660,7 +1660,7 @@ function Intersect(types, options) {
   return IntersectCreate(types, options);
 }
 var init_intersect = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intersect/intersect.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/intersect/intersect.mjs"() {
     init_type2();
     init_never2();
     init_intersect_create();
@@ -1668,27 +1668,27 @@ var init_intersect = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intersect/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/intersect/index.mjs
 var init_intersect2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intersect/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/intersect/index.mjs"() {
     init_intersect_evaluated();
     init_intersect_type();
     init_intersect();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/union/union-create.mjs
+// node_modules/@sinclair/typebox/build/esm/type/union/union-create.mjs
 function UnionCreate(T, options) {
   return CreateType({ [Kind]: "Union", anyOf: T }, options);
 }
 var init_union_create = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/union/union-create.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/union/union-create.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/union/union-evaluated.mjs
+// node_modules/@sinclair/typebox/build/esm/type/union/union-evaluated.mjs
 function IsUnionOptional(types) {
   return types.some((type) => IsOptional(type));
 }
@@ -1706,7 +1706,7 @@ function UnionEvaluated(T, options) {
   return T.length === 1 ? CreateType(T[0], options) : T.length === 0 ? Never(options) : ResolveUnion(T, options);
 }
 var init_union_evaluated = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/union/union-evaluated.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/union/union-evaluated.mjs"() {
     init_type2();
     init_symbols2();
     init_discard2();
@@ -1717,34 +1717,34 @@ var init_union_evaluated = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/union/union-type.mjs
+// node_modules/@sinclair/typebox/build/esm/type/union/union-type.mjs
 var init_union_type = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/union/union-type.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/union/union-type.mjs"() {
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/union/union.mjs
+// node_modules/@sinclair/typebox/build/esm/type/union/union.mjs
 function Union(types, options) {
   return types.length === 0 ? Never(options) : types.length === 1 ? CreateType(types[0], options) : UnionCreate(types, options);
 }
 var init_union = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/union/union.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/union/union.mjs"() {
     init_never2();
     init_type2();
     init_union_create();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/union/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/union/index.mjs
 var init_union2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/union/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/union/index.mjs"() {
     init_union_evaluated();
     init_union_type();
     init_union();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/template-literal/parse.mjs
+// node_modules/@sinclair/typebox/build/esm/type/template-literal/parse.mjs
 function Unescape(pattern) {
   return pattern.replace(/\\\$/g, "$").replace(/\\\*/g, "*").replace(/\\\^/g, "^").replace(/\\\|/g, "|").replace(/\\\(/g, "(").replace(/\\\)/g, ")");
 }
@@ -1867,14 +1867,14 @@ function TemplateLiteralParseExact(pattern) {
 }
 var TemplateLiteralParserError;
 var init_parse = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/template-literal/parse.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/template-literal/parse.mjs"() {
     init_error2();
     TemplateLiteralParserError = class extends TypeBoxError {
     };
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/template-literal/finite.mjs
+// node_modules/@sinclair/typebox/build/esm/type/template-literal/finite.mjs
 function IsNumberExpression(expression) {
   return expression.type === "or" && expression.expr.length === 2 && expression.expr[0].type === "const" && expression.expr[0].const === "0" && expression.expr[1].type === "const" && expression.expr[1].const === "[1-9][0-9]*";
 }
@@ -1895,7 +1895,7 @@ function IsTemplateLiteralFinite(schema) {
 }
 var TemplateLiteralFiniteError;
 var init_finite = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/template-literal/finite.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/template-literal/finite.mjs"() {
     init_parse();
     init_error2();
     TemplateLiteralFiniteError = class extends TypeBoxError {
@@ -1903,7 +1903,7 @@ var init_finite = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/template-literal/generate.mjs
+// node_modules/@sinclair/typebox/build/esm/type/template-literal/generate.mjs
 function* GenerateReduce(buffer) {
   if (buffer.length === 1)
     return yield* buffer[0];
@@ -1934,7 +1934,7 @@ function TemplateLiteralGenerate(schema) {
 }
 var TemplateLiteralGenerateError;
 var init_generate = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/template-literal/generate.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/template-literal/generate.mjs"() {
     init_finite();
     init_parse();
     init_error2();
@@ -1943,7 +1943,7 @@ var init_generate = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/literal/literal.mjs
+// node_modules/@sinclair/typebox/build/esm/type/literal/literal.mjs
 function Literal(value, options) {
   return CreateType({
     [Kind]: "Literal",
@@ -1952,92 +1952,92 @@ function Literal(value, options) {
   }, options);
 }
 var init_literal = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/literal/literal.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/literal/literal.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/literal/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/literal/index.mjs
 var init_literal2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/literal/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/literal/index.mjs"() {
     init_literal();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/boolean/boolean.mjs
+// node_modules/@sinclair/typebox/build/esm/type/boolean/boolean.mjs
 function Boolean2(options) {
   return CreateType({ [Kind]: "Boolean", type: "boolean" }, options);
 }
 var init_boolean = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/boolean/boolean.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/boolean/boolean.mjs"() {
     init_symbols2();
     init_create();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/boolean/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/boolean/index.mjs
 var init_boolean2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/boolean/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/boolean/index.mjs"() {
     init_boolean();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/bigint/bigint.mjs
+// node_modules/@sinclair/typebox/build/esm/type/bigint/bigint.mjs
 function BigInt2(options) {
   return CreateType({ [Kind]: "BigInt", type: "bigint" }, options);
 }
 var init_bigint = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/bigint/bigint.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/bigint/bigint.mjs"() {
     init_symbols2();
     init_create();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/bigint/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/bigint/index.mjs
 var init_bigint2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/bigint/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/bigint/index.mjs"() {
     init_bigint();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/number/number.mjs
+// node_modules/@sinclair/typebox/build/esm/type/number/number.mjs
 function Number2(options) {
   return CreateType({ [Kind]: "Number", type: "number" }, options);
 }
 var init_number = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/number/number.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/number/number.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/number/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/number/index.mjs
 var init_number2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/number/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/number/index.mjs"() {
     init_number();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/string/string.mjs
+// node_modules/@sinclair/typebox/build/esm/type/string/string.mjs
 function String2(options) {
   return CreateType({ [Kind]: "String", type: "string" }, options);
 }
 var init_string = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/string/string.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/string/string.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/string/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/string/index.mjs
 var init_string2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/string/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/string/index.mjs"() {
     init_string();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/template-literal/syntax.mjs
+// node_modules/@sinclair/typebox/build/esm/type/template-literal/syntax.mjs
 function* FromUnion(syntax) {
   const trim = syntax.trim().replace(/"|'/g, "");
   return trim === "boolean" ? yield Boolean2() : trim === "number" ? yield Number2() : trim === "bigint" ? yield BigInt2() : trim === "string" ? yield String2() : yield (() => {
@@ -2074,7 +2074,7 @@ function TemplateLiteralSyntax(syntax) {
   return [...FromSyntax(syntax)];
 }
 var init_syntax = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/template-literal/syntax.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/template-literal/syntax.mjs"() {
     init_literal2();
     init_boolean2();
     init_bigint2();
@@ -2085,10 +2085,10 @@ var init_syntax = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/patterns/patterns.mjs
+// node_modules/@sinclair/typebox/build/esm/type/patterns/patterns.mjs
 var PatternBoolean, PatternNumber, PatternString, PatternNever, PatternBooleanExact, PatternNumberExact, PatternStringExact, PatternNeverExact;
 var init_patterns = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/patterns/patterns.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/patterns/patterns.mjs"() {
     PatternBoolean = "(true|false)";
     PatternNumber = "(0|[1-9][0-9]*)";
     PatternString = "(.*)";
@@ -2100,14 +2100,14 @@ var init_patterns = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/patterns/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/patterns/index.mjs
 var init_patterns2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/patterns/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/patterns/index.mjs"() {
     init_patterns();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/template-literal/pattern.mjs
+// node_modules/@sinclair/typebox/build/esm/type/template-literal/pattern.mjs
 function Escape(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -2121,7 +2121,7 @@ function TemplateLiteralPattern(kinds) {
 }
 var TemplateLiteralPatternError;
 var init_pattern = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/template-literal/pattern.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/template-literal/pattern.mjs"() {
     init_patterns2();
     init_symbols2();
     init_error2();
@@ -2131,27 +2131,27 @@ var init_pattern = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/template-literal/union.mjs
+// node_modules/@sinclair/typebox/build/esm/type/template-literal/union.mjs
 function TemplateLiteralToUnion(schema) {
   const R = TemplateLiteralGenerate(schema);
   const L = R.map((S) => Literal(S));
   return UnionEvaluated(L);
 }
 var init_union3 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/template-literal/union.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/template-literal/union.mjs"() {
     init_union2();
     init_literal2();
     init_generate();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/template-literal/template-literal.mjs
+// node_modules/@sinclair/typebox/build/esm/type/template-literal/template-literal.mjs
 function TemplateLiteral(unresolved, options) {
   const pattern = IsString2(unresolved) ? TemplateLiteralPattern(TemplateLiteralSyntax(unresolved)) : TemplateLiteralPattern(unresolved);
   return CreateType({ [Kind]: "TemplateLiteral", type: "string", pattern }, options);
 }
 var init_template_literal = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/template-literal/template-literal.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/template-literal/template-literal.mjs"() {
     init_type2();
     init_syntax();
     init_pattern();
@@ -2160,9 +2160,9 @@ var init_template_literal = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/template-literal/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/template-literal/index.mjs
 var init_template_literal2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/template-literal/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/template-literal/index.mjs"() {
     init_finite();
     init_generate();
     init_syntax();
@@ -2173,7 +2173,7 @@ var init_template_literal2 = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-property-keys.mjs
+// node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-property-keys.mjs
 function FromTemplateLiteral(templateLiteral) {
   const keys = TemplateLiteralGenerate(templateLiteral);
   return keys.map((key) => key.toString());
@@ -2191,13 +2191,13 @@ function IndexPropertyKeys(type) {
   return [...new Set(IsTemplateLiteral(type) ? FromTemplateLiteral(type) : IsUnion(type) ? FromUnion2(type.anyOf) : IsLiteral(type) ? FromLiteral(type.const) : IsNumber3(type) ? ["[number]"] : IsInteger2(type) ? ["[number]"] : [])];
 }
 var init_indexed_property_keys = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-property-keys.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-property-keys.mjs"() {
     init_template_literal2();
     init_kind();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-result.mjs
+// node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-result.mjs
 function FromProperties2(type, properties, options) {
   const result = {};
   for (const K2 of Object.getOwnPropertyNames(properties)) {
@@ -2213,14 +2213,14 @@ function IndexFromMappedResult(type, mappedResult, options) {
   return MappedResult(properties);
 }
 var init_indexed_from_mapped_result = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-result.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-result.mjs"() {
     init_mapped2();
     init_indexed_property_keys();
     init_indexed2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed.mjs
+// node_modules/@sinclair/typebox/build/esm/type/indexed/indexed.mjs
 function FromRest(types, key) {
   return types.map((type) => IndexFromPropertyKey(type, key));
 }
@@ -2268,7 +2268,7 @@ function Index(type, key, options) {
   return CreateType(IsSchema(key) ? FromSchema(type, IndexPropertyKeys(key)) : FromSchema(type, key), options);
 }
 var init_indexed = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/indexed/indexed.mjs"() {
     init_type2();
     init_error2();
     init_computed2();
@@ -2282,7 +2282,7 @@ var init_indexed = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-key.mjs
+// node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-key.mjs
 function MappedIndexPropertyKey(type, key, options) {
   return { [key]: Index(type, [key], Clone(options)) };
 }
@@ -2299,16 +2299,16 @@ function IndexFromMappedKey(type, mappedKey, options) {
   return MappedResult(properties);
 }
 var init_indexed_from_mapped_key = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-key.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-key.mjs"() {
     init_indexed();
     init_mapped2();
     init_value2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/indexed/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/indexed/index.mjs
 var init_indexed2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/indexed/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/indexed/index.mjs"() {
     init_indexed_from_mapped_key();
     init_indexed_from_mapped_result();
     init_indexed_property_keys();
@@ -2316,25 +2316,25 @@ var init_indexed2 = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/iterator/iterator.mjs
+// node_modules/@sinclair/typebox/build/esm/type/iterator/iterator.mjs
 function Iterator(items, options) {
   return CreateType({ [Kind]: "Iterator", type: "Iterator", items }, options);
 }
 var init_iterator = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/iterator/iterator.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/iterator/iterator.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/iterator/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/iterator/index.mjs
 var init_iterator2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/iterator/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/iterator/index.mjs"() {
     init_iterator();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/object/object.mjs
+// node_modules/@sinclair/typebox/build/esm/type/object/object.mjs
 function RequiredArray(properties) {
   return globalThis.Object.keys(properties).filter((key) => !IsOptional(properties[key]));
 }
@@ -2345,7 +2345,7 @@ function _Object(properties, options) {
 }
 var Object2;
 var init_object = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/object/object.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/object/object.mjs"() {
     init_type2();
     init_symbols2();
     init_kind();
@@ -2353,32 +2353,32 @@ var init_object = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/object/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/object/index.mjs
 var init_object2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/object/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/object/index.mjs"() {
     init_object();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/promise/promise.mjs
+// node_modules/@sinclair/typebox/build/esm/type/promise/promise.mjs
 function Promise2(item, options) {
   return CreateType({ [Kind]: "Promise", type: "Promise", item }, options);
 }
 var init_promise = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/promise/promise.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/promise/promise.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/promise/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/promise/index.mjs
 var init_promise2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/promise/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/promise/index.mjs"() {
     init_promise();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/readonly/readonly.mjs
+// node_modules/@sinclair/typebox/build/esm/type/readonly/readonly.mjs
 function RemoveReadonly(schema) {
   return CreateType(Discard(schema, [ReadonlyKind]));
 }
@@ -2393,7 +2393,7 @@ function Readonly(schema, enable) {
   return IsMappedResult(schema) ? ReadonlyFromMappedResult(schema, F) : ReadonlyWithFlag(schema, F);
 }
 var init_readonly = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/readonly/readonly.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/readonly/readonly.mjs"() {
     init_type2();
     init_symbols2();
     init_discard2();
@@ -2402,7 +2402,7 @@ var init_readonly = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/readonly/readonly-from-mapped-result.mjs
+// node_modules/@sinclair/typebox/build/esm/type/readonly/readonly-from-mapped-result.mjs
 function FromProperties3(K, F) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(K))
@@ -2417,39 +2417,39 @@ function ReadonlyFromMappedResult(R, F) {
   return MappedResult(P);
 }
 var init_readonly_from_mapped_result = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/readonly/readonly-from-mapped-result.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/readonly/readonly-from-mapped-result.mjs"() {
     init_mapped2();
     init_readonly();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/readonly/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/readonly/index.mjs
 var init_readonly2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/readonly/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/readonly/index.mjs"() {
     init_readonly_from_mapped_result();
     init_readonly();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/tuple/tuple.mjs
+// node_modules/@sinclair/typebox/build/esm/type/tuple/tuple.mjs
 function Tuple(types, options) {
   return CreateType(types.length > 0 ? { [Kind]: "Tuple", type: "array", items: types, additionalItems: false, minItems: types.length, maxItems: types.length } : { [Kind]: "Tuple", type: "array", minItems: types.length, maxItems: types.length }, options);
 }
 var init_tuple = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/tuple/tuple.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/tuple/tuple.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/tuple/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/tuple/index.mjs
 var init_tuple2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/tuple/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/tuple/index.mjs"() {
     init_tuple();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/sets/set.mjs
+// node_modules/@sinclair/typebox/build/esm/type/sets/set.mjs
 function SetIncludes(T, S) {
   return T.includes(S);
 }
@@ -2474,18 +2474,18 @@ function SetUnionMany(T) {
   return Acc;
 }
 var init_set = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/sets/set.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/sets/set.mjs"() {
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/sets/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/sets/index.mjs
 var init_sets = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/sets/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/sets/index.mjs"() {
     init_set();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/mapped/mapped.mjs
+// node_modules/@sinclair/typebox/build/esm/type/mapped/mapped.mjs
 function FromMappedResult4(K, P) {
   return K in P ? FromSchemaType(K, P[K]) : MappedResult(P);
 }
@@ -2540,7 +2540,7 @@ function Mapped(key, map3, options) {
   return Object2(R, options);
 }
 var init_mapped = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/mapped/mapped.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/mapped/mapped.mjs"() {
     init_symbols2();
     init_discard2();
     init_array2();
@@ -2563,16 +2563,16 @@ var init_mapped = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/mapped/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/mapped/index.mjs
 var init_mapped2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/mapped/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/mapped/index.mjs"() {
     init_mapped_key();
     init_mapped_result();
     init_mapped();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/ref/ref.mjs
+// node_modules/@sinclair/typebox/build/esm/type/ref/ref.mjs
 function Ref(...args) {
   const [$ref, options] = typeof args[0] === "string" ? [args[0], args[1]] : [args[0].$id, args[1]];
   if (typeof $ref !== "string")
@@ -2580,21 +2580,21 @@ function Ref(...args) {
   return CreateType({ [Kind]: "Ref", $ref }, options);
 }
 var init_ref = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/ref/ref.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/ref/ref.mjs"() {
     init_error2();
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/ref/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/ref/index.mjs
 var init_ref2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/ref/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/ref/index.mjs"() {
     init_ref();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-keys.mjs
+// node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-keys.mjs
 function FromRest3(types) {
   const result = [];
   for (const L of types)
@@ -2640,14 +2640,14 @@ function KeyOfPattern(schema) {
 }
 var includePatternProperties;
 var init_keyof_property_keys = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-keys.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-keys.mjs"() {
     init_sets();
     init_kind();
     includePatternProperties = false;
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/keyof/keyof.mjs
+// node_modules/@sinclair/typebox/build/esm/type/keyof/keyof.mjs
 function FromComputed(target, parameters) {
   return Computed("KeyOf", [Computed(target, parameters)]);
 }
@@ -2667,7 +2667,7 @@ function KeyOf(type, options) {
   return IsComputed(type) ? FromComputed(type.target, type.parameters) : IsRef(type) ? FromRef(type.$ref) : IsMappedResult(type) ? KeyOfFromMappedResult(type, options) : KeyOfFromType(type, options);
 }
 var init_keyof = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/keyof/keyof.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/keyof/keyof.mjs"() {
     init_type2();
     init_literal2();
     init_number2();
@@ -2680,7 +2680,7 @@ var init_keyof = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-from-mapped-result.mjs
+// node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-from-mapped-result.mjs
 function FromProperties6(properties, options) {
   const result = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(properties))
@@ -2695,29 +2695,29 @@ function KeyOfFromMappedResult(mappedResult, options) {
   return MappedResult(properties);
 }
 var init_keyof_from_mapped_result = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-from-mapped-result.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-from-mapped-result.mjs"() {
     init_mapped2();
     init_keyof();
     init_value2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-entries.mjs
+// node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-entries.mjs
 function KeyOfPropertyEntries(schema) {
   const keys = KeyOfPropertyKeys(schema);
   const schemas = IndexFromPropertyKeys(schema, keys);
   return keys.map((_, index) => [keys[index], schemas[index]]);
 }
 var init_keyof_property_entries = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-entries.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-entries.mjs"() {
     init_indexed();
     init_keyof_property_keys();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/keyof/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/keyof/index.mjs
 var init_keyof2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/keyof/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/keyof/index.mjs"() {
     init_keyof_from_mapped_result();
     init_keyof_property_entries();
     init_keyof_property_keys();
@@ -2725,7 +2725,7 @@ var init_keyof2 = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/extends/extends-undefined.mjs
+// node_modules/@sinclair/typebox/build/esm/type/extends/extends-undefined.mjs
 function Intersect2(schema) {
   return schema.allOf.every((schema2) => ExtendsUndefinedCheck(schema2));
 }
@@ -2739,12 +2739,12 @@ function ExtendsUndefinedCheck(schema) {
   return schema[Kind] === "Intersect" ? Intersect2(schema) : schema[Kind] === "Union" ? Union2(schema) : schema[Kind] === "Not" ? Not(schema) : schema[Kind] === "Undefined" ? true : false;
 }
 var init_extends_undefined = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/extends/extends-undefined.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/extends/extends-undefined.mjs"() {
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/errors/function.mjs
+// node_modules/@sinclair/typebox/build/esm/errors/function.mjs
 function DefaultErrorFunction(error) {
   switch (error.errorType) {
     case ValueErrorType.ArrayContains:
@@ -2884,14 +2884,14 @@ function GetErrorFunction() {
 }
 var errorFunction;
 var init_function3 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/errors/function.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/errors/function.mjs"() {
     init_symbols2();
     init_errors();
     errorFunction = DefaultErrorFunction;
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/deref/deref.mjs
+// node_modules/@sinclair/typebox/build/esm/value/deref/deref.mjs
 function Resolve(schema, references) {
   const target = references.find((target2) => target2.$id === schema.$ref);
   if (target === void 0)
@@ -2909,7 +2909,7 @@ function Deref(schema, references) {
 }
 var TypeDereferenceError;
 var init_deref = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/deref/deref.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/deref/deref.mjs"() {
     init_error2();
     init_symbols2();
     init_guard();
@@ -2922,14 +2922,14 @@ var init_deref = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/deref/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/deref/index.mjs
 var init_deref2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/deref/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/deref/index.mjs"() {
     init_deref();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/hash/hash.mjs
+// node_modules/@sinclair/typebox/build/esm/value/hash/hash.mjs
 function* NumberToBytes(value) {
   const byteCount = value === 0 ? 1 : Math.ceil(Math.floor(Math.log2(value) + 1) / 8);
   for (let i = 0; i < byteCount; i++) {
@@ -3031,7 +3031,7 @@ function Hash(value) {
 }
 var ValueHashError, ByteMarker, Accumulator, Prime, Size, Bytes, F64, F64In, F64Out;
 var init_hash = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/hash/hash.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/hash/hash.mjs"() {
     init_guard2();
     init_error2();
     ValueHashError = class extends TypeBoxError {
@@ -3065,50 +3065,50 @@ var init_hash = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/hash/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/hash/index.mjs
 var init_hash2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/hash/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/hash/index.mjs"() {
     init_hash();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/any/any.mjs
+// node_modules/@sinclair/typebox/build/esm/type/any/any.mjs
 function Any(options) {
   return CreateType({ [Kind]: "Any" }, options);
 }
 var init_any = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/any/any.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/any/any.mjs"() {
     init_create();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/any/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/any/index.mjs
 var init_any2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/any/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/any/index.mjs"() {
     init_any();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/unknown/unknown.mjs
+// node_modules/@sinclair/typebox/build/esm/type/unknown/unknown.mjs
 function Unknown(options) {
   return CreateType({ [Kind]: "Unknown" }, options);
 }
 var init_unknown = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/unknown/unknown.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/unknown/unknown.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/unknown/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/unknown/index.mjs
 var init_unknown2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/unknown/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/unknown/index.mjs"() {
     init_unknown();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/guard/type.mjs
+// node_modules/@sinclair/typebox/build/esm/type/guard/type.mjs
 var type_exports2 = {};
 __export(type_exports2, {
   IsAny: () => IsAny2,
@@ -3362,7 +3362,7 @@ function IsSchema2(value) {
 }
 var TypeGuardUnknownTypeError, KnownTypes;
 var init_type3 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/guard/type.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/guard/type.mjs"() {
     init_value();
     init_symbols2();
     init_error2();
@@ -3408,16 +3408,16 @@ var init_type3 = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/guard/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/guard/index.mjs
 var init_guard3 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/guard/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/guard/index.mjs"() {
     init_kind();
     init_type3();
     init_value();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/extends/extends-check.mjs
+// node_modules/@sinclair/typebox/build/esm/type/extends/extends-check.mjs
 function IntoBooleanResult(result) {
   return result === ExtendsResult.False ? result : ExtendsResult.True;
 }
@@ -3661,7 +3661,7 @@ function ExtendsCheck(left, right) {
 }
 var ExtendsResolverError, ExtendsResult;
 var init_extends_check = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/extends/extends-check.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/extends/extends-check.mjs"() {
     init_any2();
     init_function2();
     init_number2();
@@ -3682,7 +3682,7 @@ var init_extends_check = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-result.mjs
+// node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-result.mjs
 function FromProperties7(P, Right, True, False, options) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(P))
@@ -3697,14 +3697,14 @@ function ExtendsFromMappedResult(Left, Right, True, False, options) {
   return MappedResult(P);
 }
 var init_extends_from_mapped_result = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-result.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-result.mjs"() {
     init_mapped2();
     init_extends();
     init_value2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/extends/extends.mjs
+// node_modules/@sinclair/typebox/build/esm/type/extends/extends.mjs
 function ExtendsResolve(left, right, trueType, falseType) {
   const R = ExtendsCheck(left, right);
   return R === ExtendsResult.Union ? Union([trueType, falseType]) : R === ExtendsResult.True ? trueType : falseType;
@@ -3713,7 +3713,7 @@ function Extends(L, R, T, F, options) {
   return IsMappedResult(L) ? ExtendsFromMappedResult(L, R, T, F, options) : IsMappedKey(L) ? CreateType(ExtendsFromMappedKey(L, R, T, F, options)) : CreateType(ExtendsResolve(L, R, T, F), options);
 }
 var init_extends = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/extends/extends.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/extends/extends.mjs"() {
     init_type2();
     init_union2();
     init_extends_check();
@@ -3723,7 +3723,7 @@ var init_extends = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-key.mjs
+// node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-key.mjs
 function FromPropertyKey(K, U, L, R, options) {
   return {
     [K]: Extends(Literal(K), U, L, R, Clone(options))
@@ -3742,7 +3742,7 @@ function ExtendsFromMappedKey(T, U, L, R, options) {
   return MappedResult(P);
 }
 var init_extends_from_mapped_key = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-key.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-key.mjs"() {
     init_mapped2();
     init_literal2();
     init_extends();
@@ -3750,9 +3750,9 @@ var init_extends_from_mapped_key = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/extends/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/extends/index.mjs
 var init_extends2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/extends/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/extends/index.mjs"() {
     init_extends_check();
     init_extends_from_mapped_key();
     init_extends_from_mapped_result();
@@ -3761,7 +3761,7 @@ var init_extends2 = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/check/check.mjs
+// node_modules/@sinclair/typebox/build/esm/value/check/check.mjs
 function IsAnyOrUnknown(schema) {
   return schema[Kind] === "Any" || schema[Kind] === "Unknown";
 }
@@ -4188,7 +4188,7 @@ function Check(...args) {
 }
 var ValueCheckUnknownTypeError;
 var init_check = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/check/check.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/check/check.mjs"() {
     init_system2();
     init_deref2();
     init_hash2();
@@ -4209,14 +4209,14 @@ var init_check = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/check/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/check/index.mjs
 var init_check2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/check/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/check/index.mjs"() {
     init_check();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/errors/errors.mjs
+// node_modules/@sinclair/typebox/build/esm/errors/errors.mjs
 function EscapeKey(key) {
   return key.replace(/~/g, "~0").replace(/\//g, "~1");
 }
@@ -4689,7 +4689,7 @@ function Errors(...args) {
 }
 var ValueErrorType, ValueErrorsUnknownTypeError, ValueErrorIterator;
 var init_errors = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/errors/errors.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/errors/errors.mjs"() {
     init_system2();
     init_keyof2();
     init_registry();
@@ -4790,15 +4790,15 @@ var init_errors = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/errors/index.mjs
+// node_modules/@sinclair/typebox/build/esm/errors/index.mjs
 var init_errors2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/errors/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/errors/index.mjs"() {
     init_errors();
     init_function3();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/transform/decode.mjs
+// node_modules/@sinclair/typebox/build/esm/value/transform/decode.mjs
 function Default(schema, path3, value) {
   try {
     return IsTransform(schema) ? schema[TransformKind].Decode(value) : value;
@@ -4941,7 +4941,7 @@ function TransformDecode(schema, references, value) {
 }
 var TransformDecodeCheckError, TransformDecodeError;
 var init_decode = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/transform/decode.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/transform/decode.mjs"() {
     init_policy();
     init_symbols2();
     init_error2();
@@ -4970,7 +4970,7 @@ var init_decode = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/transform/encode.mjs
+// node_modules/@sinclair/typebox/build/esm/value/transform/encode.mjs
 function Default2(schema, path3, value) {
   try {
     return IsTransform(schema) ? schema[TransformKind].Encode(value) : value;
@@ -5124,7 +5124,7 @@ function TransformEncode(schema, references, value) {
 }
 var TransformEncodeCheckError, TransformEncodeError;
 var init_encode = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/transform/encode.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/transform/encode.mjs"() {
     init_policy();
     init_symbols2();
     init_error2();
@@ -5153,7 +5153,7 @@ var init_encode = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/transform/has.mjs
+// node_modules/@sinclair/typebox/build/esm/value/transform/has.mjs
 function FromArray8(schema, references) {
   return IsTransform(schema) || Visit9(schema.items, references);
 }
@@ -5255,7 +5255,7 @@ function HasTransform(schema, references) {
 }
 var visited;
 var init_has = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/transform/has.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/transform/has.mjs"() {
     init_deref2();
     init_symbols2();
     init_kind();
@@ -5264,65 +5264,65 @@ var init_has = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/transform/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/transform/index.mjs
 var init_transform = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/transform/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/transform/index.mjs"() {
     init_decode();
     init_encode();
     init_has();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/clone/type.mjs
+// node_modules/@sinclair/typebox/build/esm/type/clone/type.mjs
 function CloneType(schema, options) {
   return options === void 0 ? Clone(schema) : Clone({ ...options, ...schema });
 }
 var init_type4 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/clone/type.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/clone/type.mjs"() {
     init_value2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/clone/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/clone/index.mjs
 var init_clone = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/clone/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/clone/index.mjs"() {
     init_type4();
     init_value2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/helpers/helpers.mjs
+// node_modules/@sinclair/typebox/build/esm/type/helpers/helpers.mjs
 var init_helpers = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/helpers/helpers.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/helpers/helpers.mjs"() {
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/helpers/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/helpers/index.mjs
 var init_helpers2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/helpers/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/helpers/index.mjs"() {
     init_helpers();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/argument/argument.mjs
+// node_modules/@sinclair/typebox/build/esm/type/argument/argument.mjs
 function Argument(index) {
   return CreateType({ [Kind]: "Argument", index });
 }
 var init_argument = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/argument/argument.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/argument/argument.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/argument/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/argument/index.mjs
 var init_argument2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/argument/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/argument/index.mjs"() {
     init_argument();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/awaited/awaited.mjs
+// node_modules/@sinclair/typebox/build/esm/type/awaited/awaited.mjs
 function FromComputed2(target, parameters) {
   return Computed("Awaited", [Computed(target, parameters)]);
 }
@@ -5345,7 +5345,7 @@ function Awaited(type, options) {
   return CreateType(IsComputed(type) ? FromComputed2(type.target, type.parameters) : IsIntersect(type) ? FromIntersect9(type.allOf) : IsUnion(type) ? FromUnion11(type.anyOf) : IsPromise2(type) ? FromPromise5(type.item) : IsRef(type) ? FromRef7(type.$ref) : type, options);
 }
 var init_awaited = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/awaited/awaited.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/awaited/awaited.mjs"() {
     init_type2();
     init_computed2();
     init_intersect2();
@@ -5355,14 +5355,14 @@ var init_awaited = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/awaited/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/awaited/index.mjs
 var init_awaited2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/awaited/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/awaited/index.mjs"() {
     init_awaited();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/composite/composite.mjs
+// node_modules/@sinclair/typebox/build/esm/type/composite/composite.mjs
 function CompositeKeys(T) {
   const Acc = [];
   for (const L of T)
@@ -5392,7 +5392,7 @@ function Composite(T, options) {
   return R;
 }
 var init_composite = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/composite/composite.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/composite/composite.mjs"() {
     init_intersect2();
     init_indexed2();
     init_keyof2();
@@ -5402,104 +5402,104 @@ var init_composite = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/composite/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/composite/index.mjs
 var init_composite2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/composite/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/composite/index.mjs"() {
     init_composite();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/date/date.mjs
+// node_modules/@sinclair/typebox/build/esm/type/date/date.mjs
 function Date2(options) {
   return CreateType({ [Kind]: "Date", type: "Date" }, options);
 }
 var init_date = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/date/date.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/date/date.mjs"() {
     init_symbols2();
     init_type2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/date/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/date/index.mjs
 var init_date2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/date/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/date/index.mjs"() {
     init_date();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/null/null.mjs
+// node_modules/@sinclair/typebox/build/esm/type/null/null.mjs
 function Null(options) {
   return CreateType({ [Kind]: "Null", type: "null" }, options);
 }
 var init_null = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/null/null.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/null/null.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/null/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/null/index.mjs
 var init_null2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/null/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/null/index.mjs"() {
     init_null();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/symbol/symbol.mjs
+// node_modules/@sinclair/typebox/build/esm/type/symbol/symbol.mjs
 function Symbol2(options) {
   return CreateType({ [Kind]: "Symbol", type: "symbol" }, options);
 }
 var init_symbol = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/symbol/symbol.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/symbol/symbol.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/symbol/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/symbol/index.mjs
 var init_symbol2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/symbol/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/symbol/index.mjs"() {
     init_symbol();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/undefined/undefined.mjs
+// node_modules/@sinclair/typebox/build/esm/type/undefined/undefined.mjs
 function Undefined(options) {
   return CreateType({ [Kind]: "Undefined", type: "undefined" }, options);
 }
 var init_undefined = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/undefined/undefined.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/undefined/undefined.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/undefined/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/undefined/index.mjs
 var init_undefined2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/undefined/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/undefined/index.mjs"() {
     init_undefined();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/uint8array/uint8array.mjs
+// node_modules/@sinclair/typebox/build/esm/type/uint8array/uint8array.mjs
 function Uint8Array2(options) {
   return CreateType({ [Kind]: "Uint8Array", type: "Uint8Array" }, options);
 }
 var init_uint8array = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/uint8array/uint8array.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/uint8array/uint8array.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/uint8array/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/uint8array/index.mjs
 var init_uint8array2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/uint8array/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/uint8array/index.mjs"() {
     init_uint8array();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/const/const.mjs
+// node_modules/@sinclair/typebox/build/esm/type/const/const.mjs
 function FromArray9(T) {
   return T.map((L) => FromValue(L, false));
 }
@@ -5519,7 +5519,7 @@ function Const(T, options) {
   return CreateType(FromValue(T, true), options);
 }
 var init_const = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/const/const.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/const/const.mjs"() {
     init_any2();
     init_bigint2();
     init_date2();
@@ -5538,33 +5538,33 @@ var init_const = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/const/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/const/index.mjs
 var init_const2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/const/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/const/index.mjs"() {
     init_const();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/constructor-parameters/constructor-parameters.mjs
+// node_modules/@sinclair/typebox/build/esm/type/constructor-parameters/constructor-parameters.mjs
 function ConstructorParameters(schema, options) {
   return IsConstructor(schema) ? Tuple(schema.parameters, options) : Never(options);
 }
 var init_constructor_parameters = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/constructor-parameters/constructor-parameters.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/constructor-parameters/constructor-parameters.mjs"() {
     init_tuple2();
     init_never2();
     init_kind();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/constructor-parameters/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/constructor-parameters/index.mjs
 var init_constructor_parameters2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/constructor-parameters/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/constructor-parameters/index.mjs"() {
     init_constructor_parameters();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/enum/enum.mjs
+// node_modules/@sinclair/typebox/build/esm/type/enum/enum.mjs
 function Enum(item, options) {
   if (IsUndefined2(item))
     throw new Error("Enum undefined or empty");
@@ -5574,7 +5574,7 @@ function Enum(item, options) {
   return Union(anyOf, { ...options, [Hint]: "Enum" });
 }
 var init_enum = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/enum/enum.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/enum/enum.mjs"() {
     init_literal2();
     init_symbols2();
     init_union2();
@@ -5582,25 +5582,25 @@ var init_enum = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/enum/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/enum/index.mjs
 var init_enum2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/enum/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/enum/index.mjs"() {
     init_enum();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-template-literal.mjs
+// node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-template-literal.mjs
 function ExcludeFromTemplateLiteral(L, R) {
   return Exclude(TemplateLiteralToUnion(L), R);
 }
 var init_exclude_from_template_literal = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-template-literal.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-template-literal.mjs"() {
     init_exclude();
     init_template_literal2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/exclude/exclude.mjs
+// node_modules/@sinclair/typebox/build/esm/type/exclude/exclude.mjs
 function ExcludeRest(L, R) {
   const excluded = L.filter((inner) => ExtendsCheck(inner, R) === ExtendsResult.False);
   return excluded.length === 1 ? excluded[0] : Union(excluded);
@@ -5613,7 +5613,7 @@ function Exclude(L, R, options = {}) {
   return CreateType(IsUnion(L) ? ExcludeRest(L.anyOf, R) : ExtendsCheck(L, R) !== ExtendsResult.False ? Never() : L, options);
 }
 var init_exclude = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/exclude/exclude.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/exclude/exclude.mjs"() {
     init_type2();
     init_union2();
     init_never2();
@@ -5624,7 +5624,7 @@ var init_exclude = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-mapped-result.mjs
+// node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-mapped-result.mjs
 function FromProperties9(P, U) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(P))
@@ -5639,33 +5639,33 @@ function ExcludeFromMappedResult(R, T) {
   return MappedResult(P);
 }
 var init_exclude_from_mapped_result = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-mapped-result.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-mapped-result.mjs"() {
     init_mapped2();
     init_exclude();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/exclude/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/exclude/index.mjs
 var init_exclude2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/exclude/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/exclude/index.mjs"() {
     init_exclude_from_mapped_result();
     init_exclude_from_template_literal();
     init_exclude();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-template-literal.mjs
+// node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-template-literal.mjs
 function ExtractFromTemplateLiteral(L, R) {
   return Extract(TemplateLiteralToUnion(L), R);
 }
 var init_extract_from_template_literal = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-template-literal.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-template-literal.mjs"() {
     init_extract();
     init_template_literal2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/extract/extract.mjs
+// node_modules/@sinclair/typebox/build/esm/type/extract/extract.mjs
 function ExtractRest(L, R) {
   const extracted = L.filter((inner) => ExtendsCheck(inner, R) !== ExtendsResult.False);
   return extracted.length === 1 ? extracted[0] : Union(extracted);
@@ -5678,7 +5678,7 @@ function Extract(L, R, options) {
   return CreateType(IsUnion(L) ? ExtractRest(L.anyOf, R) : ExtendsCheck(L, R) !== ExtendsResult.False ? L : Never(), options);
 }
 var init_extract = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/extract/extract.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/extract/extract.mjs"() {
     init_type2();
     init_union2();
     init_never2();
@@ -5689,7 +5689,7 @@ var init_extract = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-mapped-result.mjs
+// node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-mapped-result.mjs
 function FromProperties10(P, T) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(P))
@@ -5704,59 +5704,59 @@ function ExtractFromMappedResult(R, T) {
   return MappedResult(P);
 }
 var init_extract_from_mapped_result = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-mapped-result.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-mapped-result.mjs"() {
     init_mapped2();
     init_extract();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/extract/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/extract/index.mjs
 var init_extract2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/extract/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/extract/index.mjs"() {
     init_extract_from_mapped_result();
     init_extract_from_template_literal();
     init_extract();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/instance-type/instance-type.mjs
+// node_modules/@sinclair/typebox/build/esm/type/instance-type/instance-type.mjs
 function InstanceType(schema, options) {
   return IsConstructor(schema) ? CreateType(schema.returns, options) : Never(options);
 }
 var init_instance_type = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/instance-type/instance-type.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/instance-type/instance-type.mjs"() {
     init_type2();
     init_never2();
     init_kind();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/instance-type/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/instance-type/index.mjs
 var init_instance_type2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/instance-type/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/instance-type/index.mjs"() {
     init_instance_type();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/readonly-optional/readonly-optional.mjs
+// node_modules/@sinclair/typebox/build/esm/type/readonly-optional/readonly-optional.mjs
 function ReadonlyOptional(schema) {
   return Readonly(Optional(schema));
 }
 var init_readonly_optional = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/readonly-optional/readonly-optional.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/readonly-optional/readonly-optional.mjs"() {
     init_readonly2();
     init_optional2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/readonly-optional/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/readonly-optional/index.mjs
 var init_readonly_optional2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/readonly-optional/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/readonly-optional/index.mjs"() {
     init_readonly_optional();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/record/record.mjs
+// node_modules/@sinclair/typebox/build/esm/type/record/record.mjs
 function RecordCreateFromPattern(pattern, T, options) {
   return CreateType({ [Kind]: "Record", type: "object", patternProperties: { [pattern]: T } }, options);
 }
@@ -5811,7 +5811,7 @@ function RecordValue2(type) {
   return type.patternProperties[RecordPattern(type)];
 }
 var init_record = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/record/record.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/record/record.mjs"() {
     init_type2();
     init_symbols2();
     init_never2();
@@ -5827,14 +5827,14 @@ var init_record = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/record/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/record/index.mjs
 var init_record2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/record/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/record/index.mjs"() {
     init_record();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/instantiate/instantiate.mjs
+// node_modules/@sinclair/typebox/build/esm/type/instantiate/instantiate.mjs
 function FromConstructor5(args, type) {
   type.parameters = FromTypes(args, type.parameters);
   type.returns = FromType(args, type.returns);
@@ -5909,7 +5909,7 @@ function Instantiate(type, args) {
   return FromType(args, CloneType(type));
 }
 var init_instantiate = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/instantiate/instantiate.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/instantiate/instantiate.mjs"() {
     init_type4();
     init_unknown2();
     init_readonly_optional2();
@@ -5922,32 +5922,32 @@ var init_instantiate = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/instantiate/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/instantiate/index.mjs
 var init_instantiate2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/instantiate/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/instantiate/index.mjs"() {
     init_instantiate();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/integer/integer.mjs
+// node_modules/@sinclair/typebox/build/esm/type/integer/integer.mjs
 function Integer(options) {
   return CreateType({ [Kind]: "Integer", type: "integer" }, options);
 }
 var init_integer = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/integer/integer.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/integer/integer.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/integer/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/integer/index.mjs
 var init_integer2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/integer/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/integer/index.mjs"() {
     init_integer();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic-from-mapped-key.mjs
+// node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic-from-mapped-key.mjs
 function MappedIntrinsicPropertyKey(K, M, options) {
   return {
     [K]: Intrinsic(Literal(K), M, Clone(options))
@@ -5967,7 +5967,7 @@ function IntrinsicFromMappedKey(T, M, options) {
   return MappedResult(P);
 }
 var init_intrinsic_from_mapped_key = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic-from-mapped-key.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic-from-mapped-key.mjs"() {
     init_mapped2();
     init_intrinsic();
     init_literal2();
@@ -5975,7 +5975,7 @@ var init_intrinsic_from_mapped_key = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic.mjs
+// node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic.mjs
 function ApplyUncapitalize(value) {
   const [first, rest] = [value.slice(0, 1), value.slice(1)];
   return [first.toLowerCase(), rest].join("");
@@ -6020,7 +6020,7 @@ function Intrinsic(schema, mode, options = {}) {
   );
 }
 var init_intrinsic = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic.mjs"() {
     init_type2();
     init_template_literal2();
     init_intrinsic_from_mapped_key();
@@ -6030,49 +6030,49 @@ var init_intrinsic = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intrinsic/capitalize.mjs
+// node_modules/@sinclair/typebox/build/esm/type/intrinsic/capitalize.mjs
 function Capitalize(T, options = {}) {
   return Intrinsic(T, "Capitalize", options);
 }
 var init_capitalize = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intrinsic/capitalize.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/capitalize.mjs"() {
     init_intrinsic();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intrinsic/lowercase.mjs
+// node_modules/@sinclair/typebox/build/esm/type/intrinsic/lowercase.mjs
 function Lowercase(T, options = {}) {
   return Intrinsic(T, "Lowercase", options);
 }
 var init_lowercase = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intrinsic/lowercase.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/lowercase.mjs"() {
     init_intrinsic();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intrinsic/uncapitalize.mjs
+// node_modules/@sinclair/typebox/build/esm/type/intrinsic/uncapitalize.mjs
 function Uncapitalize(T, options = {}) {
   return Intrinsic(T, "Uncapitalize", options);
 }
 var init_uncapitalize = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intrinsic/uncapitalize.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/uncapitalize.mjs"() {
     init_intrinsic();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intrinsic/uppercase.mjs
+// node_modules/@sinclair/typebox/build/esm/type/intrinsic/uppercase.mjs
 function Uppercase(T, options = {}) {
   return Intrinsic(T, "Uppercase", options);
 }
 var init_uppercase = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intrinsic/uppercase.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/uppercase.mjs"() {
     init_intrinsic();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intrinsic/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/intrinsic/index.mjs
 var init_intrinsic2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/intrinsic/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/index.mjs"() {
     init_capitalize();
     init_intrinsic_from_mapped_key();
     init_intrinsic();
@@ -6082,7 +6082,7 @@ var init_intrinsic2 = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-result.mjs
+// node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-result.mjs
 function FromProperties12(properties, propertyKeys, options) {
   const result = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(properties))
@@ -6097,14 +6097,14 @@ function OmitFromMappedResult(mappedResult, propertyKeys, options) {
   return MappedResult(properties);
 }
 var init_omit_from_mapped_result = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-result.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-result.mjs"() {
     init_mapped2();
     init_omit();
     init_value2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/omit/omit.mjs
+// node_modules/@sinclair/typebox/build/esm/type/omit/omit.mjs
 function FromIntersect11(types, propertyKeys) {
   return types.map((type) => OmitResolve(type, propertyKeys));
 }
@@ -6138,7 +6138,7 @@ function Omit(type, key, options) {
   return IsMappedResult(type) ? OmitFromMappedResult(type, propertyKeys, options) : IsMappedKey(key) ? OmitFromMappedKey(type, key, options) : isTypeRef && isKeyRef ? Computed("Omit", [type, typeKey], options) : !isTypeRef && isKeyRef ? Computed("Omit", [type, typeKey], options) : isTypeRef && !isKeyRef ? Computed("Omit", [type, typeKey], options) : CreateType({ ...OmitResolve(type, propertyKeys), ...options });
 }
 var init_omit = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/omit/omit.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/omit/omit.mjs"() {
     init_type2();
     init_discard();
     init_symbols();
@@ -6155,7 +6155,7 @@ var init_omit = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-key.mjs
+// node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-key.mjs
 function FromPropertyKey2(type, key, options) {
   return { [key]: Omit(type, [key], Clone(options)) };
 }
@@ -6172,23 +6172,23 @@ function OmitFromMappedKey(type, mappedKey, options) {
   return MappedResult(properties);
 }
 var init_omit_from_mapped_key = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-key.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-key.mjs"() {
     init_mapped2();
     init_omit();
     init_value2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/omit/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/omit/index.mjs
 var init_omit2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/omit/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/omit/index.mjs"() {
     init_omit_from_mapped_key();
     init_omit_from_mapped_result();
     init_omit();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-result.mjs
+// node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-result.mjs
 function FromProperties14(properties, propertyKeys, options) {
   const result = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(properties))
@@ -6203,14 +6203,14 @@ function PickFromMappedResult(mappedResult, propertyKeys, options) {
   return MappedResult(properties);
 }
 var init_pick_from_mapped_result = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-result.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-result.mjs"() {
     init_mapped2();
     init_pick();
     init_value2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/pick/pick.mjs
+// node_modules/@sinclair/typebox/build/esm/type/pick/pick.mjs
 function FromIntersect12(types, propertyKeys) {
   return types.map((type) => PickResolve(type, propertyKeys));
 }
@@ -6244,7 +6244,7 @@ function Pick(type, key, options) {
   return IsMappedResult(type) ? PickFromMappedResult(type, propertyKeys, options) : IsMappedKey(key) ? PickFromMappedKey(type, key, options) : isTypeRef && isKeyRef ? Computed("Pick", [type, typeKey], options) : !isTypeRef && isKeyRef ? Computed("Pick", [type, typeKey], options) : isTypeRef && !isKeyRef ? Computed("Pick", [type, typeKey], options) : CreateType({ ...PickResolve(type, propertyKeys), ...options });
 }
 var init_pick = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/pick/pick.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/pick/pick.mjs"() {
     init_type2();
     init_discard();
     init_computed2();
@@ -6261,7 +6261,7 @@ var init_pick = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-key.mjs
+// node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-key.mjs
 function FromPropertyKey3(type, key, options) {
   return {
     [key]: Pick(type, [key], Clone(options))
@@ -6280,23 +6280,23 @@ function PickFromMappedKey(type, mappedKey, options) {
   return MappedResult(properties);
 }
 var init_pick_from_mapped_key = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-key.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-key.mjs"() {
     init_mapped2();
     init_pick();
     init_value2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/pick/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/pick/index.mjs
 var init_pick2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/pick/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/pick/index.mjs"() {
     init_pick_from_mapped_key();
     init_pick_from_mapped_result();
     init_pick();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/partial/partial.mjs
+// node_modules/@sinclair/typebox/build/esm/type/partial/partial.mjs
 function FromComputed3(target, parameters) {
   return Computed("Partial", [Computed(target, parameters)]);
 }
@@ -6337,7 +6337,7 @@ function Partial(type, options) {
   }
 }
 var init_partial = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/partial/partial.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/partial/partial.mjs"() {
     init_type2();
     init_computed2();
     init_optional2();
@@ -6352,7 +6352,7 @@ var init_partial = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/partial/partial-from-mapped-result.mjs
+// node_modules/@sinclair/typebox/build/esm/type/partial/partial-from-mapped-result.mjs
 function FromProperties17(K, options) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(K))
@@ -6367,22 +6367,22 @@ function PartialFromMappedResult(R, options) {
   return MappedResult(P);
 }
 var init_partial_from_mapped_result = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/partial/partial-from-mapped-result.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/partial/partial-from-mapped-result.mjs"() {
     init_mapped2();
     init_partial();
     init_value2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/partial/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/partial/index.mjs
 var init_partial2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/partial/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/partial/index.mjs"() {
     init_partial_from_mapped_result();
     init_partial();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/required/required.mjs
+// node_modules/@sinclair/typebox/build/esm/type/required/required.mjs
 function FromComputed4(target, parameters) {
   return Computed("Required", [Computed(target, parameters)]);
 }
@@ -6423,7 +6423,7 @@ function Required(type, options) {
   }
 }
 var init_required = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/required/required.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/required/required.mjs"() {
     init_type2();
     init_computed2();
     init_object2();
@@ -6437,7 +6437,7 @@ var init_required = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/required/required-from-mapped-result.mjs
+// node_modules/@sinclair/typebox/build/esm/type/required/required-from-mapped-result.mjs
 function FromProperties19(P, options) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(P))
@@ -6452,21 +6452,21 @@ function RequiredFromMappedResult(R, options) {
   return MappedResult(P);
 }
 var init_required_from_mapped_result = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/required/required-from-mapped-result.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/required/required-from-mapped-result.mjs"() {
     init_mapped2();
     init_required();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/required/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/required/index.mjs
 var init_required2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/required/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/required/index.mjs"() {
     init_required_from_mapped_result();
     init_required();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/module/compute.mjs
+// node_modules/@sinclair/typebox/build/esm/type/module/compute.mjs
 function DereferenceParameters(moduleProperties, types) {
   return types.map((type) => {
     return IsRef(type) ? Dereference(moduleProperties, type.$ref) : FromType2(moduleProperties, type);
@@ -6562,7 +6562,7 @@ function ComputeModuleProperties(moduleProperties) {
   }, {});
 }
 var init_compute = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/module/compute.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/module/compute.mjs"() {
     init_create();
     init_clone();
     init_discard2();
@@ -6589,13 +6589,13 @@ var init_compute = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/module/module.mjs
+// node_modules/@sinclair/typebox/build/esm/type/module/module.mjs
 function Module(properties) {
   return new TModule(properties);
 }
 var TModule;
 var init_module = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/module/module.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/module/module.mjs"() {
     init_create();
     init_symbols2();
     init_compute();
@@ -6620,51 +6620,51 @@ var init_module = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/module/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/module/index.mjs
 var init_module2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/module/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/module/index.mjs"() {
     init_module();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/not/not.mjs
+// node_modules/@sinclair/typebox/build/esm/type/not/not.mjs
 function Not2(type, options) {
   return CreateType({ [Kind]: "Not", not: type }, options);
 }
 var init_not = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/not/not.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/not/not.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/not/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/not/index.mjs
 var init_not2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/not/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/not/index.mjs"() {
     init_not();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/parameters/parameters.mjs
+// node_modules/@sinclair/typebox/build/esm/type/parameters/parameters.mjs
 function Parameters(schema, options) {
   return IsFunction3(schema) ? Tuple(schema.parameters, options) : Never();
 }
 var init_parameters = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/parameters/parameters.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/parameters/parameters.mjs"() {
     init_tuple2();
     init_never2();
     init_kind();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/parameters/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/parameters/index.mjs
 var init_parameters2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/parameters/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/parameters/index.mjs"() {
     init_parameters();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/recursive/recursive.mjs
+// node_modules/@sinclair/typebox/build/esm/type/recursive/recursive.mjs
 function Recursive(callback, options = {}) {
   if (IsUndefined2(options.$id))
     options.$id = `T${Ordinal++}`;
@@ -6674,7 +6674,7 @@ function Recursive(callback, options = {}) {
 }
 var Ordinal;
 var init_recursive = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/recursive/recursive.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/recursive/recursive.mjs"() {
     init_type4();
     init_type2();
     init_value();
@@ -6683,34 +6683,34 @@ var init_recursive = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/recursive/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/recursive/index.mjs
 var init_recursive2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/recursive/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/recursive/index.mjs"() {
     init_recursive();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/regexp/regexp.mjs
+// node_modules/@sinclair/typebox/build/esm/type/regexp/regexp.mjs
 function RegExp2(unresolved, options) {
   const expr = IsString2(unresolved) ? new globalThis.RegExp(unresolved) : unresolved;
   return CreateType({ [Kind]: "RegExp", type: "RegExp", source: expr.source, flags: expr.flags }, options);
 }
 var init_regexp = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/regexp/regexp.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/regexp/regexp.mjs"() {
     init_type2();
     init_value();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/regexp/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/regexp/index.mjs
 var init_regexp2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/regexp/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/regexp/index.mjs"() {
     init_regexp();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/rest/rest.mjs
+// node_modules/@sinclair/typebox/build/esm/type/rest/rest.mjs
 function RestResolve(T) {
   return IsIntersect(T) ? T.allOf : IsUnion(T) ? T.anyOf : IsTuple(T) ? T.items ?? [] : [];
 }
@@ -6718,77 +6718,77 @@ function Rest(T) {
   return RestResolve(T);
 }
 var init_rest = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/rest/rest.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/rest/rest.mjs"() {
     init_kind();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/rest/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/rest/index.mjs
 var init_rest2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/rest/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/rest/index.mjs"() {
     init_rest();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/return-type/return-type.mjs
+// node_modules/@sinclair/typebox/build/esm/type/return-type/return-type.mjs
 function ReturnType(schema, options) {
   return IsFunction3(schema) ? CreateType(schema.returns, options) : Never(options);
 }
 var init_return_type = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/return-type/return-type.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/return-type/return-type.mjs"() {
     init_type2();
     init_never2();
     init_kind();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/return-type/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/return-type/index.mjs
 var init_return_type2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/return-type/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/return-type/index.mjs"() {
     init_return_type();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/schema/anyschema.mjs
+// node_modules/@sinclair/typebox/build/esm/type/schema/anyschema.mjs
 var init_anyschema = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/schema/anyschema.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/schema/anyschema.mjs"() {
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/schema/schema.mjs
+// node_modules/@sinclair/typebox/build/esm/type/schema/schema.mjs
 var init_schema = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/schema/schema.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/schema/schema.mjs"() {
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/schema/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/schema/index.mjs
 var init_schema2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/schema/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/schema/index.mjs"() {
     init_anyschema();
     init_schema();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/static/static.mjs
+// node_modules/@sinclair/typebox/build/esm/type/static/static.mjs
 var init_static = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/static/static.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/static/static.mjs"() {
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/static/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/static/index.mjs
 var init_static2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/static/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/static/index.mjs"() {
     init_static();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/transform/transform.mjs
+// node_modules/@sinclair/typebox/build/esm/type/transform/transform.mjs
 function Transform(schema) {
   return new TransformDecodeBuilder(schema);
 }
 var TransformDecodeBuilder, TransformEncodeBuilder;
 var init_transform2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/transform/transform.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/transform/transform.mjs"() {
     init_symbols2();
     init_kind();
     TransformDecodeBuilder = class {
@@ -6821,32 +6821,32 @@ var init_transform2 = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/transform/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/transform/index.mjs
 var init_transform3 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/transform/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/transform/index.mjs"() {
     init_transform2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/void/void.mjs
+// node_modules/@sinclair/typebox/build/esm/type/void/void.mjs
 function Void(options) {
   return CreateType({ [Kind]: "Void", type: "void" }, options);
 }
 var init_void = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/void/void.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/void/void.mjs"() {
     init_type2();
     init_symbols2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/void/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/void/index.mjs
 var init_void2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/void/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/void/index.mjs"() {
     init_void();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/type/type.mjs
+// node_modules/@sinclair/typebox/build/esm/type/type/type.mjs
 var type_exports3 = {};
 __export(type_exports3, {
   Any: () => Any,
@@ -6913,7 +6913,7 @@ __export(type_exports3, {
   Void: () => Void
 });
 var init_type5 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/type/type.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/type/type.mjs"() {
     init_any2();
     init_argument2();
     init_array2();
@@ -6976,18 +6976,18 @@ var init_type5 = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/type/index.mjs
+// node_modules/@sinclair/typebox/build/esm/type/type/index.mjs
 var Type;
 var init_type6 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/type/type/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/type/type/index.mjs"() {
     init_type5();
     Type = type_exports3;
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/index.mjs
+// node_modules/@sinclair/typebox/build/esm/index.mjs
 var init_esm = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/index.mjs"() {
     init_clone();
     init_create();
     init_error2();
@@ -7062,7 +7062,7 @@ var init_esm = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/assert/assert.mjs
+// node_modules/@sinclair/typebox/build/esm/value/assert/assert.mjs
 function AssertValue(schema, references, value) {
   if (Check(schema, references, value))
     return;
@@ -7073,7 +7073,7 @@ function Assert(...args) {
 }
 var __classPrivateFieldSet, __classPrivateFieldGet, _AssertError_instances, _AssertError_iterator, _AssertError_Iterator, AssertError;
 var init_assert = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/assert/assert.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/assert/assert.mjs"() {
     init_errors2();
     init_error();
     init_check();
@@ -7110,14 +7110,14 @@ var init_assert = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/assert/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/assert/index.mjs
 var init_assert2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/assert/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/assert/index.mjs"() {
     init_assert();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/clone/clone.mjs
+// node_modules/@sinclair/typebox/build/esm/value/clone/clone.mjs
 function FromObject13(value) {
   const Acc = {};
   for (const key of Object.getOwnPropertyNames(value)) {
@@ -7164,19 +7164,19 @@ function Clone2(value) {
   throw new Error("ValueClone: Unable to clone value");
 }
 var init_clone2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/clone/clone.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/clone/clone.mjs"() {
     init_guard2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/clone/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/clone/index.mjs
 var init_clone3 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/clone/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/clone/index.mjs"() {
     init_clone2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/create/create.mjs
+// node_modules/@sinclair/typebox/build/esm/value/create/create.mjs
 function FromDefault(value) {
   return IsFunction(value) ? value() : Clone2(value);
 }
@@ -7565,7 +7565,7 @@ function Create2(...args) {
 }
 var ValueCreateError, recursiveMaxDepth, recursiveDepth;
 var init_create2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/create/create.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/create/create.mjs"() {
     init_guard2();
     init_check2();
     init_clone3();
@@ -7586,14 +7586,14 @@ var init_create2 = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/create/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/create/index.mjs
 var init_create3 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/create/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/create/index.mjs"() {
     init_create2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/cast/cast.mjs
+// node_modules/@sinclair/typebox/build/esm/value/cast/cast.mjs
 function ScoreUnion(schema, references, value) {
   if (schema[Kind] === "Object" && typeof value === "object" && !IsNull(value)) {
     const object = schema;
@@ -7792,7 +7792,7 @@ function Cast(...args) {
 }
 var ValueCastError;
 var init_cast = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/cast/cast.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/cast/cast.mjs"() {
     init_guard2();
     init_error2();
     init_symbols2();
@@ -7809,14 +7809,14 @@ var init_cast = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/cast/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/cast/index.mjs
 var init_cast2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/cast/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/cast/index.mjs"() {
     init_cast();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/clean/clean.mjs
+// node_modules/@sinclair/typebox/build/esm/value/clean/clean.mjs
 function IsCheckable(schema) {
   return IsKind(schema) && schema[Kind] !== "Unsafe";
 }
@@ -7938,7 +7938,7 @@ function Clean(...args) {
   return args.length === 3 ? Visit12(args[0], args[1], args[2]) : Visit12(args[0], [], args[1]);
 }
 var init_clean = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/clean/clean.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/clean/clean.mjs"() {
     init_keyof2();
     init_check2();
     init_clone3();
@@ -7949,14 +7949,14 @@ var init_clean = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/clean/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/clean/index.mjs
 var init_clean2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/clean/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/clean/index.mjs"() {
     init_clean();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/convert/convert.mjs
+// node_modules/@sinclair/typebox/build/esm/value/convert/convert.mjs
 function IsStringNumeric(value) {
   return IsString(value) && !isNaN(value) && !isNaN(parseFloat(value));
 }
@@ -8168,7 +8168,7 @@ function Convert(...args) {
   return args.length === 3 ? Visit13(args[0], args[1], args[2]) : Visit13(args[0], [], args[1]);
 }
 var init_convert = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/convert/convert.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/convert/convert.mjs"() {
     init_clone3();
     init_check2();
     init_deref2();
@@ -8177,14 +8177,14 @@ var init_convert = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/convert/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/convert/index.mjs
 var init_convert2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/convert/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/convert/index.mjs"() {
     init_convert();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/decode/decode.mjs
+// node_modules/@sinclair/typebox/build/esm/value/decode/decode.mjs
 function Decode(...args) {
   const [schema, references, value] = args.length === 3 ? [args[0], args[1], args[2]] : [args[0], [], args[1]];
   if (!Check(schema, references, value))
@@ -8192,21 +8192,21 @@ function Decode(...args) {
   return HasTransform(schema, references) ? TransformDecode(schema, references, value) : value;
 }
 var init_decode2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/decode/decode.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/decode/decode.mjs"() {
     init_transform();
     init_check2();
     init_errors2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/decode/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/decode/index.mjs
 var init_decode3 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/decode/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/decode/index.mjs"() {
     init_decode2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/default/default.mjs
+// node_modules/@sinclair/typebox/build/esm/value/default/default.mjs
 function ValueOrDefault(schema, value) {
   const defaultValue = HasPropertyKey(schema, "default") ? schema.default : void 0;
   const clone = IsFunction(defaultValue) ? defaultValue() : Clone2(defaultValue);
@@ -8345,7 +8345,7 @@ function Default5(...args) {
   return args.length === 3 ? Visit14(args[0], args[1], args[2]) : Visit14(args[0], [], args[1]);
 }
 var init_default = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/default/default.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/default/default.mjs"() {
     init_check2();
     init_clone3();
     init_deref2();
@@ -8355,14 +8355,14 @@ var init_default = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/default/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/default/index.mjs
 var init_default2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/default/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/default/index.mjs"() {
     init_default();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/pointer/pointer.mjs
+// node_modules/@sinclair/typebox/build/esm/value/pointer/pointer.mjs
 var pointer_exports = {};
 __export(pointer_exports, {
   Delete: () => Delete3,
@@ -8453,7 +8453,7 @@ function Get3(value, pointer) {
 }
 var ValuePointerRootSetError, ValuePointerRootDeleteError;
 var init_pointer = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/pointer/pointer.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/pointer/pointer.mjs"() {
     init_error2();
     ValuePointerRootSetError = class extends TypeBoxError {
       constructor(value, path3, update) {
@@ -8473,14 +8473,14 @@ var init_pointer = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/pointer/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/pointer/index.mjs
 var init_pointer2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/pointer/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/pointer/index.mjs"() {
     init_pointer();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/equal/equal.mjs
+// node_modules/@sinclair/typebox/build/esm/value/equal/equal.mjs
 function ObjectType3(left, right) {
   if (!IsObject(right))
     return false;
@@ -8520,12 +8520,12 @@ function Equal(left, right) {
   throw new Error("ValueEquals: Unable to compare value");
 }
 var init_equal = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/equal/equal.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/equal/equal.mjs"() {
     init_guard2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/delta/delta.mjs
+// node_modules/@sinclair/typebox/build/esm/value/delta/delta.mjs
 function CreateUpdate(path3, value) {
   return { type: "update", path: path3, value };
 }
@@ -8641,7 +8641,7 @@ function Patch(current, edits) {
 }
 var Insert, Update, Delete4, Edit, ValueDiffError;
 var init_delta = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/delta/delta.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/delta/delta.mjs"() {
     init_guard2();
     init_pointer2();
     init_clone3();
@@ -8676,14 +8676,14 @@ var init_delta = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/delta/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/delta/index.mjs
 var init_delta2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/delta/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/delta/index.mjs"() {
     init_delta();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/encode/encode.mjs
+// node_modules/@sinclair/typebox/build/esm/value/encode/encode.mjs
 function Encode(...args) {
   const [schema, references, value] = args.length === 3 ? [args[0], args[1], args[2]] : [args[0], [], args[1]];
   const encoded = HasTransform(schema, references) ? TransformEncode(schema, references, value) : value;
@@ -8692,28 +8692,28 @@ function Encode(...args) {
   return encoded;
 }
 var init_encode2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/encode/encode.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/encode/encode.mjs"() {
     init_transform();
     init_check2();
     init_errors2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/encode/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/encode/index.mjs
 var init_encode3 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/encode/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/encode/index.mjs"() {
     init_encode2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/equal/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/equal/index.mjs
 var init_equal2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/equal/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/equal/index.mjs"() {
     init_equal();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/mutate/mutate.mjs
+// node_modules/@sinclair/typebox/build/esm/value/mutate/mutate.mjs
 function IsStandardObject2(value) {
   return IsObject(value) && !IsArray(value);
 }
@@ -8787,7 +8787,7 @@ function Mutate(current, next) {
 }
 var ValueMutateError;
 var init_mutate = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/mutate/mutate.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/mutate/mutate.mjs"() {
     init_guard2();
     init_pointer2();
     init_clone3();
@@ -8800,14 +8800,14 @@ var init_mutate = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/mutate/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/mutate/index.mjs
 var init_mutate2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/mutate/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/mutate/index.mjs"() {
     init_mutate();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/parse/parse.mjs
+// node_modules/@sinclair/typebox/build/esm/value/parse/parse.mjs
 function ParseValue(operations, type, references, value) {
   return operations.reduce((value2, operationKey) => {
     const operation = ParseRegistry.Get(operationKey);
@@ -8824,7 +8824,7 @@ function Parse(...args) {
 }
 var ParseError, ParseRegistry, ParseDefault;
 var init_parse2 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/parse/parse.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/parse/parse.mjs"() {
     init_error2();
     init_transform();
     init_assert2();
@@ -8877,14 +8877,14 @@ var init_parse2 = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/parse/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/parse/index.mjs
 var init_parse3 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/parse/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/parse/index.mjs"() {
     init_parse2();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/value/value.mjs
+// node_modules/@sinclair/typebox/build/esm/value/value/value.mjs
 var value_exports2 = {};
 __export(value_exports2, {
   Assert: () => Assert,
@@ -8908,7 +8908,7 @@ __export(value_exports2, {
   ValueErrorIterator: () => ValueErrorIterator
 });
 var init_value3 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/value/value.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/value/value.mjs"() {
     init_errors2();
     init_assert2();
     init_cast2();
@@ -8928,16 +8928,16 @@ var init_value3 = __esm({
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/value/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/value/index.mjs
 var init_value4 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/value/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/value/index.mjs"() {
     init_value3();
   }
 });
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/index.mjs
+// node_modules/@sinclair/typebox/build/esm/value/index.mjs
 var init_value5 = __esm({
-  "../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/value/index.mjs"() {
+  "node_modules/@sinclair/typebox/build/esm/value/index.mjs"() {
     init_guard2();
     init_assert2();
     init_cast2();
@@ -19649,7 +19649,7 @@ init_agent_registry();
 init_slack();
 import { Router } from "express";
 
-// ../widgetdc-orchestrator/node_modules/@sinclair/typebox/build/esm/compiler/compiler.mjs
+// node_modules/@sinclair/typebox/build/esm/compiler/compiler.mjs
 init_transform();
 init_errors2();
 init_system2();
@@ -26738,6 +26738,52 @@ async function hydrateCronJobs() {
     logger.warn({ err: String(err) }, "Failed to hydrate cron jobs");
   }
 }
+function isJobOverdue(job) {
+  if (!job.last_run) return true;
+  const lastRunMs = new Date(job.last_run).getTime();
+  if (Number.isNaN(lastRunMs)) return true;
+  const ageMs = Date.now() - lastRunMs;
+  const parts = job.schedule.trim().split(/\s+/);
+  if (parts.length < 5) return false;
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
+  if (minute.includes("/") || hour.includes("/")) return false;
+  const HOUR = 60 * 60 * 1e3;
+  const DAY = 24 * HOUR;
+  if (minute !== "*" && hour !== "*" && dayOfMonth === "*" && month === "*" && dayOfWeek === "*") {
+    return ageMs > 25 * HOUR;
+  }
+  if (minute !== "*" && hour !== "*" && dayOfMonth === "*" && month === "*" && dayOfWeek !== "*") {
+    return ageMs > 7 * DAY + HOUR;
+  }
+  if (minute !== "*" && hour !== "*" && dayOfMonth !== "*" && month === "*" && dayOfWeek === "*") {
+    return ageMs > 31 * DAY + HOUR;
+  }
+  return false;
+}
+async function bootKickstartOverdueJobs() {
+  const overdue = [];
+  for (const job of jobs.values()) {
+    if (!job.enabled) continue;
+    if (isJobOverdue(job)) overdue.push(job);
+  }
+  if (overdue.length === 0) {
+    logger.info("Cron boot-kickstart: no overdue jobs detected");
+    return;
+  }
+  logger.info(
+    { count: overdue.length, ids: overdue.map((j) => j.id) },
+    "Cron boot-kickstart: firing overdue jobs sequentially"
+  );
+  for (const job of overdue) {
+    try {
+      logger.info({ id: job.id, schedule: job.schedule, last_run: job.last_run ?? "never" }, "Cron boot-kickstart: firing overdue job");
+      await runCronJob(job.id);
+    } catch (err) {
+      logger.warn({ id: job.id, err: String(err) }, "Cron boot-kickstart: job failed (continuing)");
+    }
+  }
+  logger.info({ count: overdue.length }, "Cron boot-kickstart: complete");
+}
 function buildKnowledgeBriefing(feed) {
   const date = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
   let newToday = 0;
@@ -33303,6 +33349,9 @@ async function boot() {
   await hydrateMessages();
   await hydrateCronJobs();
   registerDefaultLoops();
+  bootKickstartOverdueJobs().catch((err) => {
+    logger.warn({ err: String(err) }, "Cron boot-kickstart encountered error");
+  });
   initOpenClaw();
   initWebSocket(server);
   server.listen(config.port, () => {

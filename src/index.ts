@@ -57,7 +57,7 @@ import { getConnectionStats } from './chat-broadcaster.js'
 import { requireApiKey } from './auth.js'
 import { isSlackEnabled } from './slack.js'
 import { isRlmAvailable } from './cognitive-proxy.js'
-import { hydrateCronJobs, registerDefaultLoops, listCronJobs } from './cron-scheduler.js'
+import { hydrateCronJobs, registerDefaultLoops, listCronJobs, bootKickstartOverdueJobs } from './cron-scheduler.js'
 import { listExecutions } from './chain-engine.js'
 import { listPlans, type FSMState } from './state-machine.js'
 import { runHarvestPipeline, runFullHarvest } from './harvest-pipeline.js'
@@ -388,6 +388,11 @@ async function boot() {
   await hydrateMessages()
   await hydrateCronJobs()
   registerDefaultLoops()
+  // S1.2 (6-edges handlingsplan): fire any overdue absolute-hour jobs at boot.
+  // Non-blocking — server continues starting even if individual jobs fail.
+  bootKickstartOverdueJobs().catch(err => {
+    logger.warn({ err: String(err) }, 'Cron boot-kickstart encountered error')
+  })
   initOpenClaw()
   initWebSocket(server)
 

@@ -623,6 +623,102 @@ export async function hydrateCronJobs(): Promise<void> {
 }
 
 /**
+ * S1.2 (6-edges handlingsplan) — Cron boot-kickstart.
+ *
+ * Root cause: node-cron only fires a job when wall clock matches the cron
+ * expression. Absolute-hour jobs like "0 3 * * *" only fire if the service is
+ * running at exactly 03:00:00 on a given day. In practice orchestrator restarts
+ * frequently (Railway auto-deploys, crashes, manual deploys), so uptime rarely
+ * spans a specific target hour and these jobs can go weeks without a run. The
+ * documented symptom on 2026-04-06 was 20 absolute-hour jobs with 0 runs vs 10
+ * interval jobs firing normally.
+ *
+ * Fix: at boot, detect "overdue" jobs (their expected run time has passed since
+ * `last_run`) and fire them once sequentially. Normal node-cron scheduling then
+ * takes over for future runs. This is a belt-and-braces approach — it does not
+ * replace cron scheduling, it only catches the missed-at-boot gap.
+ *
+ * Overdue detection uses a pattern-based heuristic over common cron expressions
+ * rather than a full cron-parser dependency (which we don't ship). Pattern set
+ * covers: interval jobs (never overdue — node-cron handles them), daily/weekly
+ * /monthly absolute-hour jobs (overdue if age > period + 1h tolerance), and
+ * previously-never-run jobs (always overdue on first boot).
+ */
+function isJobOverdue(job: CronJob): boolean {
+  // Never run → always overdue (covers first-boot and Redis-hydrate-from-fresh cases).
+  if (!job.last_run) return true
+  const lastRunMs = new Date(job.last_run).getTime()
+  if (Number.isNaN(lastRunMs)) return true
+
+  const ageMs = Date.now() - lastRunMs
+  const parts = job.schedule.trim().split(/\s+/)
+  if (parts.length < 5) return false
+
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts
+
+  // Interval-based schedules (*/N in minute or hour position) — node-cron fires
+  // these regardless of boot time, so they are never overdue by the boot-kickstart
+  // definition. If they appear stale it's a service outage issue, not a cron bug.
+  if (minute.includes('/') || hour.includes('/')) return false
+
+  const HOUR = 60 * 60 * 1000
+  const DAY = 24 * HOUR
+
+  // Daily absolute: "M H * * *" — fires once per day at H:M. Overdue if we have
+  // not run in the past 25 hours (daily period + 1h tolerance for clock skew).
+  if (minute !== '*' && hour !== '*' && dayOfMonth === '*' && month === '*' && dayOfWeek === '*') {
+    return ageMs > 25 * HOUR
+  }
+
+  // Weekly absolute: "M H * * D" — fires once per week at H:M on day D.
+  if (minute !== '*' && hour !== '*' && dayOfMonth === '*' && month === '*' && dayOfWeek !== '*') {
+    return ageMs > 7 * DAY + HOUR
+  }
+
+  // Monthly absolute: "M H D * *" — fires once per month at H:M on day D.
+  if (minute !== '*' && hour !== '*' && dayOfMonth !== '*' && month === '*' && dayOfWeek === '*') {
+    return ageMs > 31 * DAY + HOUR
+  }
+
+  // Every-minute or every-hour wildcards handled by node-cron normally.
+  return false
+}
+
+/**
+ * S1.2 (6-edges handlingsplan) — Fire any overdue jobs once at boot, sequentially
+ * to avoid thundering herd during startup. Call AFTER hydrateCronJobs() and
+ * registerDefaultLoops() so all jobs are visible.
+ */
+export async function bootKickstartOverdueJobs(): Promise<void> {
+  const overdue: CronJob[] = []
+  for (const job of jobs.values()) {
+    if (!job.enabled) continue
+    if (isJobOverdue(job)) overdue.push(job)
+  }
+
+  if (overdue.length === 0) {
+    logger.info('Cron boot-kickstart: no overdue jobs detected')
+    return
+  }
+
+  logger.info(
+    { count: overdue.length, ids: overdue.map(j => j.id) },
+    'Cron boot-kickstart: firing overdue jobs sequentially',
+  )
+
+  for (const job of overdue) {
+    try {
+      logger.info({ id: job.id, schedule: job.schedule, last_run: job.last_run ?? 'never' }, 'Cron boot-kickstart: firing overdue job')
+      await runCronJob(job.id)
+    } catch (err) {
+      logger.warn({ id: job.id, err: String(err) }, 'Cron boot-kickstart: job failed (continuing)')
+    }
+  }
+
+  logger.info({ count: overdue.length }, 'Cron boot-kickstart: complete')
+}
+
+/**
  * G2.8: Build a condensed briefing string (max ~500 chars) from the full feed.
  * This is stored in Redis and served via GET /api/knowledge/briefing for
  * injection into Open WebUI system prompts.
