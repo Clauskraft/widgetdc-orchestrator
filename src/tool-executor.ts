@@ -592,7 +592,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'linear_issues': {
       const status = (args.status as string) ?? 'active'
-      const limit = (args.limit as number) ?? 10
+      const limit = clampMaxResults(args.limit)
       const query = args.query as string ?? ''
 
       // Use linear.issues MCP tool (backend has LINEAR_API_KEY)
@@ -1087,7 +1087,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
         const result = await matchPrecedents({
           objective: String(args.objective ?? ''),
           domain: String(args.domain ?? ''),
-          max_results: typeof args.max_results === 'number' ? args.max_results : undefined,
+          max_results: args.max_results !== undefined ? clampMaxResults(args.max_results) : undefined,
         })
         if (result.matches.length === 0) {
           return `No precedents found for "${String(args.objective).slice(0, 60)}" in ${args.domain} (${result.query_ms}ms)`

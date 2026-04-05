@@ -15,7 +15,7 @@
  */
 import './tracing.js'  // OTel must be first (LIN-589)
 import 'dotenv/config'
-import rateLimit from 'express-rate-limit'
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit'
 
 // S1+S6: Build-time version injection (esbuild define)
 declare const __PKG_VERSION__: string
@@ -88,6 +88,8 @@ import { abiVersioningRouter } from './routes/abi-versioning.js'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 const app = express()
+// v4.0.10: trust Railway edge proxy so req.ip reflects real client (enables correct IPv6 fallback in rate limiter)
+app.set('trust proxy', 1)
 const server = createServer(app)
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
@@ -133,16 +135,41 @@ app.use(express.json({ limit: '100kb' }))
 app.use(express.urlencoded({ extended: false }))
 
 // AEGIS fix: payload-too-large handler — return 413 instead of crashing to 500
-app.use((err: Error & { type?: string; status?: number }, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+// v4.0.10: log 413/400 events for SIEM/probing detection
+app.use((err: Error & { type?: string; status?: number }, req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (err.type === 'entity.too.large' || err.status === 413) {
+    logger.warn({ ip: req.ip, path: req.path, method: req.method }, 'Payload too large (413)')
     res.status(413).json({ success: false, error: { code: 'PAYLOAD_TOO_LARGE', message: 'Request body exceeds 100kb limit', status_code: 413 } })
     return
   }
   if (err.type === 'entity.parse.failed') {
+    logger.warn({ ip: req.ip, path: req.path, method: req.method }, 'Invalid JSON body (400)')
     res.status(400).json({ success: false, error: { code: 'INVALID_JSON', message: 'Request body is not valid JSON', status_code: 400 } })
     return
   }
   next(err)
+})
+
+// v4.0.10: shared rate limiter for all expensive/write routes — prevents valid-key DoS / cost runaway
+// Keyed per API key (not IP), so same key across IPs shares one budget.
+// Falls back to ipKeyGenerator (IPv6-safe /64 normalization) only when no API key present.
+const apiRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120, // 120 req/min per API key (2/sec avg, burst-friendly)
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req, res) => {
+    const auth = req.headers.authorization ?? ''
+    const headerKey = req.headers['x-api-key']
+    const queryKey = req.query.api_key
+    const apiKey =
+      (typeof headerKey === 'string' ? headerKey : Array.isArray(headerKey) ? headerKey[0] : '') ||
+      (typeof queryKey === 'string' ? queryKey : Array.isArray(queryKey) ? queryKey[0] : '') ||
+      auth.replace(/^Bearer\s+/i, '')
+    return apiKey || ipKeyGenerator(req.ip ?? '', 64)
+  },
+  message: { success: false, error: { code: 'RATE_LIMITED', message: 'Too many requests — max 120/min per API key', status_code: 429 } },
+  skip: (req) => req.method === 'GET', // Only limit writes; GETs (lists, health, dashboard) are free
 })
 
 // F4: IP deny list — block known scanner ranges (env: IP_DENY_LIST, comma-separated CIDRs or IPs)
@@ -191,10 +218,10 @@ app.use(auditMiddleware)
 // ─── Routes ──────────────────────────────────────────────────────────────────
 // Auth required for mutating endpoints (if ORCHESTRATOR_API_KEY is set)
 app.use('/agents', requireApiKey, agentsRouter)
-app.use('/tools', requireApiKey, toolsRouter)
+app.use('/tools', requireApiKey, apiRateLimiter, toolsRouter)
 app.use('/chat', requireApiKey, chatRouter)
-app.use('/chains', requireApiKey, chainsRouter)
-app.use('/cognitive', requireApiKey, cognitiveRouter)
+app.use('/chains', requireApiKey, apiRateLimiter, chainsRouter)
+app.use('/cognitive', requireApiKey, apiRateLimiter, cognitiveRouter)
 app.use('/cron', requireApiKey, cronRouter)
 
 // Dashboard data API + OpenClaw proxy + Audit log + LLM + SSE
@@ -206,7 +233,7 @@ app.use('/api/adoption', requireApiKey, adoptionRouter)
 app.use('/api/artifacts', requireApiKey, artifactRouter)
 app.use('/api/notebooks', requireApiKey, notebookRouter)
 app.use('/api/drill', requireApiKey, drillRouter)
-app.use('/api/llm', requireApiKey, llmRouter)
+app.use('/api/llm', requireApiKey, apiRateLimiter, llmRouter)
 app.use('/api/assembly', requireApiKey, assemblyRouter)
 app.use('/api/loose-ends', requireApiKey, looseEndsRouter)
 app.use('/api/decisions', requireApiKey, decisionsRouter)
@@ -214,17 +241,17 @@ app.use('/monitor', requireApiKey, monitorRouter)
 app.use('/api/s1-s4', requireApiKey, s1s4Router)
 
 // LIN-567: Red Queen Failure Harvester
-app.use('/api/failures', requireApiKey, failuresRouter)
+app.use('/api/failures', requireApiKey, apiRateLimiter, failuresRouter)
 // LIN-566: Competitive Phagocytosis MVP
-app.use('/api/competitive', requireApiKey, competitiveRouter)
+app.use('/api/competitive', requireApiKey, apiRateLimiter, competitiveRouter)
 // LIN-568: CaaS Mercury Folding API
-app.use('/api/fold', requireApiKey, foldRouter)
+app.use('/api/fold', requireApiKey, apiRateLimiter, foldRouter)
 // LIN-574: Knowledge Graph Hygiene
 app.use('/api/graph-hygiene', requireApiKey, graphHygieneRouter)
 app.use('/api/deliverables', requireApiKey, deliverablesRouter)
 app.use('/api/similarity', requireApiKey, similarityRouter)
 app.use('/api/engagements', requireApiKey, engagementsRouter)
-app.use('/api/intelligence', requireApiKey, intelligenceRouter)
+app.use('/api/intelligence', requireApiKey, apiRateLimiter, intelligenceRouter)
 app.use('/api/governance', requireApiKey, governanceRouter)
 // LIN-480: OSINT Scanning Pipeline
 app.use('/api/osint', requireApiKey, osintRouter)
@@ -240,22 +267,8 @@ app.use('/api/abi', requireApiKey, abiHealthRouter)
 app.use('/api/abi', requireApiKey, abiVersioningRouter)
 
 // Tool Gateway — REST access to ALL orchestrator tools (Triple-Protocol ABI)
-// AEGIS fix: rate limiter on /api/tools/* — prevent valid-key DoS / cost runaway
-const toolsRateLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 120, // 120 req/min per API key (2/sec average, allows burst)
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => {
-    // Use API key as rate limit key (not IP — same key from different IPs = same budget)
-    const auth = req.headers.authorization ?? ''
-    const apiKey = req.headers['x-api-key'] as string ?? (req.query.api_key as string) ?? auth.replace(/^Bearer\s+/i, '')
-    return apiKey || (req.ip ?? 'unknown')
-  },
-  message: { success: false, error: { code: 'RATE_LIMITED', message: 'Too many tool calls — max 120/min per API key', status_code: 429 } },
-  skip: (req) => req.method === 'GET', // Only limit writes (POST); GET /api/tools list is fine
-})
-app.use('/api/tools', requireApiKey, toolsRateLimiter, toolGatewayRouter)
+// v4.0.10: uses shared apiRateLimiter (same budget shared across /tools, /chains, /api/tools, /mcp, etc.)
+app.use('/api/tools', requireApiKey, apiRateLimiter, toolGatewayRouter)
 
 // Prompt Generator (no auth — utility endpoint)
 app.use('/api/prompt-generator', promptGeneratorRouter)
@@ -264,7 +277,8 @@ app.use('/api/prompt-generator', promptGeneratorRouter)
 app.use(openapiRouter)
 
 // MCP Streamable HTTP gateway (auth required)
-app.use('/mcp', requireApiKey, mcpGatewayRouter)
+// v4.0.10: closed MCP bypass — /mcp exposes the same tools as /api/tools and must share its budget
+app.use('/mcp', requireApiKey, apiRateLimiter, mcpGatewayRouter)
 
 // OpenAI-compatible API (for Open WebUI)
 app.use(openaiCompatRouter)

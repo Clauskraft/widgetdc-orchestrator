@@ -18328,7 +18328,7 @@ ${result.merged_context}`;
     }
     case "linear_issues": {
       const status = args.status ?? "active";
-      const limit = args.limit ?? 10;
+      const limit = clampMaxResults(args.limit);
       const query = args.query ?? "";
       const payload = { limit };
       if (query) payload.query = query;
@@ -18830,7 +18830,7 @@ ${tools.map((t) => `- ${t.name} (${t.handler_type}, ${t.verified ? "verified" : 
         const result = await matchPrecedents2({
           objective: String(args.objective ?? ""),
           domain: String(args.domain ?? ""),
-          max_results: typeof args.max_results === "number" ? args.max_results : void 0
+          max_results: args.max_results !== void 0 ? clampMaxResults(args.max_results) : void 0
         });
         if (result.matches.length === 0) {
           return `No precedents found for "${String(args.objective).slice(0, 60)}" in ${args.domain} (${result.query_ms}ms)`;
@@ -19329,7 +19329,7 @@ init_logger();
 init_chat_broadcaster();
 init_redis();
 import "dotenv/config";
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -32664,6 +32664,7 @@ abiVersioningRouter.get("/changelog", (_req, res) => {
 // src/index.ts
 var __dirname2 = path2.dirname(fileURLToPath2(import.meta.url));
 var app = express();
+app.set("trust proxy", 1);
 var server = createServer(app);
 app.use(helmet({
   contentSecurityPolicy: false,
@@ -32705,16 +32706,35 @@ app.use(cors({
 }));
 app.use(express.json({ limit: "100kb" }));
 app.use(express.urlencoded({ extended: false }));
-app.use((err, _req, res, next) => {
+app.use((err, req, res, next) => {
   if (err.type === "entity.too.large" || err.status === 413) {
+    logger.warn({ ip: req.ip, path: req.path, method: req.method }, "Payload too large (413)");
     res.status(413).json({ success: false, error: { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds 100kb limit", status_code: 413 } });
     return;
   }
   if (err.type === "entity.parse.failed") {
+    logger.warn({ ip: req.ip, path: req.path, method: req.method }, "Invalid JSON body (400)");
     res.status(400).json({ success: false, error: { code: "INVALID_JSON", message: "Request body is not valid JSON", status_code: 400 } });
     return;
   }
   next(err);
+});
+var apiRateLimiter = rateLimit({
+  windowMs: 60 * 1e3,
+  max: 120,
+  // 120 req/min per API key (2/sec avg, burst-friendly)
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req, res) => {
+    const auth = req.headers.authorization ?? "";
+    const headerKey = req.headers["x-api-key"];
+    const queryKey = req.query.api_key;
+    const apiKey = (typeof headerKey === "string" ? headerKey : Array.isArray(headerKey) ? headerKey[0] : "") || (typeof queryKey === "string" ? queryKey : Array.isArray(queryKey) ? queryKey[0] : "") || auth.replace(/^Bearer\s+/i, "");
+    return apiKey || ipKeyGenerator(req.ip ?? "", 64);
+  },
+  message: { success: false, error: { code: "RATE_LIMITED", message: "Too many requests \u2014 max 120/min per API key", status_code: 429 } },
+  skip: (req) => req.method === "GET"
+  // Only limit writes; GETs (lists, health, dashboard) are free
 });
 var ipDenyRaw = process.env.IP_DENY_LIST ?? "";
 var ipDenyList = ipDenyRaw.split(",").map((s) => s.trim()).filter(Boolean);
@@ -32752,10 +32772,10 @@ app.use(express.static(path2.join(__dirname2, "public"), {
 }));
 app.use(auditMiddleware);
 app.use("/agents", requireApiKey, agentsRouter);
-app.use("/tools", requireApiKey, toolsRouter);
+app.use("/tools", requireApiKey, apiRateLimiter, toolsRouter);
 app.use("/chat", requireApiKey, chatRouter);
-app.use("/chains", requireApiKey, chainsRouter);
-app.use("/cognitive", requireApiKey, cognitiveRouter);
+app.use("/chains", requireApiKey, apiRateLimiter, chainsRouter);
+app.use("/cognitive", requireApiKey, apiRateLimiter, cognitiveRouter);
 app.use("/cron", requireApiKey, cronRouter);
 app.use("/api/dashboard", dashboardRouter);
 app.use("/api/openclaw", requireApiKey, openclawRouter);
@@ -32765,20 +32785,20 @@ app.use("/api/adoption", requireApiKey, adoptionRouter);
 app.use("/api/artifacts", requireApiKey, artifactRouter);
 app.use("/api/notebooks", requireApiKey, notebookRouter);
 app.use("/api/drill", requireApiKey, drillRouter);
-app.use("/api/llm", requireApiKey, llmRouter);
+app.use("/api/llm", requireApiKey, apiRateLimiter, llmRouter);
 app.use("/api/assembly", requireApiKey, assemblyRouter);
 app.use("/api/loose-ends", requireApiKey, looseEndsRouter);
 app.use("/api/decisions", requireApiKey, decisionsRouter);
 app.use("/monitor", requireApiKey, monitorRouter);
 app.use("/api/s1-s4", requireApiKey, s1s4Router);
-app.use("/api/failures", requireApiKey, failuresRouter);
-app.use("/api/competitive", requireApiKey, competitiveRouter);
-app.use("/api/fold", requireApiKey, foldRouter);
+app.use("/api/failures", requireApiKey, apiRateLimiter, failuresRouter);
+app.use("/api/competitive", requireApiKey, apiRateLimiter, competitiveRouter);
+app.use("/api/fold", requireApiKey, apiRateLimiter, foldRouter);
 app.use("/api/graph-hygiene", requireApiKey, graphHygieneRouter);
 app.use("/api/deliverables", requireApiKey, deliverablesRouter);
 app.use("/api/similarity", requireApiKey, similarityRouter);
 app.use("/api/engagements", requireApiKey, engagementsRouter);
-app.use("/api/intelligence", requireApiKey, intelligenceRouter);
+app.use("/api/intelligence", requireApiKey, apiRateLimiter, intelligenceRouter);
 app.use("/api/governance", requireApiKey, governanceRouter);
 app.use("/api/osint", requireApiKey, osintRouter);
 app.use("/api/evolution", requireApiKey, evolutionRouter);
@@ -32786,26 +32806,10 @@ app.use("/api/memory", requireApiKey, memoryRouter);
 app.use("/api/abi", requireApiKey, abiDocsRouter);
 app.use("/api/abi", requireApiKey, abiHealthRouter);
 app.use("/api/abi", requireApiKey, abiVersioningRouter);
-var toolsRateLimiter = rateLimit({
-  windowMs: 60 * 1e3,
-  // 1 minute
-  max: 120,
-  // 120 req/min per API key (2/sec average, allows burst)
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => {
-    const auth = req.headers.authorization ?? "";
-    const apiKey = req.headers["x-api-key"] ?? req.query.api_key ?? auth.replace(/^Bearer\s+/i, "");
-    return apiKey || (req.ip ?? "unknown");
-  },
-  message: { success: false, error: { code: "RATE_LIMITED", message: "Too many tool calls \u2014 max 120/min per API key", status_code: 429 } },
-  skip: (req) => req.method === "GET"
-  // Only limit writes (POST); GET /api/tools list is fine
-});
-app.use("/api/tools", requireApiKey, toolsRateLimiter, toolGatewayRouter);
+app.use("/api/tools", requireApiKey, apiRateLimiter, toolGatewayRouter);
 app.use("/api/prompt-generator", promptGeneratorRouter);
 app.use(openapiRouter);
-app.use("/mcp", requireApiKey, mcpGatewayRouter);
+app.use("/mcp", requireApiKey, apiRateLimiter, mcpGatewayRouter);
 app.use(openaiCompatRouter);
 app.get("/api/plans", requireApiKey, async (_req, res) => {
   try {
@@ -32836,7 +32840,7 @@ app.get("/health", (_req, res) => {
   res.json({
     status: "healthy",
     service: "widgetdc-orchestrator",
-    version: true ? "4.0.9" : "0.0.0",
+    version: true ? "4.0.10" : "0.0.0",
     uptime_seconds: Math.floor(process.uptime()),
     agents_registered: AgentRegistry.all().length,
     ws_connections: getConnectionStats().total,
