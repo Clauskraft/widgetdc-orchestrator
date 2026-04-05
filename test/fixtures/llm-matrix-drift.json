@@ -1,0 +1,14 @@
+{
+  "providers": {
+    "deepseek": { "base_url": "https://api.deepseek.com/v1", "openai_compatible": true },
+    "openai": { "base_url": "https://api.openai.com/v1", "openai_compatible": true },
+    "fake_provider_for_drift_test": { "base_url": "https://nowhere.invalid", "openai_compatible": false }
+  },
+  "models": {
+    "deepseek-chat": { "provider": "deepseek", "context_window": 64000 },
+    "gpt-4o": { "provider": "openai", "context_window": 42 }
+  },
+  "tasks": {
+    "chat_standard": { "model_chain": ["gpt-4o", "deepseek-chat", "something-new-upstream"] }
+  }
+}

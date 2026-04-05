@@ -9,6 +9,8 @@ on:
       - 'test/**'
       - 'docs/TOOLS.md'
       - 'scripts/ci-adoption-check.mjs'
+      - 'scripts/check-matrix-drift.mjs'
+      - 'dist/llm-matrix.json'
       - 'package.json'
       - 'build.mjs'
   push:
@@ -48,7 +50,7 @@ jobs:
         working-directory: widgetdc-orchestrator
         run: npm ci
 
-      - name: Run adoption gate (5 checks)
+      - name: Run adoption gate (6 checks incl. LIN-625 matrix drift)
         working-directory: widgetdc-orchestrator
         run: npm run test:ci
 
@@ -56,4 +58,5 @@ jobs:
         if: failure()
         run: |
           echo "::error::Adoption gate failed. See ci-adoption-check.mjs output above."
-          echo "::error::Fix: ensure all tools have registry + executor + test + docs"
+          echo "::error::Fix: ensure all tools have registry + executor + test + docs,"
+          echo "::error::and bundled dist/llm-matrix.json matches @widgetdc/contracts/llm (run: npm run build)"
