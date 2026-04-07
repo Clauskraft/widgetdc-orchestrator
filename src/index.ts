@@ -85,6 +85,7 @@ import { memoryRouter } from './routes/memory.js'
 import { abiDocsRouter } from './routes/abi-docs.js'
 import { abiHealthRouter } from './routes/abi-health.js'
 import { abiVersioningRouter } from './routes/abi-versioning.js'
+import { hyperagentRouter } from './routes/hyperagent.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -268,6 +269,9 @@ app.use('/api/abi', requireApiKey, abiHealthRouter)
 // LIN-573: ABI Tool-Level Versioning + Deprecation
 app.use('/api/abi', requireApiKey, abiVersioningRouter)
 
+// HyperAgent: plan-based execution with approval gate & KPI persistence (LIN-626/627/628)
+app.use('/api/hyperagent', requireApiKey, apiRateLimiter, hyperagentRouter)
+
 // Tool Gateway — REST access to ALL orchestrator tools (Triple-Protocol ABI)
 // v4.0.10: uses shared apiRateLimiter (same budget shared across /tools, /chains, /api/tools, /mcp, etc.)
 app.use('/api/tools', requireApiKey, apiRateLimiter, toolGatewayRouter)
@@ -278,9 +282,10 @@ app.use('/api/prompt-generator', promptGeneratorRouter)
 // OpenAPI spec + Swagger UI (no auth — discovery endpoint)
 app.use(openapiRouter)
 
-// MCP Streamable HTTP gateway (auth required)
-// v4.0.10: closed MCP bypass — /mcp exposes the same tools as /api/tools and must share its budget
-app.use('/mcp', requireApiKey, apiRateLimiter, mcpGatewayRouter)
+// MCP Streamable HTTP gateway — auth handled inside gateway via query param + Bearer
+// v4.1.5: external MCP clients (Qwen, Open WebUI) can't reliably send custom headers
+// on SSE GET + JSON-RPC POST. Auth moved into mcp-gateway.ts to support api_key query param.
+app.use('/mcp', apiRateLimiter, mcpGatewayRouter)
 
 // OpenAI-compatible API (for Open WebUI)
 app.use(openaiCompatRouter)
