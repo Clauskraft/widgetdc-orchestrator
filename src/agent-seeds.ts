@@ -237,6 +237,34 @@ export const AGENT_SEEDS: AgentHandshakeData[] = [
     capabilities: ['data_analysis', 'reporting', 'visualization'],
     allowed_tool_namespaces: ['analyst', 'report', '*'],
   },
+
+  // ─── HyperAgent Autonomous Executor ────────────────────────────────────
+  // Maintained ONLY in widgetdc-orchestrator. Callable from ALL repos via MCP.
+  // Drives 72-target registry through graduated autonomy phases with
+  // persistent cross-repo memory (Redis + Neo4j Lesson nodes).
+  {
+    agent_id: 'hyperagent-auto',
+    display_name: 'HyperAgent Autonomous Executor',
+    source: 'core',
+    version: '1.0',
+    status: 'online',
+    capabilities: [
+      'autonomous_execution',
+      'target_prioritization',
+      'fitness_evolution',
+      'issue_discovery',
+      'phase_management',
+      'rlm_reasoning',
+      'rag_rewards',
+      'context_folding',
+      'cross_repo_memory',
+      'persistent_lessons',
+    ],
+    allowed_tool_namespaces: [
+      'hyperagent', 'autonomous', 'graph', 'knowledge',
+      'intelligence', 'rlm', 'chains', 'memory', '*',
+    ],
+  },
 ]
 
 /**

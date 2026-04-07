@@ -583,6 +583,19 @@ export async function runAutonomousCycle(
       await redis.expire('hyperagent:autonomous-status', 86400)
     }
 
+    // Persist cross-repo memory: edges, fitness, weights, last cycle summary
+    await persistCrossRepoMemory('edges', 'latest', edgesAfter, 'orchestrator')
+    await persistCrossRepoMemory('fitness', 'weights', edgeWeights, 'orchestrator')
+    await persistCrossRepoMemory('fitness', 'score', { score: fitnessAfter, delta: fitnessDelta, cycle: cycleId }, 'orchestrator')
+    await persistCrossRepoMemory('cycles', `last:${cycleId}`, {
+      cycleId, phase: effectivePhase,
+      completed: targetsCompleted, failed: targetsFailed,
+      discovered: newIssues.length, fitnessDelta,
+    }, 'orchestrator')
+    if (newIssues.length > 0) {
+      await persistCrossRepoMemory('discoveries', cycleId, newIssues, 'orchestrator')
+    }
+
     return result
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err)
@@ -664,4 +677,126 @@ export function setPhase(phase: AutonomousPhase): void {
   const prev = currentPhase
   currentPhase = phase
   stream('phase_set', { from: prev, to: phase, reason: 'admin override' })
+}
+
+// ─── Persistent Cross-Repo Memory ──────────────────────────────────────────
+// Keys: hyperagent:memory:{domain}:{key}
+// Also persisted to Neo4j as :HyperAgentMemory nodes for graph queries.
+// Designed for cross-repo access: any repo can read/write via MCP tool.
+
+const MEMORY_PREFIX = 'hyperagent:memory'
+const MEMORY_TTL = 86400 * 30 // 30 days
+
+/**
+ * Persist a cross-repo memory entry to Redis + Neo4j.
+ * Called by MCP tool executor when any repo writes memory.
+ */
+export async function persistCrossRepoMemory(
+  domain: string,
+  key: string,
+  value: unknown,
+  callerRepo?: string,
+): Promise<void> {
+  const redis = getRedis()
+  const entry = {
+    domain,
+    key,
+    value,
+    caller_repo: callerRepo ?? 'orchestrator',
+    stored_at: new Date().toISOString(),
+    agent_id: 'hyperagent-auto',
+  }
+
+  // Redis persistence (primary — fast reads)
+  if (redis) {
+    await redis.set(
+      `${MEMORY_PREFIX}:${domain}:${key}`,
+      JSON.stringify(entry),
+      'EX',
+      MEMORY_TTL,
+    )
+    // Index for domain listing
+    await redis.sadd(`${MEMORY_PREFIX}:domains`, domain)
+    await redis.sadd(`${MEMORY_PREFIX}:${domain}:keys`, key)
+  }
+
+  // Neo4j persistence (secondary — graph queries, survives Redis eviction)
+  try {
+    await callMcpTool({
+      toolName: 'graph.write_cypher',
+      args: {
+        query: `MERGE (m:HyperAgentMemory {domain: $domain, key: $key})
+                SET m.value = $value, m.caller_repo = $callerRepo,
+                    m.agent_id = 'hyperagent-auto', m.updated_at = datetime()
+                WITH m
+                MERGE (a:Agent {id: 'hyperagent-auto'})
+                MERGE (a)-[:HAS_MEMORY]->(m)`,
+        params: {
+          domain,
+          key,
+          value: typeof value === 'string' ? value : JSON.stringify(value),
+          callerRepo: callerRepo ?? 'orchestrator',
+        },
+      },
+      callId: `hyp-mem-write-${Date.now()}`,
+    })
+  } catch {
+    logger.debug('HyperAgent-Auto: Neo4j memory persistence failed (Redis is primary)')
+  }
+}
+
+/**
+ * Read cross-repo memory. Falls back from Redis → Neo4j.
+ */
+export async function readCrossRepoMemory(
+  domain: string,
+  key?: string,
+): Promise<unknown> {
+  const redis = getRedis()
+
+  // Single key read
+  if (key) {
+    if (redis) {
+      const raw = await redis.get(`${MEMORY_PREFIX}:${domain}:${key}`)
+      if (raw) return JSON.parse(raw)
+    }
+
+    // Fallback to Neo4j
+    try {
+      const result = await callMcpTool({
+        toolName: 'graph.read_cypher',
+        args: {
+          query: `MATCH (m:HyperAgentMemory {domain: $domain, key: $key})
+                  RETURN m.value AS value, m.caller_repo AS caller_repo, m.updated_at AS updated_at`,
+          params: { domain, key },
+        },
+        callId: `hyp-mem-read-${Date.now()}`,
+      })
+      return result
+    } catch {
+      return null
+    }
+  }
+
+  // All keys in domain
+  if (redis) {
+    const keys = await redis.smembers(`${MEMORY_PREFIX}:${domain}:keys`)
+    const entries: unknown[] = []
+    for (const k of keys) {
+      const raw = await redis.get(`${MEMORY_PREFIX}:${domain}:${k}`)
+      if (raw) entries.push(JSON.parse(raw))
+    }
+    return entries
+  }
+
+  return []
+}
+
+/**
+ * List all memory domains.
+ */
+export async function listCrossRepoMemory(): Promise<string[]> {
+  const redis = getRedis()
+  if (!redis) return []
+  return redis.smembers(`${MEMORY_PREFIX}:domains`)
 }

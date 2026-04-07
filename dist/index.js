@@ -12710,6 +12710,56 @@ var init_tool_registry = __esm({
         }),
         timeoutMs: 18e4,
         outputDescription: "Execution ID for tracking the 4-step chain"
+      }),
+      // ─── HyperAgent Autonomous Executor (cross-repo callable) ──────────────
+      defineTool({
+        name: "hyperagent_auto_run",
+        namespace: "hyperagent",
+        description: "Trigger an autonomous execution cycle. Prioritizes targets by fitness function, plans via RLM, executes via chain engine, evaluates, discovers issues, and evolves weights. Callable from ANY repo via MCP. Persistent memory ensures continuity across sessions and repos.",
+        input: z.object({
+          phase: z.enum(["phase_0", "phase_1", "phase_2", "phase_3"]).optional().describe("Override phase (default: current)"),
+          max_targets: z.number().optional().describe("Max targets per cycle (default: phase-dependent batch size)"),
+          caller_repo: z.string().optional().describe("Calling repo identifier for cross-repo memory tracking")
+        }),
+        timeoutMs: 3e5,
+        outputDescription: "Cycle result: targets attempted/completed/failed, fitness delta, discovered issues"
+      }),
+      defineTool({
+        name: "hyperagent_auto_status",
+        namespace: "hyperagent",
+        description: "Get current autonomous executor status \u2014 phase, fitness score, edge scores, running state, cycle count, last cycle results. Callable from ANY repo via MCP.",
+        input: z.object({
+          include_history: z.boolean().optional().describe("Include last N cycle results (default: false)"),
+          history_limit: z.number().optional().describe("Number of historical cycles to include (default: 5)")
+        }),
+        timeoutMs: 1e4,
+        outputDescription: "Status object with phase, fitness, edges, running state, and optional history"
+      }),
+      defineTool({
+        name: "hyperagent_auto_memory",
+        namespace: "hyperagent",
+        description: "Read/write persistent cross-repo memory for the autonomous executor. Stores lessons, discoveries, and execution context in Redis + Neo4j. Memory is keyed by domain and persists across sessions, repos, and restarts.",
+        input: z.object({
+          action: z.enum(["read", "write", "list"]).describe("Memory operation"),
+          domain: z.string().optional().describe('Memory domain (e.g. "lessons", "discoveries", "fitness", "edges")'),
+          key: z.string().optional().describe("Specific memory key (for read/write)"),
+          value: z.unknown().optional().describe("Value to store (for write)"),
+          caller_repo: z.string().optional().describe("Calling repo for provenance tracking")
+        }),
+        timeoutMs: 15e3,
+        outputDescription: "Memory entries or confirmation of write"
+      }),
+      defineTool({
+        name: "hyperagent_auto_issues",
+        namespace: "hyperagent",
+        description: "List all issues discovered during autonomous execution cycles. Issues are accumulated across all cycles and repos. Useful for cross-repo coordination and backlog grooming.",
+        input: z.object({
+          limit: z.number().optional().describe("Max issues to return (default: 50)"),
+          since_cycle: z.string().optional().describe("Only issues discovered after this cycle ID"),
+          caller_repo: z.string().optional().describe("Calling repo identifier")
+        }),
+        timeoutMs: 1e4,
+        outputDescription: "Array of discovered issues with cycle context and timestamps"
       })
     ];
   }
@@ -18252,15 +18302,1055 @@ var init_drill = __esm({
   }
 });
 
-// src/tool-executor.ts
+// src/hyperagent.ts
 import { v4 as uuid20 } from "uuid";
+import * as crypto from "crypto";
+function selectChainMode(steps, goal) {
+  const hasDependencies = steps.some(
+    (s) => s.prompt?.includes("{{prev}}") || JSON.stringify(s.arguments ?? {}).includes("{{prev}}")
+  );
+  if (hasDependencies) return "sequential";
+  const allReads = steps.every((s) => s.tool_name && !WRITE_TOOLS.includes(s.tool_name));
+  const multiSource = steps.length >= 3 && new Set(steps.map((s) => s.tool_name)).size >= 2;
+  if (allReads && multiSource) return "parallel";
+  const debateKeywords = /\b(compar|debate|versus|vs\.|pros.*cons|tradeoff|evaluate.*alternatives)\b/i;
+  if (debateKeywords.test(goal) && steps.length >= 2) return "debate";
+  const loopKeywords = /\b(iterat|refin|optimi[zs]|converg|improv.*until|repeat)\b/i;
+  if (loopKeywords.test(goal)) return "loop";
+  if (steps.length >= 5) return "funnel";
+  return steps.length >= 3 ? "adaptive" : "sequential";
+}
+function getSessionCircuit(sessionId) {
+  let c = sessionCircuits.get(sessionId);
+  if (!c) {
+    c = { consecutiveFailures: 0, circuitOpenUntil: 0, downgradedToReadOnly: false };
+    sessionCircuits.set(sessionId, c);
+  }
+  return c;
+}
+function recordSessionSuccess(sessionId) {
+  const c = getSessionCircuit(sessionId);
+  if (c.consecutiveFailures > 0) {
+    logger.info({ sessionId, previous_failures: c.consecutiveFailures }, "HyperAgent: session circuit CLOSED \u2014 recovered");
+  }
+  c.consecutiveFailures = 0;
+  c.circuitOpenUntil = 0;
+  c.downgradedToReadOnly = false;
+}
+function recordSessionFailure(sessionId) {
+  const c = getSessionCircuit(sessionId);
+  c.consecutiveFailures++;
+  if (c.consecutiveFailures >= SESSION_CIRCUIT_HARD_LIMIT && c.circuitOpenUntil === 0) {
+    const backoffMultiplier = Math.min(8, Math.pow(2, c.consecutiveFailures - SESSION_CIRCUIT_HARD_LIMIT));
+    const cooldownMs = SESSION_CIRCUIT_BASE_COOLDOWN_MS * backoffMultiplier;
+    c.circuitOpenUntil = Date.now() + cooldownMs;
+    logger.warn({ sessionId, failures: c.consecutiveFailures, cooldownMs }, "HyperAgent: session circuit OPEN \u2014 exponential backoff");
+  } else if (c.consecutiveFailures >= SESSION_CIRCUIT_THRESHOLD && !c.downgradedToReadOnly) {
+    c.downgradedToReadOnly = true;
+    logger.warn({ sessionId, failures: c.consecutiveFailures }, "HyperAgent: auto-downgraded session to read_only after 3 failures");
+  }
+}
+function isSessionCircuitOpen(sessionId) {
+  const c = getSessionCircuit(sessionId);
+  if (c.circuitOpenUntil === 0) return false;
+  if (Date.now() >= c.circuitOpenUntil) {
+    c.circuitOpenUntil = 0;
+    c.consecutiveFailures = 0;
+    c.downgradedToReadOnly = false;
+    logger.info({ sessionId }, "HyperAgent: session circuit auto-reset after cooldown");
+    return false;
+  }
+  return true;
+}
+function persistPlan(plan) {
+  plans.set(plan.planId, plan);
+  const redis2 = getRedis();
+  if (redis2) {
+    redis2.hset("orchestrator:hyperplans", plan.planId, JSON.stringify(plan)).catch(() => {
+    });
+    redis2.expire("orchestrator:hyperplans", 86400).catch(() => {
+    });
+  }
+}
+function getPlan2(planId) {
+  return plans.get(planId);
+}
+function listHyperPlans() {
+  return Array.from(plans.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 50);
+}
+async function createPlan(goal, sessionId, profileId = "read_only") {
+  if (isSessionCircuitOpen(sessionId)) {
+    throw new Error(`Session ${sessionId} circuit breaker OPEN \u2014 too many consecutive failures. Auto-resets in \u226460s.`);
+  }
+  const circuit = getSessionCircuit(sessionId);
+  const effectiveProfileId = circuit.downgradedToReadOnly ? "read_only" : profileId;
+  if (circuit.downgradedToReadOnly && profileId !== "read_only") {
+    logger.info({ sessionId, requested: profileId }, "HyperAgent: auto-downgraded to read_only due to consecutive failures");
+  }
+  const profile = POLICY_PROFILES[effectiveProfileId] ?? POLICY_PROFILES.read_only;
+  const planId = `hyp-${uuid20().slice(0, 12)}`;
+  let steps = [];
+  try {
+    const cogResult = await callCognitive("plan", {
+      prompt: goal,
+      context: { sessionId, profile: profile.id, maxSteps: profile.maxSteps },
+      agent_id: "hyperagent"
+    });
+    const rawSteps = cogResult?.execution_steps;
+    if (Array.isArray(rawSteps)) {
+      steps = rawSteps.slice(0, profile.maxSteps).map((s, i) => {
+        if (typeof s === "object" && s !== null) {
+          const step = s;
+          return {
+            id: `step-${i}`,
+            agent_id: String(step.agent_id ?? "qwen"),
+            tool_name: typeof step.tool === "string" ? step.tool : void 0,
+            cognitive_action: typeof step.cognitive_action === "string" ? step.cognitive_action : void 0,
+            arguments: typeof step.arguments === "object" ? step.arguments : void 0,
+            prompt: typeof step.prompt === "string" ? step.prompt : void 0
+          };
+        }
+        return {
+          id: `step-${i}`,
+          agent_id: "qwen",
+          cognitive_action: "analyze",
+          prompt: String(s)
+        };
+      });
+    }
+  } catch (err) {
+    if (profile.rejectOnCognitiveFailure) {
+      throw new Error(`Cognitive proxy failed and profile "${profile.id}" requires plan decomposition. Cannot create plan without RLM Engine.`);
+    }
+    logger.warn({ err, goal, profile: profile.id }, "HyperAgent: cognitive plan decomposition failed, using single-step fallback");
+    steps = [{
+      id: "step-0",
+      agent_id: "qwen",
+      cognitive_action: "analyze",
+      prompt: goal
+    }];
+  }
+  steps = steps.map((s) => {
+    if (s.tool_name && profile.blockedTools.includes(s.tool_name)) {
+      logger.info({ tool: s.tool_name, profile: profile.id }, "HyperAgent: tool blocked by policy, converting to analyze");
+      return { ...s, tool_name: void 0, cognitive_action: "analyze", prompt: `[BLOCKED] Cannot execute ${s.tool_name} under ${profile.id} profile. Analyze intent instead: ${s.prompt ?? ""}` };
+    }
+    return s;
+  });
+  const chainMode = selectChainMode(steps, goal);
+  const chainDef = {
+    chain_id: planId,
+    name: `hyperagent:${planId}`,
+    description: goal,
+    mode: chainMode,
+    steps
+  };
+  const plan = {
+    planId,
+    sessionId,
+    goal,
+    profile,
+    steps,
+    chainDef,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    status: profile.requiresApproval ? "pending_approval" : "approved"
+  };
+  persistPlan(plan);
+  logger.info({ planId, goal, profile: profile.id, steps: steps.length }, "HyperAgent: plan created");
+  return plan;
+}
+async function approvePlan(planId, approvedBy) {
+  const plan = plans.get(planId);
+  if (!plan) throw new Error(`Plan ${planId} not found`);
+  if (plan.status !== "pending_approval") throw new Error(`Plan ${planId} is ${plan.status}, not pending_approval`);
+  const ttlSeconds = plan.profile.approvalTtlSeconds;
+  const approval = {
+    planId,
+    approvedBy,
+    approvedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    expiresAt: new Date(Date.now() + ttlSeconds * 1e3).toISOString(),
+    scope: plan.profile.id
+  };
+  const redis2 = getRedis();
+  if (redis2) {
+    await redis2.setex(`${APPROVAL_PREFIX}${planId}`, ttlSeconds, JSON.stringify(approval));
+  }
+  plan.status = "approved";
+  persistPlan(plan);
+  broadcastMessage({
+    from: "HyperAgent",
+    to: "All",
+    source: "orchestrator",
+    type: "Message",
+    message: `Plan ${planId} approved by ${approvedBy}`
+  });
+  logger.info({ planId, approvedBy }, "HyperAgent: plan approved");
+  return approval;
+}
+async function rejectPlan(planId, rejectedBy) {
+  const plan = plans.get(planId);
+  if (!plan) throw new Error(`Plan ${planId} not found`);
+  const redis2 = getRedis();
+  if (redis2) {
+    await redis2.del(`${APPROVAL_PREFIX}${planId}`);
+  }
+  plan.status = "failed";
+  persistPlan(plan);
+  broadcastMessage({
+    from: "HyperAgent",
+    to: "All",
+    source: "orchestrator",
+    type: "Message",
+    message: `Plan ${planId} rejected by ${rejectedBy}`
+  });
+  logger.info({ planId, rejectedBy }, "HyperAgent: plan rejected");
+}
+async function checkApproval(planId) {
+  const t0 = Date.now();
+  const redis2 = getRedis();
+  if (!redis2) {
+    const plan = plans.get(planId);
+    return plan?.status === "approved" ? {
+      planId,
+      approvedBy: "in-memory",
+      approvedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      expiresAt: new Date(Date.now() + 36e5).toISOString(),
+      scope: plan.profile.id
+    } : null;
+  }
+  const raw = await redis2.get(`${APPROVAL_PREFIX}${planId}`);
+  if (!raw) return null;
+  const approval = JSON.parse(raw);
+  if (new Date(approval.expiresAt) < /* @__PURE__ */ new Date()) {
+    await redis2.del(`${APPROVAL_PREFIX}${planId}`);
+    logger.warn({ planId, latencyMs: Date.now() - t0 }, "HyperAgent: approval expired");
+    return null;
+  }
+  logger.debug({ planId, latencyMs: Date.now() - t0 }, "HyperAgent: approval check completed");
+  return approval;
+}
+function validateWebhookSignature(body, signature) {
+  const secret = process.env.APPROVAL_WEBHOOK_SECRET;
+  if (!secret) return true;
+  if (!signature) return false;
+  const expected = crypto.createHmac("sha256", secret).update(body).digest("hex");
+  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+}
+async function executePlan(planId) {
+  const plan = plans.get(planId);
+  if (!plan) throw new Error(`Plan ${planId} not found`);
+  if (plan.profile.requiresApproval) {
+    const approval = await checkApproval(planId);
+    if (!approval) {
+      throw new Error(`Plan ${planId} requires approval (profile: ${plan.profile.id})`);
+    }
+    logger.info({ planId, approvedBy: approval.approvedBy }, "HyperAgent: approval validated");
+  }
+  plan.status = "executing";
+  persistPlan(plan);
+  try {
+    const execution = await executeChain(plan.chainDef);
+    plan.status = execution.status === "completed" ? "completed" : "failed";
+    persistPlan(plan);
+    if (execution.status === "completed") {
+      recordSessionSuccess(plan.sessionId);
+    } else {
+      recordSessionFailure(plan.sessionId);
+    }
+    persistExecutionTrace(execution, planId).catch((err) => {
+      logger.warn({ err, planId }, "HyperAgent: trace persistence failed (non-blocking)");
+    });
+    logger.info({
+      planId,
+      executionId: execution.execution_id,
+      status: execution.status,
+      duration: execution.duration_ms
+    }, "HyperAgent: plan executed");
+    return execution;
+  } catch (err) {
+    plan.status = "failed";
+    persistPlan(plan);
+    recordSessionFailure(plan.sessionId);
+    throw err;
+  }
+}
+async function persistExecutionTrace(exec, planId) {
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (t:ExecutionTrace {executionId: $executionId})
+                SET t.chainName = $chainName, t.mode = $mode,
+                    t.planId = $planId, t.status = $status,
+                    t.stepsCompleted = $stepsCompleted,
+                    t.stepsTotal = $stepsTotal,
+                    t.durationMs = $durationMs,
+                    t.completedAt = datetime()`,
+        params: {
+          executionId: exec.execution_id,
+          chainName: exec.name,
+          mode: exec.mode,
+          planId,
+          status: exec.status,
+          stepsCompleted: exec.steps_completed,
+          stepsTotal: exec.steps_total,
+          durationMs: exec.duration_ms ?? 0
+        }
+      },
+      callId: `hyp-trace-${exec.execution_id}`
+    });
+  } catch (err) {
+    logger.warn({ err, executionId: exec.execution_id }, "HyperAgent: ExecutionTrace write failed");
+  }
+}
+async function evaluatePlan(executionId, planId, score, agentId = "hyperagent") {
+  const plan = plans.get(planId);
+  const snapshot = {
+    traceId: `kpi-${executionId}`,
+    planId,
+    agentId,
+    score: Math.max(0, Math.min(100, score)),
+    outcome: plan?.status ?? "unknown",
+    stepsCompleted: plan?.steps.length ?? 0,
+    stepsTotal: plan?.steps.length ?? 0,
+    durationMs: 0
+  };
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (k:KpiSnapshot {traceId: $traceId})
+                SET k.planId = $planId, k.agentId = $agentId,
+                    k.score = $score, k.outcome = $outcome,
+                    k.stepsCompleted = $stepsCompleted,
+                    k.stepsTotal = $stepsTotal,
+                    k.durationMs = $durationMs,
+                    k.completedAt = datetime()`,
+        params: {
+          traceId: snapshot.traceId,
+          planId: snapshot.planId,
+          agentId: snapshot.agentId,
+          score: snapshot.score,
+          outcome: snapshot.outcome,
+          stepsCompleted: snapshot.stepsCompleted,
+          stepsTotal: snapshot.stepsTotal,
+          durationMs: snapshot.durationMs
+        }
+      },
+      callId: `hyp-kpi-${executionId}`
+    });
+    logger.info({ traceId: snapshot.traceId, score }, "HyperAgent: KPI snapshot persisted to Neo4j");
+  } catch (err) {
+    logger.warn({ err, traceId: snapshot.traceId }, "HyperAgent: KPI persistence failed (non-blocking)");
+  }
+  return snapshot;
+}
+function getHyperAgentHealth() {
+  const allPlans = Array.from(plans.values());
+  const circuits = Array.from(sessionCircuits.entries()).map(([sid, c]) => ({
+    sessionId: sid,
+    failures: c.consecutiveFailures,
+    circuitOpen: c.circuitOpenUntil > Date.now(),
+    downgraded: c.downgradedToReadOnly
+  })).filter((c) => c.failures > 0);
+  return {
+    total_plans: allPlans.length,
+    by_status: {
+      pending_approval: allPlans.filter((p) => p.status === "pending_approval").length,
+      approved: allPlans.filter((p) => p.status === "approved").length,
+      executing: allPlans.filter((p) => p.status === "executing").length,
+      completed: allPlans.filter((p) => p.status === "completed").length,
+      failed: allPlans.filter((p) => p.status === "failed").length
+    },
+    active_circuits: circuits
+  };
+}
+async function getKpis(windowHours = 24) {
+  try {
+    const result = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: `MATCH (k:KpiSnapshot)
+                WHERE k.completedAt > datetime() - duration({hours: $hours})
+                RETURN avg(k.score) AS avgScore,
+                       count(k) AS totalPlans,
+                       sum(CASE WHEN k.outcome = 'completed' THEN 1 ELSE 0 END) AS succeeded,
+                       sum(CASE WHEN k.outcome = 'failed' THEN 1 ELSE 0 END) AS failed`,
+        params: { hours: windowHours }
+      },
+      callId: `hyp-kpis-${Date.now()}`
+    });
+    return { source: "neo4j", window_hours: windowHours, ...result };
+  } catch {
+    const cutoff = new Date(Date.now() - windowHours * 36e5);
+    const recent = Array.from(plans.values()).filter((p) => new Date(p.createdAt) > cutoff);
+    return {
+      source: "in_memory_fallback",
+      window_hours: windowHours,
+      totalPlans: recent.length,
+      succeeded: recent.filter((p) => p.status === "completed").length,
+      failed: recent.filter((p) => p.status === "failed").length,
+      pending: recent.filter((p) => p.status === "pending_approval").length
+    };
+  }
+}
+var WRITE_TOOLS, POLICY_PROFILES, SESSION_CIRCUIT_THRESHOLD, SESSION_CIRCUIT_HARD_LIMIT, SESSION_CIRCUIT_BASE_COOLDOWN_MS, sessionCircuits, plans, APPROVAL_PREFIX;
+var init_hyperagent = __esm({
+  "src/hyperagent.ts"() {
+    "use strict";
+    init_chain_engine();
+    init_cognitive_proxy();
+    init_mcp_caller();
+    init_redis();
+    init_chat_broadcaster();
+    init_logger();
+    WRITE_TOOLS = [
+      "graph.write_cypher",
+      "graph.bulk_write",
+      "git.commit",
+      "git.push",
+      "railway.deploy",
+      "file.write",
+      "linear.create_issue",
+      "linear.update_issue"
+    ];
+    POLICY_PROFILES = {
+      read_only: {
+        id: "read_only",
+        mode: "read_only",
+        blockedTools: WRITE_TOOLS,
+        requiresApproval: false,
+        maxSteps: 25,
+        approvalTtlSeconds: 3600,
+        // 1h (irrelevant — no approval needed)
+        rejectOnCognitiveFailure: false,
+        // Safe to fallback to single-step analyze
+        allowedProviders: []
+        // DR18: all providers OK for reads
+      },
+      staged_write: {
+        id: "staged_write",
+        mode: "staged_write",
+        blockedTools: ["git.push", "railway.deploy"],
+        requiresApproval: true,
+        maxSteps: 25,
+        approvalTtlSeconds: 3600,
+        // 1h — reversible operations
+        rejectOnCognitiveFailure: false,
+        // Fallback acceptable
+        allowedProviders: ["anthropic", "openrouter"]
+        // DR18: no DeepSeek for writes
+      },
+      production_write: {
+        id: "production_write",
+        mode: "production_write",
+        blockedTools: [],
+        requiresApproval: true,
+        maxSteps: 15,
+        approvalTtlSeconds: 900,
+        // 15min — destructive operations (RLM insight)
+        rejectOnCognitiveFailure: true,
+        // MUST have proper plan decomposition
+        allowedProviders: ["anthropic"]
+        // DR18: production_write = Claude only
+      }
+    };
+    SESSION_CIRCUIT_THRESHOLD = 3;
+    SESSION_CIRCUIT_HARD_LIMIT = 5;
+    SESSION_CIRCUIT_BASE_COOLDOWN_MS = 15e3;
+    sessionCircuits = /* @__PURE__ */ new Map();
+    plans = /* @__PURE__ */ new Map();
+    APPROVAL_PREFIX = "orchestrator:approval:";
+  }
+});
+
+// src/hyperagent-autonomous.ts
+var hyperagent_autonomous_exports = {};
+__export(hyperagent_autonomous_exports, {
+  advancePhase: () => advancePhase,
+  checkPhaseGate: () => checkPhaseGate,
+  getAutonomousStatus: () => getAutonomousStatus,
+  listCrossRepoMemory: () => listCrossRepoMemory,
+  persistCrossRepoMemory: () => persistCrossRepoMemory,
+  readCrossRepoMemory: () => readCrossRepoMemory,
+  runAutonomousCycle: () => runAutonomousCycle,
+  setPhase: () => setPhase
+});
+import { v4 as uuid21 } from "uuid";
+function stream(event, data) {
+  const payload = {
+    ...data,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    phase: currentPhase,
+    cycleCount: totalCycles2
+  };
+  broadcastSSE(`hyperagent:${event}`, payload);
+  logger.info({ event, ...payload }, `HyperAgent-Auto: ${event}`);
+}
+function computePriority(target, edgeScores) {
+  const edge = edgeScores.find((e) => e.name === target.edge);
+  if (!edge) return 0;
+  const maxGap = Math.max(...edgeScores.map((e) => e.gap), 0.1);
+  const edgeGapNorm = edge.gap / maxGap;
+  return W_EDGE_GAP * edgeGapNorm + W_TARGET_GAP * target.targetGapNorm + W_DEPENDENCY * (1 / (1 + target.deps)) - W_EFFORT * target.effortNorm;
+}
+function rankTargets(targets, edgeScores) {
+  return targets.filter((t) => t.status === "open").map((t) => ({ target: t, priority: computePriority(t, edgeScores) })).sort((a, b) => b.priority - a.priority).map((x) => x.target);
+}
+async function observeEdgeScores() {
+  try {
+    const result = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: `MATCH (e:EdgeScore) RETURN e.name AS name, e.score AS score ORDER BY e.name`,
+        params: {}
+      },
+      callId: `hyp-auto-edges-${Date.now()}`
+    });
+    const rows = Array.isArray(result) ? result : [];
+    if (rows.length >= 6) {
+      return rows.map((r) => ({
+        name: String(r.name),
+        score: Number(r.score),
+        target: TARGET_EDGE_SCORE,
+        gap: TARGET_EDGE_SCORE - Number(r.score)
+      }));
+    }
+  } catch {
+    logger.debug("HyperAgent-Auto: EdgeScore nodes not found, using defaults");
+  }
+  return [
+    { name: "Husker", score: 9, target: 9.5, gap: 0.5 },
+    { name: "Laerer", score: 8.3, target: 9.5, gap: 1.2 },
+    { name: "Heler", score: 8, target: 9.5, gap: 1.5 },
+    { name: "Forklarer", score: 9, target: 9.5, gap: 0.5 },
+    { name: "Vokser", score: 8.5, target: 9.5, gap: 1 },
+    { name: "Integrerer", score: 8.5, target: 9.5, gap: 1 }
+  ];
+}
+async function loadTargetRegistry() {
+  const redis2 = getRedis();
+  if (!redis2) return [];
+  try {
+    const raw = await redis2.get("hyperagent:HYPERAGENT:target-registry-v2.2");
+    if (!raw) {
+      const raw2 = await redis2.get("hyperagent:HYPERAGENT:target-registry-v2.1");
+      if (!raw2) return [];
+      return parseRegistryToTargets(JSON.parse(raw2));
+    }
+    return parseRegistryToTargets(JSON.parse(raw));
+  } catch {
+    logger.warn("HyperAgent-Auto: failed to load target registry from Redis");
+    return [];
+  }
+}
+function parseRegistryToTargets(registry2) {
+  const targets = [];
+  const categories = registry2.categories;
+  if (!categories) return targets;
+  for (const [catKey, catVal] of Object.entries(categories)) {
+    const category = catKey.charAt(0).toUpperCase();
+    if (typeof catVal === "object" && catVal !== null) {
+      const cat = catVal;
+      const ids = cat.ids;
+      if (Array.isArray(ids)) {
+        for (const id of ids) {
+          const parts = id.split(":");
+          const targetId = parts[0] || id;
+          targets.push({
+            id: targetId,
+            category,
+            edge: inferEdge(targetId, category),
+            metric: parts.slice(1).join(":") || targetId,
+            current: "unknown",
+            goal: "target",
+            targetGapNorm: 0.8,
+            // default high gap
+            deps: 0,
+            effortNorm: 0.3,
+            // default medium effort
+            status: "open"
+          });
+        }
+      }
+    }
+  }
+  return targets;
+}
+function inferEdge(targetId, category) {
+  const edgeMap = {
+    A: "Heler",
+    B: "Husker",
+    C: "Integrerer",
+    D: "Vokser",
+    E: "Laerer",
+    F: "Laerer",
+    G: "Husker"
+  };
+  return edgeMap[category] || "Heler";
+}
+async function discoverNewIssues(executionContext) {
+  const newIssues = [];
+  try {
+    if (await isRlmAvailable()) {
+      const analysis = await callCognitive("analyze", {
+        prompt: `Analyze this execution context for any NEW issues, failures, or anomalies not yet tracked. Context: ${executionContext.slice(0, 2e3)}`,
+        agent_id: "hyperagent-discovery"
+      });
+      const result = analysis;
+      if (result?.issues && Array.isArray(result.issues)) {
+        for (const issue of result.issues) {
+          const desc = typeof issue === "string" ? issue : JSON.stringify(issue);
+          if (!discoveredIssues.includes(desc)) {
+            discoveredIssues.push(desc);
+            newIssues.push(desc);
+            stream("issue_discovered", { issue: desc });
+          }
+        }
+      }
+    }
+  } catch (err) {
+    logger.debug({ err }, "HyperAgent-Auto: issue discovery scan failed (non-blocking)");
+  }
+  return newIssues;
+}
+function computeFitness(edgeScores) {
+  let fitness = 0;
+  for (const edge of edgeScores) {
+    const w = edgeWeights[edge.name] ?? 1 / 6;
+    fitness += w * edge.score;
+  }
+  return fitness;
+}
+function adaptWeights(edgesBefore, edgesAfter) {
+  for (const after of edgesAfter) {
+    const before = edgesBefore.find((e) => e.name === after.name);
+    if (!before) continue;
+    const delta = after.score - before.score;
+    const gapFromTarget = TARGET_EDGE_SCORE - after.score;
+    edgeWeights[after.name] = Math.max(0.05, Math.min(
+      0.4,
+      (edgeWeights[after.name] ?? 1 / 6) + LEARNING_RATE * gapFromTarget * delta
+    ));
+  }
+  const sum = Object.values(edgeWeights).reduce((a, b) => a + b, 0);
+  for (const k of Object.keys(edgeWeights)) {
+    edgeWeights[k] /= sum;
+  }
+}
+async function emitReward(targetId, success, edgeDelta) {
+  try {
+    await callMcpTool({
+      toolName: "adaptive_rag_reward",
+      args: {
+        query: `target:${targetId}`,
+        reward: success ? 1 + edgeDelta : -0.5,
+        metadata: { targetId, success, edgeDelta, phase: currentPhase }
+      },
+      callId: `hyp-reward-${targetId}-${Date.now()}`
+    });
+  } catch {
+  }
+}
+async function foldContext2(text, budget = 2e3) {
+  try {
+    const result = await callMcpTool({
+      toolName: "context_fold",
+      args: { text, budget, domain: "platform-operations", query: "autonomous execution status" },
+      callId: `hyp-fold-${Date.now()}`
+    });
+    return typeof result === "string" ? result : JSON.stringify(result);
+  } catch {
+    return text.slice(0, budget * 4);
+  }
+}
+async function runAutonomousCycle(phase, maxTargets) {
+  if (isRunning2) {
+    throw new Error("Autonomous cycle already running");
+  }
+  isRunning2 = true;
+  const cycleId = `auto-${uuid21().slice(0, 8)}`;
+  const effectivePhase = phase ?? currentPhase;
+  const batchSize = maxTargets ?? CYCLE_BATCH_SIZE[effectivePhase];
+  const profileId = PHASE_POLICY[effectivePhase];
+  const startedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const t0 = Date.now();
+  stream("cycle_start", { cycleId, phase: effectivePhase, batchSize });
+  let targetsAttempted = 0;
+  let targetsCompleted = 0;
+  let targetsFailed = 0;
+  const newIssues = [];
+  const lessons = [];
+  try {
+    currentStep = "observe";
+    stream("step", { step: "observe", detail: "Reading edge scores and target registry" });
+    const edgesBefore = await observeEdgeScores();
+    currentStep = "prioritize";
+    const allTargets = await loadTargetRegistry();
+    const ranked = rankTargets(allTargets, edgesBefore);
+    const batch = ranked.slice(0, batchSize);
+    stream("step", {
+      step: "prioritize",
+      detail: `${allTargets.length} targets loaded, ${ranked.length} open, top ${batch.length} selected`,
+      topTargets: batch.map((t) => t.id)
+    });
+    currentStep = "execute";
+    for (const target of batch) {
+      currentTarget = target.id;
+      targetsAttempted++;
+      stream("target_start", { targetId: target.id, edge: target.edge, category: target.category });
+      try {
+        const chainMode = CHAIN_MODE_MATRIX[target.category] || "sequential";
+        const goal = `[AUTO-${effectivePhase}] Close target ${target.id}: ${target.metric}. Edge: ${target.edge} (gap: ${edgesBefore.find((e) => e.name === target.edge)?.gap.toFixed(1) ?? "?"}). Chain mode hint: ${chainMode}. Policy: ${profileId}.`;
+        const plan = await createPlan(goal, `auto-${cycleId}`, profileId);
+        if (plan.status === "approved" || effectivePhase === "phase_0" || effectivePhase === "phase_1") {
+          const execution = await executePlan(plan.planId);
+          if (execution.status === "completed") {
+            targetsCompleted++;
+            target.status = "closed";
+            stream("target_complete", { targetId: target.id, status: "completed" });
+            const edgeDelta = 0.1;
+            await emitReward(target.id, true, edgeDelta);
+            await evaluatePlan(execution.execution_id, plan.planId, 80, "hyperagent-auto");
+          } else {
+            targetsFailed++;
+            stream("target_failed", { targetId: target.id, status: execution.status });
+            await emitReward(target.id, false, 0);
+          }
+          const context = JSON.stringify({
+            target: target.id,
+            steps: execution.steps_completed,
+            status: execution.status
+          });
+          const found = await discoverNewIssues(context);
+          newIssues.push(...found);
+        } else {
+          stream("approval_needed", { planId: plan.planId, targetId: target.id, profile: profileId });
+          lessons.push(`Target ${target.id} needs approval (${profileId})`);
+        }
+      } catch (err) {
+        targetsFailed++;
+        const errMsg = err instanceof Error ? err.message : String(err);
+        stream("target_error", { targetId: target.id, error: errMsg });
+        lessons.push(`Target ${target.id} failed: ${errMsg}`);
+        await emitReward(target.id, false, -0.1);
+      }
+    }
+    currentStep = "evaluate";
+    const edgesAfter = await observeEdgeScores();
+    const fitnessBefore = computeFitness(edgesBefore);
+    const fitnessAfter = computeFitness(edgesAfter);
+    const fitnessDelta = fitnessAfter - fitnessBefore;
+    stream("step", {
+      step: "evaluate",
+      fitnessBefore: fitnessBefore.toFixed(3),
+      fitnessAfter: fitnessAfter.toFixed(3),
+      fitnessDelta: fitnessDelta.toFixed(4)
+    });
+    currentStep = "evolve";
+    adaptWeights(edgesBefore, edgesAfter);
+    const cycleSummary = `Cycle ${cycleId}: ${targetsCompleted}/${targetsAttempted} completed, fitness delta ${fitnessDelta.toFixed(4)}, ${newIssues.length} new issues discovered. Lessons: ${lessons.join("; ")}`;
+    const foldedSummary = await foldContext2(cycleSummary, 1e3);
+    try {
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `CREATE (l:Lesson {
+            id: $lessonId, type: 'autonomous_cycle', agentId: 'hyperagent-auto',
+            phase: $phase, summary: $summary, targetsCompleted: $completed,
+            targetsFailed: $failed, fitnessDelta: $fitnessDelta,
+            discoveredIssues: $discoveredIssues, timestamp: datetime()
+          })`,
+          params: {
+            lessonId: `lesson-${cycleId}`,
+            phase: effectivePhase,
+            summary: foldedSummary,
+            completed: targetsCompleted,
+            failed: targetsFailed,
+            fitnessDelta,
+            discoveredIssues: newIssues.length
+          }
+        },
+        callId: `hyp-lesson-${cycleId}`
+      });
+    } catch {
+      logger.debug("HyperAgent-Auto: lesson persistence failed (non-blocking)");
+    }
+    const result = {
+      cycleId,
+      phase: effectivePhase,
+      startedAt,
+      completedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      durationMs: Date.now() - t0,
+      targetsAttempted,
+      targetsCompleted,
+      targetsFailed,
+      newIssuesDiscovered: newIssues,
+      edgeScoresBefore: edgesBefore,
+      edgeScoresAfter: edgesAfter,
+      fitnessScoreDelta: fitnessDelta,
+      lessonsLearned: lessons
+    };
+    lastCycle2 = result;
+    totalCycles2++;
+    currentStep = "idle";
+    currentTarget = null;
+    stream("cycle_complete", {
+      cycleId,
+      completed: targetsCompleted,
+      failed: targetsFailed,
+      discovered: newIssues.length,
+      fitnessDelta: fitnessDelta.toFixed(4),
+      durationMs: result.durationMs
+    });
+    const redis2 = getRedis();
+    if (redis2) {
+      await redis2.lpush("hyperagent:autonomous-cycles", JSON.stringify(result));
+      await redis2.ltrim("hyperagent:autonomous-cycles", 0, 99);
+      await redis2.set("hyperagent:autonomous-status", JSON.stringify(getAutonomousStatus()));
+      await redis2.expire("hyperagent:autonomous-status", 86400);
+    }
+    await persistCrossRepoMemory("edges", "latest", edgesAfter, "orchestrator");
+    await persistCrossRepoMemory("fitness", "weights", edgeWeights, "orchestrator");
+    await persistCrossRepoMemory("fitness", "score", { score: fitnessAfter, delta: fitnessDelta, cycle: cycleId }, "orchestrator");
+    await persistCrossRepoMemory("cycles", `last:${cycleId}`, {
+      cycleId,
+      phase: effectivePhase,
+      completed: targetsCompleted,
+      failed: targetsFailed,
+      discovered: newIssues.length,
+      fitnessDelta
+    }, "orchestrator");
+    if (newIssues.length > 0) {
+      await persistCrossRepoMemory("discoveries", cycleId, newIssues, "orchestrator");
+    }
+    return result;
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    stream("cycle_error", { cycleId, error: errMsg });
+    throw err;
+  } finally {
+    isRunning2 = false;
+    currentStep = "idle";
+    currentTarget = null;
+  }
+}
+function getAutonomousStatus() {
+  const edges = lastCycle2?.edgeScoresAfter ?? [
+    { name: "Husker", score: 9, target: 9.5, gap: 0.5 },
+    { name: "Laerer", score: 8.3, target: 9.5, gap: 1.2 },
+    { name: "Heler", score: 8, target: 9.5, gap: 1.5 },
+    { name: "Forklarer", score: 9, target: 9.5, gap: 0.5 },
+    { name: "Vokser", score: 8.5, target: 9.5, gap: 1 },
+    { name: "Integrerer", score: 8.5, target: 9.5, gap: 1 }
+  ];
+  return {
+    isRunning: isRunning2,
+    currentPhase,
+    currentTarget,
+    currentStep,
+    totalCycles: totalCycles2,
+    lastCycle: lastCycle2,
+    edgeScores: edges,
+    fitnessScore: computeFitness(edges),
+    targetsRemaining: 72 - (lastCycle2?.targetsCompleted ?? 0),
+    targetsCompleted: lastCycle2?.targetsCompleted ?? 0
+  };
+}
+function checkPhaseGate() {
+  const edges = lastCycle2?.edgeScoresAfter ?? [];
+  const minEdge = edges.length > 0 ? Math.min(...edges.map((e) => e.score)) : 0;
+  const phases = ["phase_0", "phase_1", "phase_2", "phase_3"];
+  const currentIdx = phases.indexOf(currentPhase);
+  if (currentIdx >= phases.length - 1) {
+    return { shouldAdvance: false, nextPhase: currentPhase, reason: "Already at max phase" };
+  }
+  const nextPhase = phases[currentIdx + 1];
+  const gate = PHASE_GATES[nextPhase];
+  if (minEdge < gate.minEdge) {
+    return { shouldAdvance: false, nextPhase, reason: `Min edge ${minEdge.toFixed(1)} < gate ${gate.minEdge}` };
+  }
+  return {
+    shouldAdvance: true,
+    nextPhase,
+    reason: `Min edge ${minEdge.toFixed(1)} >= ${gate.minEdge}, ready to advance`
+  };
+}
+function advancePhase() {
+  const { shouldAdvance, nextPhase, reason } = checkPhaseGate();
+  if (shouldAdvance) {
+    const prev = currentPhase;
+    currentPhase = nextPhase;
+    stream("phase_advance", { from: prev, to: nextPhase, reason });
+    logger.info({ from: prev, to: nextPhase }, "HyperAgent-Auto: phase advanced");
+  }
+  return currentPhase;
+}
+function setPhase(phase) {
+  const prev = currentPhase;
+  currentPhase = phase;
+  stream("phase_set", { from: prev, to: phase, reason: "admin override" });
+}
+async function persistCrossRepoMemory(domain, key, value, callerRepo) {
+  const redis2 = getRedis();
+  const entry = {
+    domain,
+    key,
+    value,
+    caller_repo: callerRepo ?? "orchestrator",
+    stored_at: (/* @__PURE__ */ new Date()).toISOString(),
+    agent_id: "hyperagent-auto"
+  };
+  if (redis2) {
+    await redis2.set(
+      `${MEMORY_PREFIX}:${domain}:${key}`,
+      JSON.stringify(entry),
+      "EX",
+      MEMORY_TTL
+    );
+    await redis2.sadd(`${MEMORY_PREFIX}:domains`, domain);
+    await redis2.sadd(`${MEMORY_PREFIX}:${domain}:keys`, key);
+  }
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (m:HyperAgentMemory {domain: $domain, key: $key})
+                SET m.value = $value, m.caller_repo = $callerRepo,
+                    m.agent_id = 'hyperagent-auto', m.updated_at = datetime()
+                WITH m
+                MERGE (a:Agent {id: 'hyperagent-auto'})
+                MERGE (a)-[:HAS_MEMORY]->(m)`,
+        params: {
+          domain,
+          key,
+          value: typeof value === "string" ? value : JSON.stringify(value),
+          callerRepo: callerRepo ?? "orchestrator"
+        }
+      },
+      callId: `hyp-mem-write-${Date.now()}`
+    });
+  } catch {
+    logger.debug("HyperAgent-Auto: Neo4j memory persistence failed (Redis is primary)");
+  }
+}
+async function readCrossRepoMemory(domain, key) {
+  const redis2 = getRedis();
+  if (key) {
+    if (redis2) {
+      const raw = await redis2.get(`${MEMORY_PREFIX}:${domain}:${key}`);
+      if (raw) return JSON.parse(raw);
+    }
+    try {
+      const result = await callMcpTool({
+        toolName: "graph.read_cypher",
+        args: {
+          query: `MATCH (m:HyperAgentMemory {domain: $domain, key: $key})
+                  RETURN m.value AS value, m.caller_repo AS caller_repo, m.updated_at AS updated_at`,
+          params: { domain, key }
+        },
+        callId: `hyp-mem-read-${Date.now()}`
+      });
+      return result;
+    } catch {
+      return null;
+    }
+  }
+  if (redis2) {
+    const keys = await redis2.smembers(`${MEMORY_PREFIX}:${domain}:keys`);
+    const entries = [];
+    for (const k of keys) {
+      const raw = await redis2.get(`${MEMORY_PREFIX}:${domain}:${k}`);
+      if (raw) entries.push(JSON.parse(raw));
+    }
+    return entries;
+  }
+  return [];
+}
+async function listCrossRepoMemory() {
+  const redis2 = getRedis();
+  if (!redis2) return [];
+  return redis2.smembers(`${MEMORY_PREFIX}:domains`);
+}
+var CHAIN_MODE_MATRIX, W_EDGE_GAP, W_TARGET_GAP, W_DEPENDENCY, W_EFFORT, LEARNING_RATE, TARGET_EDGE_SCORE, PHASE_GATES, PHASE_POLICY, CYCLE_BATCH_SIZE, isRunning2, currentPhase, currentTarget, currentStep, totalCycles2, lastCycle2, edgeWeights, discoveredIssues, MEMORY_PREFIX, MEMORY_TTL;
+var init_hyperagent_autonomous = __esm({
+  "src/hyperagent-autonomous.ts"() {
+    "use strict";
+    init_hyperagent();
+    init_cognitive_proxy();
+    init_mcp_caller();
+    init_redis();
+    init_sse();
+    init_logger();
+    CHAIN_MODE_MATRIX = {
+      A: "sequential",
+      // Bug fixes: deterministic
+      B: "parallel",
+      // Graph health: independent checks
+      C: "loop",
+      // Adoption: repeated audit cycles
+      D: "parallel",
+      // OSINT: embarrassingly parallel
+      E: "debate",
+      // Product features: multi-perspective
+      F: "adaptive",
+      // Score optimization: Q-learning selects
+      G: "parallel"
+      // Data/cost: batch operations
+    };
+    W_EDGE_GAP = 0.4;
+    W_TARGET_GAP = 0.3;
+    W_DEPENDENCY = 0.15;
+    W_EFFORT = 0.15;
+    LEARNING_RATE = 0.01;
+    TARGET_EDGE_SCORE = 9.5;
+    PHASE_GATES = {
+      phase_0: { minEdge: 0, stableDays: 0, maxConcurrent: 1 },
+      phase_1: { minEdge: 7, stableDays: 2, maxConcurrent: 2 },
+      phase_2: { minEdge: 8.5, stableDays: 7, maxConcurrent: 4 },
+      phase_3: { minEdge: 9, stableDays: 14, maxConcurrent: 8 }
+    };
+    PHASE_POLICY = {
+      phase_0: "read_only",
+      phase_1: "read_only",
+      phase_2: "staged_write",
+      phase_3: "production_write"
+    };
+    CYCLE_BATCH_SIZE = {
+      phase_0: 3,
+      phase_1: 5,
+      phase_2: 8,
+      phase_3: 12
+    };
+    isRunning2 = false;
+    currentPhase = "phase_0";
+    currentTarget = null;
+    currentStep = "idle";
+    totalCycles2 = 0;
+    lastCycle2 = null;
+    edgeWeights = {
+      Husker: 1 / 6,
+      Laerer: 1 / 6,
+      Heler: 1 / 6,
+      Forklarer: 1 / 6,
+      Vokser: 1 / 6,
+      Integrerer: 1 / 6
+    };
+    discoveredIssues = [];
+    MEMORY_PREFIX = "hyperagent:memory";
+    MEMORY_TTL = 86400 * 30;
+  }
+});
+
+// src/tool-executor.ts
+import { v4 as uuid22 } from "uuid";
 function getTokenSavings() {
   return { totalTokensSaved, totalFoldingCalls, avgSavingsPerFold: totalFoldingCalls > 0 ? Math.round(totalTokensSaved / totalFoldingCalls) : 0 };
 }
 async function saveFullToolOutput(content, toolName) {
   const redis2 = getRedis();
   if (!redis2) return null;
-  const id = uuid20();
+  const id = uuid22();
   try {
     const payload = JSON.stringify({
       $id: `tool-output-${id}`,
@@ -18378,7 +19468,7 @@ function buildToolFallback(toolName, error) {
   }
 }
 async function executeToolUnified(toolName, args, opts) {
-  const callId = opts?.call_id ?? uuid20();
+  const callId = opts?.call_id ?? uuid22();
   const t0 = Date.now();
   let deprecation_notice;
   const toolDef = getTool(toolName);
@@ -18470,7 +19560,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher, params: args.params ?? {} },
-        callId: uuid20(),
+        callId: uuid22(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
@@ -18491,7 +19581,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher },
-        callId: uuid20(),
+        callId: uuid22(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Task query failed: ${result.error_message}`;
@@ -18503,7 +19593,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: args.tool_name,
         args: args.payload ?? {},
-        callId: uuid20(),
+        callId: uuid22(),
         timeoutMs: 3e4
       });
       if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
@@ -18511,8 +19601,8 @@ ${result.merged_context}`;
     }
     case "get_platform_health": {
       const [backendHealth, graphHealth] = await Promise.allSettled([
-        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid20(), timeoutMs: 1e4 }),
-        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid20(), timeoutMs: 1e4 })
+        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid22(), timeoutMs: 1e4 }),
+        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid22(), timeoutMs: 1e4 })
       ]);
       const parts = [];
       if (backendHealth.status === "fulfilled" && backendHealth.value.status === "success") {
@@ -18528,7 +19618,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: args.query },
-        callId: uuid20(),
+        callId: uuid22(),
         timeoutMs: 2e4
       });
       if (result.status !== "success") return `Document search failed: ${result.error_message}`;
@@ -18546,7 +19636,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issues",
         args: payload,
-        callId: uuid20(),
+        callId: uuid22(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
@@ -18562,7 +19652,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issue_get",
         args: { identifier },
-        callId: uuid20(),
+        callId: uuid22(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
@@ -19193,7 +20283,7 @@ ${entries.map((e) => `- ${e.key}`).join("\n")}`;
             max_tokens: budget,
             domain
           },
-          callId: uuid20(),
+          callId: uuid22(),
           timeoutMs: 25e3
         });
         if (result.status !== "success") return `Folding failed: ${result.error_message}`;
@@ -19275,7 +20365,7 @@ ${summary}`;
         const lineage = await buildLineageChain2(assemblyId);
         const now = (/* @__PURE__ */ new Date()).toISOString();
         const decision = {
-          $id: `widgetdc:decision:${uuid20()}`,
+          $id: `widgetdc:decision:${uuid22()}`,
           $schema: "https://widgetdc.io/schemas/decision/v1",
           title,
           description: typeof args.description === "string" ? args.description : "",
@@ -19358,7 +20448,7 @@ ${lines.join("\n")}`;
         const { saveDrillContext: saveDrillContext2, fetchDrillChildren: fetchDrillChildren2 } = await Promise.resolve().then(() => (init_drill(), drill_exports));
         const domain = String(args.domain ?? "");
         if (!domain) return "Error: domain required";
-        const sessionId = uuid20();
+        const sessionId = uuid22();
         const ctx = {
           stack: [],
           current_level: "domain",
@@ -19447,6 +20537,115 @@ ${lines.join("\n")}`;
         return JSON.stringify({ execution_id: execution.execution_id ?? "unknown", topic, url });
       } catch (err) {
         return `S1-S4 trigger failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    // ─── HyperAgent Autonomous Executor (cross-repo callable) ──────────────
+    case "hyperagent_auto_run": {
+      try {
+        const { runAutonomousCycle: runAutonomousCycle2 } = await Promise.resolve().then(() => (init_hyperagent_autonomous(), hyperagent_autonomous_exports));
+        const phase = args.phase;
+        const maxTargets = typeof args.max_targets === "number" ? args.max_targets : void 0;
+        const callerRepo = typeof args.caller_repo === "string" ? args.caller_repo : "unknown";
+        logger.info({ callerRepo, phase, maxTargets }, "HyperAgent-Auto: cross-repo cycle triggered");
+        const cycle = await runAutonomousCycle2(phase, maxTargets);
+        const { persistCrossRepoMemory: persistCrossRepoMemory2 } = await Promise.resolve().then(() => (init_hyperagent_autonomous(), hyperagent_autonomous_exports));
+        await persistCrossRepoMemory2("calls", `run:${cycle.cycleId}`, {
+          caller_repo: callerRepo,
+          cycle_id: cycle.cycleId,
+          phase: cycle.phase,
+          targets_completed: cycle.targetsCompleted,
+          fitness_delta: cycle.fitnessScoreDelta,
+          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        });
+        return JSON.stringify({
+          cycleId: cycle.cycleId,
+          phase: cycle.phase,
+          targetsAttempted: cycle.targetsAttempted,
+          targetsCompleted: cycle.targetsCompleted,
+          targetsFailed: cycle.targetsFailed,
+          fitnessScoreDelta: cycle.fitnessScoreDelta,
+          newIssuesDiscovered: cycle.newIssuesDiscovered.length,
+          durationMs: cycle.durationMs,
+          callerRepo
+        });
+      } catch (err) {
+        return `HyperAgent auto-run failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "hyperagent_auto_status": {
+      try {
+        const { getAutonomousStatus: getAutonomousStatus3 } = await Promise.resolve().then(() => (init_hyperagent_autonomous(), hyperagent_autonomous_exports));
+        const status = getAutonomousStatus3();
+        const result = { ...status };
+        if (args.include_history) {
+          const redis2 = getRedis();
+          if (redis2) {
+            const limit = typeof args.history_limit === "number" ? Math.min(args.history_limit, 20) : 5;
+            const raw = await redis2.lrange("hyperagent:autonomous-cycles", 0, limit - 1);
+            result.history = raw.map((r) => {
+              try {
+                return JSON.parse(r);
+              } catch {
+                return null;
+              }
+            }).filter(Boolean);
+          }
+        }
+        return JSON.stringify(result);
+      } catch (err) {
+        return `HyperAgent auto-status failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "hyperagent_auto_memory": {
+      try {
+        const { persistCrossRepoMemory: persistCrossRepoMemory2, readCrossRepoMemory: readCrossRepoMemory2, listCrossRepoMemory: listCrossRepoMemory2 } = await Promise.resolve().then(() => (init_hyperagent_autonomous(), hyperagent_autonomous_exports));
+        const action = String(args.action ?? "list");
+        const domain = typeof args.domain === "string" ? args.domain : "general";
+        const callerRepo = typeof args.caller_repo === "string" ? args.caller_repo : "unknown";
+        if (action === "write") {
+          const key = String(args.key ?? "");
+          if (!key) return "Error: key required for write";
+          await persistCrossRepoMemory2(domain, key, args.value, callerRepo);
+          return JSON.stringify({ stored: true, domain, key, caller_repo: callerRepo });
+        }
+        if (action === "read") {
+          const key = typeof args.key === "string" ? args.key : void 0;
+          const entries = await readCrossRepoMemory2(domain, key);
+          return JSON.stringify({ domain, entries, count: Array.isArray(entries) ? entries.length : 1 });
+        }
+        const domains = await listCrossRepoMemory2();
+        return JSON.stringify({ domains, caller_repo: callerRepo });
+      } catch (err) {
+        return `HyperAgent auto-memory failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "hyperagent_auto_issues": {
+      try {
+        const limit = typeof args.limit === "number" ? Math.min(args.limit, 200) : 50;
+        const redis2 = getRedis();
+        if (!redis2) return JSON.stringify({ issues: [], count: 0 });
+        const raw = await redis2.lrange("hyperagent:autonomous-cycles", 0, 99);
+        const allIssues = [];
+        for (const r of raw) {
+          try {
+            const cycle = JSON.parse(r);
+            if (cycle.newIssuesDiscovered && Array.isArray(cycle.newIssuesDiscovered)) {
+              if (args.since_cycle && cycle.cycleId === args.since_cycle) break;
+              for (const issue of cycle.newIssuesDiscovered) {
+                allIssues.push({
+                  cycle: cycle.cycleId,
+                  phase: cycle.phase,
+                  issue,
+                  discoveredAt: cycle.completedAt
+                });
+              }
+            }
+          } catch {
+          }
+        }
+        return JSON.stringify({ issues: allIssues.slice(0, limit), count: allIssues.length });
+      } catch (err) {
+        return `HyperAgent auto-issues failed: ${err instanceof Error ? err.message : String(err)}`;
       }
     }
     default: {
@@ -21593,12 +22792,12 @@ import cron from "node-cron";
 // src/graph-self-correct.ts
 init_mcp_caller();
 init_logger();
-import { v4 as uuid21 } from "uuid";
+import { v4 as uuid23 } from "uuid";
 async function graphRead(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid21(),
+    callId: uuid23(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -21609,7 +22808,7 @@ async function graphWrite(cypher, params, force = true) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {}, _force: force },
-    callId: uuid21(),
+    callId: uuid23(),
     timeoutMs: 15e3
   });
   return result.status === "success";
@@ -22069,7 +23268,7 @@ init_redis();
 init_logger();
 init_mcp_caller();
 import { Router as Router10 } from "express";
-import { v4 as uuid22 } from "uuid";
+import { v4 as uuid24 } from "uuid";
 var adoptionRouter = Router10();
 var REDIS_KEY4 = "orchestrator:adoption-metrics";
 var REDIS_TRENDS_KEY = "orchestrator:adoption-trends";
@@ -22166,7 +23365,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (c:Conversation) WHERE c.createdAt > datetime() - duration('P1D') RETURN count(c) AS count"
       },
-      callId: uuid22(),
+      callId: uuid24(),
       timeoutMs: 1e4
     }),
     // Count artifacts from last 24h
@@ -22175,7 +23374,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (a:AnalysisArtifact) WHERE a.createdAt > datetime() - duration('P1D') RETURN count(a) AS count"
       },
-      callId: uuid22(),
+      callId: uuid24(),
       timeoutMs: 1e4
     }),
     // Count tool calls from audit trail
@@ -22184,7 +23383,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (e:AuditEvent) WHERE e.timestamp > datetime() - duration('P1D') AND e.action = 'tool_call' RETURN count(e) AS count"
       },
-      callId: uuid22(),
+      callId: uuid24(),
       timeoutMs: 1e4
     })
   ]);
@@ -22289,7 +23488,7 @@ SET m.conversations_24h = $conversations,
           featuresPct: snapshot.features_pct
         }
       },
-      callId: uuid22(),
+      callId: uuid24(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -22336,929 +23535,7 @@ init_slack();
 init_graph_hygiene_cron();
 init_hierarchical_intelligence();
 init_adaptive_rag();
-
-// src/hyperagent-autonomous.ts
-import { v4 as uuid24 } from "uuid";
-
-// src/hyperagent.ts
-init_chain_engine();
-init_cognitive_proxy();
-init_mcp_caller();
-init_redis();
-init_chat_broadcaster();
-init_logger();
-import { v4 as uuid23 } from "uuid";
-import * as crypto from "crypto";
-var WRITE_TOOLS = [
-  "graph.write_cypher",
-  "graph.bulk_write",
-  "git.commit",
-  "git.push",
-  "railway.deploy",
-  "file.write",
-  "linear.create_issue",
-  "linear.update_issue"
-];
-var POLICY_PROFILES = {
-  read_only: {
-    id: "read_only",
-    mode: "read_only",
-    blockedTools: WRITE_TOOLS,
-    requiresApproval: false,
-    maxSteps: 25,
-    approvalTtlSeconds: 3600,
-    // 1h (irrelevant — no approval needed)
-    rejectOnCognitiveFailure: false,
-    // Safe to fallback to single-step analyze
-    allowedProviders: []
-    // DR18: all providers OK for reads
-  },
-  staged_write: {
-    id: "staged_write",
-    mode: "staged_write",
-    blockedTools: ["git.push", "railway.deploy"],
-    requiresApproval: true,
-    maxSteps: 25,
-    approvalTtlSeconds: 3600,
-    // 1h — reversible operations
-    rejectOnCognitiveFailure: false,
-    // Fallback acceptable
-    allowedProviders: ["anthropic", "openrouter"]
-    // DR18: no DeepSeek for writes
-  },
-  production_write: {
-    id: "production_write",
-    mode: "production_write",
-    blockedTools: [],
-    requiresApproval: true,
-    maxSteps: 15,
-    approvalTtlSeconds: 900,
-    // 15min — destructive operations (RLM insight)
-    rejectOnCognitiveFailure: true,
-    // MUST have proper plan decomposition
-    allowedProviders: ["anthropic"]
-    // DR18: production_write = Claude only
-  }
-};
-function selectChainMode(steps, goal) {
-  const hasDependencies = steps.some(
-    (s) => s.prompt?.includes("{{prev}}") || JSON.stringify(s.arguments ?? {}).includes("{{prev}}")
-  );
-  if (hasDependencies) return "sequential";
-  const allReads = steps.every((s) => s.tool_name && !WRITE_TOOLS.includes(s.tool_name));
-  const multiSource = steps.length >= 3 && new Set(steps.map((s) => s.tool_name)).size >= 2;
-  if (allReads && multiSource) return "parallel";
-  const debateKeywords = /\b(compar|debate|versus|vs\.|pros.*cons|tradeoff|evaluate.*alternatives)\b/i;
-  if (debateKeywords.test(goal) && steps.length >= 2) return "debate";
-  const loopKeywords = /\b(iterat|refin|optimi[zs]|converg|improv.*until|repeat)\b/i;
-  if (loopKeywords.test(goal)) return "loop";
-  if (steps.length >= 5) return "funnel";
-  return steps.length >= 3 ? "adaptive" : "sequential";
-}
-var SESSION_CIRCUIT_THRESHOLD = 3;
-var SESSION_CIRCUIT_HARD_LIMIT = 5;
-var SESSION_CIRCUIT_BASE_COOLDOWN_MS = 15e3;
-var sessionCircuits = /* @__PURE__ */ new Map();
-function getSessionCircuit(sessionId) {
-  let c = sessionCircuits.get(sessionId);
-  if (!c) {
-    c = { consecutiveFailures: 0, circuitOpenUntil: 0, downgradedToReadOnly: false };
-    sessionCircuits.set(sessionId, c);
-  }
-  return c;
-}
-function recordSessionSuccess(sessionId) {
-  const c = getSessionCircuit(sessionId);
-  if (c.consecutiveFailures > 0) {
-    logger.info({ sessionId, previous_failures: c.consecutiveFailures }, "HyperAgent: session circuit CLOSED \u2014 recovered");
-  }
-  c.consecutiveFailures = 0;
-  c.circuitOpenUntil = 0;
-  c.downgradedToReadOnly = false;
-}
-function recordSessionFailure(sessionId) {
-  const c = getSessionCircuit(sessionId);
-  c.consecutiveFailures++;
-  if (c.consecutiveFailures >= SESSION_CIRCUIT_HARD_LIMIT && c.circuitOpenUntil === 0) {
-    const backoffMultiplier = Math.min(8, Math.pow(2, c.consecutiveFailures - SESSION_CIRCUIT_HARD_LIMIT));
-    const cooldownMs = SESSION_CIRCUIT_BASE_COOLDOWN_MS * backoffMultiplier;
-    c.circuitOpenUntil = Date.now() + cooldownMs;
-    logger.warn({ sessionId, failures: c.consecutiveFailures, cooldownMs }, "HyperAgent: session circuit OPEN \u2014 exponential backoff");
-  } else if (c.consecutiveFailures >= SESSION_CIRCUIT_THRESHOLD && !c.downgradedToReadOnly) {
-    c.downgradedToReadOnly = true;
-    logger.warn({ sessionId, failures: c.consecutiveFailures }, "HyperAgent: auto-downgraded session to read_only after 3 failures");
-  }
-}
-function isSessionCircuitOpen(sessionId) {
-  const c = getSessionCircuit(sessionId);
-  if (c.circuitOpenUntil === 0) return false;
-  if (Date.now() >= c.circuitOpenUntil) {
-    c.circuitOpenUntil = 0;
-    c.consecutiveFailures = 0;
-    c.downgradedToReadOnly = false;
-    logger.info({ sessionId }, "HyperAgent: session circuit auto-reset after cooldown");
-    return false;
-  }
-  return true;
-}
-var plans = /* @__PURE__ */ new Map();
-function persistPlan(plan) {
-  plans.set(plan.planId, plan);
-  const redis2 = getRedis();
-  if (redis2) {
-    redis2.hset("orchestrator:hyperplans", plan.planId, JSON.stringify(plan)).catch(() => {
-    });
-    redis2.expire("orchestrator:hyperplans", 86400).catch(() => {
-    });
-  }
-}
-function getPlan2(planId) {
-  return plans.get(planId);
-}
-function listHyperPlans() {
-  return Array.from(plans.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 50);
-}
-async function createPlan(goal, sessionId, profileId = "read_only") {
-  if (isSessionCircuitOpen(sessionId)) {
-    throw new Error(`Session ${sessionId} circuit breaker OPEN \u2014 too many consecutive failures. Auto-resets in \u226460s.`);
-  }
-  const circuit = getSessionCircuit(sessionId);
-  const effectiveProfileId = circuit.downgradedToReadOnly ? "read_only" : profileId;
-  if (circuit.downgradedToReadOnly && profileId !== "read_only") {
-    logger.info({ sessionId, requested: profileId }, "HyperAgent: auto-downgraded to read_only due to consecutive failures");
-  }
-  const profile = POLICY_PROFILES[effectiveProfileId] ?? POLICY_PROFILES.read_only;
-  const planId = `hyp-${uuid23().slice(0, 12)}`;
-  let steps = [];
-  try {
-    const cogResult = await callCognitive("plan", {
-      prompt: goal,
-      context: { sessionId, profile: profile.id, maxSteps: profile.maxSteps },
-      agent_id: "hyperagent"
-    });
-    const rawSteps = cogResult?.execution_steps;
-    if (Array.isArray(rawSteps)) {
-      steps = rawSteps.slice(0, profile.maxSteps).map((s, i) => {
-        if (typeof s === "object" && s !== null) {
-          const step = s;
-          return {
-            id: `step-${i}`,
-            agent_id: String(step.agent_id ?? "qwen"),
-            tool_name: typeof step.tool === "string" ? step.tool : void 0,
-            cognitive_action: typeof step.cognitive_action === "string" ? step.cognitive_action : void 0,
-            arguments: typeof step.arguments === "object" ? step.arguments : void 0,
-            prompt: typeof step.prompt === "string" ? step.prompt : void 0
-          };
-        }
-        return {
-          id: `step-${i}`,
-          agent_id: "qwen",
-          cognitive_action: "analyze",
-          prompt: String(s)
-        };
-      });
-    }
-  } catch (err) {
-    if (profile.rejectOnCognitiveFailure) {
-      throw new Error(`Cognitive proxy failed and profile "${profile.id}" requires plan decomposition. Cannot create plan without RLM Engine.`);
-    }
-    logger.warn({ err, goal, profile: profile.id }, "HyperAgent: cognitive plan decomposition failed, using single-step fallback");
-    steps = [{
-      id: "step-0",
-      agent_id: "qwen",
-      cognitive_action: "analyze",
-      prompt: goal
-    }];
-  }
-  steps = steps.map((s) => {
-    if (s.tool_name && profile.blockedTools.includes(s.tool_name)) {
-      logger.info({ tool: s.tool_name, profile: profile.id }, "HyperAgent: tool blocked by policy, converting to analyze");
-      return { ...s, tool_name: void 0, cognitive_action: "analyze", prompt: `[BLOCKED] Cannot execute ${s.tool_name} under ${profile.id} profile. Analyze intent instead: ${s.prompt ?? ""}` };
-    }
-    return s;
-  });
-  const chainMode = selectChainMode(steps, goal);
-  const chainDef = {
-    chain_id: planId,
-    name: `hyperagent:${planId}`,
-    description: goal,
-    mode: chainMode,
-    steps
-  };
-  const plan = {
-    planId,
-    sessionId,
-    goal,
-    profile,
-    steps,
-    chainDef,
-    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-    status: profile.requiresApproval ? "pending_approval" : "approved"
-  };
-  persistPlan(plan);
-  logger.info({ planId, goal, profile: profile.id, steps: steps.length }, "HyperAgent: plan created");
-  return plan;
-}
-var APPROVAL_PREFIX = "orchestrator:approval:";
-async function approvePlan(planId, approvedBy) {
-  const plan = plans.get(planId);
-  if (!plan) throw new Error(`Plan ${planId} not found`);
-  if (plan.status !== "pending_approval") throw new Error(`Plan ${planId} is ${plan.status}, not pending_approval`);
-  const ttlSeconds = plan.profile.approvalTtlSeconds;
-  const approval = {
-    planId,
-    approvedBy,
-    approvedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    expiresAt: new Date(Date.now() + ttlSeconds * 1e3).toISOString(),
-    scope: plan.profile.id
-  };
-  const redis2 = getRedis();
-  if (redis2) {
-    await redis2.setex(`${APPROVAL_PREFIX}${planId}`, ttlSeconds, JSON.stringify(approval));
-  }
-  plan.status = "approved";
-  persistPlan(plan);
-  broadcastMessage({
-    from: "HyperAgent",
-    to: "All",
-    source: "orchestrator",
-    type: "Message",
-    message: `Plan ${planId} approved by ${approvedBy}`
-  });
-  logger.info({ planId, approvedBy }, "HyperAgent: plan approved");
-  return approval;
-}
-async function rejectPlan(planId, rejectedBy) {
-  const plan = plans.get(planId);
-  if (!plan) throw new Error(`Plan ${planId} not found`);
-  const redis2 = getRedis();
-  if (redis2) {
-    await redis2.del(`${APPROVAL_PREFIX}${planId}`);
-  }
-  plan.status = "failed";
-  persistPlan(plan);
-  broadcastMessage({
-    from: "HyperAgent",
-    to: "All",
-    source: "orchestrator",
-    type: "Message",
-    message: `Plan ${planId} rejected by ${rejectedBy}`
-  });
-  logger.info({ planId, rejectedBy }, "HyperAgent: plan rejected");
-}
-async function checkApproval(planId) {
-  const t0 = Date.now();
-  const redis2 = getRedis();
-  if (!redis2) {
-    const plan = plans.get(planId);
-    return plan?.status === "approved" ? {
-      planId,
-      approvedBy: "in-memory",
-      approvedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      expiresAt: new Date(Date.now() + 36e5).toISOString(),
-      scope: plan.profile.id
-    } : null;
-  }
-  const raw = await redis2.get(`${APPROVAL_PREFIX}${planId}`);
-  if (!raw) return null;
-  const approval = JSON.parse(raw);
-  if (new Date(approval.expiresAt) < /* @__PURE__ */ new Date()) {
-    await redis2.del(`${APPROVAL_PREFIX}${planId}`);
-    logger.warn({ planId, latencyMs: Date.now() - t0 }, "HyperAgent: approval expired");
-    return null;
-  }
-  logger.debug({ planId, latencyMs: Date.now() - t0 }, "HyperAgent: approval check completed");
-  return approval;
-}
-function validateWebhookSignature(body, signature) {
-  const secret = process.env.APPROVAL_WEBHOOK_SECRET;
-  if (!secret) return true;
-  if (!signature) return false;
-  const expected = crypto.createHmac("sha256", secret).update(body).digest("hex");
-  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
-}
-async function executePlan(planId) {
-  const plan = plans.get(planId);
-  if (!plan) throw new Error(`Plan ${planId} not found`);
-  if (plan.profile.requiresApproval) {
-    const approval = await checkApproval(planId);
-    if (!approval) {
-      throw new Error(`Plan ${planId} requires approval (profile: ${plan.profile.id})`);
-    }
-    logger.info({ planId, approvedBy: approval.approvedBy }, "HyperAgent: approval validated");
-  }
-  plan.status = "executing";
-  persistPlan(plan);
-  try {
-    const execution = await executeChain(plan.chainDef);
-    plan.status = execution.status === "completed" ? "completed" : "failed";
-    persistPlan(plan);
-    if (execution.status === "completed") {
-      recordSessionSuccess(plan.sessionId);
-    } else {
-      recordSessionFailure(plan.sessionId);
-    }
-    persistExecutionTrace(execution, planId).catch((err) => {
-      logger.warn({ err, planId }, "HyperAgent: trace persistence failed (non-blocking)");
-    });
-    logger.info({
-      planId,
-      executionId: execution.execution_id,
-      status: execution.status,
-      duration: execution.duration_ms
-    }, "HyperAgent: plan executed");
-    return execution;
-  } catch (err) {
-    plan.status = "failed";
-    persistPlan(plan);
-    recordSessionFailure(plan.sessionId);
-    throw err;
-  }
-}
-async function persistExecutionTrace(exec, planId) {
-  try {
-    await callMcpTool({
-      toolName: "graph.write_cypher",
-      args: {
-        query: `MERGE (t:ExecutionTrace {executionId: $executionId})
-                SET t.chainName = $chainName, t.mode = $mode,
-                    t.planId = $planId, t.status = $status,
-                    t.stepsCompleted = $stepsCompleted,
-                    t.stepsTotal = $stepsTotal,
-                    t.durationMs = $durationMs,
-                    t.completedAt = datetime()`,
-        params: {
-          executionId: exec.execution_id,
-          chainName: exec.name,
-          mode: exec.mode,
-          planId,
-          status: exec.status,
-          stepsCompleted: exec.steps_completed,
-          stepsTotal: exec.steps_total,
-          durationMs: exec.duration_ms ?? 0
-        }
-      },
-      callId: `hyp-trace-${exec.execution_id}`
-    });
-  } catch (err) {
-    logger.warn({ err, executionId: exec.execution_id }, "HyperAgent: ExecutionTrace write failed");
-  }
-}
-async function evaluatePlan(executionId, planId, score, agentId = "hyperagent") {
-  const plan = plans.get(planId);
-  const snapshot = {
-    traceId: `kpi-${executionId}`,
-    planId,
-    agentId,
-    score: Math.max(0, Math.min(100, score)),
-    outcome: plan?.status ?? "unknown",
-    stepsCompleted: plan?.steps.length ?? 0,
-    stepsTotal: plan?.steps.length ?? 0,
-    durationMs: 0
-  };
-  try {
-    await callMcpTool({
-      toolName: "graph.write_cypher",
-      args: {
-        query: `MERGE (k:KpiSnapshot {traceId: $traceId})
-                SET k.planId = $planId, k.agentId = $agentId,
-                    k.score = $score, k.outcome = $outcome,
-                    k.stepsCompleted = $stepsCompleted,
-                    k.stepsTotal = $stepsTotal,
-                    k.durationMs = $durationMs,
-                    k.completedAt = datetime()`,
-        params: {
-          traceId: snapshot.traceId,
-          planId: snapshot.planId,
-          agentId: snapshot.agentId,
-          score: snapshot.score,
-          outcome: snapshot.outcome,
-          stepsCompleted: snapshot.stepsCompleted,
-          stepsTotal: snapshot.stepsTotal,
-          durationMs: snapshot.durationMs
-        }
-      },
-      callId: `hyp-kpi-${executionId}`
-    });
-    logger.info({ traceId: snapshot.traceId, score }, "HyperAgent: KPI snapshot persisted to Neo4j");
-  } catch (err) {
-    logger.warn({ err, traceId: snapshot.traceId }, "HyperAgent: KPI persistence failed (non-blocking)");
-  }
-  return snapshot;
-}
-function getHyperAgentHealth() {
-  const allPlans = Array.from(plans.values());
-  const circuits = Array.from(sessionCircuits.entries()).map(([sid, c]) => ({
-    sessionId: sid,
-    failures: c.consecutiveFailures,
-    circuitOpen: c.circuitOpenUntil > Date.now(),
-    downgraded: c.downgradedToReadOnly
-  })).filter((c) => c.failures > 0);
-  return {
-    total_plans: allPlans.length,
-    by_status: {
-      pending_approval: allPlans.filter((p) => p.status === "pending_approval").length,
-      approved: allPlans.filter((p) => p.status === "approved").length,
-      executing: allPlans.filter((p) => p.status === "executing").length,
-      completed: allPlans.filter((p) => p.status === "completed").length,
-      failed: allPlans.filter((p) => p.status === "failed").length
-    },
-    active_circuits: circuits
-  };
-}
-async function getKpis(windowHours = 24) {
-  try {
-    const result = await callMcpTool({
-      toolName: "graph.read_cypher",
-      args: {
-        query: `MATCH (k:KpiSnapshot)
-                WHERE k.completedAt > datetime() - duration({hours: $hours})
-                RETURN avg(k.score) AS avgScore,
-                       count(k) AS totalPlans,
-                       sum(CASE WHEN k.outcome = 'completed' THEN 1 ELSE 0 END) AS succeeded,
-                       sum(CASE WHEN k.outcome = 'failed' THEN 1 ELSE 0 END) AS failed`,
-        params: { hours: windowHours }
-      },
-      callId: `hyp-kpis-${Date.now()}`
-    });
-    return { source: "neo4j", window_hours: windowHours, ...result };
-  } catch {
-    const cutoff = new Date(Date.now() - windowHours * 36e5);
-    const recent = Array.from(plans.values()).filter((p) => new Date(p.createdAt) > cutoff);
-    return {
-      source: "in_memory_fallback",
-      window_hours: windowHours,
-      totalPlans: recent.length,
-      succeeded: recent.filter((p) => p.status === "completed").length,
-      failed: recent.filter((p) => p.status === "failed").length,
-      pending: recent.filter((p) => p.status === "pending_approval").length
-    };
-  }
-}
-
-// src/hyperagent-autonomous.ts
-init_cognitive_proxy();
-init_mcp_caller();
-init_redis();
-init_sse();
-init_logger();
-var CHAIN_MODE_MATRIX = {
-  A: "sequential",
-  // Bug fixes: deterministic
-  B: "parallel",
-  // Graph health: independent checks
-  C: "loop",
-  // Adoption: repeated audit cycles
-  D: "parallel",
-  // OSINT: embarrassingly parallel
-  E: "debate",
-  // Product features: multi-perspective
-  F: "adaptive",
-  // Score optimization: Q-learning selects
-  G: "parallel"
-  // Data/cost: batch operations
-};
-var W_EDGE_GAP = 0.4;
-var W_TARGET_GAP = 0.3;
-var W_DEPENDENCY = 0.15;
-var W_EFFORT = 0.15;
-var LEARNING_RATE = 0.01;
-var TARGET_EDGE_SCORE = 9.5;
-var PHASE_GATES = {
-  phase_0: { minEdge: 0, stableDays: 0, maxConcurrent: 1 },
-  phase_1: { minEdge: 7, stableDays: 2, maxConcurrent: 2 },
-  phase_2: { minEdge: 8.5, stableDays: 7, maxConcurrent: 4 },
-  phase_3: { minEdge: 9, stableDays: 14, maxConcurrent: 8 }
-};
-var PHASE_POLICY = {
-  phase_0: "read_only",
-  phase_1: "read_only",
-  phase_2: "staged_write",
-  phase_3: "production_write"
-};
-var CYCLE_BATCH_SIZE = {
-  phase_0: 3,
-  phase_1: 5,
-  phase_2: 8,
-  phase_3: 12
-};
-var isRunning2 = false;
-var currentPhase = "phase_0";
-var currentTarget = null;
-var currentStep = "idle";
-var totalCycles2 = 0;
-var lastCycle2 = null;
-var edgeWeights = {
-  Husker: 1 / 6,
-  Laerer: 1 / 6,
-  Heler: 1 / 6,
-  Forklarer: 1 / 6,
-  Vokser: 1 / 6,
-  Integrerer: 1 / 6
-};
-var discoveredIssues = [];
-function stream(event, data) {
-  const payload = {
-    ...data,
-    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-    phase: currentPhase,
-    cycleCount: totalCycles2
-  };
-  broadcastSSE(`hyperagent:${event}`, payload);
-  logger.info({ event, ...payload }, `HyperAgent-Auto: ${event}`);
-}
-function computePriority(target, edgeScores) {
-  const edge = edgeScores.find((e) => e.name === target.edge);
-  if (!edge) return 0;
-  const maxGap = Math.max(...edgeScores.map((e) => e.gap), 0.1);
-  const edgeGapNorm = edge.gap / maxGap;
-  return W_EDGE_GAP * edgeGapNorm + W_TARGET_GAP * target.targetGapNorm + W_DEPENDENCY * (1 / (1 + target.deps)) - W_EFFORT * target.effortNorm;
-}
-function rankTargets(targets, edgeScores) {
-  return targets.filter((t) => t.status === "open").map((t) => ({ target: t, priority: computePriority(t, edgeScores) })).sort((a, b) => b.priority - a.priority).map((x) => x.target);
-}
-async function observeEdgeScores() {
-  try {
-    const result = await callMcpTool({
-      toolName: "graph.read_cypher",
-      args: {
-        query: `MATCH (e:EdgeScore) RETURN e.name AS name, e.score AS score ORDER BY e.name`,
-        params: {}
-      },
-      callId: `hyp-auto-edges-${Date.now()}`
-    });
-    const rows = Array.isArray(result) ? result : [];
-    if (rows.length >= 6) {
-      return rows.map((r) => ({
-        name: String(r.name),
-        score: Number(r.score),
-        target: TARGET_EDGE_SCORE,
-        gap: TARGET_EDGE_SCORE - Number(r.score)
-      }));
-    }
-  } catch {
-    logger.debug("HyperAgent-Auto: EdgeScore nodes not found, using defaults");
-  }
-  return [
-    { name: "Husker", score: 9, target: 9.5, gap: 0.5 },
-    { name: "Laerer", score: 8.3, target: 9.5, gap: 1.2 },
-    { name: "Heler", score: 8, target: 9.5, gap: 1.5 },
-    { name: "Forklarer", score: 9, target: 9.5, gap: 0.5 },
-    { name: "Vokser", score: 8.5, target: 9.5, gap: 1 },
-    { name: "Integrerer", score: 8.5, target: 9.5, gap: 1 }
-  ];
-}
-async function loadTargetRegistry() {
-  const redis2 = getRedis();
-  if (!redis2) return [];
-  try {
-    const raw = await redis2.get("hyperagent:HYPERAGENT:target-registry-v2.2");
-    if (!raw) {
-      const raw2 = await redis2.get("hyperagent:HYPERAGENT:target-registry-v2.1");
-      if (!raw2) return [];
-      return parseRegistryToTargets(JSON.parse(raw2));
-    }
-    return parseRegistryToTargets(JSON.parse(raw));
-  } catch {
-    logger.warn("HyperAgent-Auto: failed to load target registry from Redis");
-    return [];
-  }
-}
-function parseRegistryToTargets(registry2) {
-  const targets = [];
-  const categories = registry2.categories;
-  if (!categories) return targets;
-  for (const [catKey, catVal] of Object.entries(categories)) {
-    const category = catKey.charAt(0).toUpperCase();
-    if (typeof catVal === "object" && catVal !== null) {
-      const cat = catVal;
-      const ids = cat.ids;
-      if (Array.isArray(ids)) {
-        for (const id of ids) {
-          const parts = id.split(":");
-          const targetId = parts[0] || id;
-          targets.push({
-            id: targetId,
-            category,
-            edge: inferEdge(targetId, category),
-            metric: parts.slice(1).join(":") || targetId,
-            current: "unknown",
-            goal: "target",
-            targetGapNorm: 0.8,
-            // default high gap
-            deps: 0,
-            effortNorm: 0.3,
-            // default medium effort
-            status: "open"
-          });
-        }
-      }
-    }
-  }
-  return targets;
-}
-function inferEdge(targetId, category) {
-  const edgeMap = {
-    A: "Heler",
-    B: "Husker",
-    C: "Integrerer",
-    D: "Vokser",
-    E: "Laerer",
-    F: "Laerer",
-    G: "Husker"
-  };
-  return edgeMap[category] || "Heler";
-}
-async function discoverNewIssues(executionContext) {
-  const newIssues = [];
-  try {
-    if (await isRlmAvailable()) {
-      const analysis = await callCognitive("analyze", {
-        prompt: `Analyze this execution context for any NEW issues, failures, or anomalies not yet tracked. Context: ${executionContext.slice(0, 2e3)}`,
-        agent_id: "hyperagent-discovery"
-      });
-      const result = analysis;
-      if (result?.issues && Array.isArray(result.issues)) {
-        for (const issue of result.issues) {
-          const desc = typeof issue === "string" ? issue : JSON.stringify(issue);
-          if (!discoveredIssues.includes(desc)) {
-            discoveredIssues.push(desc);
-            newIssues.push(desc);
-            stream("issue_discovered", { issue: desc });
-          }
-        }
-      }
-    }
-  } catch (err) {
-    logger.debug({ err }, "HyperAgent-Auto: issue discovery scan failed (non-blocking)");
-  }
-  return newIssues;
-}
-function computeFitness(edgeScores) {
-  let fitness = 0;
-  for (const edge of edgeScores) {
-    const w = edgeWeights[edge.name] ?? 1 / 6;
-    fitness += w * edge.score;
-  }
-  return fitness;
-}
-function adaptWeights(edgesBefore, edgesAfter) {
-  for (const after of edgesAfter) {
-    const before = edgesBefore.find((e) => e.name === after.name);
-    if (!before) continue;
-    const delta = after.score - before.score;
-    const gapFromTarget = TARGET_EDGE_SCORE - after.score;
-    edgeWeights[after.name] = Math.max(0.05, Math.min(
-      0.4,
-      (edgeWeights[after.name] ?? 1 / 6) + LEARNING_RATE * gapFromTarget * delta
-    ));
-  }
-  const sum = Object.values(edgeWeights).reduce((a, b) => a + b, 0);
-  for (const k of Object.keys(edgeWeights)) {
-    edgeWeights[k] /= sum;
-  }
-}
-async function emitReward(targetId, success, edgeDelta) {
-  try {
-    await callMcpTool({
-      toolName: "adaptive_rag_reward",
-      args: {
-        query: `target:${targetId}`,
-        reward: success ? 1 + edgeDelta : -0.5,
-        metadata: { targetId, success, edgeDelta, phase: currentPhase }
-      },
-      callId: `hyp-reward-${targetId}-${Date.now()}`
-    });
-  } catch {
-  }
-}
-async function foldContext2(text, budget = 2e3) {
-  try {
-    const result = await callMcpTool({
-      toolName: "context_fold",
-      args: { text, budget, domain: "platform-operations", query: "autonomous execution status" },
-      callId: `hyp-fold-${Date.now()}`
-    });
-    return typeof result === "string" ? result : JSON.stringify(result);
-  } catch {
-    return text.slice(0, budget * 4);
-  }
-}
-async function runAutonomousCycle(phase, maxTargets) {
-  if (isRunning2) {
-    throw new Error("Autonomous cycle already running");
-  }
-  isRunning2 = true;
-  const cycleId = `auto-${uuid24().slice(0, 8)}`;
-  const effectivePhase = phase ?? currentPhase;
-  const batchSize = maxTargets ?? CYCLE_BATCH_SIZE[effectivePhase];
-  const profileId = PHASE_POLICY[effectivePhase];
-  const startedAt = (/* @__PURE__ */ new Date()).toISOString();
-  const t0 = Date.now();
-  stream("cycle_start", { cycleId, phase: effectivePhase, batchSize });
-  let targetsAttempted = 0;
-  let targetsCompleted = 0;
-  let targetsFailed = 0;
-  const newIssues = [];
-  const lessons = [];
-  try {
-    currentStep = "observe";
-    stream("step", { step: "observe", detail: "Reading edge scores and target registry" });
-    const edgesBefore = await observeEdgeScores();
-    currentStep = "prioritize";
-    const allTargets = await loadTargetRegistry();
-    const ranked = rankTargets(allTargets, edgesBefore);
-    const batch = ranked.slice(0, batchSize);
-    stream("step", {
-      step: "prioritize",
-      detail: `${allTargets.length} targets loaded, ${ranked.length} open, top ${batch.length} selected`,
-      topTargets: batch.map((t) => t.id)
-    });
-    currentStep = "execute";
-    for (const target of batch) {
-      currentTarget = target.id;
-      targetsAttempted++;
-      stream("target_start", { targetId: target.id, edge: target.edge, category: target.category });
-      try {
-        const chainMode = CHAIN_MODE_MATRIX[target.category] || "sequential";
-        const goal = `[AUTO-${effectivePhase}] Close target ${target.id}: ${target.metric}. Edge: ${target.edge} (gap: ${edgesBefore.find((e) => e.name === target.edge)?.gap.toFixed(1) ?? "?"}). Chain mode hint: ${chainMode}. Policy: ${profileId}.`;
-        const plan = await createPlan(goal, `auto-${cycleId}`, profileId);
-        if (plan.status === "approved" || effectivePhase === "phase_0" || effectivePhase === "phase_1") {
-          const execution = await executePlan(plan.planId);
-          if (execution.status === "completed") {
-            targetsCompleted++;
-            target.status = "closed";
-            stream("target_complete", { targetId: target.id, status: "completed" });
-            const edgeDelta = 0.1;
-            await emitReward(target.id, true, edgeDelta);
-            await evaluatePlan(execution.execution_id, plan.planId, 80, "hyperagent-auto");
-          } else {
-            targetsFailed++;
-            stream("target_failed", { targetId: target.id, status: execution.status });
-            await emitReward(target.id, false, 0);
-          }
-          const context = JSON.stringify({
-            target: target.id,
-            steps: execution.steps_completed,
-            status: execution.status
-          });
-          const found = await discoverNewIssues(context);
-          newIssues.push(...found);
-        } else {
-          stream("approval_needed", { planId: plan.planId, targetId: target.id, profile: profileId });
-          lessons.push(`Target ${target.id} needs approval (${profileId})`);
-        }
-      } catch (err) {
-        targetsFailed++;
-        const errMsg = err instanceof Error ? err.message : String(err);
-        stream("target_error", { targetId: target.id, error: errMsg });
-        lessons.push(`Target ${target.id} failed: ${errMsg}`);
-        await emitReward(target.id, false, -0.1);
-      }
-    }
-    currentStep = "evaluate";
-    const edgesAfter = await observeEdgeScores();
-    const fitnessBefore = computeFitness(edgesBefore);
-    const fitnessAfter = computeFitness(edgesAfter);
-    const fitnessDelta = fitnessAfter - fitnessBefore;
-    stream("step", {
-      step: "evaluate",
-      fitnessBefore: fitnessBefore.toFixed(3),
-      fitnessAfter: fitnessAfter.toFixed(3),
-      fitnessDelta: fitnessDelta.toFixed(4)
-    });
-    currentStep = "evolve";
-    adaptWeights(edgesBefore, edgesAfter);
-    const cycleSummary = `Cycle ${cycleId}: ${targetsCompleted}/${targetsAttempted} completed, fitness delta ${fitnessDelta.toFixed(4)}, ${newIssues.length} new issues discovered. Lessons: ${lessons.join("; ")}`;
-    const foldedSummary = await foldContext2(cycleSummary, 1e3);
-    try {
-      await callMcpTool({
-        toolName: "graph.write_cypher",
-        args: {
-          query: `CREATE (l:Lesson {
-            id: $lessonId, type: 'autonomous_cycle', agentId: 'hyperagent-auto',
-            phase: $phase, summary: $summary, targetsCompleted: $completed,
-            targetsFailed: $failed, fitnessDelta: $fitnessDelta,
-            discoveredIssues: $discoveredIssues, timestamp: datetime()
-          })`,
-          params: {
-            lessonId: `lesson-${cycleId}`,
-            phase: effectivePhase,
-            summary: foldedSummary,
-            completed: targetsCompleted,
-            failed: targetsFailed,
-            fitnessDelta,
-            discoveredIssues: newIssues.length
-          }
-        },
-        callId: `hyp-lesson-${cycleId}`
-      });
-    } catch {
-      logger.debug("HyperAgent-Auto: lesson persistence failed (non-blocking)");
-    }
-    const result = {
-      cycleId,
-      phase: effectivePhase,
-      startedAt,
-      completedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      durationMs: Date.now() - t0,
-      targetsAttempted,
-      targetsCompleted,
-      targetsFailed,
-      newIssuesDiscovered: newIssues,
-      edgeScoresBefore: edgesBefore,
-      edgeScoresAfter: edgesAfter,
-      fitnessScoreDelta: fitnessDelta,
-      lessonsLearned: lessons
-    };
-    lastCycle2 = result;
-    totalCycles2++;
-    currentStep = "idle";
-    currentTarget = null;
-    stream("cycle_complete", {
-      cycleId,
-      completed: targetsCompleted,
-      failed: targetsFailed,
-      discovered: newIssues.length,
-      fitnessDelta: fitnessDelta.toFixed(4),
-      durationMs: result.durationMs
-    });
-    const redis2 = getRedis();
-    if (redis2) {
-      await redis2.lpush("hyperagent:autonomous-cycles", JSON.stringify(result));
-      await redis2.ltrim("hyperagent:autonomous-cycles", 0, 99);
-      await redis2.set("hyperagent:autonomous-status", JSON.stringify(getAutonomousStatus()));
-      await redis2.expire("hyperagent:autonomous-status", 86400);
-    }
-    return result;
-  } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    stream("cycle_error", { cycleId, error: errMsg });
-    throw err;
-  } finally {
-    isRunning2 = false;
-    currentStep = "idle";
-    currentTarget = null;
-  }
-}
-function getAutonomousStatus() {
-  const edges = lastCycle2?.edgeScoresAfter ?? [
-    { name: "Husker", score: 9, target: 9.5, gap: 0.5 },
-    { name: "Laerer", score: 8.3, target: 9.5, gap: 1.2 },
-    { name: "Heler", score: 8, target: 9.5, gap: 1.5 },
-    { name: "Forklarer", score: 9, target: 9.5, gap: 0.5 },
-    { name: "Vokser", score: 8.5, target: 9.5, gap: 1 },
-    { name: "Integrerer", score: 8.5, target: 9.5, gap: 1 }
-  ];
-  return {
-    isRunning: isRunning2,
-    currentPhase,
-    currentTarget,
-    currentStep,
-    totalCycles: totalCycles2,
-    lastCycle: lastCycle2,
-    edgeScores: edges,
-    fitnessScore: computeFitness(edges),
-    targetsRemaining: 72 - (lastCycle2?.targetsCompleted ?? 0),
-    targetsCompleted: lastCycle2?.targetsCompleted ?? 0
-  };
-}
-function checkPhaseGate() {
-  const edges = lastCycle2?.edgeScoresAfter ?? [];
-  const minEdge = edges.length > 0 ? Math.min(...edges.map((e) => e.score)) : 0;
-  const phases = ["phase_0", "phase_1", "phase_2", "phase_3"];
-  const currentIdx = phases.indexOf(currentPhase);
-  if (currentIdx >= phases.length - 1) {
-    return { shouldAdvance: false, nextPhase: currentPhase, reason: "Already at max phase" };
-  }
-  const nextPhase = phases[currentIdx + 1];
-  const gate = PHASE_GATES[nextPhase];
-  if (minEdge < gate.minEdge) {
-    return { shouldAdvance: false, nextPhase, reason: `Min edge ${minEdge.toFixed(1)} < gate ${gate.minEdge}` };
-  }
-  return {
-    shouldAdvance: true,
-    nextPhase,
-    reason: `Min edge ${minEdge.toFixed(1)} >= ${gate.minEdge}, ready to advance`
-  };
-}
-function advancePhase() {
-  const { shouldAdvance, nextPhase, reason } = checkPhaseGate();
-  if (shouldAdvance) {
-    const prev = currentPhase;
-    currentPhase = nextPhase;
-    stream("phase_advance", { from: prev, to: nextPhase, reason });
-    logger.info({ from: prev, to: nextPhase }, "HyperAgent-Auto: phase advanced");
-  }
-  return currentPhase;
-}
-function setPhase(phase) {
-  const prev = currentPhase;
-  currentPhase = phase;
-  stream("phase_set", { from: prev, to: phase, reason: "admin override" });
-}
-
-// src/cron-scheduler.ts
+init_hyperagent_autonomous();
 var jobs = /* @__PURE__ */ new Map();
 var cronTasks = /* @__PURE__ */ new Map();
 var REDIS_CRON_KEY = "orchestrator:cron-jobs";
@@ -28117,6 +28394,40 @@ var AGENT_SEEDS = [
     status: "online",
     capabilities: ["data_analysis", "reporting", "visualization"],
     allowed_tool_namespaces: ["analyst", "report", "*"]
+  },
+  // ─── HyperAgent Autonomous Executor ────────────────────────────────────
+  // Maintained ONLY in widgetdc-orchestrator. Callable from ALL repos via MCP.
+  // Drives 72-target registry through graduated autonomy phases with
+  // persistent cross-repo memory (Redis + Neo4j Lesson nodes).
+  {
+    agent_id: "hyperagent-auto",
+    display_name: "HyperAgent Autonomous Executor",
+    source: "core",
+    version: "1.0",
+    status: "online",
+    capabilities: [
+      "autonomous_execution",
+      "target_prioritization",
+      "fitness_evolution",
+      "issue_discovery",
+      "phase_management",
+      "rlm_reasoning",
+      "rag_rewards",
+      "context_folding",
+      "cross_repo_memory",
+      "persistent_lessons"
+    ],
+    allowed_tool_namespaces: [
+      "hyperagent",
+      "autonomous",
+      "graph",
+      "knowledge",
+      "intelligence",
+      "rlm",
+      "chains",
+      "memory",
+      "*"
+    ]
   }
 ];
 function seedAgents() {
@@ -30182,8 +30493,9 @@ abiVersioningRouter.get("/changelog", (_req, res) => {
 });
 
 // src/routes/hyperagent.ts
-import { Router as Router42 } from "express";
+init_hyperagent();
 init_logger();
+import { Router as Router42 } from "express";
 var hyperagentRouter = Router42();
 hyperagentRouter.post("/plan", async (req, res) => {
   const { goal, sessionId, profile } = req.body;
@@ -30341,9 +30653,10 @@ hyperagentRouter.get("/health", (_req, res) => {
 });
 
 // src/routes/hyperagent-autonomous.ts
-import { Router as Router43 } from "express";
+init_hyperagent_autonomous();
 init_redis();
 init_logger();
+import { Router as Router43 } from "express";
 var hyperagentAutoRouter = Router43();
 hyperagentAutoRouter.post("/run", async (req, res) => {
   const { phase, maxTargets } = req.body;

@@ -1175,6 +1175,42 @@ Trigger the S1-S4 research harvesting pipeline: Extract (OSINT) → Map (cogniti
 
 ---
 
+### `hyperagent_auto_run`
+**Namespace:** hyperagent | **Timeout:** 300s | **Handler:** orchestrator
+
+Trigger an autonomous execution cycle. Prioritizes targets by fitness function, plans via RLM, executes via chain engine, evaluates, discovers issues, and evolves weights. Callable from ANY repo via MCP. Persistent memory ensures continuity across sessions and repos.
+
+**Optional:** `phase` (phase_0–phase_3), `max_targets`, `caller_repo`
+
+---
+
+### `hyperagent_auto_status`
+**Namespace:** hyperagent | **Timeout:** 10s | **Handler:** orchestrator
+
+Get current autonomous executor status — phase, fitness score, edge scores, running state, cycle count, last cycle results. Callable from ANY repo via MCP.
+
+**Optional:** `include_history` (boolean), `history_limit` (number)
+
+---
+
+### `hyperagent_auto_memory`
+**Namespace:** hyperagent | **Timeout:** 15s | **Handler:** orchestrator
+
+Read/write persistent cross-repo memory for the autonomous executor. Stores lessons, discoveries, and execution context in Redis + Neo4j. Memory is keyed by domain and persists across sessions, repos, and restarts.
+
+**Required:** `action` (read/write/list) | **Optional:** `domain`, `key`, `value`, `caller_repo`
+
+---
+
+### `hyperagent_auto_issues`
+**Namespace:** hyperagent | **Timeout:** 10s | **Handler:** orchestrator
+
+List all issues discovered during autonomous execution cycles. Issues are accumulated across all cycles and repos. Useful for cross-repo coordination and backlog grooming.
+
+**Optional:** `limit`, `since_cycle`, `caller_repo`
+
+---
+
 ## Adding a New Tool
 
 All protocols (REST, OpenAI, MCP) compile automatically from a single entry in `src/tool-registry.ts`:

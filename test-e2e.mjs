@@ -1283,6 +1283,44 @@ await test('137. GET /api/tool-output/:id/raw returns 404 for missing', async ()
 })
 
 // ═══════════════════════════════════════════════════════════════
+// Section 21: HyperAgent Autonomous Executor (cross-repo MCP tools)
+// ═══════════════════════════════════════════════════════════════
+
+// ── 138. hyperagent_auto_status — exists ──
+await test('138. POST /api/tools/hyperagent_auto_status responds', async () => {
+  const r = await api('/api/tools/hyperagent_auto_status', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `hyperagent_auto_status not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'hyperagent_auto_status', `wrong tool_name`)
+})
+
+// ── 139. hyperagent_auto_run — exists ──
+await test('139. POST /api/tools/hyperagent_auto_run responds', async () => {
+  const r = await api('/api/tools/hyperagent_auto_run', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `hyperagent_auto_run not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'hyperagent_auto_run', `wrong tool_name`)
+})
+
+// ── 140. hyperagent_auto_memory — exists ──
+await test('140. POST /api/tools/hyperagent_auto_memory responds', async () => {
+  const r = await api('/api/tools/hyperagent_auto_memory', { method: 'POST', body: JSON.stringify({ action: 'list' }) })
+  assert(r.status !== 404, `hyperagent_auto_memory not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'hyperagent_auto_memory', `wrong tool_name`)
+})
+
+// ── 141. hyperagent_auto_issues — exists ──
+await test('141. POST /api/tools/hyperagent_auto_issues responds', async () => {
+  const r = await api('/api/tools/hyperagent_auto_issues', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `hyperagent_auto_issues not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'hyperagent_auto_issues', `wrong tool_name`)
+})
+
+// ── 142. hyperagent auto REST status endpoint ──
+await test('142. GET /api/hyperagent/auto/status returns status', async () => {
+  const r = await api('/api/hyperagent/auto/status')
+  assert(r.status !== 404, `hyperagent auto status endpoint not deployed (404)`)
+})
+
+// ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped
 console.log(`  RESULTS: ${passed} passed, ${failed} failed, ${skipped} skipped / ${total} total`)

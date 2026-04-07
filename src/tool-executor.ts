@@ -1560,6 +1560,127 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    // ─── HyperAgent Autonomous Executor (cross-repo callable) ──────────────
+
+    case 'hyperagent_auto_run': {
+      try {
+        const { runAutonomousCycle } = await import('./hyperagent-autonomous.js')
+        const phase = args.phase as 'phase_0' | 'phase_1' | 'phase_2' | 'phase_3' | undefined
+        const maxTargets = typeof args.max_targets === 'number' ? args.max_targets : undefined
+        const callerRepo = typeof args.caller_repo === 'string' ? args.caller_repo : 'unknown'
+
+        // Log cross-repo call provenance
+        logger.info({ callerRepo, phase, maxTargets }, 'HyperAgent-Auto: cross-repo cycle triggered')
+
+        const cycle = await runAutonomousCycle(phase, maxTargets)
+
+        // Persist cross-repo call to memory
+        const { persistCrossRepoMemory } = await import('./hyperagent-autonomous.js')
+        await persistCrossRepoMemory('calls', `run:${cycle.cycleId}`, {
+          caller_repo: callerRepo,
+          cycle_id: cycle.cycleId,
+          phase: cycle.phase,
+          targets_completed: cycle.targetsCompleted,
+          fitness_delta: cycle.fitnessScoreDelta,
+          timestamp: new Date().toISOString(),
+        })
+
+        return JSON.stringify({
+          cycleId: cycle.cycleId,
+          phase: cycle.phase,
+          targetsAttempted: cycle.targetsAttempted,
+          targetsCompleted: cycle.targetsCompleted,
+          targetsFailed: cycle.targetsFailed,
+          fitnessScoreDelta: cycle.fitnessScoreDelta,
+          newIssuesDiscovered: cycle.newIssuesDiscovered.length,
+          durationMs: cycle.durationMs,
+          callerRepo,
+        })
+      } catch (err) {
+        return `HyperAgent auto-run failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'hyperagent_auto_status': {
+      try {
+        const { getAutonomousStatus } = await import('./hyperagent-autonomous.js')
+        const status = getAutonomousStatus()
+        const result: Record<string, unknown> = { ...status }
+
+        if (args.include_history) {
+          const redis = getRedis()
+          if (redis) {
+            const limit = typeof args.history_limit === 'number' ? Math.min(args.history_limit, 20) : 5
+            const raw = await redis.lrange('hyperagent:autonomous-cycles', 0, limit - 1)
+            result.history = raw.map((r: string) => { try { return JSON.parse(r) } catch { return null } }).filter(Boolean)
+          }
+        }
+        return JSON.stringify(result)
+      } catch (err) {
+        return `HyperAgent auto-status failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'hyperagent_auto_memory': {
+      try {
+        const { persistCrossRepoMemory, readCrossRepoMemory, listCrossRepoMemory } = await import('./hyperagent-autonomous.js')
+        const action = String(args.action ?? 'list')
+        const domain = typeof args.domain === 'string' ? args.domain : 'general'
+        const callerRepo = typeof args.caller_repo === 'string' ? args.caller_repo : 'unknown'
+
+        if (action === 'write') {
+          const key = String(args.key ?? '')
+          if (!key) return 'Error: key required for write'
+          await persistCrossRepoMemory(domain, key, args.value, callerRepo)
+          return JSON.stringify({ stored: true, domain, key, caller_repo: callerRepo })
+        }
+
+        if (action === 'read') {
+          const key = typeof args.key === 'string' ? args.key : undefined
+          const entries = await readCrossRepoMemory(domain, key)
+          return JSON.stringify({ domain, entries, count: Array.isArray(entries) ? entries.length : 1 })
+        }
+
+        // list
+        const domains = await listCrossRepoMemory()
+        return JSON.stringify({ domains, caller_repo: callerRepo })
+      } catch (err) {
+        return `HyperAgent auto-memory failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'hyperagent_auto_issues': {
+      try {
+        const limit = typeof args.limit === 'number' ? Math.min(args.limit, 200) : 50
+        const redis = getRedis()
+        if (!redis) return JSON.stringify({ issues: [], count: 0 })
+
+        const raw = await redis.lrange('hyperagent:autonomous-cycles', 0, 99)
+        const allIssues: Array<{ cycle: string; phase: string; issue: string; discoveredAt: string }> = []
+
+        for (const r of raw) {
+          try {
+            const cycle = JSON.parse(r)
+            if (cycle.newIssuesDiscovered && Array.isArray(cycle.newIssuesDiscovered)) {
+              if (args.since_cycle && cycle.cycleId === args.since_cycle) break
+              for (const issue of cycle.newIssuesDiscovered) {
+                allIssues.push({
+                  cycle: cycle.cycleId,
+                  phase: cycle.phase,
+                  issue,
+                  discoveredAt: cycle.completedAt,
+                })
+              }
+            }
+          } catch { /* skip */ }
+        }
+
+        return JSON.stringify({ issues: allIssues.slice(0, limit), count: allIssues.length })
+      } catch (err) {
+        return `HyperAgent auto-issues failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
     default: {
       // Check forged tools before giving up
       try {

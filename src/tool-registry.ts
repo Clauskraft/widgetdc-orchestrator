@@ -861,6 +861,61 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     timeoutMs: 180000,
     outputDescription: 'Execution ID for tracking the 4-step chain',
   }),
+
+  // ─── HyperAgent Autonomous Executor (cross-repo callable) ──────────────
+
+  defineTool({
+    name: 'hyperagent_auto_run',
+    namespace: 'hyperagent',
+    description: 'Trigger an autonomous execution cycle. Prioritizes targets by fitness function, plans via RLM, executes via chain engine, evaluates, discovers issues, and evolves weights. Callable from ANY repo via MCP. Persistent memory ensures continuity across sessions and repos.',
+    input: z.object({
+      phase: z.enum(['phase_0', 'phase_1', 'phase_2', 'phase_3']).optional().describe('Override phase (default: current)'),
+      max_targets: z.number().optional().describe('Max targets per cycle (default: phase-dependent batch size)'),
+      caller_repo: z.string().optional().describe('Calling repo identifier for cross-repo memory tracking'),
+    }),
+    timeoutMs: 300000,
+    outputDescription: 'Cycle result: targets attempted/completed/failed, fitness delta, discovered issues',
+  }),
+
+  defineTool({
+    name: 'hyperagent_auto_status',
+    namespace: 'hyperagent',
+    description: 'Get current autonomous executor status — phase, fitness score, edge scores, running state, cycle count, last cycle results. Callable from ANY repo via MCP.',
+    input: z.object({
+      include_history: z.boolean().optional().describe('Include last N cycle results (default: false)'),
+      history_limit: z.number().optional().describe('Number of historical cycles to include (default: 5)'),
+    }),
+    timeoutMs: 10000,
+    outputDescription: 'Status object with phase, fitness, edges, running state, and optional history',
+  }),
+
+  defineTool({
+    name: 'hyperagent_auto_memory',
+    namespace: 'hyperagent',
+    description: 'Read/write persistent cross-repo memory for the autonomous executor. Stores lessons, discoveries, and execution context in Redis + Neo4j. Memory is keyed by domain and persists across sessions, repos, and restarts.',
+    input: z.object({
+      action: z.enum(['read', 'write', 'list']).describe('Memory operation'),
+      domain: z.string().optional().describe('Memory domain (e.g. "lessons", "discoveries", "fitness", "edges")'),
+      key: z.string().optional().describe('Specific memory key (for read/write)'),
+      value: z.unknown().optional().describe('Value to store (for write)'),
+      caller_repo: z.string().optional().describe('Calling repo for provenance tracking'),
+    }),
+    timeoutMs: 15000,
+    outputDescription: 'Memory entries or confirmation of write',
+  }),
+
+  defineTool({
+    name: 'hyperagent_auto_issues',
+    namespace: 'hyperagent',
+    description: 'List all issues discovered during autonomous execution cycles. Issues are accumulated across all cycles and repos. Useful for cross-repo coordination and backlog grooming.',
+    input: z.object({
+      limit: z.number().optional().describe('Max issues to return (default: 50)'),
+      since_cycle: z.string().optional().describe('Only issues discovered after this cycle ID'),
+      caller_repo: z.string().optional().describe('Calling repo identifier'),
+    }),
+    timeoutMs: 10000,
+    outputDescription: 'Array of discovered issues with cycle context and timestamps',
+  }),
 ]
 
 // ─── Protocol Compilers ─────────────────────────────────────────────────────
