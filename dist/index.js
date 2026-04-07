@@ -18830,37 +18830,52 @@ async function observeEdgeScores() {
 }
 async function loadTargetRegistry() {
   const redis2 = getRedis();
-  if (!redis2) return [];
+  if (!redis2) { logger.warn("HyperAgent-Auto: no Redis for target registry"); return []; }
   try {
     const keyPatterns = [
       "wm:HYPERAGENT:target-registry-v2.2",
-      // working-memory format
       "hyperagent:HYPERAGENT:target-registry-v2.2",
-      // legacy format
       "hyperagent:memory:targets:full-registry-v2.2",
-      // cross-repo memory format
       "wm:HYPERAGENT:target-registry-v2.1"
-      // older version
     ];
+    const diag = {};
     for (const key of keyPatterns) {
       const raw = await redis2.get(key);
-      if (raw) {
-        try {
-          const parsed = JSON.parse(raw);
-          const data = parsed.value ? typeof parsed.value === "string" ? JSON.parse(parsed.value) : parsed.value : parsed;
-          const targets = parseRegistryToTargets(data);
-          if (targets.length > 0) {
-            logger.info({ key, targetCount: targets.length }, "HyperAgent-Auto: loaded target registry");
-            return targets;
+      if (!raw) { diag[key] = "NOT_FOUND"; continue; }
+      diag[key] = "raw_len=" + raw.length;
+      try {
+        const parsed = JSON.parse(raw);
+        const topKeys = Object.keys(parsed).join(",");
+        diag[key] += " top=[" + topKeys + "]";
+        let data;
+        if (parsed.value !== void 0) {
+          if (typeof parsed.value === "string") {
+            data = JSON.parse(parsed.value);
+            diag[key] += " unwrap=str";
+          } else {
+            data = parsed.value;
+            diag[key] += " unwrap=obj";
           }
-        } catch {
+        } else {
+          data = parsed;
+          diag[key] += " unwrap=none";
         }
+        const dKeys = Object.keys(data).join(",");
+        diag[key] += " dkeys=[" + dKeys + "]";
+        const targets = parseRegistryToTargets(data);
+        diag[key] += " targets=" + targets.length;
+        if (targets.length > 0) {
+          logger.info({ key, targetCount: targets.length, diag }, "HyperAgent-Auto: loaded target registry");
+          return targets;
+        }
+      } catch (err) {
+        diag[key] += " ERR=" + (err instanceof Error ? err.message : String(err));
       }
     }
-    logger.info("HyperAgent-Auto: no target registry found in any key pattern");
+    logger.warn({ diag }, "HyperAgent-Auto: no target registry found");
     return [];
-  } catch {
-    logger.warn("HyperAgent-Auto: failed to load target registry from Redis");
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "HyperAgent-Auto: registry load failed");
     return [];
   }
 }
