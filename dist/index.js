@@ -20168,9 +20168,127 @@ init_esm();
 init_value5();
 
 // node_modules/@widgetdc/contracts/dist/orchestrator/index.js
-var AgentHandshake = {};
-var AgentMessage = {};
-var OrchestratorToolCall = {};
+init_esm();
+var WorkflowPhase = Type.Union([
+  Type.Literal("discovery"),
+  Type.Literal("planning"),
+  Type.Literal("execution"),
+  Type.Literal("verification"),
+  Type.Literal("completion")
+]);
+var WorkflowType = Type.Union([
+  Type.Literal("sequential"),
+  Type.Literal("parallel"),
+  Type.Literal("loop"),
+  Type.Literal("debate"),
+  Type.Literal("adaptive")
+]);
+var OrchestratorTaskDomain = Type.Union([
+  Type.Literal("intelligence"),
+  Type.Literal("operations"),
+  Type.Literal("compliance"),
+  Type.Literal("architecture"),
+  Type.Literal("security")
+]);
+var RoutingCapability = Type.Object({
+  capability: Type.String({ description: "Capability name" }),
+  priority: Type.Optional(Type.Number({ minimum: 0, maximum: 10 })),
+  required: Type.Optional(Type.Boolean())
+});
+var RoutingIntent = Type.Object({
+  domain: OrchestratorTaskDomain,
+  capabilities: Type.Array(Type.String()),
+  priority: Type.Optional(Type.Number({ minimum: 0, maximum: 10 })),
+  timeout_ms: Type.Optional(Type.Number({ minimum: 100 }))
+});
+var RoutingDecision = Type.Object({
+  $id: Type.Optional(Type.String()),
+  intent: RoutingIntent,
+  selected_agent_id: Type.String(),
+  confidence: Type.Number({ minimum: 0, maximum: 1 }),
+  rationale: Type.Optional(Type.String()),
+  decided_at: Type.String({ format: "date-time" })
+});
+var AgentTrustProfile = Type.Object({
+  $id: Type.Optional(Type.String()),
+  agent_id: Type.String(),
+  trust_score: Type.Number({ minimum: 0, maximum: 100 }),
+  breach_count: Type.Optional(Type.Number({ minimum: 0 })),
+  last_verified_at: Type.Optional(Type.String({ format: "date-time" })),
+  capabilities_certified: Type.Optional(Type.Array(Type.String()))
+});
+var AgentHandshake = Type.Object({
+  $id: Type.Optional(Type.String()),
+  agent_id: Type.String({ description: "Unique agent identifier" }),
+  display_name: Type.String(),
+  version: Type.Optional(Type.String()),
+  source: Type.Optional(Type.String()),
+  status: Type.Optional(Type.Union([
+    Type.Literal("online"),
+    Type.Literal("offline"),
+    Type.Literal("busy"),
+    Type.Literal("degraded")
+  ])),
+  capabilities: Type.Optional(Type.Array(Type.String())),
+  allowed_tool_namespaces: Type.Optional(Type.Array(Type.String())),
+  metadata: Type.Optional(Type.Record(Type.String(), Type.Any()))
+});
+var AgentMessage = Type.Object({
+  $id: Type.Optional(Type.String()),
+  message_id: Type.String(),
+  from: Type.String({ description: "Sender agent ID" }),
+  to: Type.Union([
+    Type.String({ pattern: "^[a-z0-9_-]+$" }),
+    Type.Literal("All")
+  ]),
+  content: Type.String(),
+  timestamp: Type.String({ format: "date-time" }),
+  thread_id: Type.Optional(Type.String()),
+  metadata: Type.Optional(Type.Record(Type.String(), Type.Any()))
+});
+var StoredMessage = Type.Composite([
+  AgentMessage,
+  Type.Object({
+    stored_at: Type.String({ format: "date-time" }),
+    ttl_seconds: Type.Optional(Type.Number({ minimum: 1 }))
+  })
+]);
+var OrchestratorToolCall = Type.Object({
+  $id: Type.Optional(Type.String()),
+  call_id: Type.String(),
+  tool_name: Type.String(),
+  payload: Type.Record(Type.String(), Type.Any()),
+  called_by: Type.String({ description: "Agent ID that initiated the call" }),
+  timestamp: Type.String({ format: "date-time" }),
+  timeout_ms: Type.Optional(Type.Number({ minimum: 100 }))
+});
+var OrchestratorToolResult = Type.Object({
+  $id: Type.Optional(Type.String()),
+  call_id: Type.String(),
+  tool_name: Type.String(),
+  status: Type.Union([
+    Type.Literal("success"),
+    Type.Literal("error"),
+    Type.Literal("timeout"),
+    Type.Literal("not_found")
+  ]),
+  result: Type.Optional(Type.Any()),
+  error: Type.Optional(Type.String()),
+  timestamp: Type.String({ format: "date-time" }),
+  duration_ms: Type.Optional(Type.Number({ minimum: 0 }))
+});
+var AgentWorkflowEnvelope = Type.Object({
+  $id: Type.Optional(Type.String()),
+  workflow_id: Type.String(),
+  phase: WorkflowPhase,
+  workflow_type: WorkflowType,
+  agent_id: Type.String(),
+  task_domain: OrchestratorTaskDomain,
+  payload: Type.Record(Type.String(), Type.Any()),
+  created_at: Type.String({ format: "date-time" }),
+  updated_at: Type.String({ format: "date-time" }),
+  routing_decision: Type.Optional(RoutingDecision)
+});
 
 // src/validation.ts
 if (!format_exports.Has("date-time")) {
