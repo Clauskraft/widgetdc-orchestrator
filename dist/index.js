@@ -9208,7 +9208,7 @@ async function callMcpTool(opts) {
         };
       }
     }
-    let lastError = null;
+    let lastError2 = null;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       if (attempt > 0) {
         span.setAttribute("mcp.retry_attempt", attempt);
@@ -9229,7 +9229,7 @@ async function callMcpTool(opts) {
         span.setAttribute("mcp.duration_ms", result.duration_ms);
         return result;
       }
-      lastError = result.error_message;
+      lastError2 = result.error_message;
     }
     span.setAttribute("mcp.status", "error");
     span.setAttribute("mcp.retries_exhausted", true);
@@ -9237,7 +9237,7 @@ async function callMcpTool(opts) {
       call_id: opts.callId,
       status: "error",
       result: null,
-      error_message: `Failed after ${MAX_RETRIES + 1} attempts: ${lastError}`,
+      error_message: `Failed after ${MAX_RETRIES + 1} attempts: ${lastError2}`,
       error_code: "BACKEND_ERROR",
       duration_ms: Date.now() - t0,
       trace_id: opts.traceId ?? null,
@@ -14351,7 +14351,7 @@ async function persistScanResult(result) {
 }
 async function runOsintScan(options) {
   const scanId = uuid11();
-  const startedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const startedAt2 = (/* @__PURE__ */ new Date()).toISOString();
   const t0 = Date.now();
   const domains = options?.domains ?? [...DK_PUBLIC_DOMAINS];
   const scanType = options?.scan_type ?? "full";
@@ -14383,7 +14383,7 @@ async function runOsintScan(options) {
   }
   const result = {
     scan_id: scanId,
-    started_at: startedAt,
+    started_at: startedAt2,
     completed_at: (/* @__PURE__ */ new Date()).toISOString(),
     duration_ms: Date.now() - t0,
     scan_type: scanType,
@@ -14786,7 +14786,7 @@ async function runEvolutionLoop(opts) {
   }
   isRunning = true;
   const cycleId = uuid12();
-  const startedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const startedAt2 = (/* @__PURE__ */ new Date()).toISOString();
   const t0 = Date.now();
   const focusArea = opts?.focus_area?.slice(0, 200);
   const dryRun = opts?.dry_run ?? false;
@@ -14803,7 +14803,7 @@ async function runEvolutionLoop(opts) {
     cycle_id: cycleId,
     status: "failed",
     summary: "",
-    started_at: startedAt,
+    started_at: startedAt2,
     completed_at: "",
     duration_ms: 0,
     focus_area: focusArea,
@@ -19262,7 +19262,7 @@ async function runAutonomousCycle(phase, maxTargets) {
   const effectivePhase = phase ?? currentPhase;
   const batchSize = maxTargets ?? CYCLE_BATCH_SIZE[effectivePhase];
   const profileId = PHASE_POLICY[effectivePhase];
-  const startedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const startedAt2 = (/* @__PURE__ */ new Date()).toISOString();
   const t0 = Date.now();
   stream("cycle_start", { cycleId, phase: effectivePhase, batchSize });
   let targetsAttempted = 0;
@@ -19434,7 +19434,7 @@ ${approach.slice(0, 500)}
     const result = {
       cycleId,
       phase: effectivePhase,
-      startedAt,
+      startedAt: startedAt2,
       completedAt: (/* @__PURE__ */ new Date()).toISOString(),
       durationMs: Date.now() - t0,
       targetsAttempted,
@@ -27352,7 +27352,7 @@ async function pruneStaleData() {
 }
 async function runSelfCorrect() {
   const t0 = Date.now();
-  const startedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const startedAt2 = (/* @__PURE__ */ new Date()).toISOString();
   logger.info("Self-correcting graph agent starting");
   const corrections = await Promise.all([
     // Original orchestrator healers
@@ -27443,7 +27443,7 @@ async function runSelfCorrect() {
     }))
   ]);
   const report = {
-    started_at: startedAt,
+    started_at: startedAt2,
     completed_at: (/* @__PURE__ */ new Date()).toISOString(),
     duration_ms: Date.now() - t0,
     corrections,
@@ -31126,7 +31126,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     res.status(429).json({ error: { message: "Rate limit exceeded (30 req/min)", type: "rate_limit", code: "rate_limited" } });
     return;
   }
-  const { model, messages, stream: stream2, temperature, max_tokens } = req.body;
+  const { model, messages, stream: stream3, temperature, max_tokens } = req.body;
   const requestId = `chatcmpl-${uuid29().substring(0, 12)}`;
   const assistant = ASSISTANT_MAP.get(model);
   const resolvedModel = assistant ? assistant.baseModel : model;
@@ -31149,7 +31149,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     }
   }
   const t0 = Date.now();
-  logger.info({ model, provider, stream: stream2, messageCount: llmMessages.length, ip: clientIp }, "OpenAI compat request");
+  logger.info({ model, provider, stream: stream3, messageCount: llmMessages.length, ip: clientIp }, "OpenAI compat request");
   try {
     let loopMessages = [...llmMessages];
     let finalContent = "";
@@ -31224,7 +31224,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     }
     logger.info({ model, provider, toolRounds, tools: allToolNames, toolsOffered: selectedTools.length, duration_ms: Date.now() - t0 }, "OpenAI compat complete (orchestrated)");
     recordMetrics(model || "gemini-flash", allToolNames, toolRounds, totalUsage.total_tokens, selectedTools.length);
-    if (stream2) {
+    if (stream3) {
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
@@ -31437,7 +31437,7 @@ var intentRules = [
 function classifyIntent(description) {
   const lower = description.toLowerCase();
   let bestMatch = null;
-  let bestScore = 0;
+  let bestScore2 = 0;
   for (const rule of intentRules) {
     let score = 0;
     for (const kw of rule.keywords) {
@@ -31445,8 +31445,8 @@ function classifyIntent(description) {
         score += kw.length;
       }
     }
-    if (score > bestScore) {
-      bestScore = score;
+    if (score > bestScore2) {
+      bestScore2 = score;
       bestMatch = rule;
     }
   }
@@ -33810,7 +33810,7 @@ intelligenceRouter.post("/adaptive-rag/retrain", async (_req, res) => {
 });
 intelligenceRouter.post("/extract-test", async (req, res) => {
   const { callMcpTool: callMcpTool2 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
-  const { v4: uuid34 } = await import("uuid");
+  const { v4: uuid35 } = await import("uuid");
   const content = req.body?.content ?? "CSRD regulation, ATP pension fund, GRI framework";
   try {
     const llmResult = await callMcpTool2({
@@ -33820,7 +33820,7 @@ intelligenceRouter.post("/extract-test", async (req, res) => {
 
 Content: ${content.slice(0, 2e3)}`
       },
-      callId: uuid34(),
+      callId: uuid35(),
       timeoutMs: 3e4
     });
     const raw = llmResult.result;
@@ -35038,6 +35038,732 @@ data: ${JSON.stringify({
   });
 });
 
+// src/routes/inventor.ts
+import { Router as Router44 } from "express";
+
+// src/inventor-loop.ts
+init_cognitive_proxy();
+init_dual_rag();
+init_mcp_caller();
+init_redis();
+init_sse();
+init_chat_broadcaster();
+init_logger();
+import { v4 as uuid34 } from "uuid";
+
+// src/inventor-sampler.ts
+init_logger();
+var UCB1Sampler = class {
+  algorithm = "ucb1";
+  c;
+  totalVisits = 0;
+  constructor(c = 1.414) {
+    this.c = c;
+  }
+  sample(nodes2, n) {
+    if (nodes2.length === 0) return [];
+    if (nodes2.length <= n) return [...nodes2];
+    const minScore = Math.min(...nodes2.map((nd) => nd.score));
+    const maxScore = Math.max(...nodes2.map((nd) => nd.score));
+    const scoreRange = maxScore - minScore || 1;
+    const scored = nodes2.map((node) => {
+      const normalizedScore = (node.score - minScore) / scoreRange;
+      const exploration = node.visitCount === 0 ? Infinity : this.c * Math.sqrt(Math.log(Math.max(this.totalVisits, 1)) / node.visitCount);
+      return { node, ucb1: normalizedScore + exploration };
+    });
+    scored.sort((a, b) => b.ucb1 - a.ucb1);
+    const selected = scored.slice(0, n).map((s) => s.node);
+    for (const node of selected) {
+      node.visitCount++;
+      this.totalVisits++;
+    }
+    return selected;
+  }
+  onNodeAdded(_node) {
+  }
+  getState() {
+    return { totalVisits: this.totalVisits, c: this.c };
+  }
+  loadState(state) {
+    this.totalVisits = state.totalVisits || 0;
+    this.c = state.c || 1.414;
+  }
+};
+var GreedySampler = class {
+  algorithm = "greedy";
+  sample(nodes2, n) {
+    if (nodes2.length === 0) return [];
+    const sorted = [...nodes2].sort((a, b) => b.score - a.score);
+    return sorted.slice(0, n);
+  }
+  onNodeAdded(_node) {
+  }
+  getState() {
+    return {};
+  }
+  loadState(_state) {
+  }
+};
+var RandomSampler = class {
+  algorithm = "random";
+  sample(nodes2, n) {
+    if (nodes2.length === 0) return [];
+    const shuffled = [...nodes2].sort(() => Math.random() - 0.5);
+    return shuffled.slice(0, n);
+  }
+  onNodeAdded(_node) {
+  }
+  getState() {
+    return {};
+  }
+  loadState(_state) {
+  }
+};
+var IslandSampler = class {
+  algorithm = "island";
+  islands = /* @__PURE__ */ new Map();
+  islandCount;
+  migrationInterval;
+  migrationRate;
+  currentIsland = 0;
+  generationCount = 0;
+  lastMigration = 0;
+  constructor(config2) {
+    this.islandCount = config2.count;
+    this.migrationInterval = config2.migrationInterval;
+    this.migrationRate = config2.migrationRate;
+    for (let i = 0; i < this.islandCount; i++) {
+      this.islands.set(i, /* @__PURE__ */ new Set());
+    }
+  }
+  sample(nodes2, n) {
+    if (nodes2.length === 0) return [];
+    this.generationCount++;
+    if (this.generationCount - this.lastMigration >= this.migrationInterval) {
+      this.migrate(nodes2);
+      this.lastMigration = this.generationCount;
+    }
+    const islandNodeIds = this.islands.get(this.currentIsland) ?? /* @__PURE__ */ new Set();
+    const islandNodes = nodes2.filter((nd) => islandNodeIds.has(nd.id));
+    this.currentIsland = (this.currentIsland + 1) % this.islandCount;
+    if (islandNodes.length === 0) {
+      const sorted2 = [...nodes2].sort((a, b) => b.score - a.score);
+      return sorted2.slice(0, n);
+    }
+    const explorationCount = Math.max(1, Math.floor(n * 0.3));
+    const exploitationCount = n - explorationCount;
+    const sorted = [...islandNodes].sort((a, b) => b.score - a.score);
+    const exploited = sorted.slice(0, exploitationCount);
+    const remaining = islandNodes.filter((nd) => !exploited.includes(nd));
+    const shuffled = remaining.sort(() => Math.random() - 0.5);
+    const explored = shuffled.slice(0, explorationCount);
+    return [...exploited, ...explored];
+  }
+  onNodeAdded(node) {
+    const targetIsland = node.island >= 0 ? node.island : this.currentIsland;
+    const island = this.islands.get(targetIsland % this.islandCount);
+    if (island) island.add(node.id);
+    node.island = targetIsland % this.islandCount;
+  }
+  migrate(allNodes) {
+    const nodeMap = new Map(allNodes.map((n) => [n.id, n]));
+    for (let i = 0; i < this.islandCount; i++) {
+      const islandIds = this.islands.get(i) ?? /* @__PURE__ */ new Set();
+      const islandNodes = [...islandIds].map((id) => nodeMap.get(id)).filter((n) => n !== void 0).sort((a, b) => b.score - a.score);
+      const migrantCount = Math.max(1, Math.floor(islandNodes.length * this.migrationRate));
+      const migrants = islandNodes.slice(0, migrantCount);
+      const leftNeighbor = (i - 1 + this.islandCount) % this.islandCount;
+      const rightNeighbor = (i + 1) % this.islandCount;
+      for (const migrant of migrants) {
+        const targetIsland = Math.random() < 0.5 ? leftNeighbor : rightNeighbor;
+        const target = this.islands.get(targetIsland);
+        if (target && !target.has(migrant.id)) {
+          target.add(migrant.id);
+        }
+      }
+    }
+    logger.debug({ generation: this.generationCount }, "Inventor: island migration completed");
+  }
+  getState() {
+    const islands = {};
+    this.islands.forEach((ids, idx) => {
+      islands[idx] = [...ids];
+    });
+    return {
+      islands,
+      currentIsland: this.currentIsland,
+      generationCount: this.generationCount,
+      lastMigration: this.lastMigration
+    };
+  }
+  loadState(state) {
+    const islands = state.islands;
+    if (islands) {
+      this.islands.clear();
+      for (const [idx, ids] of Object.entries(islands)) {
+        this.islands.set(Number(idx), new Set(ids));
+      }
+    }
+    this.currentIsland = state.currentIsland || 0;
+    this.generationCount = state.generationCount || 0;
+    this.lastMigration = state.lastMigration || 0;
+  }
+};
+function createSampler(config2) {
+  switch (config2.algorithm) {
+    case "ucb1":
+      return new UCB1Sampler(config2.ucb1C ?? 1.414);
+    case "greedy":
+      return new GreedySampler();
+    case "random":
+      return new RandomSampler();
+    case "island":
+      return new IslandSampler(config2.islands ?? { count: 5, migrationInterval: 10, migrationRate: 0.1 });
+    default:
+      return new UCB1Sampler();
+  }
+}
+
+// src/inventor-loop.ts
+var isRunning3 = false;
+var currentConfig = null;
+var currentStep2 = 0;
+var bestScore = -Infinity;
+var bestNodeId = null;
+var startedAt = null;
+var lastStepAt = null;
+var lastError = null;
+var sampler = null;
+var nodes = /* @__PURE__ */ new Map();
+var REDIS_PREFIX9 = "inventor:";
+var nodeKey = (expName) => `${REDIS_PREFIX9}${expName}:nodes`;
+var stateKey = (expName) => `${REDIS_PREFIX9}${expName}:state`;
+var samplerKey = (expName) => `${REDIS_PREFIX9}${expName}:sampler`;
+function stream2(event, data) {
+  broadcastSSE("inventor", { event, ...data, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+}
+async function retrieveCognition(query, topK) {
+  try {
+    const ragResponse = await dualChannelRAG(query, {
+      maxResults: topK,
+      maxHops: 2,
+      forceChannels: ["graphrag", "srag"]
+    });
+    return ragResponse.results.map((r, i) => ({
+      id: `cog-${i}`,
+      title: r.content.slice(0, 80),
+      content: r.content,
+      domain: [],
+      source: r.source,
+      score: r.score
+    }));
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Inventor: cognition retrieval failed");
+    return [];
+  }
+}
+async function runResearcher(task, parentNodes, cognitionItems, config2) {
+  const parentContext = parentNodes.map(
+    (n) => `[Node ${n.id}] score=${n.score.toFixed(3)}
+  analysis: ${n.analysis.slice(0, 200)}
+  artifact preview: ${n.artifact.slice(0, 300)}`
+  ).join("\n\n");
+  const cognitionContext = cognitionItems.map(
+    (c) => `[${c.source}] ${c.title}
+  ${c.content.slice(0, 200)}`
+  ).join("\n\n");
+  const prompt = `You are the Researcher agent in an evolutionary AI system.
+
+TASK: ${task}
+
+PARENT SOLUTIONS (sampled via ${config2.sampling.algorithm}):
+${parentContext || "(no parents yet \u2014 generate an initial solution)"}
+
+RELEVANT KNOWLEDGE (from RAG):
+${cognitionContext || "(no prior knowledge available)"}
+
+Generate a NEW solution that improves on the best parent.
+- If parents exist, create a variation that addresses their weaknesses
+- If no parents, generate an initial high-quality solution
+- Max artifact length: ${config2.pipeline.maxArtifactLength} characters
+
+Respond in JSON format:
+{
+  "motivation": "Why this variation should improve on parents...",
+  "artifact": "The complete solution code/config..."
+}`;
+  try {
+    const result = await callCognitiveRaw("reason", {
+      prompt,
+      agent_id: "inventor-researcher",
+      depth: 2,
+      context: {
+        parentCount: parentNodes.length,
+        bestParentScore: parentNodes.length > 0 ? Math.max(...parentNodes.map((n) => n.score)) : 0,
+        cognitionCount: cognitionItems.length
+      }
+    }, config2.pipeline.engineerTimeoutMs);
+    const text = String(result.answer || result.result || "");
+    try {
+      const jsonMatch = text.match(/\{[\s\S]*"artifact"[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return {
+          artifact: String(parsed.artifact || "").slice(0, config2.pipeline.maxArtifactLength),
+          motivation: String(parsed.motivation || "No motivation provided")
+        };
+      }
+    } catch {
+    }
+    return {
+      artifact: text.slice(0, config2.pipeline.maxArtifactLength),
+      motivation: "Generated via RLM reasoning (raw output)"
+    };
+  } catch (err) {
+    throw new Error(`Researcher failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+async function runEngineer(node, config2) {
+  const t0 = Date.now();
+  try {
+    const result = await callMcpTool({
+      toolName: "critique_refine",
+      args: {
+        content: node.artifact,
+        criteria: `Evaluate this solution for: ${config2.taskDescription}. Score 0-100 on: correctness, efficiency, elegance, completeness.`,
+        mode: "evaluate"
+      },
+      callId: `inventor-eng-${node.id}`
+    });
+    const resultObj = typeof result === "object" && result !== null ? result : {};
+    const score = Number(resultObj.score ?? resultObj.overall_score ?? 50) / 100;
+    const metrics2 = {
+      correctness: Number(resultObj.correctness ?? 0.5),
+      efficiency: Number(resultObj.efficiency ?? 0.5),
+      elegance: Number(resultObj.elegance ?? 0.5),
+      completeness: Number(resultObj.completeness ?? 0.5)
+    };
+    return {
+      nodeId: node.id,
+      success: score > 0.3,
+      score,
+      metrics: metrics2,
+      output: JSON.stringify(resultObj).slice(0, 2e3),
+      durationMs: Date.now() - t0,
+      tokensUsed: 0
+    };
+  } catch (err) {
+    return {
+      nodeId: node.id,
+      success: false,
+      score: 0,
+      metrics: {},
+      output: "",
+      error: err instanceof Error ? err.message : String(err),
+      durationMs: Date.now() - t0,
+      tokensUsed: 0
+    };
+  }
+}
+async function runAnalyzer(node, result, parentNode, config2) {
+  try {
+    const analyzeResult = await callCognitiveRaw("analyze", {
+      prompt: `Analyze this evolutionary trial result.
+
+TASK: ${config2.taskDescription}
+TRIAL NODE: ${node.id} (score: ${result.score.toFixed(3)})
+PARENT: ${parentNode ? `${parentNode.id} (score: ${parentNode.score.toFixed(3)})` : "none (seed)"}
+MOTIVATION: ${node.motivation}
+SUCCESS: ${result.success}
+METRICS: ${JSON.stringify(result.metrics)}
+
+Provide:
+1. Why this solution scored as it did
+2. What the key improvement/regression was vs parent
+3. One actionable insight for the next iteration`,
+      agent_id: "inventor-analyzer"
+    }, 15e3);
+    return String(analyzeResult.answer || analyzeResult.result || "Analysis unavailable");
+  } catch {
+    return `Score: ${result.score.toFixed(3)}. ${result.success ? "Passed" : "Failed"}. ${result.error || ""}`;
+  }
+}
+async function persistNodes(experimentName) {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  const data = JSON.stringify([...nodes.values()]);
+  await redis2.set(nodeKey(experimentName), data).catch(() => {
+  });
+}
+async function persistState(experimentName) {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  const state = {
+    currentStep: currentStep2,
+    bestScore,
+    bestNodeId,
+    startedAt,
+    lastStepAt,
+    lastError
+  };
+  await redis2.set(stateKey(experimentName), JSON.stringify(state)).catch(() => {
+  });
+  if (sampler) {
+    await redis2.set(samplerKey(experimentName), JSON.stringify(sampler.getState())).catch(() => {
+    });
+  }
+}
+async function loadState(experimentName) {
+  const redis2 = getRedis();
+  if (!redis2) return false;
+  try {
+    const nodesRaw = await redis2.get(nodeKey(experimentName));
+    if (nodesRaw) {
+      const parsed = JSON.parse(nodesRaw);
+      nodes.clear();
+      for (const n of parsed) nodes.set(n.id, n);
+    }
+    const stateRaw = await redis2.get(stateKey(experimentName));
+    if (stateRaw) {
+      const state = JSON.parse(stateRaw);
+      currentStep2 = state.currentStep || 0;
+      bestScore = state.bestScore ?? -Infinity;
+      bestNodeId = state.bestNodeId || null;
+      startedAt = state.startedAt || null;
+      lastStepAt = state.lastStepAt || null;
+      lastError = state.lastError || null;
+    }
+    if (sampler) {
+      const samplerRaw = await redis2.get(samplerKey(experimentName));
+      if (samplerRaw) sampler.loadState(JSON.parse(samplerRaw));
+    }
+    return nodes.size > 0;
+  } catch {
+    return false;
+  }
+}
+async function runStep(config2) {
+  currentStep2++;
+  const stepId = `step-${currentStep2}`;
+  const t0 = Date.now();
+  stream2("step_start", { step: currentStep2, maxSteps: config2.pipeline.maxSteps });
+  const allNodes = [...nodes.values()].filter((n) => n.status === "completed");
+  const parentNodes = sampler?.sample(allNodes, config2.sampling.sampleN) ?? [];
+  const cognitionQuery = parentNodes.length > 0 ? `${config2.taskDescription}. Best approach: ${parentNodes[0].analysis.slice(0, 200)}` : config2.taskDescription;
+  const cognitionItems = await retrieveCognition(cognitionQuery, config2.cognition.topK);
+  stream2("learn", {
+    step: currentStep2,
+    parentCount: parentNodes.length,
+    cognitionCount: cognitionItems.length,
+    bestParentScore: parentNodes.length > 0 ? Math.max(...parentNodes.map((n) => n.score)) : null
+  });
+  stream2("design", { step: currentStep2 });
+  const { artifact, motivation } = await runResearcher(
+    config2.taskDescription,
+    parentNodes,
+    cognitionItems,
+    config2
+  );
+  const nodeId = `inv-${uuid34().slice(0, 8)}`;
+  const parentId = parentNodes.length > 0 ? parentNodes[0].id : null;
+  const node = {
+    id: nodeId,
+    parentId,
+    artifact,
+    taskDescription: config2.taskDescription,
+    score: 0,
+    metrics: {},
+    analysis: "",
+    motivation,
+    island: parentNodes.length > 0 ? parentNodes[0].island : 0,
+    visitCount: 0,
+    chainMode: config2.chainMode || "sequential",
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    status: "running"
+  };
+  nodes.set(nodeId, node);
+  stream2("experiment", { step: currentStep2, nodeId });
+  const result = await runEngineer(node, config2);
+  node.score = result.score;
+  node.metrics = result.metrics;
+  node.status = result.success ? "completed" : "failed";
+  stream2("analyze", { step: currentStep2, nodeId, score: result.score });
+  const parentNode = parentId ? nodes.get(parentId) ?? null : null;
+  node.analysis = await runAnalyzer(node, result, parentNode, config2);
+  if (sampler) sampler.onNodeAdded(node);
+  if (result.score > bestScore) {
+    bestScore = result.score;
+    bestNodeId = nodeId;
+    stream2("new_best", { step: currentStep2, nodeId, score: result.score });
+  }
+  lastStepAt = (/* @__PURE__ */ new Date()).toISOString();
+  await persistNodes(config2.experimentName);
+  await persistState(config2.experimentName);
+  if (result.success && node.analysis.length > 20) {
+    try {
+      await callMcpTool({
+        toolName: "memory_store",
+        args: {
+          agent_id: "inventor-analyzer",
+          key: `insight:${nodeId}`,
+          value: node.analysis,
+          metadata: { score: result.score, step: currentStep2, experiment: config2.experimentName }
+        },
+        callId: `inventor-mem-${nodeId}`
+      });
+    } catch {
+    }
+  }
+  const stepResult = {
+    stepNumber: currentStep2,
+    nodeId,
+    parentId,
+    score: result.score,
+    bestScore,
+    analysis: node.analysis.slice(0, 300),
+    durationMs: Date.now() - t0
+  };
+  stream2("step_complete", { ...stepResult });
+  return stepResult;
+}
+async function runInventor(config2, resume = false) {
+  if (isRunning3) throw new Error("Inventor already running");
+  isRunning3 = true;
+  currentConfig = config2;
+  startedAt = (/* @__PURE__ */ new Date()).toISOString();
+  lastError = null;
+  const results = [];
+  sampler = createSampler({
+    algorithm: config2.sampling.algorithm,
+    ucb1C: config2.sampling.ucb1C,
+    islands: config2.sampling.islands
+  });
+  if (resume) {
+    const loaded = await loadState(config2.experimentName);
+    if (loaded) {
+      logger.info(
+        { experiment: config2.experimentName, nodes: nodes.size, step: currentStep2 },
+        "Inventor: resumed from Redis"
+      );
+    }
+  } else {
+    nodes.clear();
+    currentStep2 = 0;
+    bestScore = -Infinity;
+    bestNodeId = null;
+  }
+  stream2("run_start", {
+    experiment: config2.experimentName,
+    maxSteps: config2.pipeline.maxSteps,
+    sampling: config2.sampling.algorithm,
+    resumed: resume && nodes.size > 0
+  });
+  if (config2.initialArtifact && nodes.size === 0) {
+    const seedNode = {
+      id: `inv-seed-${uuid34().slice(0, 8)}`,
+      parentId: null,
+      artifact: config2.initialArtifact,
+      taskDescription: config2.taskDescription,
+      score: 0,
+      metrics: {},
+      analysis: "Initial seed artifact",
+      motivation: "Seed solution provided by user",
+      island: 0,
+      visitCount: 0,
+      chainMode: config2.chainMode || "sequential",
+      createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+      status: "completed"
+    };
+    const seedResult = await runEngineer(seedNode, config2);
+    seedNode.score = seedResult.score;
+    seedNode.metrics = seedResult.metrics;
+    seedNode.status = seedResult.success ? "completed" : "failed";
+    nodes.set(seedNode.id, seedNode);
+    if (sampler) sampler.onNodeAdded(seedNode);
+    if (seedResult.score > bestScore) {
+      bestScore = seedResult.score;
+      bestNodeId = seedNode.id;
+    }
+    stream2("seed", { nodeId: seedNode.id, score: seedResult.score });
+  }
+  try {
+    for (let step = currentStep2; step < config2.pipeline.maxSteps; step++) {
+      try {
+        const result = await runStep(config2);
+        results.push(result);
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+        stream2("step_error", { step: currentStep2, error: lastError });
+        logger.error({ step: currentStep2, error: lastError }, "Inventor: step failed");
+      }
+    }
+  } finally {
+    isRunning3 = false;
+    currentConfig = null;
+    stream2("run_complete", {
+      totalSteps: results.length,
+      bestScore,
+      bestNodeId,
+      nodesCreated: nodes.size
+    });
+    broadcastMessage({
+      from: "Inventor",
+      to: "All",
+      source: "orchestrator",
+      type: "Message",
+      message: `Evolution complete: ${results.length} steps, best score ${bestScore.toFixed(3)} (node ${bestNodeId})`
+    });
+  }
+  return { steps: results, bestScore, bestNodeId };
+}
+function getInventorStatus() {
+  return {
+    isRunning: isRunning3,
+    experimentName: currentConfig?.experimentName ?? "",
+    currentStep: currentStep2,
+    totalSteps: currentConfig?.pipeline.maxSteps ?? 0,
+    nodesCreated: nodes.size,
+    bestScore: bestScore === -Infinity ? 0 : bestScore,
+    bestNodeId,
+    samplingAlgorithm: currentConfig?.sampling.algorithm ?? "ucb1",
+    startedAt,
+    lastStepAt,
+    lastError
+  };
+}
+function getInventorNodes() {
+  return [...nodes.values()];
+}
+function getInventorNode(id) {
+  return nodes.get(id);
+}
+function getBestNode() {
+  return bestNodeId ? nodes.get(bestNodeId) : void 0;
+}
+
+// src/routes/inventor.ts
+init_logger();
+var inventorRouter = Router44();
+inventorRouter.post("/run", async (req, res) => {
+  const { config: config2, resume } = req.body;
+  if (!config2 || !config2.experimentName || !config2.taskDescription) {
+    res.status(400).json({
+      success: false,
+      error: {
+        code: "VALIDATION_ERROR",
+        message: "Required: config.experimentName, config.taskDescription",
+        status_code: 400
+      }
+    });
+    return;
+  }
+  const status = getInventorStatus();
+  if (status.isRunning) {
+    res.status(409).json({
+      success: false,
+      error: {
+        code: "ALREADY_RUNNING",
+        message: `Experiment '${status.experimentName}' is already running (step ${status.currentStep}/${status.totalSteps})`,
+        status_code: 409
+      }
+    });
+    return;
+  }
+  const fullConfig = {
+    experimentName: config2.experimentName,
+    taskDescription: config2.taskDescription,
+    initialArtifact: config2.initialArtifact,
+    sampling: {
+      algorithm: config2.sampling?.algorithm ?? "ucb1",
+      sampleN: config2.sampling?.sampleN ?? 3,
+      ucb1C: config2.sampling?.ucb1C ?? 1.414,
+      islands: config2.sampling?.islands ?? { count: 5, migrationInterval: 10, migrationRate: 0.1 }
+    },
+    cognition: {
+      topK: config2.cognition?.topK ?? 5,
+      threshold: config2.cognition?.threshold ?? 0.3
+    },
+    pipeline: {
+      maxSteps: config2.pipeline?.maxSteps ?? 20,
+      maxArtifactLength: config2.pipeline?.maxArtifactLength ?? 8e3,
+      engineerTimeoutMs: config2.pipeline?.engineerTimeoutMs ?? 12e4,
+      numWorkers: config2.pipeline?.numWorkers ?? 1
+    },
+    evalScript: config2.evalScript,
+    model: config2.model,
+    chainMode: config2.chainMode ?? "sequential"
+  };
+  try {
+    runInventor(fullConfig, resume ?? false).catch((err) => {
+      logger.error({ err: String(err), experiment: fullConfig.experimentName }, "Inventor run failed");
+    });
+    res.status(202).json({
+      success: true,
+      data: {
+        message: `Inventor experiment '${fullConfig.experimentName}' started`,
+        experiment: fullConfig.experimentName,
+        maxSteps: fullConfig.pipeline.maxSteps,
+        sampling: fullConfig.sampling.algorithm,
+        poll_url: "/api/inventor/status"
+      }
+    });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Inventor start failed");
+    res.status(500).json({
+      success: false,
+      error: { code: "INVENTOR_ERROR", message: String(err), status_code: 500 }
+    });
+  }
+});
+inventorRouter.get("/status", (_req, res) => {
+  const status = getInventorStatus();
+  res.json({ success: true, data: status });
+});
+inventorRouter.get("/nodes", (req, res) => {
+  const sort = req.query.sort ?? "score";
+  const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+  const offset = parseInt(req.query.offset) || 0;
+  let nodes2 = getInventorNodes();
+  if (sort === "created") {
+    nodes2 = [...nodes2].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  } else {
+    nodes2 = [...nodes2].sort((a, b) => b.score - a.score);
+  }
+  const total = nodes2.length;
+  const paged = nodes2.slice(offset, offset + limit);
+  res.json({
+    success: true,
+    data: {
+      nodes: paged,
+      total,
+      limit,
+      offset
+    }
+  });
+});
+inventorRouter.get("/node/:id", (req, res) => {
+  const node = getInventorNode(req.params.id);
+  if (!node) {
+    res.status(404).json({
+      success: false,
+      error: { code: "NOT_FOUND", message: `Node '${req.params.id}' not found`, status_code: 404 }
+    });
+    return;
+  }
+  res.json({ success: true, data: node });
+});
+inventorRouter.get("/best", (_req, res) => {
+  const best = getBestNode();
+  if (!best) {
+    res.status(404).json({
+      success: false,
+      error: { code: "NOT_FOUND", message: "No nodes yet \u2014 run an experiment first", status_code: 404 }
+    });
+    return;
+  }
+  res.json({ success: true, data: best });
+});
+
 // src/index.ts
 var __dirname3 = path2.dirname(fileURLToPath3(import.meta.url));
 var app = express();
@@ -35184,6 +35910,7 @@ app.use("/api/memory", requireApiKey, memoryRouter);
 app.use("/api/abi", requireApiKey, abiDocsRouter);
 app.use("/api/abi", requireApiKey, abiHealthRouter);
 app.use("/api/abi", requireApiKey, abiVersioningRouter);
+app.use("/api/inventor", requireApiKey, apiRateLimiter, inventorRouter);
 app.use("/api/hyperagent/auto", requireApiKey, apiRateLimiter, hyperagentAutoRouter);
 app.use("/api/hyperagent", requireApiKey, apiRateLimiter, hyperagentRouter);
 app.use("/api/tools", requireApiKey, apiRateLimiter, toolGatewayRouter);
