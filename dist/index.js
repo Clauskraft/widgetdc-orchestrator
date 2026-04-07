@@ -196,12 +196,6 @@ var init_sse = __esm({
 });
 
 // src/redis.ts
-var redis_exports = {};
-__export(redis_exports, {
-  getRedis: () => getRedis,
-  initRedis: () => initRedis,
-  isRedisEnabled: () => isRedisEnabled
-});
 import Redis from "ioredis";
 function getRedis() {
   return redis;
@@ -34630,54 +34624,6 @@ init_redis();
 init_logger();
 import { Router as Router43 } from "express";
 var hyperagentAutoRouter = Router43();
-hyperagentAutoRouter.get("/debug-registry", async (_req, res) => {
-  try {
-    const { getRedis: getRedis2 } = await Promise.resolve().then(() => (init_redis(), redis_exports));
-    const redis2 = getRedis2();
-    if (!redis2) return res.json({ error: "no redis" });
-    const keys = [
-      "wm:HYPERAGENT:target-registry-v2.2",
-      "hyperagent:HYPERAGENT:target-registry-v2.2",
-      "hyperagent:memory:targets:full-registry-v2.2",
-      "wm:HYPERAGENT:target-registry-v2.1"
-    ];
-    const results = {};
-    for (const key of keys) {
-      const raw = await redis2.get(key);
-      if (!raw) {
-        results[key] = "NOT_FOUND";
-        continue;
-      }
-      try {
-        const parsed = JSON.parse(raw);
-        const topKeys = Object.keys(parsed);
-        let valueType = "none";
-        let dataKeys = [];
-        if (parsed.value !== void 0) {
-          valueType = typeof parsed.value;
-          if (typeof parsed.value === "string") {
-            try {
-              const inner = JSON.parse(parsed.value);
-              dataKeys = Object.keys(inner);
-              valueType = "string->parsed";
-            } catch {
-              valueType = "string->parse_fail";
-            }
-          } else if (typeof parsed.value === "object") {
-            dataKeys = Object.keys(parsed.value);
-            valueType = "object";
-          }
-        }
-        results[key] = { raw_len: raw.length, topKeys, valueType, dataKeys };
-      } catch (e) {
-        results[key] = { raw_len: raw.length, error: String(e) };
-      }
-    }
-    res.json({ success: true, results });
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
-});
 hyperagentAutoRouter.post("/run", async (req, res) => {
   const { phase, maxTargets } = req.body;
   try {

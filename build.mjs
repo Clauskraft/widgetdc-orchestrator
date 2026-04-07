@@ -5,6 +5,13 @@ import * as esbuild from 'esbuild'
 import { readFileSync, mkdirSync, copyFileSync, existsSync } from 'fs'
 import { spawnSync } from 'child_process'
 
+// Guard: NODE_ENV=production causes npm to skip devDependencies (esbuild, typebox, etc.)
+// This silently breaks the build. Force NODE_ENV=development for build context.
+if (process.env.NODE_ENV === 'production') {
+  console.warn('⚠️  NODE_ENV=production detected — overriding to development for build')
+  process.env.NODE_ENV = 'development'
+}
+
 // S2: Verify contracts symlink before build
 const contractsDist = './node_modules/@widgetdc/contracts/dist/orchestrator'
 if (!existsSync(contractsDist)) {
