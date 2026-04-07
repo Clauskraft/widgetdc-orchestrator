@@ -19070,6 +19070,109 @@ function adaptWeights(edgesBefore, edgesAfter) {
     edgeWeights[k] /= sum;
   }
 }
+async function enrichTargetWithRAG(target, edgeGap) {
+  try {
+    const ragQuery = `Platform target ${target.id}: ${target.metric}. Edge: ${target.edge} (gap: ${edgeGap.toFixed(1)}). Category: ${target.category}. Find relevant knowledge, prior fixes, lessons, and related issues.`;
+    const ragResponse = await dualChannelRAG(ragQuery, {
+      maxResults: 8,
+      maxHops: target.category === "E" || target.category === "F" ? 3 : 2,
+      forceChannels: edgeGap > 1 ? ["graphrag", "srag", "cypher"] : ["graphrag", "srag"]
+      // Low-gap: skip cypher overhead
+    });
+    const folded = await foldContext2(
+      `[RAG context for ${target.id}]
+${ragResponse.merged_context}`,
+      1500
+    );
+    logger.info({
+      targetId: target.id,
+      channels: ragResponse.channels_used,
+      resultCount: ragResponse.results.length,
+      durationMs: ragResponse.duration_ms,
+      pollution: ragResponse.pollution_filtered
+    }, "HyperAgent-Auto: RAG enrichment complete");
+    return {
+      ragContext: folded,
+      channelsUsed: ragResponse.channels_used,
+      ragResultCount: ragResponse.results.length
+    };
+  } catch (err) {
+    logger.warn({ targetId: target.id, err: String(err) }, "HyperAgent-Auto: RAG enrichment failed (continuing without)");
+    return { ragContext: "", channelsUsed: [], ragResultCount: 0 };
+  }
+}
+async function reasonAboutTarget(target, ragContext, edgesBefore, phase) {
+  if (!isRlmAvailable()) {
+    return { approach: "", confidence: 0 };
+  }
+  try {
+    const edge = edgesBefore.find((e) => e.name === target.edge);
+    const reasonResult = await callCognitiveRaw("reason", {
+      prompt: `Deep analysis for autonomous target execution.
+
+TARGET: ${target.id} \u2014 ${target.metric}
+EDGE: ${target.edge} (score: ${edge?.score.toFixed(1) ?? "?"}, gap: ${edge?.gap.toFixed(1) ?? "?"})
+CATEGORY: ${target.category} (chain hint: ${CHAIN_MODE_MATRIX[target.category] || "sequential"})
+PHASE: ${phase} (policy: ${PHASE_POLICY[phase]})
+
+PRIOR KNOWLEDGE FROM RAG:
+${ragContext || "(no RAG context available)"}
+
+Determine:
+1. The optimal execution approach for this target
+2. Whether the chain mode should differ from the category default
+3. Confidence level (0-1) that this target can be closed in current phase
+4. Any prerequisite actions needed before execution`,
+      agent_id: "hyperagent-auto",
+      depth: target.category === "E" || target.category === "A" ? 2 : 1,
+      context: {
+        edgeScores: edgesBefore.reduce((acc, e) => ({ ...acc, [e.name]: e.score }), {}),
+        phase
+      }
+    }, 3e4);
+    if (!reasonResult) return { approach: "", confidence: 0 };
+    const approach = reasonResult.answer || reasonResult.reasoning || "";
+    const confidence = reasonResult.confidence ?? 0.5;
+    const routing = reasonResult.routing;
+    let chainModeOverride;
+    const approachLower = (typeof approach === "string" ? approach : "").toLowerCase();
+    if (approachLower.includes("debate") || approachLower.includes("multi-perspective")) {
+      chainModeOverride = "debate";
+    } else if (approachLower.includes("parallel") || approachLower.includes("independent")) {
+      chainModeOverride = "parallel";
+    } else if (approachLower.includes("adaptive") || approachLower.includes("q-learning")) {
+      chainModeOverride = "adaptive";
+    }
+    logger.info({
+      targetId: target.id,
+      confidence,
+      chainModeOverride,
+      provider: routing?.provider,
+      costDkk: routing?.cost
+    }, "HyperAgent-Auto: RLM reasoning complete");
+    return { approach: typeof approach === "string" ? approach : JSON.stringify(approach), confidence, chainModeOverride };
+  } catch (err) {
+    logger.warn({ targetId: target.id, err: String(err) }, "HyperAgent-Auto: RLM reasoning failed (using defaults)");
+    return { approach: "", confidence: 0 };
+  }
+}
+async function emitPerChannelReward(targetId, success, edgeDelta, channelsUsed) {
+  const reward = success ? 1 + Math.max(0, edgeDelta * 5) : -0.5;
+  for (const channel of channelsUsed) {
+    try {
+      await callMcpTool({
+        toolName: "adaptive_rag_reward",
+        args: {
+          query: `channel:${channel}:target:${targetId}`,
+          reward,
+          metadata: { targetId, channel, success, edgeDelta, phase: currentPhase }
+        },
+        callId: `hyp-rag-reward-${targetId}-${channel}`
+      });
+    } catch {
+    }
+  }
+}
 async function emitReward(targetId, success, edgeDelta) {
   try {
     await callMcpTool({
@@ -19130,31 +19233,65 @@ async function runAutonomousCycle(phase, maxTargets) {
     for (const target of batch) {
       currentTarget = target.id;
       targetsAttempted++;
-      stream("target_start", { targetId: target.id, edge: target.edge, category: target.category });
+      const edgeGap = edgesBefore.find((e) => e.name === target.edge)?.gap ?? 1;
+      stream("target_start", { targetId: target.id, edge: target.edge, category: target.category, edgeGap });
       try {
-        const chainMode = CHAIN_MODE_MATRIX[target.category] || "sequential";
-        const goal = `[AUTO-${effectivePhase}] Close target ${target.id}: ${target.metric}. Edge: ${target.edge} (gap: ${edgesBefore.find((e) => e.name === target.edge)?.gap.toFixed(1) ?? "?"}). Chain mode hint: ${chainMode}. Policy: ${profileId}.`;
-        const plan = await createPlan(goal, `auto-${cycleId}`, profileId);
+        stream("target_step", { targetId: target.id, step: "rag_enrich" });
+        const { ragContext, channelsUsed, ragResultCount } = await enrichTargetWithRAG(target, edgeGap);
+        stream("target_step", { targetId: target.id, step: "rlm_reason" });
+        const { approach, confidence, chainModeOverride } = await reasonAboutTarget(
+          target,
+          ragContext,
+          edgesBefore,
+          effectivePhase
+        );
+        const categoryMode = CHAIN_MODE_MATRIX[target.category] || "sequential";
+        const chainMode = chainModeOverride || categoryMode;
+        stream("target_step", { targetId: target.id, step: "plan", chainMode, confidence });
+        const enrichedGoal = `[AUTO-${effectivePhase}] Close target ${target.id}: ${target.metric}. Edge: ${target.edge} (gap: ${edgeGap.toFixed(1)}). Chain mode: ${chainMode}. Policy: ${profileId}. Confidence: ${confidence.toFixed(2)}. ` + (ragContext ? `
+
+[RAG Context]
+${ragContext.slice(0, 800)}
+` : "") + (approach ? `
+[RLM Approach]
+${approach.slice(0, 500)}
+` : "");
+        const plan = await createPlan(enrichedGoal, `auto-${cycleId}`, profileId);
         if (plan.status === "approved" || effectivePhase === "phase_0" || effectivePhase === "phase_1") {
+          stream("target_step", { targetId: target.id, step: "execute" });
           const execution = await executePlan(plan.planId);
           if (execution.status === "completed") {
             targetsCompleted++;
             target.status = "closed";
-            stream("target_complete", { targetId: target.id, status: "completed" });
+            stream("target_complete", {
+              targetId: target.id,
+              status: "completed",
+              ragChannels: channelsUsed,
+              ragResults: ragResultCount,
+              confidence,
+              chainMode
+            });
             const edgeDelta = 0.1;
             await emitReward(target.id, true, edgeDelta);
+            await emitPerChannelReward(target.id, true, edgeDelta, channelsUsed);
             await evaluatePlan(execution.execution_id, plan.planId, 80, "hyperagent-auto");
+            lessons.push(`Target ${target.id} closed via ${chainMode} (conf=${confidence.toFixed(2)}, rag=${ragResultCount})`);
           } else {
             targetsFailed++;
-            stream("target_failed", { targetId: target.id, status: execution.status });
+            stream("target_failed", { targetId: target.id, status: execution.status, chainMode });
             await emitReward(target.id, false, 0);
+            await emitPerChannelReward(target.id, false, 0, channelsUsed);
+            lessons.push(`Target ${target.id} failed (${execution.status}) via ${chainMode}`);
           }
-          const context = JSON.stringify({
+          const discoveryContext = JSON.stringify({
             target: target.id,
             steps: execution.steps_completed,
-            status: execution.status
+            status: execution.status,
+            ragChannels: channelsUsed,
+            ragResultCount,
+            approach: approach.slice(0, 300)
           });
-          const found = await discoverNewIssues(context);
+          const found = await discoverNewIssues(discoveryContext);
           newIssues.push(...found);
         } else {
           stream("approval_needed", { planId: plan.planId, targetId: target.id, profile: profileId });
@@ -19181,6 +19318,26 @@ async function runAutonomousCycle(phase, maxTargets) {
     });
     currentStep = "evolve";
     adaptWeights(edgesBefore, edgesAfter);
+    try {
+      if (targetsAttempted > 0) {
+        await callMcpTool({
+          toolName: "adaptive_rag_retrain",
+          args: {
+            trigger: "autonomous_cycle",
+            metadata: {
+              cycleId,
+              phase: effectivePhase,
+              successRate: targetsCompleted / targetsAttempted,
+              fitnessDelta
+            }
+          },
+          callId: `hyp-retrain-${cycleId}`
+        });
+        logger.info({ cycleId, successRate: targetsCompleted / targetsAttempted }, "HyperAgent-Auto: RAG retrain triggered");
+      }
+    } catch {
+      logger.debug("HyperAgent-Auto: RAG retrain failed (non-blocking)");
+    }
     const cycleSummary = `Cycle ${cycleId}: ${targetsCompleted}/${targetsAttempted} completed, fitness delta ${fitnessDelta.toFixed(4)}, ${newIssues.length} new issues discovered. Lessons: ${lessons.join("; ")}`;
     const foldedSummary = await foldContext2(cycleSummary, 1e3);
     try {
@@ -19411,6 +19568,7 @@ var init_hyperagent_autonomous = __esm({
     init_hyperagent();
     init_cognitive_proxy();
     init_mcp_caller();
+    init_dual_rag();
     init_redis();
     init_sse();
     init_logger();
