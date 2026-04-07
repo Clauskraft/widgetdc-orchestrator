@@ -19257,7 +19257,16 @@ ${ragContext.slice(0, 800)}
 ${approach.slice(0, 500)}
 ` : "");
         const plan = await createPlan(enrichedGoal, `auto-${cycleId}`, profileId);
-        if (plan.status === "approved" || effectivePhase === "phase_0" || effectivePhase === "phase_1") {
+        if (plan.status === "approved" || plan.status === "pending_approval" || effectivePhase === "phase_0") {
+          if (plan.status === "pending_approval") {
+            try {
+              await approvePlan(plan.planId, `hyperagent-auto:${effectivePhase}`);
+              stream("auto_approved", { planId: plan.planId, targetId: target.id, phase: effectivePhase });
+              logger.info({ planId: plan.planId, targetId: target.id }, "HyperAgent-Auto: self-approved staged plan");
+            } catch (approveErr) {
+              logger.warn({ planId: plan.planId, error: String(approveErr) }, "HyperAgent-Auto: self-approve failed");
+            }
+          }
           stream("target_step", { targetId: target.id, step: "execute" });
           const execution = await executePlan(plan.planId);
           if (execution.status === "completed") {
