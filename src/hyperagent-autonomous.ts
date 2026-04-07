@@ -104,19 +104,24 @@ const W_EFFORT = 0.15
 const LEARNING_RATE = 0.01
 const TARGET_EDGE_SCORE = 9.5
 
-/** Phase gate thresholds */
-const PHASE_GATES: Record<AutonomousPhase, { minEdge: number; stableDays: number; maxConcurrent: number }> = {
-  phase_0: { minEdge: 0, stableDays: 0, maxConcurrent: 1 },
-  phase_1: { minEdge: 7.0, stableDays: 2, maxConcurrent: 2 },
-  phase_2: { minEdge: 8.5, stableDays: 7, maxConcurrent: 4 },
-  phase_3: { minEdge: 9.0, stableDays: 14, maxConcurrent: 8 },
+/** Phase gate thresholds — minEdge = lowest edge score required to advance */
+const PHASE_GATES: Record<AutonomousPhase, { minEdge: number; minCycles: number; maxConcurrent: number }> = {
+  phase_0: { minEdge: 0, minCycles: 0, maxConcurrent: 1 },
+  phase_1: { minEdge: 7.0, minCycles: 3, maxConcurrent: 3 },
+  phase_2: { minEdge: 8.5, minCycles: 10, maxConcurrent: 5 },
+  phase_3: { minEdge: 9.0, minCycles: 25, maxConcurrent: 8 },
 }
 
-/** Policy profile per phase */
+/** Policy profile per phase — graduated autonomy
+ * Phase 0: read_only — observe, analyze, discover issues only
+ * Phase 1: staged_write — can execute fixes but with approval gate + dry-run
+ * Phase 2: production_write — can execute writes directly, approval for destructive ops
+ * Phase 3: full_auto — unrestricted execution, self-healing
+ */
 const PHASE_POLICY: Record<AutonomousPhase, string> = {
   phase_0: 'read_only',
-  phase_1: 'read_only',
-  phase_2: 'staged_write',
+  phase_1: 'staged_write',
+  phase_2: 'production_write',
   phase_3: 'production_write',
 }
 
@@ -890,28 +895,42 @@ export function getAutonomousStatus(): AutonomousStatus {
 }
 
 /** Phase transition check — call after each cycle */
-export function checkPhaseGate(): { shouldAdvance: boolean; nextPhase: AutonomousPhase; reason: string } {
+export function checkPhaseGate(): { shouldAdvance: boolean; nextPhase: AutonomousPhase; reason: string; details: Record<string, unknown> } {
   const edges = lastCycle?.edgeScoresAfter ?? []
   const minEdge = edges.length > 0 ? Math.min(...edges.map(e => e.score)) : 0
 
   const phases: AutonomousPhase[] = ['phase_0', 'phase_1', 'phase_2', 'phase_3']
   const currentIdx = phases.indexOf(currentPhase)
   if (currentIdx >= phases.length - 1) {
-    return { shouldAdvance: false, nextPhase: currentPhase, reason: 'Already at max phase' }
+    return { shouldAdvance: false, nextPhase: currentPhase, reason: 'Already at max phase', details: { phase: currentPhase } }
   }
 
   const nextPhase = phases[currentIdx + 1]
   const gate = PHASE_GATES[nextPhase]
 
-  if (minEdge < gate.minEdge) {
-    return { shouldAdvance: false, nextPhase, reason: `Min edge ${minEdge.toFixed(1)} < gate ${gate.minEdge}` }
+  const details = {
+    currentPhase,
+    nextPhase,
+    minEdge,
+    requiredMinEdge: gate.minEdge,
+    totalCycles,
+    requiredMinCycles: gate.minCycles,
+    policy: PHASE_POLICY[nextPhase],
   }
 
-  // Simplified stability check (full impl would track days of stability)
+  if (minEdge < gate.minEdge) {
+    return { shouldAdvance: false, nextPhase, reason: `Min edge ${minEdge.toFixed(1)} < gate ${gate.minEdge}`, details }
+  }
+
+  if (totalCycles < gate.minCycles) {
+    return { shouldAdvance: false, nextPhase, reason: `Cycles ${totalCycles} < required ${gate.minCycles}`, details }
+  }
+
   return {
     shouldAdvance: true,
     nextPhase,
-    reason: `Min edge ${minEdge.toFixed(1)} >= ${gate.minEdge}, ready to advance`,
+    reason: `Min edge ${minEdge.toFixed(1)} >= ${gate.minEdge}, cycles ${totalCycles} >= ${gate.minCycles}. Ready to advance to ${nextPhase} (policy: ${PHASE_POLICY[nextPhase]})`,
+    details,
   }
 }
 
