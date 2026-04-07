@@ -86,6 +86,7 @@ import { abiDocsRouter } from './routes/abi-docs.js'
 import { abiHealthRouter } from './routes/abi-health.js'
 import { abiVersioningRouter } from './routes/abi-versioning.js'
 import { hyperagentRouter } from './routes/hyperagent.js'
+import { hyperagentAutoRouter } from './routes/hyperagent-autonomous.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -268,6 +269,9 @@ app.use('/api/abi', requireApiKey, abiDocsRouter)
 app.use('/api/abi', requireApiKey, abiHealthRouter)
 // LIN-573: ABI Tool-Level Versioning + Deprecation
 app.use('/api/abi', requireApiKey, abiVersioningRouter)
+
+// HyperAgent Autonomous Executor: self-driving cycle engine with SSE streaming
+app.use('/api/hyperagent/auto', requireApiKey, apiRateLimiter, hyperagentAutoRouter)
 
 // HyperAgent: plan-based execution with approval gate & KPI persistence (LIN-626/627/628)
 app.use('/api/hyperagent', requireApiKey, apiRateLimiter, hyperagentRouter)

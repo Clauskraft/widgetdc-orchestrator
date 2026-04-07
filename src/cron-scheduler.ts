@@ -20,6 +20,7 @@ import { notifyAdoptionDigest } from './slack.js'
 import { runGraphHygiene } from './graph-hygiene-cron.js'
 import { buildCommunitySummaries } from './hierarchical-intelligence.js'
 import { retrainRoutingWeights } from './adaptive-rag.js'
+import { runAutonomousCycle, getAutonomousStatus } from './hyperagent-autonomous.js'
 
 interface CronJob {
   id: string
@@ -496,6 +497,42 @@ export async function runCronJob(jobId: string): Promise<void> {
         job.run_count++
         persistCronJobs()
         logger.error({ id: job.id, err: String(err) }, 'Evolution loop cron failed')
+      }
+      return
+    }
+
+    // Special handler for HyperAgent autonomous cycle
+    if (job.id === 'hyperagent-autonomous-cycle') {
+      try {
+        const cycle = await runAutonomousCycle()
+        job.last_run = new Date().toISOString()
+        job.last_status = `${cycle.targetsCompleted}/${cycle.targetsAttempted} completed, Δ${cycle.fitnessScoreDelta.toFixed(4)}`
+        job.run_count++
+        persistCronJobs()
+
+        broadcastMessage({
+          from: 'Orchestrator',
+          to: 'All',
+          source: 'orchestrator',
+          type: 'Message',
+          message: `HyperAgent auto-cycle ${cycle.cycleId}: ${cycle.targetsCompleted}/${cycle.targetsAttempted} targets (${cycle.phase}), fitness Δ${cycle.fitnessScoreDelta.toFixed(4)}, ${cycle.newIssuesDiscovered.length} issues found (${cycle.durationMs}ms)`,
+          timestamp: new Date().toISOString(),
+        })
+        broadcastSSE('hyperagent-autonomous-cycle', {
+          cycleId: cycle.cycleId,
+          phase: cycle.phase,
+          completed: cycle.targetsCompleted,
+          failed: cycle.targetsFailed,
+          discovered: cycle.newIssuesDiscovered.length,
+          fitnessDelta: cycle.fitnessScoreDelta,
+          durationMs: cycle.durationMs,
+        })
+      } catch (err) {
+        job.last_run = new Date().toISOString()
+        job.last_status = 'failed'
+        job.run_count++
+        persistCronJobs()
+        logger.error({ id: job.id, err: String(err) }, 'HyperAgent autonomous cycle cron failed')
       }
       return
     }
@@ -1451,6 +1488,25 @@ export function registerDefaultLoops(): void {
     enabled: true,
     chain: {
       name: 'Lesson Delivery',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // HYPERAGENT AUTONOMOUS EXECUTOR — Self-driving target processing cycle
+  // Runs every 30 minutes: prioritize → plan → execute → evaluate → evolve
+  // Uses RLM reasoning, RAG rewards, context folding, adaptive fitness
+  // Disabled by default — enable via API when ready for production
+  // ═══════════════════════════════════════════════════════════════════════
+
+  registerCronJob({
+    id: 'hyperagent-autonomous-cycle',
+    name: 'HyperAgent Autonomous Executor',
+    schedule: '*/30 * * * *', // Every 30 minutes
+    enabled: false, // Enable via POST /api/cron/:id/enable when ready
+    chain: {
+      name: 'HyperAgent Autonomous Cycle',
       mode: 'sequential',
       steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
     },
