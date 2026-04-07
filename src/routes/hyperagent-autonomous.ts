@@ -25,6 +25,52 @@ import { logger } from '../logger.js'
 
 export const hyperagentAutoRouter = Router()
 
+// Debug endpoint: inspect Redis keys for target registry
+hyperagentAutoRouter.get('/debug-registry', async (_req: Request, res: Response) => {
+  try {
+    const { getRedis } = await import('../redis.js')
+    const redis = getRedis()
+    if (!redis) return res.json({ error: 'no redis' })
+
+    const keys = [
+      'wm:HYPERAGENT:target-registry-v2.2',
+      'hyperagent:HYPERAGENT:target-registry-v2.2',
+      'hyperagent:memory:targets:full-registry-v2.2',
+      'wm:HYPERAGENT:target-registry-v2.1',
+    ]
+    const results: Record<string, unknown> = {}
+    for (const key of keys) {
+      const raw = await redis.get(key)
+      if (!raw) { results[key] = 'NOT_FOUND'; continue }
+      try {
+        const parsed = JSON.parse(raw)
+        const topKeys = Object.keys(parsed)
+        let valueType = 'none'
+        let dataKeys: string[] = []
+        if (parsed.value !== undefined) {
+          valueType = typeof parsed.value
+          if (typeof parsed.value === 'string') {
+            try {
+              const inner = JSON.parse(parsed.value)
+              dataKeys = Object.keys(inner)
+              valueType = 'string->parsed'
+            } catch { valueType = 'string->parse_fail' }
+          } else if (typeof parsed.value === 'object') {
+            dataKeys = Object.keys(parsed.value)
+            valueType = 'object'
+          }
+        }
+        results[key] = { raw_len: raw.length, topKeys, valueType, dataKeys }
+      } catch (e) {
+        results[key] = { raw_len: raw.length, error: String(e) }
+      }
+    }
+    res.json({ success: true, results })
+  } catch (e) {
+    res.status(500).json({ error: String(e) })
+  }
+})
+
 // ─── POST /run — Trigger autonomous cycle ──────────────────────────────────
 
 hyperagentAutoRouter.post('/run', async (req: Request, res: Response) => {

@@ -224,7 +224,10 @@ async function observeEdgeScores(): Promise<EdgeScore[]> {
 
 async function loadTargetRegistry(): Promise<TargetDef[]> {
   const redis = getRedis()
-  if (!redis) return []
+  if (!redis) {
+    logger.warn('HyperAgent-Auto: no Redis connection for target registry')
+    return []
+  }
 
   try {
     // Try multiple key patterns (working-memory prefix, hyperagent prefix, cross-repo memory)
@@ -235,27 +238,53 @@ async function loadTargetRegistry(): Promise<TargetDef[]> {
       'wm:HYPERAGENT:target-registry-v2.1',           // older version
     ]
 
+    const diagnostics: Record<string, string> = {}
+
     for (const key of keyPatterns) {
       const raw = await redis.get(key)
-      if (raw) {
-        // Working-memory wraps value in a MemoryEntry envelope
-        try {
-          const parsed = JSON.parse(raw)
-          // If it has a 'value' field, unwrap the envelope
-          const data = parsed.value ? (typeof parsed.value === 'string' ? JSON.parse(parsed.value) : parsed.value) : parsed
-          const targets = parseRegistryToTargets(data)
-          if (targets.length > 0) {
-            logger.info({ key, targetCount: targets.length }, 'HyperAgent-Auto: loaded target registry')
-            return targets
+      if (!raw) {
+        diagnostics[key] = 'NOT_FOUND'
+        continue
+      }
+      diagnostics[key] = `raw_len=${raw.length}`
+      try {
+        const parsed = JSON.parse(raw)
+        const topKeys = Object.keys(parsed).join(',')
+        diagnostics[key] += ` top_keys=[${topKeys}]`
+
+        // Unwrap envelope: working-memory has {key,value,agent_id,...}, cross-repo has {domain,key,value,...}
+        let data: Record<string, unknown>
+        if (parsed.value !== undefined) {
+          if (typeof parsed.value === 'string') {
+            data = JSON.parse(parsed.value)
+            diagnostics[key] += ' unwrap=string_parse'
+          } else {
+            data = parsed.value as Record<string, unknown>
+            diagnostics[key] += ' unwrap=direct_object'
           }
-        } catch { /* try next key */ }
+        } else {
+          data = parsed
+          diagnostics[key] += ' unwrap=none'
+        }
+
+        const dataKeys = Object.keys(data).join(',')
+        diagnostics[key] += ` data_keys=[${dataKeys}]`
+        const targets = parseRegistryToTargets(data)
+        diagnostics[key] += ` targets=${targets.length}`
+
+        if (targets.length > 0) {
+          logger.info({ key, targetCount: targets.length, diagnostics }, 'HyperAgent-Auto: loaded target registry')
+          return targets
+        }
+      } catch (err) {
+        diagnostics[key] += ` ERROR=${err instanceof Error ? err.message : String(err)}`
       }
     }
 
-    logger.info('HyperAgent-Auto: no target registry found in any key pattern')
+    logger.warn({ diagnostics }, 'HyperAgent-Auto: no target registry found in any key pattern')
     return []
-  } catch {
-    logger.warn('HyperAgent-Auto: failed to load target registry from Redis')
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'HyperAgent-Auto: failed to load target registry from Redis')
     return []
   }
 }
