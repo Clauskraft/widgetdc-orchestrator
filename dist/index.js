@@ -18832,13 +18832,33 @@ async function loadTargetRegistry() {
   const redis2 = getRedis();
   if (!redis2) return [];
   try {
-    const raw = await redis2.get("hyperagent:HYPERAGENT:target-registry-v2.2");
-    if (!raw) {
-      const raw2 = await redis2.get("hyperagent:HYPERAGENT:target-registry-v2.1");
-      if (!raw2) return [];
-      return parseRegistryToTargets(JSON.parse(raw2));
+    const keyPatterns = [
+      "wm:HYPERAGENT:target-registry-v2.2",
+      // working-memory format
+      "hyperagent:HYPERAGENT:target-registry-v2.2",
+      // legacy format
+      "hyperagent:memory:targets:full-registry-v2.2",
+      // cross-repo memory format
+      "wm:HYPERAGENT:target-registry-v2.1"
+      // older version
+    ];
+    for (const key of keyPatterns) {
+      const raw = await redis2.get(key);
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          const data = parsed.value ? typeof parsed.value === "string" ? JSON.parse(parsed.value) : parsed.value : parsed;
+          const targets = parseRegistryToTargets(data);
+          if (targets.length > 0) {
+            logger.info({ key, targetCount: targets.length }, "HyperAgent-Auto: loaded target registry");
+            return targets;
+          }
+        } catch {
+        }
+      }
     }
-    return parseRegistryToTargets(JSON.parse(raw));
+    logger.info("HyperAgent-Auto: no target registry found in any key pattern");
+    return [];
   } catch {
     logger.warn("HyperAgent-Auto: failed to load target registry from Redis");
     return [];

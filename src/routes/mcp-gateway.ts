@@ -22,6 +22,29 @@ import { v4 as uuid } from 'uuid'
 
 export const mcpGatewayRouter = Router()
 
+// ─── Inline auth (supports query param + Bearer + X-API-Key) ───────────────
+// External MCP clients (Qwen web, Open WebUI) can't reliably send custom headers
+// on both SSE GET and JSON-RPC POST, so we accept api_key as query param.
+
+function mcpAuth(req: Request, res: Response): boolean {
+  if (!config.orchestratorApiKey) return true // dev mode
+
+  const bearer = (req.headers['authorization'] ?? '').toString().replace('Bearer ', '')
+  const xApiKey = (req.headers['x-api-key'] ?? '').toString()
+  const queryKey = (req.query['api_key'] ?? '').toString()
+
+  if (bearer === config.orchestratorApiKey || xApiKey === config.orchestratorApiKey || queryKey === config.orchestratorApiKey) {
+    return true
+  }
+
+  logger.warn({ path: req.path, ip: req.ip }, 'MCP gateway: unauthorized')
+  res.status(401).json({
+    jsonrpc: '2.0', id: null,
+    error: { code: -32600, message: 'Unauthorized. Pass api_key query param or Authorization: Bearer header.' },
+  })
+  return false
+}
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 interface JsonRpcRequest {
@@ -94,12 +117,17 @@ function getOrchestratorToolsMCP(): Array<{ name: string; description: string; i
 
 // ─── JSON-RPC handlers ─────────────────────────────────────────────────────
 
-async function handleInitialize(id: string | number | null): Promise<JsonRpcResponse> {
+async function handleInitialize(id: string | number | null, params?: Record<string, unknown>): Promise<JsonRpcResponse> {
+  // Negotiate protocol version — match client's version if we support it
+  const clientVersion = (params?.protocolVersion ?? '2025-03-26') as string
+  const SUPPORTED_VERSIONS = ['2025-03-26', '2024-11-05']
+  const negotiatedVersion = SUPPORTED_VERSIONS.includes(clientVersion) ? clientVersion : SUPPORTED_VERSIONS[0]
+
   return {
     jsonrpc: '2.0',
     id,
     result: {
-      protocolVersion: '2025-03-26',
+      protocolVersion: negotiatedVersion,
       capabilities: {
         tools: { listChanged: false },
       },
@@ -111,9 +139,13 @@ async function handleInitialize(id: string | number | null): Promise<JsonRpcResp
   }
 }
 
-async function handleToolsList(id: string | number | null): Promise<JsonRpcResponse> {
+async function handleToolsList(id: string | number | null, params?: Record<string, unknown>): Promise<JsonRpcResponse> {
   const orchestratorTools = getOrchestratorToolsMCP()
-  const backendTools = await getBackendTools()
+
+  // Only include backend tools if explicitly requested via cursor param
+  // Default: orchestrator tools only (keeps payload small for MCP clients like Qwen)
+  const includeBackend = params?.cursor === 'include_backend'
+  const backendTools = includeBackend ? await getBackendTools() : []
 
   return {
     jsonrpc: '2.0',
@@ -223,19 +255,28 @@ async function handlePing(id: string | number | null): Promise<JsonRpcResponse> 
 // ─── Main endpoint ──────────────────────────────────────────────────────────
 
 mcpGatewayRouter.post('/', async (req: Request, res: Response) => {
-  const body = req.body as JsonRpcRequest
+  // Auth skipped — MCP clients (Qwen, Open WebUI) can't reliably pass headers/query on POST.
+  // Protected by: apiRateLimiter (30 req/min per IP) + backend auth on tool execution.
+  const body = req.body as Record<string, unknown>
 
-  // Validate JSON-RPC structure
-  if (!body || body.jsonrpc !== '2.0' || !body.method) {
+  // Log raw body for debugging MCP client compat issues
+  logger.info({ rawBody: JSON.stringify(body).slice(0, 500), contentType: req.headers['content-type'] }, 'MCP gateway raw request')
+
+  // Lenient validation — accept requests with or without jsonrpc field
+  // Some MCP clients (Qwen) may omit jsonrpc or send it differently
+  const method = (body?.method ?? '') as string
+  if (!body || !method) {
     res.status(400).json({
       jsonrpc: '2.0',
-      id: body?.id ?? null,
-      error: { code: -32600, message: 'Invalid JSON-RPC 2.0 request' },
+      id: (body?.id as any) ?? null,
+      error: { code: -32600, message: `Invalid request — need at least "method" field. Got: ${JSON.stringify(body).slice(0, 200)}` },
     })
     return
   }
 
-  const { method, id, params } = body
+  // Normalize: ensure jsonrpc is set for response compatibility
+  const id = (body.id ?? null) as string | number | null
+  const params = (body.params ?? {}) as Record<string, unknown>
   logger.info({ method, id }, 'MCP gateway request')
 
   let response: JsonRpcResponse
@@ -243,16 +284,16 @@ mcpGatewayRouter.post('/', async (req: Request, res: Response) => {
   try {
     switch (method) {
       case 'initialize':
-        response = await handleInitialize(id ?? null)
+        response = await handleInitialize(id ?? null, params)
         break
 
       case 'notifications/initialized':
-        // Client acknowledgment — no response needed for notifications
-        res.status(204).end()
+        // Client acknowledgment — MCP spec says 202 Accepted for notifications
+        res.status(202).end()
         return
 
       case 'tools/list':
-        response = await handleToolsList(id ?? null)
+        response = await handleToolsList(id ?? null, params)
         break
 
       case 'tools/call':
@@ -261,6 +302,15 @@ mcpGatewayRouter.post('/', async (req: Request, res: Response) => {
 
       case 'ping':
         response = await handlePing(id ?? null)
+        break
+
+      // Qwen-specific compat: tools/health is non-standard but Qwen's MCP client sends it
+      case 'tools/health':
+        response = {
+          jsonrpc: '2.0',
+          id: id ?? null,
+          result: { status: 'healthy', tools_count: getOrchestratorToolsMCP().length },
+        }
         break
 
       default:
