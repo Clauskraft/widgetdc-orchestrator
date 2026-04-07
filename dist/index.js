@@ -18885,6 +18885,24 @@ function rankTargets(targets, edgeScores) {
   return targets.filter((t) => t.status === "open").map((t) => ({ target: t, priority: computePriority(t, edgeScores) })).sort((a, b) => b.priority - a.priority).map((x) => x.target);
 }
 async function observeEdgeScores() {
+  const redis2 = getRedis();
+  if (redis2) {
+    try {
+      const raw = await redis2.get(EDGE_SCORES_REDIS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length >= 6) {
+          return parsed.map((e) => ({
+            ...e,
+            target: TARGET_EDGE_SCORE,
+            gap: TARGET_EDGE_SCORE - e.score
+          }));
+        }
+      }
+    } catch {
+      logger.debug("HyperAgent-Auto: Redis edge score read failed, trying graph");
+    }
+  }
   try {
     const result = await callMcpTool({
       toolName: "graph.read_cypher",
@@ -18896,24 +18914,47 @@ async function observeEdgeScores() {
     });
     const rows = Array.isArray(result) ? result : [];
     if (rows.length >= 6) {
-      return rows.map((r) => ({
+      const scores = rows.map((r) => ({
         name: String(r.name),
         score: Number(r.score),
         target: TARGET_EDGE_SCORE,
         gap: TARGET_EDGE_SCORE - Number(r.score)
       }));
+      if (redis2) await redis2.set(EDGE_SCORES_REDIS_KEY, JSON.stringify(scores)).catch(() => {
+      });
+      return scores;
     }
   } catch {
-    logger.debug("HyperAgent-Auto: EdgeScore nodes not found, using defaults");
+    logger.debug("HyperAgent-Auto: EdgeScore graph nodes not found, using defaults");
   }
-  return [
-    { name: "Husker", score: 9, target: 9.5, gap: 0.5 },
-    { name: "Laerer", score: 8.3, target: 9.5, gap: 1.2 },
-    { name: "Heler", score: 8, target: 9.5, gap: 1.5 },
-    { name: "Forklarer", score: 9, target: 9.5, gap: 0.5 },
-    { name: "Vokser", score: 8.5, target: 9.5, gap: 1 },
-    { name: "Integrerer", score: 8.5, target: 9.5, gap: 1 }
-  ];
+  const defaults = DEFAULT_EDGE_SCORES.map((e) => ({ ...e }));
+  if (redis2) await redis2.set(EDGE_SCORES_REDIS_KEY, JSON.stringify(defaults)).catch(() => {
+  });
+  return defaults;
+}
+async function updateEdgeScores(currentScores, closedTargets) {
+  if (closedTargets.length === 0) return currentScores;
+  const deltaPerEdge = {};
+  for (const t of closedTargets) {
+    deltaPerEdge[t.edge] = (deltaPerEdge[t.edge] || 0) + SCORE_PER_TARGET;
+  }
+  const updated = currentScores.map((e) => {
+    const delta = deltaPerEdge[e.name] || 0;
+    const newScore = Math.min(e.score + delta, TARGET_EDGE_SCORE);
+    return {
+      name: e.name,
+      score: Number(newScore.toFixed(3)),
+      target: TARGET_EDGE_SCORE,
+      gap: Number((TARGET_EDGE_SCORE - newScore).toFixed(3))
+    };
+  });
+  const redis2 = getRedis();
+  if (redis2) {
+    await redis2.set(EDGE_SCORES_REDIS_KEY, JSON.stringify(updated)).catch(() => {
+    });
+    logger.info({ deltas: deltaPerEdge }, "HyperAgent-Auto: edge scores updated in Redis");
+  }
+  return updated;
 }
 async function loadTargetRegistry() {
   const redis2 = getRedis();
@@ -19204,6 +19245,19 @@ async function runAutonomousCycle(phase, maxTargets) {
     throw new Error("Autonomous cycle already running");
   }
   isRunning2 = true;
+  if (totalCycles2 === 0) {
+    const redisRestore = getRedis();
+    if (redisRestore) {
+      try {
+        const stored = await redisRestore.get("hyperagent:totalCycles");
+        if (stored) {
+          totalCycles2 = parseInt(stored, 10) || 0;
+          logger.info({ totalCycles: totalCycles2 }, "HyperAgent-Auto: restored totalCycles from Redis");
+        }
+      } catch {
+      }
+    }
+  }
   const cycleId = `auto-${uuid21().slice(0, 8)}`;
   const effectivePhase = phase ?? currentPhase;
   const batchSize = maxTargets ?? CYCLE_BATCH_SIZE[effectivePhase];
@@ -19214,6 +19268,7 @@ async function runAutonomousCycle(phase, maxTargets) {
   let targetsAttempted = 0;
   let targetsCompleted = 0;
   let targetsFailed = 0;
+  const closedTargets = [];
   const newIssues = [];
   const lessons = [];
   try {
@@ -19264,7 +19319,7 @@ ${approach.slice(0, 500)}
               stream("auto_approved", { planId: plan.planId, targetId: target.id, phase: effectivePhase });
               logger.info({ planId: plan.planId, targetId: target.id }, "HyperAgent-Auto: self-approved staged plan");
             } catch (approveErr) {
-              logger.warn({ planId: plan.planId, error: String(approveErr) }, "HyperAgent-Auto: self-approve failed");
+              logger.warn({ planId: plan.planId, error: String(approveErr) }, "HyperAgent-Auto: self-approve failed, attempting execution anyway");
             }
           }
           stream("target_step", { targetId: target.id, step: "execute" });
@@ -19272,6 +19327,7 @@ ${approach.slice(0, 500)}
           if (execution.status === "completed") {
             targetsCompleted++;
             target.status = "closed";
+            closedTargets.push(target);
             stream("target_complete", {
               targetId: target.id,
               status: "completed",
@@ -19315,7 +19371,8 @@ ${approach.slice(0, 500)}
       }
     }
     currentStep = "evaluate";
-    const edgesAfter = await observeEdgeScores();
+    const updatedEdges = await updateEdgeScores(edgesBefore, closedTargets);
+    const edgesAfter = updatedEdges;
     const fitnessBefore = computeFitness(edgesBefore);
     const fitnessAfter = computeFitness(edgesAfter);
     const fitnessDelta = fitnessAfter - fitnessBefore;
@@ -19393,6 +19450,11 @@ ${approach.slice(0, 500)}
     totalCycles2++;
     currentStep = "idle";
     currentTarget = null;
+    const redisPersist = getRedis();
+    if (redisPersist) {
+      await redisPersist.set("hyperagent:totalCycles", String(totalCycles2)).catch(() => {
+      });
+    }
     stream("cycle_complete", {
       cycleId,
       completed: targetsCompleted,
@@ -19583,7 +19645,7 @@ async function listCrossRepoMemory() {
   if (!redis2) return [];
   return redis2.smembers(`${MEMORY_PREFIX}:domains`);
 }
-var CHAIN_MODE_MATRIX, W_EDGE_GAP, W_TARGET_GAP, W_DEPENDENCY, W_EFFORT, LEARNING_RATE, TARGET_EDGE_SCORE, PHASE_GATES, PHASE_POLICY, CYCLE_BATCH_SIZE, isRunning2, currentPhase, currentTarget, currentStep, totalCycles2, lastCycle2, edgeWeights, discoveredIssues, MEMORY_PREFIX, MEMORY_TTL;
+var CHAIN_MODE_MATRIX, W_EDGE_GAP, W_TARGET_GAP, W_DEPENDENCY, W_EFFORT, LEARNING_RATE, TARGET_EDGE_SCORE, PHASE_GATES, PHASE_POLICY, CYCLE_BATCH_SIZE, isRunning2, currentPhase, currentTarget, currentStep, totalCycles2, lastCycle2, edgeWeights, discoveredIssues, DEFAULT_EDGE_SCORES, EDGE_SCORES_REDIS_KEY, SCORE_PER_TARGET, MEMORY_PREFIX, MEMORY_TTL;
 var init_hyperagent_autonomous = __esm({
   "src/hyperagent-autonomous.ts"() {
     "use strict";
@@ -19649,6 +19711,16 @@ var init_hyperagent_autonomous = __esm({
       Integrerer: 1 / 6
     };
     discoveredIssues = [];
+    DEFAULT_EDGE_SCORES = [
+      { name: "Husker", score: 9, target: 9.5, gap: 0.5 },
+      { name: "Laerer", score: 8.3, target: 9.5, gap: 1.2 },
+      { name: "Heler", score: 8, target: 9.5, gap: 1.5 },
+      { name: "Forklarer", score: 9, target: 9.5, gap: 0.5 },
+      { name: "Vokser", score: 8.5, target: 9.5, gap: 1 },
+      { name: "Integrerer", score: 8.5, target: 9.5, gap: 1 }
+    ];
+    EDGE_SCORES_REDIS_KEY = "hyperagent:edge-scores:v1";
+    SCORE_PER_TARGET = 0.02;
     MEMORY_PREFIX = "hyperagent:memory";
     MEMORY_TTL = 86400 * 30;
   }
