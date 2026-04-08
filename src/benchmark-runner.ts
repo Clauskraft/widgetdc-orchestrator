@@ -283,38 +283,34 @@ export async function startBenchmarkRun(
   const url = baseUrl ?? process.env.ORCH_URL ?? 'http://localhost:3000'
   const token = apiKey ?? process.env.ORCH_API_KEY ?? 'WidgeTDC_Orch_2026'
 
-  // Use dynamic import to avoid circular dependency with the local server
-  // In production the orchestrator self-calls (loopback)
-  const inventorConfig = {
-    experimentName,
-    taskDescription: `${task.researcherPrompt}\n\nBENCHMARK: ${task.id} | STRATEGY: ${strategy} | RUN: ${runId}`,
-    initialArtifact: task.initialArtifact,
-    sampling: buildSamplingConfig(strategy),
-    cognition: { topK: 5, threshold: 0.25 },
-    pipeline: {
-      maxSteps: run.maxRounds,
-      maxArtifactLength: 6000,
-      engineerTimeoutMs: 90000,
-      numWorkers: 1,
-    },
-    evalScript: task.evaluatorPrompt,
+  // Inventor is exposed via the tool gateway at /api/tools/inventor_run
+  // Map InventorConfig fields → inventor_run tool parameters
+  const samplingConfig = buildSamplingConfig(strategy)
+  const toolPayload = {
+    experiment_name: experimentName,
+    task_description: `${task.researcherPrompt}\n\nBENCHMARK: ${task.id} | STRATEGY: ${strategy} | RUN: ${runId}`,
+    initial_artifact: task.initialArtifact,
+    sampling_algorithm: samplingConfig.algorithm,
+    sample_n: samplingConfig.sampleN,
+    max_steps: run.maxRounds,
   }
 
-  fetch(`${url}/api/inventor/run`, {
+  fetch(`${url}/api/tools/inventor_run`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${token}`,
     },
-    body: JSON.stringify({ config: inventorConfig }),
-    signal: AbortSignal.timeout(10_000),
+    body: JSON.stringify(toolPayload),
+    signal: AbortSignal.timeout(15_000),
   }).then(async res => {
-    const body = await res.json().catch(() => null)
-    if (res.ok) {
+    const body = await res.json().catch(() => null) as Record<string, unknown> | null
+    if (res.ok && body?.success !== false) {
       run.status = 'running'
     } else {
       run.status = 'failed'
-      run.error = body?.error?.message ?? `HTTP ${res.status}`
+      const errMsg = (body?.error as Record<string, unknown> | null)?.message ?? body?.error ?? `HTTP ${res.status}`
+      run.error = String(errMsg)
     }
     upsertBenchmarkRun(run)
   }).catch(err => {

@@ -38930,37 +38930,33 @@ async function startBenchmarkRun(taskId, strategy, maxRounds, baseUrl, apiKey) {
   await persist2();
   const url = baseUrl ?? process.env.ORCH_URL ?? "http://localhost:3000";
   const token = apiKey ?? process.env.ORCH_API_KEY ?? "WidgeTDC_Orch_2026";
-  const inventorConfig = {
-    experimentName,
-    taskDescription: `${task.researcherPrompt}
+  const samplingConfig = buildSamplingConfig(strategy);
+  const toolPayload = {
+    experiment_name: experimentName,
+    task_description: `${task.researcherPrompt}
 
 BENCHMARK: ${task.id} | STRATEGY: ${strategy} | RUN: ${runId}`,
-    initialArtifact: task.initialArtifact,
-    sampling: buildSamplingConfig(strategy),
-    cognition: { topK: 5, threshold: 0.25 },
-    pipeline: {
-      maxSteps: run.maxRounds,
-      maxArtifactLength: 6e3,
-      engineerTimeoutMs: 9e4,
-      numWorkers: 1
-    },
-    evalScript: task.evaluatorPrompt
+    initial_artifact: task.initialArtifact,
+    sampling_algorithm: samplingConfig.algorithm,
+    sample_n: samplingConfig.sampleN,
+    max_steps: run.maxRounds
   };
-  fetch(`${url}/api/inventor/run`, {
+  fetch(`${url}/api/tools/inventor_run`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${token}`
     },
-    body: JSON.stringify({ config: inventorConfig }),
-    signal: AbortSignal.timeout(1e4)
+    body: JSON.stringify(toolPayload),
+    signal: AbortSignal.timeout(15e3)
   }).then(async (res) => {
     const body = await res.json().catch(() => null);
-    if (res.ok) {
+    if (res.ok && body?.success !== false) {
       run.status = "running";
     } else {
       run.status = "failed";
-      run.error = body?.error?.message ?? `HTTP ${res.status}`;
+      const errMsg = body?.error?.message ?? body?.error ?? `HTTP ${res.status}`;
+      run.error = String(errMsg);
     }
     upsertBenchmarkRun(run);
   }).catch((err) => {
