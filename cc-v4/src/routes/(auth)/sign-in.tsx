@@ -22,14 +22,14 @@ function SignInPage() {
     setError(null)
 
     try {
-      // Validate API key by calling /api/dashboard
-      const dashboard = await apiGet('/api/dashboard', {
+      // Validate API key by calling an auth-protected endpoint
+      const result = await apiGet('/agents', {
         headers: {
           Authorization: `Bearer ${apiKey}`,
         },
       })
 
-      if (dashboard) {
+      if (result) {
         setAccessToken(apiKey)
         setUser({
           email: 'user@widgetdc.dev',
