@@ -5,7 +5,7 @@
  *   POST /api/failures/harvest   — Trigger manual harvest
  */
 import { Router, Request, Response } from 'express'
-import { runFailureHarvest, buildFailureSummary, harvestFailures } from '../failure-harvester.js'
+import { runFailureHarvest, buildFailureSummary, harvestFailures } from '../flywheel/failure-harvester.js'
 import { getRedis } from '../redis.js'
 import { logger } from '../logger.js'
 

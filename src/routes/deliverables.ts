@@ -13,7 +13,7 @@ import {
   type DeliverableRequest,
   type DeliverableType,
   type DeliverableFormat,
-} from '../deliverable-engine.js'
+} from '../engagement/deliverable-engine.js'
 import { logger } from '../logger.js'
 
 export const deliverablesRouter = Router()

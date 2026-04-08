@@ -2,7 +2,7 @@
  * routes/llm.ts — LLM chat proxy endpoints.
  */
 import { Router } from 'express'
-import { chatLLM, listProviders } from '../llm-proxy.js'
+import { chatLLM, listProviders } from '../llm/llm-proxy.js'
 import { broadcastMessage } from '../chat-broadcaster.js'
 import { storeMessage, msgId } from '../chat-store.js'
 import { logger } from '../logger.js'

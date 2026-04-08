@@ -8,8 +8,8 @@
  * but the executor case is missing (or vice versa). Previously such bugs
  * only surfaced when a user called the tool in production.
  */
-import { TOOL_REGISTRY } from './tool-registry.js'
-import { executeToolUnified } from './tool-executor.js'
+import { TOOL_REGISTRY } from './tools/tool-registry.js'
+import { executeToolUnified } from './tools/tool-executor.js'
 import { logger } from './logger.js'
 
 export interface ValidationResult {

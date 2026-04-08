@@ -10,7 +10,7 @@
  *   DELETE /api/memory/:agent_id       — Clear all memories for an agent
  */
 import { Router, Request, Response } from 'express'
-import { storeMemory, retrieveMemory, listMemories, deleteMemory, clearAgentMemory } from '../working-memory.js'
+import { storeMemory, retrieveMemory, listMemories, deleteMemory, clearAgentMemory } from '../memory/working-memory.js'
 import { logger } from '../logger.js'
 
 export const memoryRouter = Router()

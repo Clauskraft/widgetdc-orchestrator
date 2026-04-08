@@ -2,7 +2,7 @@
  * routes/chains.ts — Agent chain/swarm execution endpoints.
  */
 import { Router, Request, Response } from 'express'
-import { executeChain, getExecution, listExecutions, FUNNEL_STAGES, type ChainDefinition, type FunnelStage } from '../chain-engine.js'
+import { executeChain, getExecution, listExecutions, FUNNEL_STAGES, type ChainDefinition, type FunnelStage } from '../chain/chain-engine.js'
 import { logger } from '../logger.js'
 
 export const chainsRouter = Router()

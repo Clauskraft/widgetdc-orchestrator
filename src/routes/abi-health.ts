@@ -16,7 +16,7 @@ import {
   toOpenAITools,
   toMCPTools,
   toOpenAPIPaths,
-} from '../tool-registry.js'
+} from '../tools/tool-registry.js'
 import { logger } from '../logger.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))

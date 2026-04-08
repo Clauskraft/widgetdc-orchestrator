@@ -7,7 +7,7 @@
  * POST /scan       — Trigger an on-demand anomaly scan
  */
 import { Router, Request, Response } from 'express'
-import { runAnomalyScan, getWatcherState, getActiveAnomalies, getAnomalyPatterns } from '../anomaly-watcher.js'
+import { runAnomalyScan, getWatcherState, getActiveAnomalies, getAnomalyPatterns } from '../swarm/anomaly-watcher.js'
 import { logger } from '../logger.js'
 
 export const anomalyWatcherRouter = Router()

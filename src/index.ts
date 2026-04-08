@@ -52,21 +52,21 @@ import { decisionsRouter } from './routes/decisions.js'
 import { s1s4Router } from './routes/s1-s4.js'
 import { auditMiddleware } from './audit.js'
 import { handleSSE, getSSEClientCount } from './sse.js'
-import { AgentRegistry } from './agent-registry.js'
+import { AgentRegistry } from './agents/agent-registry.js'
 import { getConnectionStats } from './chat-broadcaster.js'
 import { requireApiKey } from './auth.js'
 import { isSlackEnabled } from './slack.js'
 import { isRlmAvailable } from './cognitive-proxy.js'
 import { hydrateCronJobs, registerDefaultLoops, listCronJobs, bootKickstartOverdueJobs } from './cron-scheduler.js'
-import { listExecutions } from './chain-engine.js'
-import { listPlans, type FSMState } from './state-machine.js'
-import { runHarvestPipeline, runFullHarvest } from './harvest-pipeline.js'
+import { listExecutions } from './chain/chain-engine.js'
+import { listPlans, type FSMState } from './chain/state-machine.js'
+import { runHarvestPipeline, runFullHarvest } from './flywheel/harvest-pipeline.js'
 import { openaiCompatRouter } from './routes/openai-compat.js'
 import { promptGeneratorRouter } from './routes/prompt-generator.js'
 import { openapiRouter } from './openapi.js'
 import { mcpGatewayRouter } from './routes/mcp-gateway.js'
 import { toolGatewayRouter } from './routes/tool-gateway.js'
-import { seedAgents } from './agent-seeds.js'
+import { seedAgents } from './agents/agent-seeds.js'
 import { hydrateMessages } from './chat-store.js'
 import { failuresRouter } from './routes/failures.js'
 import { competitiveRouter } from './routes/competitive.js'
@@ -89,15 +89,15 @@ import { hyperagentRouter } from './routes/hyperagent.js'
 import { hyperagentAutoRouter } from './routes/hyperagent-autonomous.js'
 import { inventorRouter } from './routes/inventor.js'
 import { anomalyWatcherRouter } from './routes/anomaly-watcher.js'
-import { initAnomalyWatcher, getWatcherState } from './anomaly-watcher.js'
+import { initAnomalyWatcher, getWatcherState } from './swarm/anomaly-watcher.js'
 import { pheromoneRouter } from './routes/pheromone.js'
 import { peerEvalRouter } from './routes/peer-eval.js'
 import { flywheelRouter } from './routes/flywheel.js'
 import { benchmarkRouter } from './routes/benchmark.js'
 import { loadBenchmarkRuns } from './benchmark-runner.js'
 import { obsidianRouter } from './routes/obsidian.js'
-import { initPheromoneLayer, getPheromoneState } from './pheromone-layer.js'
-import { initPeerEval, getPeerEvalState } from './peer-eval.js'
+import { initPheromoneLayer, getPheromoneState } from './swarm/pheromone-layer.js'
+import { initPeerEval, getPeerEvalState } from './swarm/peer-eval.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -443,7 +443,7 @@ async function boot() {
   await AgentRegistry.hydrate()
   seedAgents()
   // LIN-594: Load persisted forged tools from Redis
-  import('./skill-forge.js').then(m => m.loadForgedTools()).catch(() => {})
+  import('./llm/skill-forge.js').then(m => m.loadForgedTools()).catch(() => {})
   await hydrateMessages()
   await hydrateCronJobs()
   registerDefaultLoops()

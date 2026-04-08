@@ -4,14 +4,14 @@
  * Redis-cached (15s TTL) to avoid serializing 450+ agents on every poll.
  */
 import { Router } from 'express'
-import { AgentRegistry } from '../agent-registry.js'
+import { AgentRegistry } from '../agents/agent-registry.js'
 import { getConnectionStats } from '../chat-broadcaster.js'
-import { listExecutions } from '../chain-engine.js'
+import { listExecutions } from '../chain/chain-engine.js'
 import { listCronJobs } from '../cron-scheduler.js'
 import { isRlmAvailable, getRlmHealth } from '../cognitive-proxy.js'
 import { getOpenClawHealth, getOpenClawSkills } from './openclaw.js'
 import { config } from '../config.js'
-import { buildRoutingDashboardData } from '../routing-engine.js'
+import { buildRoutingDashboardData } from '../agents/routing-engine.js'
 import { getRedis } from '../redis.js'
 
 export const dashboardRouter = Router()

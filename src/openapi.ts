@@ -7,7 +7,7 @@
  */
 import { Router } from 'express'
 import swaggerUi from 'swagger-ui-express'
-import { toOpenAPIPaths, TOOL_REGISTRY } from './tool-registry.js'
+import { toOpenAPIPaths, TOOL_REGISTRY } from './tools/tool-registry.js'
 
 // ─── Build OpenAPI spec inline (no JSDoc file scanning needed) ──────────────
 

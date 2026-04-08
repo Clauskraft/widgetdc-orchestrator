@@ -67,7 +67,7 @@ export async function callCognitive(
   // This avoids RLM's internal routing which may select suboptimal models
   // (e.g. gemini-flash-lite instead of gemini-2.0-flash for complex tasks).
   if (params.llm_provider) {
-    const { chatLLM } = await import('./llm-proxy.js')
+    const { chatLLM } = await import('./llm/llm-proxy.js')
     const systemPrompt = `You are a WidgeTDC platform agent (${params.agent_id ?? 'unknown'}). Action: ${action}. Produce concrete, actionable output.`
     const result = await chatLLM({
       provider: params.llm_provider,
@@ -188,7 +188,7 @@ export async function callCognitiveRaw(
 ): Promise<CognitiveRawResponse | null> {
   // ── LLM Direct Bypass (same as callCognitive) ──
   if (params.llm_provider) {
-    const { chatLLM } = await import('./llm-proxy.js')
+    const { chatLLM } = await import('./llm/llm-proxy.js')
     const systemPrompt = `You are a WidgeTDC platform agent (${params.agent_id ?? 'unknown'}). Action: ${action}. Produce concrete, actionable output.`
     const result = await chatLLM({
       provider: params.llm_provider,

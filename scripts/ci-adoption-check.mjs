@@ -74,7 +74,7 @@ console.log(label('CHECK 1 — Registry ↔ Executor parity'))
 
 let registryTools = []
 try {
-  const registrySource = readFile('src/tool-registry.ts')
+  const registrySource = readFile('src/tools/tool-registry.ts')
 
   // Match every `name: 'tool_name'` that is a direct property in a defineTool() call.
   // The pattern targets lines like:   name: 'search_knowledge',
@@ -99,7 +99,7 @@ try {
 
 let executorCases = []
 try {
-  const executorSource = readFile('src/tool-executor.ts')
+  const executorSource = readFile('src/tools/tool-executor.ts')
   const caseMatches = [...executorSource.matchAll(/case\s+['"]([^'"]+)['"]\s*:/g)]
   executorCases = [...new Set(caseMatches.map(m => m[1]))]
   console.log(`  Found ${executorCases.length} case labels in executor`)

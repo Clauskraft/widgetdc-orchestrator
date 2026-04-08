@@ -32,7 +32,7 @@ const EXTRACTOR_PATH = path.join(PROJECT_ROOT, '_abi-extract.tmp.ts')
 const EXTRACTOR_OUT = path.join(PROJECT_ROOT, '_abi-extract.tmp.json')
 
 const extractorCode = `
-import { TOOL_REGISTRY, toOpenAITools, toMCPTools, toOpenAPIPaths } from './src/tool-registry.js'
+import { TOOL_REGISTRY, toOpenAITools, toMCPTools, toOpenAPIPaths } from './src/tools/tool-registry.js'
 import { writeFileSync } from 'fs'
 
 const snapshot = {

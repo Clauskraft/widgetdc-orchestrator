@@ -168,7 +168,7 @@ export async function callMcpTool(opts: McpCallOptions): Promise<OrchestratorToo
   if (LOCAL_TOOLS.has(opts.toolName)) {
     const t0 = Date.now()
     try {
-      const { executeToolUnified } = await import('./tool-executor.js')
+      const { executeToolUnified } = await import('./tools/tool-executor.js')
       const result = await executeToolUnified(opts.toolName, opts.args, { call_id: opts.callId, fold: false })
       return {
         call_id: opts.callId,

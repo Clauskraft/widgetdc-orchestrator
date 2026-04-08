@@ -14,7 +14,7 @@
 import { v4 as uuid } from 'uuid'
 import { getRedis } from './redis.js'
 import { callMcpTool } from './mcp-caller.js'
-import { chatLLM } from './llm-proxy.js'
+import { chatLLM } from './llm/llm-proxy.js'
 import { logger } from './logger.js'
 import { broadcastSSE } from './sse.js'
 

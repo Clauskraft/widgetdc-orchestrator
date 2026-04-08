@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express'
-import { executeChain } from '../chain-engine.js'
+import { executeChain } from '../chain/chain-engine.js'
 import { logger } from '../logger.js'
 
 export const s1s4Router = Router()

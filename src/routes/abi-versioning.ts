@@ -9,7 +9,7 @@
  *   GET /api/abi/changelog   — Version history (maintained in code)
  */
 import { Router, Request, Response } from 'express'
-import { TOOL_REGISTRY } from '../tool-registry.js'
+import { TOOL_REGISTRY } from '../tools/tool-registry.js'
 
 export const abiVersioningRouter = Router()
 

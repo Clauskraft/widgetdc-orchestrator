@@ -3,7 +3,7 @@
  * Uses TypeBox contract validation at API boundary.
  */
 import { Router, Request, Response } from 'express'
-import { AgentRegistry } from '../agent-registry.js'
+import { AgentRegistry } from '../agents/agent-registry.js'
 import { callMcpTool } from '../mcp-caller.js'
 import { broadcastToolResult } from '../chat-broadcaster.js'
 import { config } from '../config.js'
@@ -11,8 +11,8 @@ import { childLogger, logger } from '../logger.js'
 import { notifyToolCall } from '../slack.js'
 import { validate, validateToolCall } from '../validation.js'
 import { getRedis } from '../redis.js'
-import { ORCHESTRATOR_TOOLS } from '../tool-executor.js'
-import { recordToolCall } from '../adoption-telemetry.js'
+import { ORCHESTRATOR_TOOLS } from '../tools/tool-executor.js'
+import { recordToolCall } from '../flywheel/adoption-telemetry.js'
 import type { OrchestratorToolCall } from '@widgetdc/contracts/orchestrator'
 
 export const toolsRouter = Router()

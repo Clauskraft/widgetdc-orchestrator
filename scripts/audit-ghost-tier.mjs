@@ -5,7 +5,7 @@ import { readFileSync, readdirSync } from 'fs'
 import { join } from 'path'
 
 const ROUTES_DIR = 'src/routes'
-const REGISTRY_FILE = 'src/tool-registry.ts'
+const REGISTRY_FILE = 'src/tools/tool-registry.ts'
 
 // Extract registered tool names
 const registrySource = readFileSync(REGISTRY_FILE, 'utf8')

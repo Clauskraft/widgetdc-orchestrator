@@ -29,7 +29,7 @@ import {
   type PlanRequest,
   type RecordOutcomeRequest,
   type OutcomeGrade,
-} from '../engagement-engine.js'
+} from '../engagement/engagement-engine.js'
 import { logger } from '../logger.js'
 
 export const engagementsRouter = Router()

@@ -19,7 +19,7 @@ import {
   advancePhase,
   setPhase,
   type AutonomousPhase,
-} from '../hyperagent-autonomous.js'
+} from '../hyperagent/hyperagent-autonomous.js'
 import { getRedis } from '../redis.js'
 import { logger } from '../logger.js'
 

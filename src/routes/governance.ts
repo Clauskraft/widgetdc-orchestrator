@@ -15,7 +15,7 @@ import {
   getGaps,
   generateGraphCypher,
   MANIFESTO_PRINCIPLES,
-} from '../manifesto-governance.js'
+} from '../llm/manifesto-governance.js'
 import { callMcpTool } from '../mcp-caller.js'
 import { logger } from '../logger.js'
 import { v4 as uuid } from 'uuid'

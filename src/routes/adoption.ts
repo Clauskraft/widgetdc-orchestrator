@@ -10,7 +10,7 @@ import { getRedis } from '../redis.js'
 import { logger } from '../logger.js'
 import { callMcpTool } from '../mcp-caller.js'
 import { v4 as uuid } from 'uuid'
-import { computeTelemetry } from '../adoption-telemetry.js'
+import { computeTelemetry } from '../flywheel/adoption-telemetry.js'
 
 export const adoptionRouter = Router()
 

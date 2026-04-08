@@ -6,12 +6,12 @@
  * GET  /api/intelligence/health      — Graph health + intelligence metrics
  */
 import { Router, Request, Response } from 'express'
-import { ingestDocument, type DocumentIngestionRequest } from '../document-intelligence.js'
-import { buildCommunitySummaries, searchCommunitySummaries } from '../hierarchical-intelligence.js'
-import { runGraphHygiene } from '../graph-hygiene-cron.js'
+import { ingestDocument, type DocumentIngestionRequest } from '../engagement/document-intelligence.js'
+import { buildCommunitySummaries, searchCommunitySummaries } from '../graph/hierarchical-intelligence.js'
+import { runGraphHygiene } from '../graph/graph-hygiene-cron.js'
 import { getWriteGateStats } from '../write-gate.js'
-import { getAdaptiveRAGDashboard, retrainRoutingWeights } from '../adaptive-rag.js'
-import { generatePlan, matchPrecedents, listEngagements, PlanGateRejection } from '../engagement-engine.js'
+import { getAdaptiveRAGDashboard, retrainRoutingWeights } from '../memory/adaptive-rag.js'
+import { generatePlan, matchPrecedents, listEngagements, PlanGateRejection } from '../engagement/engagement-engine.js'
 import { logger } from '../logger.js'
 
 export const intelligenceRouter = Router()

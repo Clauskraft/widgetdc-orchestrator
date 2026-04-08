@@ -13,7 +13,7 @@ import {
   getPheromoneState, sense, getTrailSummary, getHeatmap,
   deposit, runPheromoneCron, onExternalSignal,
   type PheromoneType,
-} from '../pheromone-layer.js'
+} from '../swarm/pheromone-layer.js'
 import { logger } from '../logger.js'
 
 export const pheromoneRouter = Router()

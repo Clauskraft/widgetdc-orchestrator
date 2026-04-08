@@ -11,7 +11,7 @@ import {
   fixFrameworkDomainRels,
   consolidateDomains,
   purgeGraphBloat,
-} from '../graph-hygiene.js'
+} from '../graph/graph-hygiene.js'
 import { logger } from '../logger.js'
 
 export const graphHygieneRouter = Router()

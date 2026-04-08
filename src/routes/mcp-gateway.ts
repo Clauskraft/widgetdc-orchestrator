@@ -13,8 +13,8 @@
  * Supports both single requests and SSE streaming for long-running calls.
  */
 import { Router, Request, Response } from 'express'
-import { ORCHESTRATOR_TOOLS, executeToolCalls } from '../tool-executor.js'
-import { toMCPTools, TOOL_REGISTRY } from '../tool-registry.js'
+import { ORCHESTRATOR_TOOLS, executeToolCalls } from '../tools/tool-executor.js'
+import { toMCPTools, TOOL_REGISTRY } from '../tools/tool-registry.js'
 import { callMcpTool } from '../mcp-caller.js'
 import { config } from '../config.js'
 import { logger } from '../logger.js'

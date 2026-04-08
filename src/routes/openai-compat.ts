@@ -16,8 +16,8 @@
  */
 import { Router, Request, Response } from 'express'
 import { LlmMatrix } from '@widgetdc/contracts/llm'
-import { chatLLM, type LLMMessage } from '../llm-proxy.js'
-import { ORCHESTRATOR_TOOLS, executeToolCalls, getTokenSavings } from '../tool-executor.js'
+import { chatLLM, type LLMMessage } from '../llm/llm-proxy.js'
+import { ORCHESTRATOR_TOOLS, executeToolCalls, getTokenSavings } from '../tools/tool-executor.js'
 import { logger } from '../logger.js'
 import { config } from '../config.js'
 import { v4 as uuid } from 'uuid'

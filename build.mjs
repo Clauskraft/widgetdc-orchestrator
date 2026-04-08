@@ -41,8 +41,8 @@ if (!existsSync(contractsDist)) {
 
 // Bulletproof W3: Build-time tool registry ↔ executor parity check
 // Fail fast if new tools added to registry without matching executor case.
-const registrySource = readFileSync('./src/tool-registry.ts', 'utf8')
-const executorSource = readFileSync('./src/tool-executor.ts', 'utf8')
+const registrySource = readFileSync('./src/tools/tool-registry.ts', 'utf8')
+const executorSource = readFileSync('./src/tools/tool-executor.ts', 'utf8')
 
 // Extract tool names from defineTool({ name: 'x', ... }) blocks
 const registryNames = new Set()

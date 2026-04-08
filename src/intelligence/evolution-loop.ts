@@ -14,7 +14,7 @@
 import { v4 as uuid } from 'uuid'
 import { callCognitive, isRlmAvailable } from '../cognitive-proxy.js'
 import { callMcpTool } from '../mcp-caller.js'
-import { executeChain } from '../chain-engine.js'
+import { executeChain } from '../chain/chain-engine.js'
 import { getRedis } from '../redis.js'
 import { logger } from '../logger.js'
 import { broadcastMessage } from '../chat-broadcaster.js'

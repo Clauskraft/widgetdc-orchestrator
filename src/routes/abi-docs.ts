@@ -5,8 +5,8 @@
  * POST /api/abi/try  — Live playground: execute a tool and return result with timing
  */
 import { Router } from 'express'
-import { TOOL_REGISTRY, getCategories } from '../tool-registry.js'
-import { executeToolUnified } from '../tool-executor.js'
+import { TOOL_REGISTRY, getCategories } from '../tools/tool-registry.js'
+import { executeToolUnified } from '../tools/tool-executor.js'
 import { logger } from '../logger.js'
 
 export const abiDocsRouter = Router()

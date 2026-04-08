@@ -25,7 +25,7 @@ import {
   validateWebhookSignature,
   getHyperAgentHealth,
   POLICY_PROFILES,
-} from '../hyperagent.js'
+} from '../hyperagent/hyperagent.js'
 import { logger } from '../logger.js'
 
 export const hyperagentRouter = Router()

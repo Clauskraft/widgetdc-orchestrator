@@ -12,7 +12,7 @@ import { Router, Request, Response } from 'express'
 import {
   getPeerEvalState, getAllFleetLearnings, getFleetLearning,
   getWhatWorks, getRecentEvals, hookIntoExecution, runFleetAnalysis,
-} from '../peer-eval.js'
+} from '../swarm/peer-eval.js'
 import { logger } from '../logger.js'
 
 export const peerEvalRouter = Router()

@@ -10,10 +10,10 @@
  *   - REST/OpenAPI           → THIS FILE
  */
 import { Router, Request, Response } from 'express'
-import { executeToolUnified } from '../tool-executor.js'
-import { getTool, TOOL_REGISTRY } from '../tool-registry.js'
+import { executeToolUnified } from '../tools/tool-executor.js'
+import { getTool, TOOL_REGISTRY } from '../tools/tool-registry.js'
 import { logger } from '../logger.js'
-import { recordToolCall } from '../adoption-telemetry.js'
+import { recordToolCall } from '../flywheel/adoption-telemetry.js'
 import { v4 as uuid } from 'uuid'
 
 export const toolGatewayRouter = Router()

@@ -3,8 +3,8 @@
  * Uses TypeBox contract validation at API boundary.
  */
 import { Router, Request, Response } from 'express'
-import { AgentRegistry } from '../agent-registry.js'
-import type { AgentHandshakeData } from '../agent-registry.js'
+import { AgentRegistry } from '../agents/agent-registry.js'
+import type { AgentHandshakeData } from '../agents/agent-registry.js'
 import { notifyAgentRegistered } from '../slack.js'
 import { validate, validateHandshake, cleanToSchema } from '../validation.js'
 import { AgentHandshake } from '@widgetdc/contracts/orchestrator'

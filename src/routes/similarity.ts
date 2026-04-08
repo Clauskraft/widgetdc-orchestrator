@@ -10,8 +10,8 @@ import {
   getClientDetails,
   type SimilarityRequest,
   type SimilarityDimension,
-} from '../similarity-engine.js'
-import { hookSimilarityPreference } from '../compound-hooks.js'
+} from '../engagement/similarity-engine.js'
+import { hookSimilarityPreference } from '../swarm/compound-hooks.js'
 import { logger } from '../logger.js'
 
 export const similarityRouter = Router()

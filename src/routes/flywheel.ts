@@ -7,9 +7,9 @@
  * POST /api/flywheel/consolidation — Trigger on-demand consolidation scan
  */
 import { Router, Request, Response } from 'express'
-import { getFlywheelMetrics, runWeeklySync } from '../flywheel-coordinator.js'
-import { getLastReport, runWeeklyConsolidation } from '../consolidation-engine.js'
-import { getCostSummary, getAllCostProfiles } from '../cost-optimizer.js'
+import { getFlywheelMetrics, runWeeklySync } from '../flywheel/flywheel-coordinator.js'
+import { getLastReport, runWeeklyConsolidation } from '../llm/consolidation-engine.js'
+import { getCostSummary, getAllCostProfiles } from '../flywheel/cost-optimizer.js'
 import { logger } from '../logger.js'
 
 export const flywheelRouter = Router()
