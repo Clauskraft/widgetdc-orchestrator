@@ -1873,22 +1873,66 @@ async function fetchDomainCoverage() {
 async function fetchKnowledgeGaps() {
   document.getElementById('knowledge-content').innerHTML = '<div class="empty-state"><div class="skeleton skeleton-card" style="width:100%;height:200px"></div></div>'
   try {
-    var result = await api('/tools/call', { method: 'POST', body: JSON.stringify({ agent_id: 'command-center', tool_name: 'graph.read_cypher', call_id: uuid(), arguments: { query: "MATCH (ia:IntelligenceAsset) WHERE ia.domain IS NOT NULL RETURN ia.domain AS domain, count(ia) AS count ORDER BY count DESC" } }) })
-    var data = result.result || result.data && result.data.result || result
-    var records = data.results || data.records || data.rows || data
-    if (!Array.isArray(records) || records.length === 0) { document.getElementById('knowledge-content').innerHTML = '<div class="empty-state"><div class="empty-icon">\u{1F4CA}</div>No IntelligenceAsset nodes with domain tags found</div>'; return }
-    var total = records.reduce(function(s, r) { return s + (r.count || 0) }, 0)
-    var ideal = 1 / 17
-    var html = '<div class="section-box"><h2>Knowledge Gap Analysis</h2><div class="card-grid"><div class="stat-card"><div class="value">' + Number(total).toLocaleString() + '</div><div class="label">Intelligence Assets</div></div><div class="stat-card"><div class="value">' + records.length + '/17</div><div class="label">Domains Covered</div></div></div>'
-    html += '<table><thead><tr><th>Domain</th><th>Assets</th><th>Coverage</th><th>Gap</th></tr></thead><tbody>'
-    for (var i = 0; i < records.length; i++) {
-      var coverage = total > 0 ? records[i].count / total : 0
-      var gap = ideal - coverage
-      html += '<tr><td><code style="color:var(--purple)">' + h(records[i].domain) + '</code></td><td>' + Number(records[i].count).toLocaleString() + '</td><td>' + (coverage * 100).toFixed(1) + '%</td><td style="color:' + (gap > 0.03 ? 'var(--red)' : gap > 0 ? 'var(--yellow)' : 'var(--green)') + '">' + (gap > 0 ? '+' : '') + (gap * 100).toFixed(2) + '%</td></tr>'
+    // Query actual domain-tagged nodes across all content types + ConsultingDomain link counts
+    var results = await Promise.allSettled([
+      api('/tools/call', { method: 'POST', body: JSON.stringify({ agent_id: 'command-center', tool_name: 'graph.read_cypher', call_id: uuid(), arguments: { query: "MATCH (n) WHERE n.domain IS NOT NULL RETURN n.domain AS domain, labels(n)[0] AS label, count(*) AS count ORDER BY count DESC LIMIT 40" } }) }),
+      api('/tools/call', { method: 'POST', body: JSON.stringify({ agent_id: 'command-center', tool_name: 'graph.read_cypher', call_id: uuid(), arguments: { query: "MATCH (d:ConsultingDomain) OPTIONAL MATCH (d)<-[r]-(n) RETURN d.domain_id AS domain_id, d.name AS name, count(n) AS linked, collect(DISTINCT type(r)) AS rel_types ORDER BY linked DESC" } }) })
+    ])
+    var domainData = results[0].status === 'fulfilled' ? (results[0].value.result || results[0].value.data && results[0].value.data.result || results[0].value) : null
+    var linkData = results[1].status === 'fulfilled' ? (results[1].value.result || results[1].value.data && results[1].value.data.result || results[1].value) : null
+
+    var domainRecords = domainData && (domainData.results || domainData.records || domainData.rows || domainData)
+    var linkRecords = linkData && (linkData.results || linkData.records || linkData.rows || linkData)
+
+    if ((!Array.isArray(domainRecords) || domainRecords.length === 0) && (!Array.isArray(linkRecords) || linkRecords.length === 0)) {
+      document.getElementById('knowledge-content').innerHTML = '<div class="empty-state"><div class="empty-icon">\u{1F4CA}</div>No domain-tagged nodes found in graph</div>'; return
+    }
+
+    // Aggregate by domain
+    var byDomain = {}
+    if (Array.isArray(domainRecords)) {
+      for (var i = 0; i < domainRecords.length; i++) {
+        var d = domainRecords[i].domain || 'untagged'
+        if (!byDomain[d]) byDomain[d] = { count: 0, types: {} }
+        var c = Number(domainRecords[i].count && domainRecords[i].count.low !== undefined ? domainRecords[i].count.low : domainRecords[i].count) || 0
+        byDomain[d].count += c
+        var lbl = domainRecords[i].label || '?'
+        byDomain[d].types[lbl] = (byDomain[d].types[lbl] || 0) + c
+      }
+    }
+
+    var domains = Object.keys(byDomain).sort(function(a, b) { return byDomain[b].count - byDomain[a].count })
+    var total = domains.reduce(function(s, d) { return s + byDomain[d].count }, 0)
+    var numDomains = domains.filter(function(d) { return d !== 'untagged' }).length
+
+    var html = '<div class="section-box"><h2>Knowledge Gap Analysis</h2><div class="card-grid"><div class="stat-card"><div class="value">' + Number(total).toLocaleString() + '</div><div class="label">Domain-Tagged Nodes</div></div><div class="stat-card"><div class="value">' + numDomains + '</div><div class="label">Domains Active</div></div></div>'
+
+    // Domain breakdown table
+    html += '<table><thead><tr><th>Domain</th><th>Nodes</th><th>Coverage</th><th>Top Types</th></tr></thead><tbody>'
+    for (var j = 0; j < domains.length; j++) {
+      var dd = domains[j], info = byDomain[dd]
+      var coverage = total > 0 ? info.count / total : 0
+      var topTypes = Object.entries(info.types).sort(function(a, b) { return b[1] - a[1] }).slice(0, 3).map(function(e) { return e[0] + ' (' + e[1].toLocaleString() + ')' }).join(', ')
+      var barColor = coverage > 0.2 ? 'var(--accent)' : coverage > 0.05 ? 'var(--yellow)' : 'var(--red-muted)'
+      html += '<tr><td><code style="color:var(--purple);font-weight:700">' + h(dd) + '</code></td><td>' + Number(info.count).toLocaleString() + '</td><td><div style="display:flex;align-items:center;gap:8px"><div style="background:var(--bg);border-radius:4px;overflow:hidden;height:8px;width:100px"><div style="background:' + barColor + ';height:100%;width:' + Math.min(100, coverage * 200) + '%"></div></div>' + (coverage * 100).toFixed(1) + '%</div></td><td style="font-size:0.75rem;color:var(--text-2)">' + h(topTypes) + '</td></tr>'
     }
     html += '</tbody></table></div>'
+
+    // ConsultingDomain link coverage
+    if (Array.isArray(linkRecords) && linkRecords.length > 0) {
+      html += '<div class="section-box" style="margin-top:var(--sp-4)"><h2>ConsultingDomain Link Coverage</h2><table><thead><tr><th>Domain</th><th>ID</th><th>Linked Nodes</th><th>Relationship Types</th></tr></thead><tbody>'
+      for (var k = 0; k < linkRecords.length; k++) {
+        var lr = linkRecords[k]
+        var linked = Number(lr.linked && lr.linked.low !== undefined ? lr.linked.low : lr.linked) || 0
+        var rels = Array.isArray(lr.rel_types) ? lr.rel_types.filter(Boolean).join(', ') : ''
+        var statusBadge = linked > 0 ? '<span class="badge badge-online">' + linked + ' linked</span>' : '<span class="badge badge-offline">orphan</span>'
+        html += '<tr><td>' + h(lr.name || '') + '</td><td><code style="color:var(--purple)">' + h(lr.domain_id || '\u2014') + '</code></td><td>' + statusBadge + '</td><td style="font-size:0.75rem;color:var(--text-2)">' + h(rels || 'none') + '</td></tr>'
+      }
+      html += '</tbody></table></div>'
+    }
+
     document.getElementById('knowledge-content').innerHTML = html
-  } catch (err) { document.getElementById('knowledge-content').innerHTML = '<div class="error-state">\u274C ' + h(err.message) + '</div>' }
+  } catch (err) { document.getElementById('knowledge-content').innerHTML = '<div class="error-state">\u274C ' + h(err.message) + '<div class="error-action"><button class="btn-sm" onclick="fetchKnowledgeGaps()">Retry</button></div></div>' }
 }
 
 async function fetchGraphTopology() {
