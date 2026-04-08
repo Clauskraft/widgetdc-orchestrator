@@ -1,0 +1,1 @@
+import{c as e,u as t}from"./button-DQ5y_3Gq.js";var n=t();function r({fixed:t,className:r,fluid:i,...a}){return(0,n.jsx)(`main`,{"data-layout":t?`fixed`:`auto`,className:e(`px-4 py-6`,t&&`flex grow flex-col overflow-hidden`,!i&&`@7xl/content:mx-auto @7xl/content:w-full @7xl/content:max-w-7xl`,r),...a})}export{r as t};

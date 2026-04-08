@@ -2,7 +2,7 @@
 // Bundles everything into a single dist/index.js (ESM, Node 20 target)
 // @widgetdc/contracts is bundled IN (file: dep, not available on Railway)
 import * as esbuild from 'esbuild'
-import { readFileSync, mkdirSync, copyFileSync, existsSync } from 'fs'
+import { readFileSync, mkdirSync, copyFileSync, cpSync, existsSync } from 'fs'
 import { spawnSync } from 'child_process'
 
 // Guard: NODE_ENV=production causes npm to skip devDependencies (esbuild, typebox, etc.)
@@ -81,8 +81,18 @@ await esbuild.build({
 })
 
 // Copy frontend to dist/public/
+// CC v4: React SPA built with Vite (frontend-v4/ contains pre-built output)
+// Fallback: legacy single-file frontend/index.html
 mkdirSync('dist/public', { recursive: true })
-copyFileSync('frontend/index.html', 'dist/public/index.html')
+if (existsSync('frontend-v4/index.html')) {
+  // Recursively copy Vite build output (index.html + assets/ + images/)
+  cpSync('frontend-v4', 'dist/public', { recursive: true })
+  console.log('✓ Copied CC v4 (React SPA) → dist/public/')
+} else {
+  // Legacy fallback
+  copyFileSync('frontend/index.html', 'dist/public/index.html')
+  console.log('✓ Copied legacy frontend/index.html → dist/public/')
+}
 // Inventor dashboard (ASI-Evolve evolution engine UI)
 if (existsSync('frontend/inventor-dashboard.html')) {
   copyFileSync('frontend/inventor-dashboard.html', 'dist/public/inventor-dashboard.html')
