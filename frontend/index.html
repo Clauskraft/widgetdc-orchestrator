@@ -371,18 +371,8 @@
 
   <!-- Keyboard Shortcuts -->
   <div class="shortcuts-overlay" id="shortcuts-overlay" role="dialog" aria-label="Keyboard Shortcuts">
-    <div class="shortcuts-box">
-      <h2>Keyboard Shortcuts</h2>
-      <div class="shortcut-row"><span class="shortcut-desc">Command palette</span><span class="shortcut-keys"><kbd>Ctrl</kbd><kbd>K</kbd></span></div>
-      <div class="shortcut-row"><span class="shortcut-desc">Show shortcuts</span><span class="shortcut-keys"><kbd>?</kbd></span></div>
-      <div class="shortcut-row"><span class="shortcut-desc">Dashboard</span><span class="shortcut-keys"><kbd>G</kbd><kbd>D</kbd></span></div>
-      <div class="shortcut-row"><span class="shortcut-desc">Chat</span><span class="shortcut-keys"><kbd>G</kbd><kbd>C</kbd></span></div>
-      <div class="shortcut-row"><span class="shortcut-desc">Agents</span><span class="shortcut-keys"><kbd>G</kbd><kbd>A</kbd></span></div>
-      <div class="shortcut-row"><span class="shortcut-desc">Chains</span><span class="shortcut-keys"><kbd>G</kbd><kbd>H</kbd></span></div>
-      <div class="shortcut-row"><span class="shortcut-desc">Inventor</span><span class="shortcut-keys"><kbd>G</kbd><kbd>I</kbd></span></div>
-      <div class="shortcut-row"><span class="shortcut-desc">Refresh dashboard</span><span class="shortcut-keys"><kbd>R</kbd></span></div>
-      <div class="shortcut-row"><span class="shortcut-desc">Close dialog</span><span class="shortcut-keys"><kbd>Esc</kbd></span></div>
-      <div style="margin-top:var(--sp-4);text-align:center"><button class="btn-secondary btn-sm" onclick="document.getElementById('shortcuts-overlay').classList.remove('show')">Close</button></div>
+    <div class="shortcuts-box" id="shortcuts-box-inner">
+      <!-- Rendered dynamically by renderShortcutsOverlay() -->
     </div>
   </div>
 
@@ -869,8 +859,16 @@ var ShortcutRegistry = (function() {
 
 // Register all shortcuts
 ShortcutRegistry.register('ctrl+k', 'Open command palette', function() { openPalette() })
-ShortcutRegistry.register('?', 'Show keyboard shortcuts', function() { document.getElementById('shortcuts-overlay').classList.add('show') })
+ShortcutRegistry.register('?', 'Show keyboard shortcuts', function() { renderShortcutsOverlay(); document.getElementById('shortcuts-overlay').classList.add('show') })
 ShortcutRegistry.register('r', 'Refresh dashboard', function() { refreshDashboard(); showToast('Dashboard refreshed', 'info') })
+ShortcutRegistry.register('/', 'Focus chat input', function() {
+  var el = document.getElementById('chat-input')
+  if (el) { var nav = document.querySelector('[data-panel="chat"]'); if (nav) nav.click(); setTimeout(function() { el.focus() }, 100) }
+})
+ShortcutRegistry.register('s', 'Search chat messages', function() {
+  var el = document.getElementById('chat-search-input')
+  if (el) { var nav = document.querySelector('[data-panel="chat"]'); if (nav) nav.click(); setTimeout(function() { el.focus() }, 100) }
+})
 
 // ─── Unified Error Boundary (Gap 3: Categorized recovery) ──────────────────
 var ErrorBoundary = (function() {
@@ -920,7 +918,8 @@ var ErrorBoundary = (function() {
 })()
 
 // ─── API Client (with ErrorBoundary integration) ────────────────────────────
-async function api(path, opts) {
+// Raw fetch — used internally by api(). Direct callers bypass ErrorBoundary.
+async function apiRaw(path, opts) {
   opts = opts || {}
   var headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + API_KEY }
   var res = await fetch(BASE + path, Object.assign({}, opts, { headers: Object.assign({}, headers, opts.headers || {}) }))
@@ -929,9 +928,42 @@ async function api(path, opts) {
   return res.json()
 }
 
-// Wrapped API call with automatic retry and error categorization
+// Safe API — all calls go through ErrorBoundary with auto-retry (max 2).
+// Every existing api() call automatically gets categorized error handling,
+// toast notifications, and exponential backoff on transient failures.
+function api(path, opts) {
+  return ErrorBoundary.wrap(path, function() { return apiRaw(path, opts) })
+}
+
+// Explicit safe wrapper with custom retry callback (for UI retry buttons etc.)
 function apiSafe(path, opts, retryFn) {
-  return ErrorBoundary.wrap(path, function() { return api(path, opts) }, retryFn)
+  return ErrorBoundary.wrap(path, function() { return apiRaw(path, opts) }, retryFn)
+}
+
+// ─── Shortcuts Overlay Renderer (dynamic from ShortcutRegistry) ────────────
+function renderShortcutsOverlay() {
+  var all = ShortcutRegistry.list()
+  var singles = all.filter(function(s) { return s.combo.indexOf('g+') !== 0 })
+  var gKeys = all.filter(function(s) { return s.combo.indexOf('g+') === 0 })
+
+  function formatKey(k) {
+    return k.split('+').map(function(part) { return '<kbd>' + part.charAt(0).toUpperCase() + part.slice(1) + '</kbd>' }).join('')
+  }
+
+  var html = '<h2>Keyboard Shortcuts <span style="font-size:0.75rem;font-weight:400;color:var(--text-2)">(' + all.length + ' registered)</span></h2>'
+  html += '<div style="margin-bottom:var(--sp-3);font-weight:600;color:var(--text-2);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.05em">Global</div>'
+  singles.forEach(function(s) {
+    html += '<div class="shortcut-row"><span class="shortcut-desc">' + s.description + '</span><span class="shortcut-keys">' + formatKey(s.combo) + '</span></div>'
+  })
+  html += '<div class="shortcut-row"><span class="shortcut-desc">Close dialog</span><span class="shortcut-keys"><kbd>Esc</kbd></span></div>'
+
+  html += '<div style="margin:var(--sp-3) 0 var(--sp-2);font-weight:600;color:var(--text-2);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.05em">Navigation (G + key)</div>'
+  gKeys.forEach(function(s) {
+    html += '<div class="shortcut-row"><span class="shortcut-desc">' + s.description + '</span><span class="shortcut-keys">' + formatKey(s.combo) + '</span></div>'
+  })
+
+  html += '<div style="margin-top:var(--sp-4);text-align:center"><button class="btn-secondary btn-sm" onclick="document.getElementById(\'shortcuts-overlay\').classList.remove(\'show\')">Close</button></div>'
+  document.getElementById('shortcuts-box-inner').innerHTML = html
 }
 
 // ─── WebSocket ──────────────────────────────────────────────────────────────
@@ -1011,7 +1043,7 @@ var pendingG = false
 var gTimer = null
 
 // G+key navigation map — registered with conflict detection
-var gNavMap = { d: 'dashboard', c: 'chat', a: 'agents', h: 'chains', i: 'inventor', o: 'omega', k: 'knowledge', p: 'pheromone', f: 'fleet-learning', v: 'cost', u: 'audit', n: 'anomaly', w: 'openclaw', r: 'cron', t: 'adoption' }
+var gNavMap = { d: 'dashboard', c: 'chat', a: 'agents', h: 'chains', i: 'inventor', o: 'omega', k: 'knowledge', p: 'pheromone', f: 'fleet-learning', v: 'cost', u: 'audit', n: 'anomaly', w: 'openclaw', r: 'cron', t: 'adoption', s: 'cognitive' }
 Object.keys(gNavMap).forEach(function(key) {
   ShortcutRegistry.register('g+' + key, 'Go to ' + (panelNames[gNavMap[key]] || gNavMap[key]), function() {
     var nav = document.querySelector('[data-panel="' + gNavMap[key] + '"]')
@@ -2262,6 +2294,12 @@ function connectSSE() {
         chatMessages.push(msg)
         if (chatMessages.length > 500) chatMessages = chatMessages.slice(-400)
         renderChat()
+        // SSE → EventBus: route channel events to cross-panel sync
+        var ch = msg.channel || msg.type || ''
+        if (ch === 'inventor' || ch === 'evolution') EventBus.emit('inventor:update', { type: msg.event || 'sse', data: msg })
+        if (ch === 'pheromone') EventBus.emit('pheromone:update', { type: 'sse', data: msg })
+        if (ch === 'fleet' || ch === 'peer_eval') EventBus.emit('fleet:update', { type: 'sse', data: msg })
+        if (ch === 'anomaly') EventBus.emit('anomaly:update', { type: 'sse', data: msg })
       } catch(e) {}
     })
     evtSource.addEventListener('connected', function() { console.log('SSE connected') })
