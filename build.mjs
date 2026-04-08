@@ -4,6 +4,7 @@
 import * as esbuild from 'esbuild'
 import { readFileSync, mkdirSync, copyFileSync, cpSync, existsSync } from 'fs'
 import { spawnSync } from 'child_process'
+import { fileURLToPath } from 'url'
 
 // Guard: NODE_ENV=production causes npm to skip devDependencies (esbuild, typebox, etc.)
 // This silently breaks the build. Force NODE_ENV=development for build context.
@@ -82,7 +83,8 @@ const external = [
 // Resolve the working contracts dist path for esbuild alias (broken symlink workaround).
 // Alias maps @widgetdc/contracts → <altPath>/dist so sub-path imports like
 // @widgetdc/contracts/llm resolve to <altPath>/dist/llm correctly.
-const contractsAbsPath = new URL(contractsDist.replace('/orchestrator', ''), import.meta.url).pathname
+// Use fileURLToPath so Windows paths are C:/... not /C:/... (URL.pathname quirk).
+const contractsAbsPath = fileURLToPath(new URL(contractsDist.replace('/orchestrator', ''), import.meta.url))
 
 await esbuild.build({
   entryPoints: ['src/index.ts'],
