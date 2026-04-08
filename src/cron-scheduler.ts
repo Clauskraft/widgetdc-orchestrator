@@ -24,6 +24,8 @@ import { runAutonomousCycle, getAutonomousStatus } from './hyperagent-autonomous
 import { runAnomalyScan } from './anomaly-watcher.js'
 import { runPheromoneCron } from './pheromone-layer.js'
 import { runFleetAnalysis } from './peer-eval.js'
+import { runWeeklySync as runFlywheelSync } from './flywheel-coordinator.js'
+import { runWeeklyConsolidation } from './consolidation-engine.js'
 
 interface CronJob {
   id: string
@@ -604,6 +606,75 @@ export async function runCronJob(jobId: string): Promise<void> {
       return
     }
 
+    // Value Flywheel: weekly compound health sync (Monday 08:00)
+    if (job.id === 'flywheel-weekly-sync') {
+      try {
+        const report = await runFlywheelSync()
+        job.last_run = new Date().toISOString()
+        job.last_status = `compound=${(report.compoundScore * 100).toFixed(0)}% delta=${report.weeklyDelta >= 0 ? '+' : ''}${(report.weeklyDelta * 100).toFixed(1)}%`
+        job.run_count++
+        persistCronJobs()
+
+        const emoji = report.compoundScore >= 0.7 ? '🟢' : report.compoundScore >= 0.4 ? '🟡' : '🔴'
+        broadcastMessage({
+          from: 'Orchestrator',
+          to: 'All',
+          source: 'orchestrator',
+          type: 'Message',
+          message: `${emoji} Value Flywheel: compound=${(report.compoundScore * 100).toFixed(0)}% (${report.weeklyDelta >= 0 ? '+' : ''}${(report.weeklyDelta * 100).toFixed(1)}% WoW) — ${report.nextOptimizations[0]?.title ?? 'all pillars healthy'}`,
+          timestamp: new Date().toISOString(),
+        })
+        broadcastSSE('flywheel-report', report)
+
+        // Create Linear issue if there are low-scoring pillars
+        if (report.nextOptimizations.length > 0 && report.compoundScore < 0.7) {
+          const topOpt = report.nextOptimizations[0]
+          logger.info({ pillar: topOpt.pillar, impact: topOpt.impact }, '[Flywheel] Optimization opportunity flagged')
+        }
+      } catch (err) {
+        job.last_run = new Date().toISOString()
+        job.last_status = 'failed'
+        job.run_count++
+        persistCronJobs()
+        logger.error({ id: job.id, err: String(err) }, 'Flywheel weekly sync cron failed')
+      }
+      return
+    }
+
+    // Consolidation Engine: weekly deprecation scan (Sunday 06:00)
+    if (job.id === 'consolidation-weekly') {
+      try {
+        const report = await runWeeklyConsolidation()
+        job.last_run = new Date().toISOString()
+        job.last_status = `${report.candidates.length} candidates`
+        job.run_count++
+        persistCronJobs()
+
+        if (report.candidates.length > 0) {
+          const high = report.candidates.filter(c => c.riskLevel === 'high').length
+          const emoji = high > 0 ? '🔴' : '🟡'
+          broadcastMessage({
+            from: 'Orchestrator',
+            to: 'All',
+            source: 'orchestrator',
+            type: 'Message',
+            message: `${emoji} Consolidation scan: ${report.candidates.length} candidates (${high} high-risk) — all require human review`,
+            timestamp: new Date().toISOString(),
+          })
+          broadcastSSE('consolidation-report', report)
+        } else {
+          logger.info('[Consolidation] Clean — no candidates this week')
+        }
+      } catch (err) {
+        job.last_run = new Date().toISOString()
+        job.last_status = 'failed'
+        job.run_count++
+        persistCronJobs()
+        logger.error({ id: job.id, err: String(err) }, 'Consolidation weekly cron failed')
+      }
+      return
+    }
+
     // PeerEval Fleet Analysis: RLM-powered fleet-wide strategic reasoning
     if (job.id === 'fleet-analysis') {
       try {
@@ -1139,6 +1210,36 @@ export function registerDefaultLoops(): void {
     enabled: true,
     chain: {
       name: 'Fleet Analysis',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // VALUE FLYWHEEL — Weekly compound health sync across 5 pillars
+  // ═══════════════════════════════════════════════════════════════════════
+  registerCronJob({
+    id: 'flywheel-weekly-sync',
+    name: 'Value Flywheel Weekly Sync (5 Pillars)',
+    schedule: '0 8 * * 1', // Weekly Monday 08:00 UTC
+    enabled: true,
+    chain: {
+      name: 'Flywheel Sync',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // CONSOLIDATION ENGINE — Weekly deprecation/archival candidate scan
+  // ═══════════════════════════════════════════════════════════════════════
+  registerCronJob({
+    id: 'consolidation-weekly',
+    name: 'Consolidation Scan (Deprecation Candidates)',
+    schedule: '0 6 * * 0', // Weekly Sunday 06:00 UTC
+    enabled: true,
+    chain: {
+      name: 'Consolidation Scan',
       mode: 'sequential',
       steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
     },

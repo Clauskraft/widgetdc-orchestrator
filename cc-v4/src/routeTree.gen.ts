@@ -18,6 +18,7 @@ import { Route as AuthenticatedOmegaRouteImport } from './routes/_authenticated/
 import { Route as AuthenticatedObsidianRouteImport } from './routes/_authenticated/obsidian'
 import { Route as AuthenticatedKnowledgeRouteImport } from './routes/_authenticated/knowledge'
 import { Route as AuthenticatedInventorRouteImport } from './routes/_authenticated/inventor'
+import { Route as AuthenticatedFlywheelRouteImport } from './routes/_authenticated/flywheel'
 import { Route as AuthenticatedFleetLearningRouteImport } from './routes/_authenticated/fleet-learning'
 import { Route as AuthenticatedCronRouteImport } from './routes/_authenticated/cron'
 import { Route as AuthenticatedCostRouteImport } from './routes/_authenticated/cost'
@@ -77,6 +78,11 @@ const AuthenticatedKnowledgeRoute = AuthenticatedKnowledgeRouteImport.update({
 const AuthenticatedInventorRoute = AuthenticatedInventorRouteImport.update({
   id: '/inventor',
   path: '/inventor',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
+const AuthenticatedFlywheelRoute = AuthenticatedFlywheelRouteImport.update({
+  id: '/flywheel',
+  path: '/flywheel',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
 const AuthenticatedFleetLearningRoute =
@@ -179,6 +185,7 @@ export interface FileRoutesByFullPath {
   '/cost': typeof AuthenticatedCostRoute
   '/cron': typeof AuthenticatedCronRoute
   '/fleet-learning': typeof AuthenticatedFleetLearningRoute
+  '/flywheel': typeof AuthenticatedFlywheelRoute
   '/inventor': typeof AuthenticatedInventorRoute
   '/knowledge': typeof AuthenticatedKnowledgeRoute
   '/obsidian': typeof AuthenticatedObsidianRoute
@@ -204,6 +211,7 @@ export interface FileRoutesByTo {
   '/cost': typeof AuthenticatedCostRoute
   '/cron': typeof AuthenticatedCronRoute
   '/fleet-learning': typeof AuthenticatedFleetLearningRoute
+  '/flywheel': typeof AuthenticatedFlywheelRoute
   '/inventor': typeof AuthenticatedInventorRoute
   '/knowledge': typeof AuthenticatedKnowledgeRoute
   '/obsidian': typeof AuthenticatedObsidianRoute
@@ -232,6 +240,7 @@ export interface FileRoutesById {
   '/_authenticated/cost': typeof AuthenticatedCostRoute
   '/_authenticated/cron': typeof AuthenticatedCronRoute
   '/_authenticated/fleet-learning': typeof AuthenticatedFleetLearningRoute
+  '/_authenticated/flywheel': typeof AuthenticatedFlywheelRoute
   '/_authenticated/inventor': typeof AuthenticatedInventorRoute
   '/_authenticated/knowledge': typeof AuthenticatedKnowledgeRoute
   '/_authenticated/obsidian': typeof AuthenticatedObsidianRoute
@@ -261,6 +270,7 @@ export interface FileRouteTypes {
     | '/cost'
     | '/cron'
     | '/fleet-learning'
+    | '/flywheel'
     | '/inventor'
     | '/knowledge'
     | '/obsidian'
@@ -286,6 +296,7 @@ export interface FileRouteTypes {
     | '/cost'
     | '/cron'
     | '/fleet-learning'
+    | '/flywheel'
     | '/inventor'
     | '/knowledge'
     | '/obsidian'
@@ -313,6 +324,7 @@ export interface FileRouteTypes {
     | '/_authenticated/cost'
     | '/_authenticated/cron'
     | '/_authenticated/fleet-learning'
+    | '/_authenticated/flywheel'
     | '/_authenticated/inventor'
     | '/_authenticated/knowledge'
     | '/_authenticated/obsidian'
@@ -396,6 +408,13 @@ declare module '@tanstack/react-router' {
       path: '/inventor'
       fullPath: '/inventor'
       preLoaderRoute: typeof AuthenticatedInventorRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/flywheel': {
+      id: '/_authenticated/flywheel'
+      path: '/flywheel'
+      fullPath: '/flywheel'
+      preLoaderRoute: typeof AuthenticatedFlywheelRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/fleet-learning': {
@@ -546,6 +565,7 @@ interface AuthenticatedRouteChildren {
   AuthenticatedCostRoute: typeof AuthenticatedCostRoute
   AuthenticatedCronRoute: typeof AuthenticatedCronRoute
   AuthenticatedFleetLearningRoute: typeof AuthenticatedFleetLearningRoute
+  AuthenticatedFlywheelRoute: typeof AuthenticatedFlywheelRoute
   AuthenticatedInventorRoute: typeof AuthenticatedInventorRoute
   AuthenticatedKnowledgeRoute: typeof AuthenticatedKnowledgeRoute
   AuthenticatedObsidianRoute: typeof AuthenticatedObsidianRoute
@@ -567,6 +587,7 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedCostRoute: AuthenticatedCostRoute,
   AuthenticatedCronRoute: AuthenticatedCronRoute,
   AuthenticatedFleetLearningRoute: AuthenticatedFleetLearningRoute,
+  AuthenticatedFlywheelRoute: AuthenticatedFlywheelRoute,
   AuthenticatedInventorRoute: AuthenticatedInventorRoute,
   AuthenticatedKnowledgeRoute: AuthenticatedKnowledgeRoute,
   AuthenticatedObsidianRoute: AuthenticatedObsidianRoute,

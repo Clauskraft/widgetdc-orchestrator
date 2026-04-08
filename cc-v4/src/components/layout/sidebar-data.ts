@@ -19,6 +19,7 @@ import {
   RefreshCw,
   Lightbulb,
   Activity,
+  RotateCw,
 } from 'lucide-react'
 
 export interface NavItem {
@@ -95,6 +96,12 @@ export const sidebarData: NavGroup[] = [
   {
     label: 'Platform',
     items: [
+      {
+        title: 'Value Flywheel',
+        path: '/flywheel',
+        icon: RotateCw,
+        description: '5-pillar compound health',
+      },
       {
         title: 'Pheromone',
         path: '/pheromone',

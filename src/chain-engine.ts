@@ -18,6 +18,7 @@ import { resolveRoutingDecision } from './routing-engine.js'
 import { hookIntoExecution } from './peer-eval.js'
 import { recordToolCall } from './adoption-telemetry.js'
 import { runFailureHarvest } from './failure-harvester.js'
+import { updateCostProfile } from './cost-optimizer.js'
 import type {
   AgentWorkflowEnvelope,
   RoutingCapability,
@@ -201,6 +202,12 @@ async function executeStep(step: ChainStep, previousOutput: unknown): Promise<St
       inputs: step.arguments,
       outputs: typeof output === 'object' && output !== null ? output as Record<string, unknown> : { result: output },
       metrics: { latency_ms: successResult.duration_ms, quality_score: 0.75 },
+    }).catch(() => {}) // non-blocking
+    // Cost optimizer: track per-agent cost/quality/latency profiles
+    updateCostProfile(step.agent_id, step.tool_name ?? step.cognitive_action ?? 'unknown', {
+      latency_ms: successResult.duration_ms,
+      quality_score: 0.75,
+      cost_usd: 0,
     }).catch(() => {}) // non-blocking
     // Adoption telemetry: capture chain-internal tool calls (bypass HTTP layer)
     recordToolCall(step.tool_name ?? step.cognitive_action ?? 'chain-step')

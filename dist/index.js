@@ -11203,8 +11203,8 @@ function buildTrustProfile(agentId, capability, executions2) {
     last_verified_at: (/* @__PURE__ */ new Date()).toISOString()
   };
 }
-function sortProfiles(profiles) {
-  return [...profiles].sort((left, right) => {
+function sortProfiles(profiles2) {
+  return [...profiles2].sort((left, right) => {
     if (right.bayesian_score !== left.bayesian_score) {
       return right.bayesian_score - left.bayesian_score;
     }
@@ -11275,8 +11275,8 @@ function getRecentRoutingDecisions() {
 }
 function buildRoutingDashboardData(recentExecutions) {
   const allProfiles = Object.keys(CAPABILITY_CANDIDATES).flatMap((capability) => {
-    const profiles = getCandidateAgents(capability).map((agentId) => buildTrustProfile(agentId, capability, recentExecutions));
-    return sortProfiles(profiles).slice(0, 2);
+    const profiles2 = getCandidateAgents(capability).map((agentId) => buildTrustProfile(agentId, capability, recentExecutions));
+    return sortProfiles(profiles2).slice(0, 2);
   });
   return {
     recentDecisions: getRecentRoutingDecisions().slice(0, 10),
@@ -13520,6 +13520,108 @@ var init_failure_harvester = __esm({
   }
 });
 
+// src/cost-optimizer.ts
+function profileKey(agentId, taskType) {
+  return `${agentId}:${taskType}`;
+}
+async function updateCostProfile(agentId, taskType, metrics2) {
+  if (!agentId || !taskType) return;
+  const key = profileKey(agentId, taskType);
+  const existing = profiles.get(key);
+  const cost = metrics2.cost_usd ?? 0;
+  const quality = Math.max(0, Math.min(1, metrics2.quality_score));
+  const p = existing ? {
+    ...existing,
+    totalTasks: existing.totalTasks + 1,
+    totalCostUsd: existing.totalCostUsd + cost,
+    totalLatencyMs: existing.totalLatencyMs + metrics2.latency_ms,
+    totalQualityScore: existing.totalQualityScore + quality,
+    recentScores: [...existing.recentScores, quality].slice(-10),
+    lastUpdatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  } : {
+    agentId,
+    taskType,
+    totalTasks: 1,
+    totalCostUsd: cost,
+    totalLatencyMs: metrics2.latency_ms,
+    totalQualityScore: quality,
+    avgCostUsd: cost,
+    avgLatencyMs: metrics2.latency_ms,
+    avgQualityScore: quality,
+    efficiencyRatio: quality / (cost + 1e-3),
+    recentScores: [quality],
+    degraded: false,
+    lastUpdatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  p.avgCostUsd = p.totalCostUsd / p.totalTasks;
+  p.avgLatencyMs = p.totalLatencyMs / p.totalTasks;
+  p.avgQualityScore = p.totalQualityScore / p.totalTasks;
+  p.efficiencyRatio = p.avgQualityScore / (p.avgCostUsd + 1e-3);
+  p.degraded = p.recentScores.length >= 3 && p.recentScores.slice(-3).reduce((s, v) => s + v, 0) / 3 < 0.4;
+  if (!existing && profiles.size >= MAX_PROFILES) {
+    const firstKey = profiles.keys().next().value;
+    if (firstKey) profiles.delete(firstKey);
+  }
+  profiles.set(key, p);
+  if (p.degraded) {
+    logger.warn(
+      { agentId, taskType, recent: p.recentScores.slice(-3) },
+      "[CostOptimizer] Agent quality degradation detected"
+    );
+  }
+  schedulePersist();
+}
+function getAllCostProfiles() {
+  return [...profiles.values()];
+}
+function getCostSummary() {
+  const all = getAllCostProfiles();
+  const totalCost = all.reduce((s, p) => s + p.totalCostUsd, 0);
+  const totalTasks = all.reduce((s, p) => s + p.totalTasks, 0);
+  const taskTypes = new Set(all.map((p) => p.taskType));
+  return {
+    totalProfiles: all.length,
+    degradedAgents: all.filter((p) => p.degraded).map((p) => p.agentId),
+    topEfficient: [...all].sort((a, b) => b.efficiencyRatio - a.efficiencyRatio).slice(0, 5),
+    avgPlatformCostPerTask: totalTasks > 0 ? totalCost / totalTasks : 0,
+    taskTypesCovered: taskTypes.size
+  };
+}
+function schedulePersist() {
+  if (persistTimer) return;
+  persistTimer = setTimeout(async () => {
+    persistTimer = null;
+    await persistToRedis2();
+  }, 5e3);
+}
+async function persistToRedis2() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const pipeline = redis2.multi();
+    for (const [key, profile] of profiles.entries()) {
+      pipeline.set(`${REDIS_PREFIX3}profile:${key}`, JSON.stringify(profile), { EX: 30 * 24 * 3600 });
+    }
+    pipeline.sadd(REDIS_INDEX, ...[...profiles.keys()]);
+    await pipeline.exec();
+  } catch (err) {
+    logger.warn({ error: String(err) }, "[CostOptimizer] Redis persist failed");
+  }
+}
+var REDIS_PREFIX3, REDIS_INDEX, MAX_PROFILES, profiles, persistTimer;
+var init_cost_optimizer = __esm({
+  "src/cost-optimizer.ts"() {
+    "use strict";
+    init_redis();
+    init_logger();
+    REDIS_PREFIX3 = "orchestrator:cost:";
+    REDIS_INDEX = `${REDIS_PREFIX3}index`;
+    MAX_PROFILES = 1e3;
+    profiles = /* @__PURE__ */ new Map();
+    persistTimer = null;
+  }
+});
+
 // src/chain-engine.ts
 var chain_engine_exports = {};
 __export(chain_engine_exports, {
@@ -13597,6 +13699,12 @@ async function executeStep(step, previousOutput) {
       inputs: step.arguments,
       outputs: typeof output === "object" && output !== null ? output : { result: output },
       metrics: { latency_ms: successResult.duration_ms, quality_score: 0.75 }
+    }).catch(() => {
+    });
+    updateCostProfile(step.agent_id, step.tool_name ?? step.cognitive_action ?? "unknown", {
+      latency_ms: successResult.duration_ms,
+      quality_score: 0.75,
+      cost_usd: 0
     }).catch(() => {
     });
     recordToolCall(step.tool_name ?? step.cognitive_action ?? "chain-step");
@@ -13970,6 +14078,7 @@ var init_chain_engine = __esm({
     init_peer_eval();
     init_adoption_telemetry();
     init_failure_harvester();
+    init_cost_optimizer();
     FUNNEL_STAGES = [
       "signal",
       "pattern",
@@ -14307,7 +14416,7 @@ async function persistResult(result) {
   const redis2 = getRedis();
   if (!redis2) return;
   try {
-    await redis2.set(`${REDIS_PREFIX3}${result.$id}`, JSON.stringify(result), "EX", 604800);
+    await redis2.set(`${REDIS_PREFIX4}${result.$id}`, JSON.stringify(result), "EX", 604800);
   } catch {
   }
 }
@@ -14560,7 +14669,7 @@ async function batchIngest(documents) {
   }
   return results;
 }
-var REDIS_PREFIX3;
+var REDIS_PREFIX4;
 var init_document_intelligence = __esm({
   "src/document-intelligence.ts"() {
     "use strict";
@@ -14569,7 +14678,7 @@ var init_document_intelligence = __esm({
     init_llm_proxy();
     init_logger();
     init_redis();
-    REDIS_PREFIX3 = "orchestrator:ingestion:";
+    REDIS_PREFIX4 = "orchestrator:ingestion:";
   }
 });
 
@@ -15012,8 +15121,8 @@ async function persist(d) {
   const redis2 = getRedis();
   if (!redis2) return;
   try {
-    await redis2.set(`${REDIS_PREFIX4}${d.$id}`, JSON.stringify(d), "EX", TTL_SECONDS2);
-    await redis2.sadd(REDIS_INDEX, d.$id);
+    await redis2.set(`${REDIS_PREFIX5}${d.$id}`, JSON.stringify(d), "EX", TTL_SECONDS2);
+    await redis2.sadd(REDIS_INDEX2, d.$id);
   } catch {
   }
 }
@@ -15022,7 +15131,7 @@ async function getDeliverable(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX4}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX5}${id}`);
     if (raw) {
       const d = JSON.parse(raw);
       deliverableCache.set(id, d);
@@ -15036,7 +15145,7 @@ async function listDeliverables(limit = 20) {
   const redis2 = getRedis();
   if (!redis2) return Array.from(deliverableCache.values()).slice(0, limit);
   try {
-    const ids = await redis2.smembers(REDIS_INDEX);
+    const ids = await redis2.smembers(REDIS_INDEX2);
     const results = [];
     for (const id of ids.slice(0, limit)) {
       const d = await getDeliverable(id);
@@ -15323,7 +15432,7 @@ async function renderPDF(deliverable) {
     deliverable.format = "markdown";
   }
 }
-var REDIS_PREFIX4, REDIS_INDEX, TTL_SECONDS2, deliverableCache, CACHE_MAX_SIZE, activeGenerations, MAX_CONCURRENT, TYPE_PROMPTS;
+var REDIS_PREFIX5, REDIS_INDEX2, TTL_SECONDS2, deliverableCache, CACHE_MAX_SIZE, activeGenerations, MAX_CONCURRENT, TYPE_PROMPTS;
 var init_deliverable_engine = __esm({
   "src/deliverable-engine.ts"() {
     "use strict";
@@ -15332,8 +15441,8 @@ var init_deliverable_engine = __esm({
     init_dual_rag();
     init_redis();
     init_logger();
-    REDIS_PREFIX4 = "orchestrator:deliverable:";
-    REDIS_INDEX = "orchestrator:deliverables:index";
+    REDIS_PREFIX5 = "orchestrator:deliverable:";
+    REDIS_INDEX2 = "orchestrator:deliverables:index";
     TTL_SECONDS2 = 604800;
     deliverableCache = /* @__PURE__ */ new Map();
     CACHE_MAX_SIZE = 100;
@@ -15947,7 +16056,7 @@ async function persistCycle(cycle) {
   const redis2 = getRedis();
   if (!redis2) return;
   try {
-    await redis2.set(`${REDIS_PREFIX5}${cycle.cycle_id}`, JSON.stringify(cycle), "EX", REDIS_TTL);
+    await redis2.set(`${REDIS_PREFIX6}${cycle.cycle_id}`, JSON.stringify(cycle), "EX", REDIS_TTL);
     await redis2.lpush(REDIS_HISTORY_KEY, JSON.stringify(cycle));
     await redis2.ltrim(REDIS_HISTORY_KEY, 0, 19);
     await redis2.expire(REDIS_HISTORY_KEY, REDIS_TTL);
@@ -16364,7 +16473,7 @@ async function getEvolutionHistory(limit = 10) {
     return lastCycle ? [lastCycle] : [];
   }
 }
-var isRunning, currentStage, lastCycle, totalCycles, STAGE_TIMEOUT_MS, TOTAL_TIMEOUT_MS, REDIS_PREFIX5, REDIS_HISTORY_KEY, REDIS_TTL;
+var isRunning, currentStage, lastCycle, totalCycles, STAGE_TIMEOUT_MS, TOTAL_TIMEOUT_MS, REDIS_PREFIX6, REDIS_HISTORY_KEY, REDIS_TTL;
 var init_evolution_loop = __esm({
   "src/evolution-loop.ts"() {
     "use strict";
@@ -16379,7 +16488,7 @@ var init_evolution_loop = __esm({
     totalCycles = 0;
     STAGE_TIMEOUT_MS = 5 * 60 * 1e3;
     TOTAL_TIMEOUT_MS = 20 * 60 * 1e3;
-    REDIS_PREFIX5 = "orchestrator:evolution:";
+    REDIS_PREFIX6 = "orchestrator:evolution:";
     REDIS_HISTORY_KEY = "orchestrator:evolution:history";
     REDIS_TTL = 7 * 86400;
   }
@@ -16999,7 +17108,7 @@ Handler type: ${handlerType}` }
   const redis2 = getRedis();
   if (redis2) {
     try {
-      await redis2.set(`${REDIS_PREFIX6}${name}`, JSON.stringify(spec2), "EX", 86400 * 30);
+      await redis2.set(`${REDIS_PREFIX7}${name}`, JSON.stringify(spec2), "EX", 86400 * 30);
     } catch {
     }
   }
@@ -17042,7 +17151,7 @@ async function verifyForgedTool(name) {
     const redis2 = getRedis();
     if (redis2) {
       try {
-        await redis2.set(`${REDIS_PREFIX6}${name}`, JSON.stringify(spec2), "EX", 86400 * 30);
+        await redis2.set(`${REDIS_PREFIX7}${name}`, JSON.stringify(spec2), "EX", 86400 * 30);
       } catch {
       }
     }
@@ -17100,7 +17209,7 @@ async function loadForgedTools() {
   const redis2 = getRedis();
   if (!redis2) return 0;
   try {
-    const keys = await redis2.keys(`${REDIS_PREFIX6}*`);
+    const keys = await redis2.keys(`${REDIS_PREFIX7}*`);
     let loaded = 0;
     for (const key of keys) {
       const raw = await redis2.get(key);
@@ -17116,7 +17225,7 @@ async function loadForgedTools() {
     return 0;
   }
 }
-var FORGED_TOOLS, REDIS_PREFIX6;
+var FORGED_TOOLS, REDIS_PREFIX7;
 var init_skill_forge = __esm({
   "src/skill-forge.ts"() {
     "use strict";
@@ -17125,7 +17234,7 @@ var init_skill_forge = __esm({
     init_redis();
     init_logger();
     FORGED_TOOLS = /* @__PURE__ */ new Map();
-    REDIS_PREFIX6 = "forge:";
+    REDIS_PREFIX7 = "forge:";
   }
 });
 
@@ -17148,8 +17257,8 @@ async function saveEngagement(e) {
   const redis2 = getRedis();
   if (redis2) {
     try {
-      await redis2.set(`${REDIS_PREFIX7}${e.$id}`, JSON.stringify(e), "EX", TTL_SECONDS4);
-      await redis2.zadd(REDIS_INDEX2, Date.now(), e.$id);
+      await redis2.set(`${REDIS_PREFIX8}${e.$id}`, JSON.stringify(e), "EX", TTL_SECONDS4);
+      await redis2.zadd(REDIS_INDEX3, Date.now(), e.$id);
     } catch (err) {
       logger.warn({ error: String(err) }, "Engagement: Redis save failed");
     }
@@ -17161,7 +17270,7 @@ async function getEngagement(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX7}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX8}${id}`);
     if (!raw) return null;
     const e = JSON.parse(raw);
     engagementCache.set(id, e);
@@ -17174,7 +17283,7 @@ async function listEngagements(limit = 20) {
   const redis2 = getRedis();
   if (!redis2) return Array.from(engagementCache.values()).slice(0, limit);
   try {
-    const ids = await redis2.zrevrange(REDIS_INDEX2, 0, limit - 1);
+    const ids = await redis2.zrevrange(REDIS_INDEX3, 0, limit - 1);
     const out = [];
     for (const id of ids) {
       const e = await getEngagement(id);
@@ -17935,7 +18044,7 @@ async function recordOutcome(req) {
   const redis2 = getRedis();
   if (redis2) {
     try {
-      await redis2.set(`${REDIS_PREFIX7}outcome:${req.engagement_id}`, JSON.stringify(outcome), "EX", TTL_SECONDS4);
+      await redis2.set(`${REDIS_PREFIX8}outcome:${req.engagement_id}`, JSON.stringify(outcome), "EX", TTL_SECONDS4);
     } catch {
     }
   }
@@ -17970,7 +18079,7 @@ async function getOutcome(engagementId) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX7}outcome:${engagementId}`);
+    const raw = await redis2.get(`${REDIS_PREFIX8}outcome:${engagementId}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -17986,7 +18095,7 @@ async function getPlan(engagementId) {
     return null;
   }
 }
-var REDIS_PREFIX7, REDIS_INDEX2, REDIS_PLAN_PREFIX, TTL_SECONDS4, engagementCache, STALE_PRECEDENT_DAYS, GATE_BUDGET_DKK, GATE_TEAM_SIZE, GATE_DURATION_WEEKS, GATE_REQUIRE_CONSENSUS, GATE_CONSENSUS_TIMEOUT_MS, GATE_MAX_BUDGET_DKK, GATE_MAX_TEAM_SIZE, GATE_MAX_DURATION_WEEKS, GATE_MIN_OBJECTIVE_LEN, PlanGateRejection;
+var REDIS_PREFIX8, REDIS_INDEX3, REDIS_PLAN_PREFIX, TTL_SECONDS4, engagementCache, STALE_PRECEDENT_DAYS, GATE_BUDGET_DKK, GATE_TEAM_SIZE, GATE_DURATION_WEEKS, GATE_REQUIRE_CONSENSUS, GATE_CONSENSUS_TIMEOUT_MS, GATE_MAX_BUDGET_DKK, GATE_MAX_TEAM_SIZE, GATE_MAX_DURATION_WEEKS, GATE_MIN_OBJECTIVE_LEN, PlanGateRejection;
 var init_engagement_engine = __esm({
   "src/engagement-engine.ts"() {
     "use strict";
@@ -17996,8 +18105,8 @@ var init_engagement_engine = __esm({
     init_redis();
     init_logger();
     init_adaptive_rag();
-    REDIS_PREFIX7 = "orchestrator:engagement:";
-    REDIS_INDEX2 = "orchestrator:engagements:index";
+    REDIS_PREFIX8 = "orchestrator:engagement:";
+    REDIS_INDEX3 = "orchestrator:engagements:index";
     REDIS_PLAN_PREFIX = "orchestrator:engagement:plan:";
     TTL_SECONDS4 = 60 * 60 * 24 * 30;
     engagementCache = /* @__PURE__ */ new Map();
@@ -18637,8 +18746,8 @@ async function storeDecision(decision) {
   const redis2 = getRedis();
   if (!redis2) return false;
   try {
-    await redis2.set(`${REDIS_PREFIX8}${decision.$id}`, JSON.stringify(decision), "EX", TTL_SECONDS5);
-    await redis2.sadd(REDIS_INDEX3, decision.$id);
+    await redis2.set(`${REDIS_PREFIX9}${decision.$id}`, JSON.stringify(decision), "EX", TTL_SECONDS5);
+    await redis2.sadd(REDIS_INDEX4, decision.$id);
     return true;
   } catch (err) {
     logger.warn({ err: String(err) }, "Redis store failed for decision");
@@ -18649,7 +18758,7 @@ async function loadDecision(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX8}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX9}${id}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -18659,7 +18768,7 @@ async function listAllDecisionIds() {
   const redis2 = getRedis();
   if (!redis2) return [];
   try {
-    return await redis2.smembers(REDIS_INDEX3);
+    return await redis2.smembers(REDIS_INDEX4);
   } catch {
     return [];
   }
@@ -18728,7 +18837,7 @@ ORDER BY b.name`,
   }
   return lineage;
 }
-var decisionsRouter, REDIS_PREFIX8, REDIS_INDEX3, TTL_SECONDS5;
+var decisionsRouter, REDIS_PREFIX9, REDIS_INDEX4, TTL_SECONDS5;
 var init_decisions = __esm({
   "src/routes/decisions.ts"() {
     "use strict";
@@ -18738,8 +18847,8 @@ var init_decisions = __esm({
     init_cognitive_proxy();
     init_sse();
     decisionsRouter = Router3();
-    REDIS_PREFIX8 = "orchestrator:decision:";
-    REDIS_INDEX3 = "orchestrator:decisions:index";
+    REDIS_PREFIX9 = "orchestrator:decision:";
+    REDIS_INDEX4 = "orchestrator:decisions:index";
     TTL_SECONDS5 = 7776e3;
     decisionsRouter.post("/certify", async (req, res) => {
       const body = req.body;
@@ -18890,7 +18999,7 @@ CREATE (d)-[:CERTIFIED_BY_EVIDENCE]->(e)`,
       try {
         const pipeline = redis2.pipeline();
         for (const id of allIds) {
-          pipeline.get(`${REDIS_PREFIX8}${id}`);
+          pipeline.get(`${REDIS_PREFIX9}${id}`);
         }
         const results = await pipeline.exec();
         if (results) {
@@ -21740,7 +21849,7 @@ async function getExperimentHistory(limit = 20) {
     return [];
   }
 }
-var isRunning3, currentConfig, currentStep2, bestScore, bestNodeId, startedAt, lastStepAt, lastError, sampler, abortRequested, nodes, REDIS_PREFIX9, nodeKey, stateKey, samplerKey, historyKey;
+var isRunning3, currentConfig, currentStep2, bestScore, bestNodeId, startedAt, lastStepAt, lastError, sampler, abortRequested, nodes, REDIS_PREFIX10, nodeKey, stateKey, samplerKey, historyKey;
 var init_inventor_loop = __esm({
   "src/inventor-loop.ts"() {
     "use strict";
@@ -21765,11 +21874,11 @@ var init_inventor_loop = __esm({
     sampler = null;
     abortRequested = false;
     nodes = /* @__PURE__ */ new Map();
-    REDIS_PREFIX9 = "inventor:";
-    nodeKey = (expName) => `${REDIS_PREFIX9}${expName}:nodes`;
-    stateKey = (expName) => `${REDIS_PREFIX9}${expName}:state`;
-    samplerKey = (expName) => `${REDIS_PREFIX9}${expName}:sampler`;
-    historyKey = () => `${REDIS_PREFIX9}history`;
+    REDIS_PREFIX10 = "inventor:";
+    nodeKey = (expName) => `${REDIS_PREFIX10}${expName}:nodes`;
+    stateKey = (expName) => `${REDIS_PREFIX10}${expName}:state`;
+    samplerKey = (expName) => `${REDIS_PREFIX10}${expName}:sampler`;
+    historyKey = () => `${REDIS_PREFIX10}history`;
   }
 });
 
@@ -30385,6 +30494,325 @@ async function initAnomalyWatcher() {
 // src/cron-scheduler.ts
 init_pheromone_layer();
 init_peer_eval();
+
+// src/flywheel-coordinator.ts
+init_logger();
+init_cost_optimizer();
+init_peer_eval();
+init_adoption_telemetry();
+var lastReport = null;
+async function runWeeklySync() {
+  logger.info("[Flywheel] Starting weekly sync");
+  const pillars = await Promise.all([
+    scoreCostEfficiency(),
+    scoreFleetIntelligence(),
+    scoreAdoption(),
+    scorePheromone(),
+    scorePlatformHealth()
+  ]);
+  const compound = Math.pow(
+    pillars.reduce((product, p) => product * Math.max(0.01, p.score), 1),
+    1 / pillars.length
+  );
+  const optimizations = identifyOptimizations(pillars);
+  const delta = lastReport ? compound - lastReport.compoundScore : 0;
+  const report = {
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    compoundScore: parseFloat(compound.toFixed(4)),
+    pillars,
+    nextOptimizations: optimizations.slice(0, 5),
+    weeklyDelta: parseFloat(delta.toFixed(4))
+  };
+  lastReport = report;
+  logger.info({ compound: report.compoundScore, delta: report.weeklyDelta }, "[Flywheel] Weekly sync complete");
+  return report;
+}
+async function getFlywheelMetrics() {
+  if (!lastReport) {
+    try {
+      const report = await runWeeklySync();
+      return { available: true, report, pillars: report.pillars };
+    } catch {
+      return { available: false, report: null };
+    }
+  }
+  return { available: true, report: lastReport, pillars: lastReport.pillars };
+}
+async function scoreCostEfficiency() {
+  try {
+    const summary = getCostSummary();
+    const profiles2 = getAllCostProfiles();
+    const degradedPct = summary.totalProfiles > 0 ? summary.degradedAgents.length / summary.totalProfiles : 0;
+    const avgQuality = profiles2.length > 0 ? profiles2.reduce((s, p) => s + p.avgQualityScore, 0) / profiles2.length : 0.5;
+    const score = Math.max(0, Math.min(
+      1,
+      avgQuality * 0.5 + (1 - degradedPct) * 0.3 + (summary.avgPlatformCostPerTask < 0.05 ? 0.2 : summary.avgPlatformCostPerTask < 0.1 ? 0.1 : 0)
+    ));
+    return {
+      name: "Cost Efficiency",
+      score: parseFloat(score.toFixed(3)),
+      trend: "flat",
+      headline: `${summary.totalProfiles} agent\xD7task profiles \xB7 avg quality ${(avgQuality * 100).toFixed(0)}%`,
+      details: [
+        `${summary.degradedAgents.length} degraded agents`,
+        `${summary.taskTypesCovered} task types covered`,
+        `Avg cost/task: $${summary.avgPlatformCostPerTask.toFixed(4)}`,
+        ...summary.topEfficient.slice(0, 2).map((p) => `Top: ${p.agentId}/${p.taskType} efficiency=${p.efficiencyRatio.toFixed(2)}`)
+      ]
+    };
+  } catch (err) {
+    logger.warn({ err }, "[Flywheel] scoreCostEfficiency failed");
+    return fallbackPillar("Cost Efficiency");
+  }
+}
+async function scoreFleetIntelligence() {
+  try {
+    const learnings = getAllFleetLearnings();
+    const state4 = getPeerEvalState();
+    const reliableLearnings = learnings.filter((l) => l.totalEvals >= 5 && l.avgScore >= 0.6);
+    const avgScore = learnings.length > 0 ? learnings.reduce((s, l) => s + l.avgScore, 0) / learnings.length : 0.5;
+    const bpCount = learnings.reduce((s, l) => s + (l.bestPractices?.length ?? 0), 0);
+    const score = Math.min(
+      1,
+      (state4.totalEvals > 0 ? Math.min(0.4, state4.totalEvals / 1e3) : 0) + avgScore * 0.4 + (bpCount > 0 ? Math.min(0.2, bpCount / 50) : 0)
+    );
+    return {
+      name: "Fleet Intelligence",
+      score: parseFloat(score.toFixed(3)),
+      trend: state4.totalEvals > 100 ? "up" : "flat",
+      headline: `${state4.totalEvals} evals \xB7 ${learnings.length} task types \xB7 ${bpCount} best practices`,
+      details: [
+        `${reliableLearnings.length} reliable routes (\u22655 evals, \u22650.6 quality)`,
+        `Avg fleet quality: ${(avgScore * 100).toFixed(0)}%`,
+        `Task types tracked: ${state4.taskTypesTracked}`
+      ]
+    };
+  } catch (err) {
+    logger.warn({ err }, "[Flywheel] scoreFleetIntelligence failed");
+    return fallbackPillar("Fleet Intelligence");
+  }
+}
+async function scoreAdoption() {
+  try {
+    const telemetry = await computeTelemetry();
+    const totalCalls = telemetry.tools.reduce((s, t) => s + t.lifetime_calls, 0);
+    const uniqueTools = telemetry.tools_called_this_week;
+    const advancedPct = (telemetry.kpis.advanced_utilisation_pct ?? 0) / 100;
+    const score = Math.min(
+      1,
+      (uniqueTools > 0 ? Math.min(0.4, uniqueTools / 20) : 0) + advancedPct * 0.3 + (totalCalls > 100 ? 0.3 : totalCalls / 100 * 0.3)
+    );
+    return {
+      name: "Adoption",
+      score: parseFloat(score.toFixed(3)),
+      trend: totalCalls > 0 ? "up" : "flat",
+      headline: `${totalCalls} calls \xB7 ${uniqueTools} tools active this week \xB7 ${(advancedPct * 100).toFixed(0)}% advanced`,
+      details: [
+        `Total lifetime calls: ${totalCalls}`,
+        `Tools active this week: ${uniqueTools} / ${telemetry.total_tools}`,
+        `Advanced tool usage: ${(advancedPct * 100).toFixed(0)}%`,
+        `Utilisation rate: ${telemetry.kpis.utilisation_rate_pct.toFixed(0)}%`
+      ]
+    };
+  } catch (err) {
+    logger.warn({ err }, "[Flywheel] scoreAdoption failed");
+    return fallbackPillar("Adoption");
+  }
+}
+async function scorePheromone() {
+  try {
+    const { getPheromoneStats } = await Promise.resolve().then(() => (init_pheromone_layer(), pheromone_layer_exports));
+    const stats = getPheromoneStats();
+    const active = stats?.activePheromones ?? 0;
+    const deposits = stats?.totalDeposits ?? 0;
+    const amplifications = stats?.totalAmplifications ?? 0;
+    const score = Math.min(
+      1,
+      (active > 0 ? Math.min(0.4, active / 200) : 0) + (deposits > 0 ? Math.min(0.3, deposits / 1e3) : 0) + (amplifications > 0 ? Math.min(0.3, amplifications / 200) : 0)
+    );
+    return {
+      name: "Pheromone Signal",
+      score: parseFloat(score.toFixed(3)),
+      trend: active > 50 ? "up" : "flat",
+      headline: `${active} active \xB7 ${deposits} deposits \xB7 ${amplifications} amplifications`,
+      details: [
+        `Active pheromones: ${active}`,
+        `Total deposits: ${deposits}`,
+        `Cross-pillar amplifications: ${amplifications}`,
+        `Decay cycles: ${stats?.totalDecays ?? 0}`
+      ]
+    };
+  } catch (err) {
+    logger.warn({ err }, "[Flywheel] scorePheromone failed");
+    return fallbackPillar("Pheromone Signal");
+  }
+}
+async function scorePlatformHealth() {
+  try {
+    const { getCircuitBreakerStats } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
+    const cb = getCircuitBreakerStats?.() ?? null;
+    const circuitOpen = cb?.open === true;
+    const failures = cb?.failures ?? 0;
+    const score = circuitOpen ? 0.2 : Math.max(0, 1 - failures * 0.05);
+    return {
+      name: "Platform Health",
+      score: parseFloat(Math.min(1, score).toFixed(3)),
+      trend: circuitOpen ? "down" : failures > 0 ? "flat" : "up",
+      headline: circuitOpen ? "\u26A0 Circuit breaker OPEN" : `${failures} backend failures`,
+      details: [
+        `Circuit breaker: ${circuitOpen ? "OPEN" : "closed"}`,
+        `Recent failures: ${failures}`
+      ]
+    };
+  } catch {
+    return { name: "Platform Health", score: 0.7, trend: "flat", headline: "Health data unavailable", details: [] };
+  }
+}
+function identifyOptimizations(pillars) {
+  const opts = [];
+  for (const p of pillars) {
+    if (p.score < 0.4) {
+      opts.push({
+        title: `Improve ${p.name} (score ${(p.score * 100).toFixed(0)}%)`,
+        pillar: p.name,
+        impact: 1 - p.score,
+        action: getActionForPillar(p.name, p)
+      });
+    } else if (p.score < 0.7) {
+      opts.push({
+        title: `Grow ${p.name} (${(p.score * 100).toFixed(0)}% \u2192 70%+)`,
+        pillar: p.name,
+        impact: (0.7 - p.score) * 0.5,
+        action: getActionForPillar(p.name, p)
+      });
+    }
+  }
+  return opts.sort((a, b) => b.impact - a.impact);
+}
+function getActionForPillar(name, p) {
+  switch (name) {
+    case "Cost Efficiency":
+      return p.details[0]?.includes("degraded") ? "Investigate degraded agents, check error logs" : "Add cost tracking to more chain steps";
+    case "Fleet Intelligence":
+      return "Run more chain executions to accumulate peer-eval data";
+    case "Adoption":
+      return "Enable advanced tools (reason_deeply, kg_rag, inventor_run) in more chains";
+    case "Pheromone Signal":
+      return "Deposit attraction pheromones on high-value task types";
+    case "Platform Health":
+      return "Check /health endpoint and error logs";
+    default:
+      return "Review telemetry data";
+  }
+}
+function fallbackPillar(name) {
+  return { name, score: 0.5, trend: "flat", headline: "Data unavailable", details: [] };
+}
+
+// src/consolidation-engine.ts
+init_logger();
+init_cost_optimizer();
+init_peer_eval();
+init_adoption_telemetry();
+var lastReport2 = null;
+async function runWeeklyConsolidation() {
+  logger.info("[Consolidation] Starting weekly scan");
+  const candidates = [];
+  await scanDegradedAgents(candidates);
+  await scanDominantRoutes(candidates);
+  await scanStaleTools(candidates);
+  const report = {
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    candidates,
+    autoExecuted: 0,
+    manualReview: candidates.length,
+    summary: `${candidates.length} consolidation candidates found \u2014 all require human review`
+  };
+  lastReport2 = report;
+  logger.info({ candidates: candidates.length }, "[Consolidation] Weekly scan complete");
+  return report;
+}
+function getLastReport() {
+  return lastReport2;
+}
+async function scanDegradedAgents(candidates) {
+  try {
+    const profiles2 = getAllCostProfiles();
+    const degraded = profiles2.filter((p) => p.degraded && p.totalTasks >= 10);
+    for (const p of degraded) {
+      const recent = p.recentScores.slice(-5);
+      const recentAvg = recent.reduce((s, v) => s + v, 0) / Math.max(1, recent.length);
+      candidates.push({
+        id: `degraded:${p.agentId}:${p.taskType}`,
+        category: "degraded-agent",
+        agentId: p.agentId,
+        taskType: p.taskType,
+        reason: `Agent "${p.agentId}" has quality degradation on task type "${p.taskType}"`,
+        evidence: [
+          `Last ${recent.length} scores avg: ${(recentAvg * 100).toFixed(0)}% (below 40%)`,
+          `Total tasks evaluated: ${p.totalTasks}`,
+          `Efficiency ratio: ${p.efficiencyRatio.toFixed(3)}`
+        ],
+        riskLevel: recentAvg < 0.2 ? "high" : "medium",
+        suggestedAction: `Investigate agent config for "${p.agentId}" on "${p.taskType}" tasks. Consider routing to a different agent temporarily.`
+      });
+    }
+  } catch (err) {
+    logger.warn({ err }, "[Consolidation] scanDegradedAgents failed");
+  }
+}
+async function scanDominantRoutes(candidates) {
+  try {
+    const learnings = getAllFleetLearnings();
+    for (const l of learnings) {
+      if (l.totalEvals >= 20 && l.bestScore >= 0.85 && l.bestAgent) {
+        const profiles2 = getAllCostProfiles().filter((p) => p.taskType === l.taskType);
+        const nonBest = profiles2.filter((p) => p.agentId !== l.bestAgent);
+        for (const p of nonBest) {
+          if (p.totalTasks >= 5 && p.avgQualityScore < l.bestScore - 0.2) {
+            candidates.push({
+              id: `dominant:${l.taskType}:${p.agentId}`,
+              category: "dominant-route",
+              agentId: p.agentId,
+              taskType: l.taskType,
+              reason: `"${l.bestAgent}" dominates "${l.taskType}" task type \u2014 "${p.agentId}" is underperforming`,
+              evidence: [
+                `Best agent: ${l.bestAgent} score=${l.bestScore.toFixed(2)}`,
+                `This agent: ${p.agentId} score=${p.avgQualityScore.toFixed(2)} (\u0394=${(l.bestScore - p.avgQualityScore).toFixed(2)})`,
+                `Fleet evals: ${l.totalEvals}`
+              ],
+              riskLevel: "low",
+              suggestedAction: `Consider updating chain routing for "${l.taskType}" to default to "${l.bestAgent}".`
+            });
+          }
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn({ err }, "[Consolidation] scanDominantRoutes failed");
+  }
+}
+async function scanStaleTools(candidates) {
+  try {
+    const summary = await computeTelemetry();
+    const stale = summary.stale_tools ?? [];
+    for (const toolName of stale.slice(0, 10)) {
+      candidates.push({
+        id: `stale:${toolName}`,
+        category: "stale-tool",
+        toolName,
+        reason: `Tool "${toolName}" has not been called in 30+ days`,
+        evidence: ["0 calls in last 30-day window", "Detected by adoption-telemetry stale scan"],
+        riskLevel: "low",
+        suggestedAction: `Verify if "${toolName}" is still needed. If unused for 60+ days, consider removing from tool registry.`
+      });
+    }
+  } catch (err) {
+    logger.warn({ err }, "[Consolidation] scanStaleTools failed");
+  }
+}
+
+// src/cron-scheduler.ts
 var jobs = /* @__PURE__ */ new Map();
 var cronTasks = /* @__PURE__ */ new Map();
 var REDIS_CRON_KEY = "orchestrator:cron-jobs";
@@ -30865,6 +31293,67 @@ async function runCronJob(jobId) {
       }
       return;
     }
+    if (job.id === "flywheel-weekly-sync") {
+      try {
+        const report = await runWeeklySync();
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = `compound=${(report.compoundScore * 100).toFixed(0)}% delta=${report.weeklyDelta >= 0 ? "+" : ""}${(report.weeklyDelta * 100).toFixed(1)}%`;
+        job.run_count++;
+        persistCronJobs();
+        const emoji = report.compoundScore >= 0.7 ? "\u{1F7E2}" : report.compoundScore >= 0.4 ? "\u{1F7E1}" : "\u{1F534}";
+        broadcastMessage({
+          from: "Orchestrator",
+          to: "All",
+          source: "orchestrator",
+          type: "Message",
+          message: `${emoji} Value Flywheel: compound=${(report.compoundScore * 100).toFixed(0)}% (${report.weeklyDelta >= 0 ? "+" : ""}${(report.weeklyDelta * 100).toFixed(1)}% WoW) \u2014 ${report.nextOptimizations[0]?.title ?? "all pillars healthy"}`,
+          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        });
+        broadcastSSE("flywheel-report", report);
+        if (report.nextOptimizations.length > 0 && report.compoundScore < 0.7) {
+          const topOpt = report.nextOptimizations[0];
+          logger.info({ pillar: topOpt.pillar, impact: topOpt.impact }, "[Flywheel] Optimization opportunity flagged");
+        }
+      } catch (err) {
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = "failed";
+        job.run_count++;
+        persistCronJobs();
+        logger.error({ id: job.id, err: String(err) }, "Flywheel weekly sync cron failed");
+      }
+      return;
+    }
+    if (job.id === "consolidation-weekly") {
+      try {
+        const report = await runWeeklyConsolidation();
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = `${report.candidates.length} candidates`;
+        job.run_count++;
+        persistCronJobs();
+        if (report.candidates.length > 0) {
+          const high = report.candidates.filter((c) => c.riskLevel === "high").length;
+          const emoji = high > 0 ? "\u{1F534}" : "\u{1F7E1}";
+          broadcastMessage({
+            from: "Orchestrator",
+            to: "All",
+            source: "orchestrator",
+            type: "Message",
+            message: `${emoji} Consolidation scan: ${report.candidates.length} candidates (${high} high-risk) \u2014 all require human review`,
+            timestamp: (/* @__PURE__ */ new Date()).toISOString()
+          });
+          broadcastSSE("consolidation-report", report);
+        } else {
+          logger.info("[Consolidation] Clean \u2014 no candidates this week");
+        }
+      } catch (err) {
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = "failed";
+        job.run_count++;
+        persistCronJobs();
+        logger.error({ id: job.id, err: String(err) }, "Consolidation weekly cron failed");
+      }
+      return;
+    }
     if (job.id === "fleet-analysis") {
       try {
         const analysis = await runFleetAnalysis();
@@ -31259,6 +31748,30 @@ function registerDefaultLoops() {
     enabled: true,
     chain: {
       name: "Fleet Analysis",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
+    }
+  });
+  registerCronJob({
+    id: "flywheel-weekly-sync",
+    name: "Value Flywheel Weekly Sync (5 Pillars)",
+    schedule: "0 8 * * 1",
+    // Weekly Monday 08:00 UTC
+    enabled: true,
+    chain: {
+      name: "Flywheel Sync",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
+    }
+  });
+  registerCronJob({
+    id: "consolidation-weekly",
+    name: "Consolidation Scan (Deprecation Candidates)",
+    schedule: "0 6 * * 0",
+    // Weekly Sunday 06:00 UTC
+    enabled: true,
+    chain: {
+      name: "Consolidation Scan",
       mode: "sequential",
       steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
     }
@@ -33080,15 +33593,15 @@ init_cognitive_proxy();
 import { Router as Router20 } from "express";
 import { v4 as uuid30 } from "uuid";
 var assemblyRouter = Router20();
-var REDIS_PREFIX10 = "orchestrator:assembly:";
-var REDIS_INDEX4 = "orchestrator:assemblies:index";
+var REDIS_PREFIX11 = "orchestrator:assembly:";
+var REDIS_INDEX5 = "orchestrator:assemblies:index";
 var TTL_SECONDS9 = 2592e3;
 async function storeAssembly(assembly) {
   const redis2 = getRedis();
   if (!redis2) return false;
   try {
-    await redis2.set(`${REDIS_PREFIX10}${assembly.$id}`, JSON.stringify(assembly), "EX", TTL_SECONDS9);
-    await redis2.sadd(REDIS_INDEX4, assembly.$id);
+    await redis2.set(`${REDIS_PREFIX11}${assembly.$id}`, JSON.stringify(assembly), "EX", TTL_SECONDS9);
+    await redis2.sadd(REDIS_INDEX5, assembly.$id);
     return true;
   } catch (err) {
     logger.warn({ err: String(err) }, "Redis store failed for assembly");
@@ -33099,7 +33612,7 @@ async function loadAssembly(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX10}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX11}${id}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -33109,7 +33622,7 @@ async function listAllIds() {
   const redis2 = getRedis();
   if (!redis2) return [];
   try {
-    return await redis2.smembers(REDIS_INDEX4);
+    return await redis2.smembers(REDIS_INDEX5);
   } catch {
     return [];
   }
@@ -33303,7 +33816,7 @@ assemblyRouter.get("/", async (req, res) => {
   try {
     const pipeline = redis2.pipeline();
     for (const id of allIds) {
-      pipeline.get(`${REDIS_PREFIX10}${id}`);
+      pipeline.get(`${REDIS_PREFIX11}${id}`);
     }
     const results = await pipeline.exec();
     if (results) {
@@ -35578,12 +36091,12 @@ init_logger();
 import { Router as Router29 } from "express";
 var foldRouter = Router29();
 var DAILY_LIMIT = 100;
-var REDIS_PREFIX11 = "caas:usage:";
+var REDIS_PREFIX12 = "caas:usage:";
 async function getUsageCount(apiKey) {
   const redis2 = getRedis();
   if (!redis2) return 0;
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  const key = `${REDIS_PREFIX11}${today}:${apiKey}`;
+  const key = `${REDIS_PREFIX12}${today}:${apiKey}`;
   const count = await redis2.get(key);
   return parseInt(count ?? "0", 10);
 }
@@ -35591,7 +36104,7 @@ async function incrementUsage(apiKey) {
   const redis2 = getRedis();
   if (!redis2) return;
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  const key = `${REDIS_PREFIX11}${today}:${apiKey}`;
+  const key = `${REDIS_PREFIX12}${today}:${apiKey}`;
   await redis2.incr(key);
   await redis2.expire(key, 86400 * 2);
 }
@@ -38194,11 +38707,60 @@ peerEvalRouter.post("/analyze", async (_req, res) => {
   }
 });
 
+// src/routes/flywheel.ts
+import { Router as Router48 } from "express";
+init_cost_optimizer();
+init_logger();
+var flywheelRouter = Router48();
+flywheelRouter.get("/metrics", async (_req, res) => {
+  try {
+    const data = await getFlywheelMetrics();
+    res.json({ success: true, ...data });
+  } catch (err) {
+    logger.warn({ err: String(err) }, "[Flywheel] GET /metrics failed");
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
+flywheelRouter.post("/metrics", async (_req, res) => {
+  try {
+    const report = await runWeeklySync();
+    res.json({ success: true, report, pillars: report.pillars });
+  } catch (err) {
+    logger.warn({ err: String(err) }, "[Flywheel] POST /metrics failed");
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
+flywheelRouter.get("/consolidation", (_req, res) => {
+  const report = getLastReport();
+  if (!report) {
+    return res.json({ success: true, available: false, report: null });
+  }
+  res.json({ success: true, available: true, report });
+});
+flywheelRouter.post("/consolidation", async (_req, res) => {
+  try {
+    const report = await runWeeklyConsolidation();
+    res.json({ success: true, report });
+  } catch (err) {
+    logger.warn({ err: String(err) }, "[Flywheel] POST /consolidation failed");
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
+flywheelRouter.get("/cost-summary", (_req, res) => {
+  try {
+    const summary = getCostSummary();
+    const profiles2 = getAllCostProfiles();
+    res.json({ success: true, summary, profiles: profiles2.slice(0, 50) });
+  } catch (err) {
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
+
 // src/routes/obsidian.ts
 init_config();
 init_logger();
-import { Router as Router48 } from "express";
-var obsidianRouter = Router48();
+import { Router as Router49 } from "express";
+var obsidianRouter = Router49();
 var TIMEOUT_MS = 8e3;
 async function obsidianFetch(path3, options = {}) {
   const base = config.obsidianUrl.replace(/\/$/, "");
@@ -38449,6 +39011,7 @@ app.use("/api/inventor", requireApiKey, apiRateLimiter, inventorRouter);
 app.use("/api/anomaly-watcher", requireApiKey, anomalyWatcherRouter);
 app.use("/api/pheromone", requireApiKey, pheromoneRouter);
 app.use("/api/peer-eval", requireApiKey, peerEvalRouter);
+app.use("/api/flywheel", requireApiKey, flywheelRouter);
 app.use("/api/obsidian", requireApiKey, obsidianRouter);
 app.use("/api/hyperagent/auto", requireApiKey, apiRateLimiter, hyperagentAutoRouter);
 app.use("/api/hyperagent", requireApiKey, apiRateLimiter, hyperagentRouter);
