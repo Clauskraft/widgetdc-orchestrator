@@ -67,6 +67,17 @@ if (missingExecutor.length > 0) {
 }
 console.log(`✓ Build parity: ${registryNames.size} tools ↔ ${executorNames.size} executor cases`)
 
+// ── File integrity guard: catch sandbox truncation before esbuild wastes time ──
+{
+  const { execFileSync } = await import('child_process')
+  try {
+    execFileSync('node', ['scripts/verify-files.mjs'], { stdio: 'inherit' })
+  } catch {
+    console.error('✗ File integrity check failed — aborting build')
+    process.exit(1)
+  }
+}
+
 const pkg = JSON.parse(readFileSync('./package.json', 'utf8'))
 const PKG_VERSION = pkg.version
 
