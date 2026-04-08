@@ -1846,7 +1846,8 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'inventor_stop': {
       const { stopInventor } = await import('./inventor-loop.js')
-      return stopInventor()
+      const result = stopInventor()
+      return `${result.success ? 'Stopped' : 'Failed'}: ${result.message}`
     }
 
     case 'inventor_history': {
