@@ -15,11 +15,39 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 
+interface LlmProvider {
+  id: string
+  name: string
+  models: string[]
+  status: string
+}
+
+interface LlmProvidersResponse {
+  success: boolean
+  providers: LlmProvider[]
+}
+
+interface DashboardData {
+  agents: any[]
+  chains: any[]
+  cronJobs: any[]
+  rlmAvailable: boolean
+  config: {
+    llm_providers: string[]
+  }
+}
+
 function CostPage() {
-  const { data, isLoading, error } = useQuery({
-    queryKey: ['cost-intel'],
-    queryFn: () => apiGet('/api/monitor/cost'),
-    refetchInterval: 30000,
+  const { data: providers, isLoading: providersLoading, error } = useQuery<LlmProvidersResponse>({
+    queryKey: ['llm-providers'],
+    queryFn: () => apiGet('/api/llm/providers'),
+    refetchInterval: 60000,
+  })
+
+  const { data: dashboard } = useQuery<DashboardData>({
+    queryKey: ['dashboard-for-cost'],
+    queryFn: () => apiGet('/api/dashboard/data'),
+    refetchInterval: 60000,
   })
 
   if (error) {
@@ -32,108 +60,119 @@ function CostPage() {
     )
   }
 
-  const chartData = [
-    { name: 'DeepSeek', dkk: 1200 },
-    { name: 'OpenAI', dkk: 1850 },
-    { name: 'Groq', dkk: 320 },
-    { name: 'Gemini', dkk: 940 },
-    { name: 'Claude', dkk: 2100 },
-  ]
+  const providerList = providers?.providers ?? []
+  const activeProviders = providerList.filter(p => p.status === 'active' || p.models?.length > 0)
 
   return (
     <div className="flex flex-col gap-6 p-8">
       <div>
         <h1 className="text-3xl font-bold tracking-tight">Cost Intel</h1>
-        <p className="text-muted-foreground mt-1">Token and DKK costs</p>
+        <p className="text-muted-foreground mt-1">LLM provider routing, token economics, and cost optimization</p>
       </div>
 
+      {/* KPI Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              Total Spend (30d)
-            </CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground">Active Providers</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">6,410 DKK</div>
-            <p className="text-xs text-muted-foreground">
-              Across all providers
-            </p>
+            {providersLoading ? <Skeleton className="h-8 w-16" /> : (
+              <>
+                <div className="text-2xl font-bold">{activeProviders.length}</div>
+                <p className="text-xs text-muted-foreground">
+                  {providerList.length} configured
+                </p>
+              </>
+            )}
           </CardContent>
         </Card>
-
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              Tokens Used (30d)
-            </CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground">Total Models</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">42.3M</div>
-            <p className="text-xs text-muted-foreground">
-              Total input + output
-            </p>
+            {providersLoading ? <Skeleton className="h-8 w-16" /> : (
+              <>
+                <div className="text-2xl font-bold">
+                  {providerList.reduce((sum, p) => sum + (p.models?.length ?? 0), 0)}
+                </div>
+                <p className="text-xs text-muted-foreground">Across all providers</p>
+              </>
+            )}
           </CardContent>
         </Card>
-
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              Avg Cost / 1M Tokens
-            </CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground">RLM Engine</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">151.5 DKK</div>
-            <p className="text-xs text-muted-foreground">
-              Blended rate
-            </p>
+            <div className="text-2xl font-bold">{dashboard?.rlmAvailable ? 'Online' : 'Offline'}</div>
+            <p className="text-xs text-muted-foreground">Reasoning & folding engine</p>
           </CardContent>
         </Card>
       </div>
 
+      {/* Provider Details */}
       <Card>
         <CardHeader>
-          <CardTitle>Spend by Provider</CardTitle>
-          <CardDescription>30-day breakdown</CardDescription>
+          <CardTitle>LLM Providers</CardTitle>
+          <CardDescription>Configured model routing — cheapest capable model per task type</CardDescription>
         </CardHeader>
         <CardContent>
-          {isLoading ? (
-            <Skeleton className="h-64 w-full" />
+          {providersLoading ? (
+            <div className="space-y-3">
+              {[1,2,3].map(i => <Skeleton key={i} className="h-16 w-full" />)}
+            </div>
+          ) : providerList.length > 0 ? (
+            <div className="space-y-3">
+              {providerList.map((provider) => (
+                <div key={provider.id} className="border rounded-lg p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="font-medium">{provider.name}</span>
+                    <Badge variant={provider.status === 'active' ? 'default' : 'secondary'}>
+                      {provider.status}
+                    </Badge>
+                  </div>
+                  <div className="flex flex-wrap gap-1 mt-2">
+                    {provider.models?.map((model) => (
+                      <span key={model} className="text-xs bg-muted px-2 py-0.5 rounded font-mono">
+                        {model}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
           ) : (
-            <ResponsiveContainer width="100%" height={300}>
-              <BarChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="name" />
-                <YAxis />
-                <Tooltip />
-                <Bar dataKey="dkk" fill="#3b82f6" />
-              </BarChart>
-            </ResponsiveContainer>
+            <div className="text-sm text-muted-foreground text-center py-4">
+              No LLM providers configured.
+            </div>
           )}
         </CardContent>
       </Card>
 
+      {/* Cost Optimization Strategies */}
       <Card>
         <CardHeader>
-          <CardTitle>Cost Breakdown</CardTitle>
+          <CardTitle>Optimization Strategies</CardTitle>
+          <CardDescription>Available token cost reduction methods</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="space-y-3">
+          <div className="space-y-2 text-sm">
             {[
-              { provider: 'Claude', dkk: 2100, percent: 32.8 },
-              { provider: 'OpenAI', dkk: 1850, percent: 28.9 },
-              { provider: 'DeepSeek', dkk: 1200, percent: 18.7 },
-              { provider: 'Gemini', dkk: 940, percent: 14.7 },
-              { provider: 'Groq', dkk: 320, percent: 5.0 },
-            ].map((item, i) => (
+              { strategy: 'Context Folding + RAG', savings: '30-40%', status: 'active' },
+              { strategy: 'Context Folding + RLM', savings: '40-50%', status: 'active' },
+              { strategy: 'Context Folding + Swarm', savings: '35-45%', status: 'active' },
+              { strategy: 'Model Geo-Arbitrage (CN vs US)', savings: '50-80%', status: 'available' },
+              { strategy: 'Batch Embedding Reuse', savings: '20-30%', status: 'active' },
+            ].map((s, i) => (
               <div key={i} className="flex items-center justify-between">
-                <div>
-                  <div className="font-medium">{item.provider}</div>
-                  <div className="text-sm text-muted-foreground">
-                    {item.percent}%
-                  </div>
+                <span>{s.strategy}</span>
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-muted-foreground">{s.savings}</span>
+                  <Badge variant={s.status === 'active' ? 'default' : 'secondary'} className="text-xs">{s.status}</Badge>
                 </div>
-                <Badge variant="outline">{item.dkk} DKK</Badge>
               </div>
             ))}
           </div>

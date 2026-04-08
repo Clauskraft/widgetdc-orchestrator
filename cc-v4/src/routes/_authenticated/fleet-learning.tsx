@@ -6,21 +6,41 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 
-interface Agent {
-  name: string
-  score: number
-  efficiency: number
-  tasksCompleted: number
+interface PeerEvalStatus {
+  totalEvals: number
+  totalPeerReviews: number
+  totalBestPracticesShared: number
+  taskTypesTracked: number
+  lastEvalAt: string | null
+}
+
+interface FleetEntry {
+  taskType: string
+  totalEvals: number
+  avgScore: number
+  avgCost: number
+  avgLatency: number
+  bestAgent: string
+  bestScore: number
+  bestPractices: string[]
+  lastUpdated: string
+  reliable: boolean
 }
 
 function FleetLearningPage() {
-  const { data, isLoading, error } = useQuery({
-    queryKey: ['fleet-learning'],
-    queryFn: () => apiGet('/api/monitor/peer-eval'),
+  const { data: status, isLoading: statusLoading, error: statusError } = useQuery<PeerEvalStatus>({
+    queryKey: ['peer-eval-status'],
+    queryFn: () => apiGet('/api/peer-eval/status'),
     refetchInterval: 15000,
   })
 
-  if (error) {
+  const { data: fleet, isLoading: fleetLoading } = useQuery<FleetEntry[]>({
+    queryKey: ['peer-eval-fleet'],
+    queryFn: () => apiGet('/api/peer-eval/fleet'),
+    refetchInterval: 15000,
+  })
+
+  if (statusError) {
     return (
       <div className="p-8">
         <Alert variant="destructive">
@@ -30,77 +50,137 @@ function FleetLearningPage() {
     )
   }
 
+  // Compute aggregates from fleet data
+  const fleetData = fleet ?? []
+  const uniqueAgents = [...new Set(fleetData.map(f => f.bestAgent))]
+  const avgScoreOverall = fleetData.length > 0
+    ? fleetData.reduce((s, f) => s + f.avgScore, 0) / fleetData.length
+    : 0
+  const reliableCount = fleetData.filter(f => f.reliable).length
+
   return (
     <div className="flex flex-col gap-6 p-8">
       <div>
         <h1 className="text-3xl font-bold tracking-tight">Fleet Learning</h1>
-        <p className="text-muted-foreground mt-1">Agent fleet performance</p>
+        <p className="text-muted-foreground mt-1">PeerEval fleet intelligence — EMA-weighted scores across 19-agent swarm</p>
       </div>
 
+      {/* KPI Cards */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        {statusLoading ? (
+          [1,2,3,4].map(i => <Skeleton key={i} className="h-24" />)
+        ) : (
+          <>
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium text-muted-foreground">Total Evaluations</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">{status?.totalEvals ?? 0}</div>
+                <p className="text-xs text-muted-foreground">
+                  {status?.lastEvalAt ? `Last: ${new Date(status.lastEvalAt).toLocaleTimeString()}` : 'No evals yet'}
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium text-muted-foreground">Task Types</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">{status?.taskTypesTracked ?? 0}</div>
+                <p className="text-xs text-muted-foreground">Distinct task types tracked</p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium text-muted-foreground">Avg Fleet Score</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">{(avgScoreOverall * 100).toFixed(1)}%</div>
+                <p className="text-xs text-muted-foreground">{reliableCount} reliable / {fleetData.length} total</p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium text-muted-foreground">Active Agents</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">{uniqueAgents.length}</div>
+                <p className="text-xs text-muted-foreground">Agents with best scores</p>
+              </CardContent>
+            </Card>
+          </>
+        )}
+      </div>
+
+      {/* Fleet Performance by Task Type */}
       <Card>
         <CardHeader>
-          <CardTitle>Overall Status</CardTitle>
-          <CardDescription>Fleet-wide learning metrics</CardDescription>
+          <CardTitle>Performance by Task Type</CardTitle>
+          <CardDescription>EMA-weighted scores per task type — best agent and latency</CardDescription>
         </CardHeader>
         <CardContent>
-          {isLoading ? (
+          {fleetLoading ? (
             <div className="space-y-2">
-              {[1, 2, 3].map((i) => (
-                <Skeleton key={i} className="h-4 w-48" />
+              {[1,2,3,4].map(i => <Skeleton key={i} className="h-8 w-full" />)}
+            </div>
+          ) : fleetData.length > 0 ? (
+            <div className="space-y-3">
+              {fleetData
+                .sort((a, b) => b.avgScore - a.avgScore)
+                .map((entry) => (
+                <div key={entry.taskType} className="flex items-center justify-between border-b pb-2 last:border-0">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-sm font-mono">{entry.taskType}</span>
+                      {entry.reliable && <Badge variant="outline" className="text-green-700 text-xs">reliable</Badge>}
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-0.5">
+                      Best: <span className="font-medium">{entry.bestAgent}</span> ·
+                      {entry.totalEvals} evals ·
+                      {entry.avgLatency.toFixed(0)}ms avg
+                    </div>
+                  </div>
+                  <div className="text-right ml-4">
+                    <div className="font-mono text-sm font-medium">{(entry.avgScore * 100).toFixed(1)}%</div>
+                    <div className="text-xs text-muted-foreground">best: {(entry.bestScore * 100).toFixed(0)}%</div>
+                  </div>
+                </div>
               ))}
             </div>
           ) : (
-            <pre className="bg-muted p-4 rounded-md overflow-auto text-xs">
-              {JSON.stringify(data, null, 2)}
-            </pre>
+            <div className="text-sm text-muted-foreground text-center py-4">
+              No fleet evaluations recorded yet.
+            </div>
           )}
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Top Performing Agents</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-3">
-            {[
-              { name: 'Codex', score: 0.94, efficiency: 0.91 },
-              { name: 'Gemini', score: 0.89, efficiency: 0.88 },
-              { name: 'Qwen', score: 0.87, efficiency: 0.85 },
-            ].map((agent, i) => (
-              <div key={i} className="flex items-center justify-between">
-                <div>
-                  <div className="font-medium">{agent.name}</div>
-                  <div className="text-sm text-muted-foreground">
-                    Efficiency: {(agent.efficiency * 100).toFixed(0)}%
-                  </div>
-                </div>
-                <Badge>Score: {(agent.score * 100).toFixed(0)}</Badge>
-              </div>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-
+      {/* Best Practices */}
       <Card>
         <CardHeader>
           <CardTitle>Best Practices</CardTitle>
+          <CardDescription>Shared across the fleet ({status?.totalBestPracticesShared ?? 0} total)</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="text-sm space-y-2">
-            <div>
-              <span className="font-medium">Sequential chains</span>
-              <p className="text-muted-foreground">87% success rate</p>
+          {fleetData.some(f => f.bestPractices.length > 0) ? (
+            <div className="space-y-2 text-sm">
+              {fleetData
+                .filter(f => f.bestPractices.length > 0)
+                .flatMap(f => f.bestPractices.map(bp => ({ taskType: f.taskType, practice: bp })))
+                .map((item, i) => (
+                  <div key={i} className="flex gap-2">
+                    <Badge variant="secondary" className="text-xs shrink-0">{item.taskType}</Badge>
+                    <span>{item.practice}</span>
+                  </div>
+                ))
+              }
             </div>
-            <div>
-              <span className="font-medium">Parallel execution</span>
-              <p className="text-muted-foreground">92% success rate</p>
+          ) : (
+            <div className="text-sm text-muted-foreground text-center py-4">
+              No best practices shared yet. Fleet needs more evaluations to surface patterns.
             </div>
-            <div>
-              <span className="font-medium">Graph-based reasoning</span>
-              <p className="text-muted-foreground">85% success rate</p>
-            </div>
-          </div>
+          )}
         </CardContent>
       </Card>
     </div>

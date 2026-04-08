@@ -6,8 +6,18 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 
+interface OpenClawStatus {
+  success: boolean
+  data: {
+    healthy: boolean
+    url: string | null
+    models?: string[]
+    latency_ms?: number
+  }
+}
+
 function OpenClawPage() {
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading, error } = useQuery<OpenClawStatus>({
     queryKey: ['openclaw-status'],
     queryFn: () => apiGet('/api/openclaw/status'),
     refetchInterval: 30000,
@@ -23,17 +33,19 @@ function OpenClawPage() {
     )
   }
 
+  const d = data?.data
+
   return (
     <div className="flex flex-col gap-6 p-8">
       <div>
         <h1 className="text-3xl font-bold tracking-tight">OpenClaw</h1>
-        <p className="text-muted-foreground mt-1">Gateway integration</p>
+        <p className="text-muted-foreground mt-1">OpenAI-compatible gateway proxy</p>
       </div>
 
       <Card>
         <CardHeader>
           <CardTitle>Gateway Status</CardTitle>
-          <CardDescription>OpenClaw integration status</CardDescription>
+          <CardDescription>OpenClaw integration health</CardDescription>
         </CardHeader>
         <CardContent>
           {isLoading ? (
@@ -43,67 +55,63 @@ function OpenClawPage() {
               ))}
             </div>
           ) : (
-            <pre className="bg-muted p-4 rounded-md overflow-auto text-xs">
-              {JSON.stringify(data, null, 2)}
-            </pre>
+            <div className="space-y-3 text-sm">
+              <div className="flex items-center justify-between">
+                <span>Health</span>
+                <Badge variant={d?.healthy ? 'default' : 'destructive'}>
+                  {d?.healthy ? 'Healthy' : 'Unhealthy'}
+                </Badge>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>URL</span>
+                <span className="font-mono text-muted-foreground">{d?.url ?? 'Not configured'}</span>
+              </div>
+              {d?.latency_ms != null && (
+                <div className="flex items-center justify-between">
+                  <span>Latency</span>
+                  <span className="font-mono text-muted-foreground">{d.latency_ms}ms</span>
+                </div>
+              )}
+            </div>
           )}
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Available Endpoints</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-3">
-            {[
-              { endpoint: '/v1/models', status: 'active', latency: '24ms' },
-              {
-                endpoint: '/v1/chat/completions',
-                status: 'active',
-                latency: '156ms',
-              },
-              {
-                endpoint: '/v1/embeddings',
-                status: 'active',
-                latency: '89ms',
-              },
-              {
-                endpoint: '/v1/agent/execute',
-                status: 'active',
-                latency: '342ms',
-              },
-            ].map((item, i) => (
-              <div key={i} className="flex items-center justify-between">
-                <div>
-                  <div className="font-medium text-sm font-mono">
-                    {item.endpoint}
-                  </div>
-                  <div className="text-xs text-muted-foreground">
-                    Latency: {item.latency}
-                  </div>
-                </div>
-                <Badge variant="default">{item.status}</Badge>
-              </div>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
+      {d?.models && d.models.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Available Models</CardTitle>
+            <CardDescription>Models accessible via OpenClaw proxy</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex flex-wrap gap-2">
+              {d.models.map((model) => (
+                <Badge key={model} variant="outline" className="font-mono text-xs">
+                  {model}
+                </Badge>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>
-          <CardTitle>Configuration</CardTitle>
+          <CardTitle>OpenAI-Compatible Endpoints</CardTitle>
+          <CardDescription>Proxied through orchestrator at /api/openclaw</CardDescription>
         </CardHeader>
-        <CardContent className="text-sm space-y-2">
-          <div>
-            <span className="text-muted-foreground">Host:</span>{' '}
-            api.widgetdc.dev
-          </div>
-          <div>
-            <span className="text-muted-foreground">Version:</span> 1.0
-          </div>
-          <div>
-            <span className="text-muted-foreground">Auth:</span> Bearer token
+        <CardContent>
+          <div className="space-y-2 text-sm">
+            {[
+              { endpoint: '/v1/models', desc: 'List available models' },
+              { endpoint: '/v1/chat/completions', desc: 'Chat completion (streaming)' },
+              { endpoint: '/v1/embeddings', desc: 'Text embeddings' },
+            ].map((item) => (
+              <div key={item.endpoint} className="flex items-center justify-between">
+                <span className="font-mono">{item.endpoint}</span>
+                <span className="text-muted-foreground">{item.desc}</span>
+              </div>
+            ))}
           </div>
         </CardContent>
       </Card>
