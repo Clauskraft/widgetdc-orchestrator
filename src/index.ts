@@ -93,6 +93,8 @@ import { initAnomalyWatcher, getWatcherState } from './anomaly-watcher.js'
 import { pheromoneRouter } from './routes/pheromone.js'
 import { peerEvalRouter } from './routes/peer-eval.js'
 import { flywheelRouter } from './routes/flywheel.js'
+import { benchmarkRouter } from './routes/benchmark.js'
+import { loadBenchmarkRuns } from './benchmark-runner.js'
 import { obsidianRouter } from './routes/obsidian.js'
 import { initPheromoneLayer, getPheromoneState } from './pheromone-layer.js'
 import { initPeerEval, getPeerEvalState } from './peer-eval.js'
@@ -295,6 +297,9 @@ app.use('/api/peer-eval', requireApiKey, peerEvalRouter)
 // Value Flywheel: 5-pillar compound health, consolidation scan, cost optimizer
 app.use('/api/flywheel', requireApiKey, flywheelRouter)
 
+// Benchmark: Inventor vs. research baselines (circle-packing / scheduler-opt / ablation)
+app.use('/api/benchmark', requireApiKey, benchmarkRouter)
+
 // Obsidian Vault proxy (LIN-652) — set OBSIDIAN_API_URL + OBSIDIAN_API_TOKEN in env
 app.use('/api/obsidian', requireApiKey, obsidianRouter)
 
@@ -443,6 +448,10 @@ async function boot() {
   // Initialize pheromone layer + peer-eval fleet learning
   await initPheromoneLayer()
   await initPeerEval()
+  // Load persisted benchmark runs from Redis (non-blocking)
+  loadBenchmarkRuns().catch(err => {
+    logger.warn({ err: String(err) }, 'Benchmark run hydration failed (non-critical)')
+  })
   // S1.2 (6-edges handlingsplan): fire any overdue absolute-hour jobs at boot.
   // Non-blocking — server continues starting even if individual jobs fail.
   bootKickstartOverdueJobs().catch(err => {

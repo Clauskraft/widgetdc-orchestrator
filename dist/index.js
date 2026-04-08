@@ -38876,6 +38876,18 @@ async function persist2() {
   await redis2.set(REDIS_KEY7, JSON.stringify(data), "EX", 86400 * 30).catch(() => {
   });
 }
+async function loadBenchmarkRuns() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const raw = await redis2.get(REDIS_KEY7);
+    if (!raw) return;
+    const saved = JSON.parse(raw);
+    for (const run of saved) runs.set(run.runId, run);
+    logger.info({ count: saved.length }, "[Benchmark] Hydrated runs from Redis");
+  } catch {
+  }
+}
 function listBenchmarkTasks() {
   return BENCHMARK_TASKS;
 }
@@ -39548,6 +39560,9 @@ async function boot() {
   await initAnomalyWatcher();
   await initPheromoneLayer();
   await initPeerEval();
+  loadBenchmarkRuns().catch((err) => {
+    logger.warn({ err: String(err) }, "Benchmark run hydration failed (non-critical)");
+  });
   bootKickstartOverdueJobs().catch((err) => {
     logger.warn({ err: String(err) }, "Cron boot-kickstart encountered error");
   });

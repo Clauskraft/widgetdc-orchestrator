@@ -25,6 +25,7 @@ import { Route as AuthenticatedCostRouteImport } from './routes/_authenticated/c
 import { Route as AuthenticatedCognitiveRouteImport } from './routes/_authenticated/cognitive'
 import { Route as AuthenticatedChatRouteImport } from './routes/_authenticated/chat'
 import { Route as AuthenticatedChainsRouteImport } from './routes/_authenticated/chains'
+import { Route as AuthenticatedBenchmarkRouteImport } from './routes/_authenticated/benchmark'
 import { Route as AuthenticatedAuditRouteImport } from './routes/_authenticated/audit'
 import { Route as AuthenticatedAnomalyRouteImport } from './routes/_authenticated/anomaly'
 import { Route as AuthenticatedAgentsRouteImport } from './routes/_authenticated/agents'
@@ -116,6 +117,11 @@ const AuthenticatedChainsRoute = AuthenticatedChainsRouteImport.update({
   path: '/chains',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
+const AuthenticatedBenchmarkRoute = AuthenticatedBenchmarkRouteImport.update({
+  id: '/benchmark',
+  path: '/benchmark',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
 const AuthenticatedAuditRoute = AuthenticatedAuditRouteImport.update({
   id: '/audit',
   path: '/audit',
@@ -179,6 +185,7 @@ export interface FileRoutesByFullPath {
   '/agents': typeof AuthenticatedAgentsRoute
   '/anomaly': typeof AuthenticatedAnomalyRoute
   '/audit': typeof AuthenticatedAuditRoute
+  '/benchmark': typeof AuthenticatedBenchmarkRoute
   '/chains': typeof AuthenticatedChainsRoute
   '/chat': typeof AuthenticatedChatRoute
   '/cognitive': typeof AuthenticatedCognitiveRoute
@@ -205,6 +212,7 @@ export interface FileRoutesByTo {
   '/agents': typeof AuthenticatedAgentsRoute
   '/anomaly': typeof AuthenticatedAnomalyRoute
   '/audit': typeof AuthenticatedAuditRoute
+  '/benchmark': typeof AuthenticatedBenchmarkRoute
   '/chains': typeof AuthenticatedChainsRoute
   '/chat': typeof AuthenticatedChatRoute
   '/cognitive': typeof AuthenticatedCognitiveRoute
@@ -234,6 +242,7 @@ export interface FileRoutesById {
   '/_authenticated/agents': typeof AuthenticatedAgentsRoute
   '/_authenticated/anomaly': typeof AuthenticatedAnomalyRoute
   '/_authenticated/audit': typeof AuthenticatedAuditRoute
+  '/_authenticated/benchmark': typeof AuthenticatedBenchmarkRoute
   '/_authenticated/chains': typeof AuthenticatedChainsRoute
   '/_authenticated/chat': typeof AuthenticatedChatRoute
   '/_authenticated/cognitive': typeof AuthenticatedCognitiveRoute
@@ -264,6 +273,7 @@ export interface FileRouteTypes {
     | '/agents'
     | '/anomaly'
     | '/audit'
+    | '/benchmark'
     | '/chains'
     | '/chat'
     | '/cognitive'
@@ -290,6 +300,7 @@ export interface FileRouteTypes {
     | '/agents'
     | '/anomaly'
     | '/audit'
+    | '/benchmark'
     | '/chains'
     | '/chat'
     | '/cognitive'
@@ -318,6 +329,7 @@ export interface FileRouteTypes {
     | '/_authenticated/agents'
     | '/_authenticated/anomaly'
     | '/_authenticated/audit'
+    | '/_authenticated/benchmark'
     | '/_authenticated/chains'
     | '/_authenticated/chat'
     | '/_authenticated/cognitive'
@@ -459,6 +471,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedChainsRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/benchmark': {
+      id: '/_authenticated/benchmark'
+      path: '/benchmark'
+      fullPath: '/benchmark'
+      preLoaderRoute: typeof AuthenticatedBenchmarkRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
     '/_authenticated/audit': {
       id: '/_authenticated/audit'
       path: '/audit'
@@ -559,6 +578,7 @@ interface AuthenticatedRouteChildren {
   AuthenticatedAgentsRoute: typeof AuthenticatedAgentsRoute
   AuthenticatedAnomalyRoute: typeof AuthenticatedAnomalyRoute
   AuthenticatedAuditRoute: typeof AuthenticatedAuditRoute
+  AuthenticatedBenchmarkRoute: typeof AuthenticatedBenchmarkRoute
   AuthenticatedChainsRoute: typeof AuthenticatedChainsRoute
   AuthenticatedChatRoute: typeof AuthenticatedChatRoute
   AuthenticatedCognitiveRoute: typeof AuthenticatedCognitiveRoute
@@ -581,6 +601,7 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedAgentsRoute: AuthenticatedAgentsRoute,
   AuthenticatedAnomalyRoute: AuthenticatedAnomalyRoute,
   AuthenticatedAuditRoute: AuthenticatedAuditRoute,
+  AuthenticatedBenchmarkRoute: AuthenticatedBenchmarkRoute,
   AuthenticatedChainsRoute: AuthenticatedChainsRoute,
   AuthenticatedChatRoute: AuthenticatedChatRoute,
   AuthenticatedCognitiveRoute: AuthenticatedCognitiveRoute,

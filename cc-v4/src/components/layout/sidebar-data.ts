@@ -20,6 +20,7 @@ import {
   Lightbulb,
   Activity,
   RotateCw,
+  FlaskConical,
 } from 'lucide-react'
 
 export interface NavItem {
@@ -119,6 +120,12 @@ export const sidebarData: NavGroup[] = [
         path: '/inventor',
         icon: Lightbulb,
         description: 'Evolution experiments',
+      },
+      {
+        title: 'Benchmark',
+        path: '/benchmark',
+        icon: FlaskConical,
+        description: 'Inventor vs. research baselines',
       },
       {
         title: 'Anomaly',
