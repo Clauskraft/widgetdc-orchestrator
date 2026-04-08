@@ -215,6 +215,58 @@ export async function loadBenchmarkRuns(): Promise<void> {
   } catch { /* non-critical */ }
 }
 
+// ─── Inventor Helpers ────────────────────────────────────────────────────────
+
+/**
+ * Wait for the Inventor to finish its current experiment (if any).
+ * Polls every 30s with a 3-hour hard limit.
+ */
+async function waitForInventorIdle(maxWaitMs = 3 * 60 * 60 * 1000): Promise<void> {
+  const { getInventorStatus } = await import('./inventor-loop.js')
+  const deadline = Date.now() + maxWaitMs
+  while (Date.now() < deadline) {
+    if (!getInventorStatus().isRunning) return
+    await new Promise(r => setTimeout(r, 30_000))
+  }
+  throw new Error('Inventor did not become idle within the timeout window')
+}
+
+/**
+ * Wait for idle, then run the experiment, then sync score history.
+ * Runs entirely in the background — all state changes go through upsertBenchmarkRun.
+ */
+async function launchRunWhenIdle(
+  run: BenchmarkRun,
+  inventorConfig: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await waitForInventorIdle()
+
+    const { runInventor, getInventorNodes } = await import('./inventor-loop.js')
+    run.status = 'running'
+    upsertBenchmarkRun(run)
+
+    await runInventor(inventorConfig as Parameters<typeof runInventor>[0], false)
+
+    // Sync score history from Inventor nodes
+    const nodes = getInventorNodes()
+    const nodeList = nodes.map((n: { id: string; score: number; createdAt: string }) => ({
+      id: n.id,
+      score: n.score ?? 0,
+      createdAt: n.createdAt,
+    }))
+    syncRunWithInventorStatus(run.runId, nodeList, false)
+
+    run.completedAt = new Date().toISOString()
+    upsertBenchmarkRun(run)
+  } catch (err) {
+    run.status = 'failed'
+    run.error = String(err)
+    upsertBenchmarkRun(run)
+    logger.warn({ runId: run.runId, err: String(err) }, '[Benchmark] Run failed')
+  }
+}
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 export function listBenchmarkTasks(): BenchmarkTask[] {
@@ -278,14 +330,12 @@ export async function startBenchmarkRun(
   await persist()
 
   // Launch Inventor via the REST API (fire-and-forget style — status tracked via polling)
-  // Call Inventor directly via in-process import — avoids HTTP loopback issues.
-  // runInventor is fire-and-forget; we mark the run as 'running' immediately.
-  const samplingConfig = buildSamplingConfig(strategy)
+  // Build the InventorConfig for this run
   const inventorConfig = {
     experimentName,
     taskDescription: `${task.researcherPrompt}\n\nBENCHMARK: ${task.id} | STRATEGY: ${strategy} | RUN: ${runId}`,
     initialArtifact: task.initialArtifact,
-    sampling: samplingConfig,
+    sampling: buildSamplingConfig(strategy),
     cognition: { topK: 5, threshold: 0.25 },
     pipeline: {
       maxSteps: run.maxRounds,
@@ -296,51 +346,8 @@ export async function startBenchmarkRun(
     chainMode: 'sequential' as const,
   }
 
-  try {
-    const { runInventor, getInventorStatus } = await import('./inventor-loop.js')
-
-    // If another experiment is already running, queue this one to start after a delay
-    const status = getInventorStatus()
-    if (status.isRunning) {
-      // Retry after 10s — ablation runs are sequential by design
-      setTimeout(async () => {
-        try {
-          const { runInventor: ri } = await import('./inventor-loop.js')
-          run.status = 'running'
-          upsertBenchmarkRun(run)
-          await ri(inventorConfig, false)
-          run.status = 'completed'
-          run.completedAt = new Date().toISOString()
-        } catch (err) {
-          run.status = 'failed'
-          run.error = String(err)
-        }
-        upsertBenchmarkRun(run)
-      }, 10_000)
-      run.status = 'pending'
-    } else {
-      run.status = 'running'
-      upsertBenchmarkRun(run)
-      // Fire-and-forget
-      runInventor(inventorConfig, false)
-        .then(() => {
-          run.status = 'completed'
-          run.completedAt = new Date().toISOString()
-          upsertBenchmarkRun(run)
-        })
-        .catch(err => {
-          run.status = 'failed'
-          run.error = String(err)
-          upsertBenchmarkRun(run)
-          logger.warn({ runId, err: String(err) }, '[Benchmark] Inventor run failed')
-        })
-    }
-  } catch (err) {
-    run.status = 'failed'
-    run.error = String(err)
-    upsertBenchmarkRun(run)
-    logger.warn({ runId, err: String(err) }, '[Benchmark] Failed to import inventor-loop')
-  }
+  // Launch in background — caller polls /api/benchmark/runs/:runId
+  launchRunWhenIdle(run, inventorConfig).catch(() => {})
 
   return run
 }
@@ -360,12 +367,13 @@ export async function startAblationStudy(
   const ablationId = `ablation-${taskId}-${Date.now()}`
   const runList: BenchmarkRun[] = []
 
-  // Queue all runs (they will start sequentially — each waits for Inventor to be free)
+  // Create all run records immediately — each launchRunWhenIdle waits for Inventor idle,
+  // so they queue naturally without race conditions.
   for (const strategy of strategies) {
     const run = await startBenchmarkRun(taskId, strategy, maxRoundsPerStrategy)
     runList.push(run)
-    // Brief pause between submissions to avoid race conditions
-    await new Promise(r => setTimeout(r, 500))
+    // Stagger submissions slightly so waitForInventorIdle sees them in order
+    await new Promise(r => setTimeout(r, 200))
   }
 
   // Store ablation manifest

@@ -38888,6 +38888,38 @@ async function loadBenchmarkRuns() {
   } catch {
   }
 }
+async function waitForInventorIdle(maxWaitMs = 3 * 60 * 60 * 1e3) {
+  const { getInventorStatus: getInventorStatus2 } = await Promise.resolve().then(() => (init_inventor_loop(), inventor_loop_exports));
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    if (!getInventorStatus2().isRunning) return;
+    await new Promise((r) => setTimeout(r, 3e4));
+  }
+  throw new Error("Inventor did not become idle within the timeout window");
+}
+async function launchRunWhenIdle(run, inventorConfig) {
+  try {
+    await waitForInventorIdle();
+    const { runInventor: runInventor2, getInventorNodes: getInventorNodes2 } = await Promise.resolve().then(() => (init_inventor_loop(), inventor_loop_exports));
+    run.status = "running";
+    upsertBenchmarkRun(run);
+    await runInventor2(inventorConfig, false);
+    const nodes2 = getInventorNodes2();
+    const nodeList = nodes2.map((n) => ({
+      id: n.id,
+      score: n.score ?? 0,
+      createdAt: n.createdAt
+    }));
+    syncRunWithInventorStatus(run.runId, nodeList, false);
+    run.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+    upsertBenchmarkRun(run);
+  } catch (err) {
+    run.status = "failed";
+    run.error = String(err);
+    upsertBenchmarkRun(run);
+    logger.warn({ runId: run.runId, err: String(err) }, "[Benchmark] Run failed");
+  }
+}
 function listBenchmarkTasks() {
   return BENCHMARK_TASKS;
 }
@@ -38928,14 +38960,13 @@ async function startBenchmarkRun(taskId, strategy, maxRounds) {
   };
   runs.set(runId, run);
   await persist2();
-  const samplingConfig = buildSamplingConfig(strategy);
   const inventorConfig = {
     experimentName,
     taskDescription: `${task.researcherPrompt}
 
 BENCHMARK: ${task.id} | STRATEGY: ${strategy} | RUN: ${runId}`,
     initialArtifact: task.initialArtifact,
-    sampling: samplingConfig,
+    sampling: buildSamplingConfig(strategy),
     cognition: { topK: 5, threshold: 0.25 },
     pipeline: {
       maxSteps: run.maxRounds,
@@ -38945,45 +38976,8 @@ BENCHMARK: ${task.id} | STRATEGY: ${strategy} | RUN: ${runId}`,
     },
     chainMode: "sequential"
   };
-  try {
-    const { runInventor: runInventor2, getInventorStatus: getInventorStatus2 } = await Promise.resolve().then(() => (init_inventor_loop(), inventor_loop_exports));
-    const status = getInventorStatus2();
-    if (status.isRunning) {
-      setTimeout(async () => {
-        try {
-          const { runInventor: ri } = await Promise.resolve().then(() => (init_inventor_loop(), inventor_loop_exports));
-          run.status = "running";
-          upsertBenchmarkRun(run);
-          await ri(inventorConfig, false);
-          run.status = "completed";
-          run.completedAt = (/* @__PURE__ */ new Date()).toISOString();
-        } catch (err) {
-          run.status = "failed";
-          run.error = String(err);
-        }
-        upsertBenchmarkRun(run);
-      }, 1e4);
-      run.status = "pending";
-    } else {
-      run.status = "running";
-      upsertBenchmarkRun(run);
-      runInventor2(inventorConfig, false).then(() => {
-        run.status = "completed";
-        run.completedAt = (/* @__PURE__ */ new Date()).toISOString();
-        upsertBenchmarkRun(run);
-      }).catch((err) => {
-        run.status = "failed";
-        run.error = String(err);
-        upsertBenchmarkRun(run);
-        logger.warn({ runId, err: String(err) }, "[Benchmark] Inventor run failed");
-      });
-    }
-  } catch (err) {
-    run.status = "failed";
-    run.error = String(err);
-    upsertBenchmarkRun(run);
-    logger.warn({ runId, err: String(err) }, "[Benchmark] Failed to import inventor-loop");
-  }
+  launchRunWhenIdle(run, inventorConfig).catch(() => {
+  });
   return run;
 }
 async function startAblationStudy(taskId, maxRoundsPerStrategy = 20) {
@@ -38995,7 +38989,7 @@ async function startAblationStudy(taskId, maxRoundsPerStrategy = 20) {
   for (const strategy of strategies) {
     const run = await startBenchmarkRun(taskId, strategy, maxRoundsPerStrategy);
     runList.push(run);
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 200));
   }
   const redis2 = getRedis();
   if (redis2) {
