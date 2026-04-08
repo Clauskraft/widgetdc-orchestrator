@@ -21076,7 +21076,8 @@ artifact: ${n.artifact.slice(0, 500)}`
       context: { raw_context: rawContext, node_count: parentNodes.length },
       agent_id: "inventor-folder"
     }, 15e3);
-    const folded = String(foldResult.answer || foldResult.result || rawContext);
+    const fr = foldResult;
+    const folded = String(fr?.answer ?? fr?.result ?? fr?.reasoning ?? rawContext);
     logger.info(
       { original: rawContext.length, folded: folded.length, ratio: (folded.length / rawContext.length).toFixed(2) },
       "Inventor: context folded via RLM"
@@ -21124,7 +21125,15 @@ Respond in JSON format:
         cognitionCount: cognitionItems.length
       }
     }, config2.pipeline.engineerTimeoutMs);
-    const text = String(result.answer || result.result || "");
+    if (!result) throw new Error("RLM returned null (non-OK response)");
+    const r = result;
+    const text = String(
+      r.answer ?? r.result ?? r.reasoning ?? r.plan ?? (r.analysis && typeof r.analysis === "object" ? JSON.stringify(r.analysis) : "") ?? (r.content ?? "")
+    );
+    if (!text) {
+      logger.warn({ resultKeys: Object.keys(r) }, "Inventor: researcher got empty text from RLM");
+      throw new Error(`RLM returned no usable text (keys: ${Object.keys(r).join(", ")})`);
+    }
     try {
       const jsonMatch = text.match(/\{[\s\S]*"artifact"[\s\S]*\}/);
       if (jsonMatch) {
@@ -21204,7 +21213,8 @@ Provide:
 3. One actionable insight for the next iteration`,
       agent_id: "inventor-analyzer"
     }, 15e3);
-    return String(analyzeResult.answer || analyzeResult.result || "Analysis unavailable");
+    const ar = analyzeResult;
+    return String(ar?.answer ?? ar?.result ?? ar?.reasoning ?? "Analysis unavailable");
   } catch {
     return `Score: ${result.score.toFixed(3)}. ${result.success ? "Passed" : "Failed"}. ${result.error || ""}`;
   }
