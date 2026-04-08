@@ -69,6 +69,7 @@ function inferCategory(namespace: string): ToolCategory {
     decisions: 'decisions', adoption: 'adoption', linear: 'linear',
     compliance: 'compliance', llm: 'llm', monitor: 'monitor', mcp: 'mcp',
     engagement: 'engagement', memory: 'memory',
+    pheromone: 'monitor', peereval: 'monitor',
   }
   return map[namespace] ?? 'mcp'
 }
@@ -915,6 +916,102 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     }),
     timeoutMs: 10000,
     outputDescription: 'Array of discovered issues with cycle context and timestamps',
+  }),
+
+  // ── Pheromone Layer (Stigmergic Communication) ────────────────────────────
+
+  defineTool({
+    name: 'pheromone_status',
+    namespace: 'pheromone',
+    description: 'Get pheromone layer status: active pheromone count, total deposits, decay cycles, amplifications, trail count. Use to check flywheel health.',
+    input: z.object({}),
+    timeoutMs: 5000,
+    outputDescription: 'Pheromone layer state with counts and timestamps',
+  }),
+
+  defineTool({
+    name: 'pheromone_sense',
+    namespace: 'pheromone',
+    description: 'Sense pheromones in a domain — returns active signals ranked by strength. Use before task execution to find best trails, or to check which strategies are working in a domain.',
+    input: z.object({
+      domain: z.string().optional().describe('Domain to sense (e.g., "research", "analysis", "chain:sequential")'),
+      type: z.enum(['attraction', 'repellent', 'trail', 'external', 'amplification']).optional().describe('Filter by pheromone type'),
+      tags: z.array(z.string()).optional().describe('Filter by tags'),
+      min_strength: z.number().optional().describe('Minimum strength threshold (0-1, default 0.1)'),
+      limit: z.number().optional().describe('Max results (default 20)'),
+    }),
+    timeoutMs: 5000,
+    outputDescription: 'Array of pheromones with type, strength, domain, source, tags, and timestamps',
+  }),
+
+  defineTool({
+    name: 'pheromone_deposit',
+    namespace: 'pheromone',
+    description: 'Deposit a pheromone signal — attraction (good result), repellent (bad result), trail (successful path), or external (outside intelligence). Use after task completion to share learnings with the fleet.',
+    input: z.object({
+      type: z.enum(['attraction', 'repellent', 'trail', 'external']).describe('Pheromone type'),
+      domain: z.string().describe('Domain (e.g., "research", "analysis", "cost-optimization")'),
+      source: z.string().describe('Who deposited (agent ID or system)'),
+      strength: z.number().optional().describe('Signal strength 0-1 (default 0.5)'),
+      label: z.string().optional().describe('Human-readable label for the signal'),
+      tags: z.array(z.string()).optional().describe('Classification tags'),
+      metadata: z.record(z.number()).optional().describe('Numeric metrics (e.g., { score: 0.9, latency_ms: 50 })'),
+    }),
+    timeoutMs: 5000,
+    outputDescription: 'Deposited pheromone with assigned ID and TTL',
+  }),
+
+  defineTool({
+    name: 'pheromone_heatmap',
+    namespace: 'pheromone',
+    description: 'Get cross-domain pheromone heatmap — shows which domains have the strongest signals and most activity. Use for strategic overview of where the flywheel is spinning fastest.',
+    input: z.object({}),
+    timeoutMs: 5000,
+    outputDescription: 'Domain-by-type heatmap with counts and average strengths',
+  }),
+
+  // ── PeerEval Fleet Learning ───────────────────────────────────────────────
+
+  defineTool({
+    name: 'peer_eval_status',
+    namespace: 'peereval',
+    description: 'Get fleet learning status: total evals, task types tracked, best practices shared. Use to check if the fleet is learning effectively.',
+    input: z.object({}),
+    timeoutMs: 5000,
+    outputDescription: 'PeerEval state with eval counts, task type count, and timestamps',
+  }),
+
+  defineTool({
+    name: 'peer_eval_fleet',
+    namespace: 'peereval',
+    description: 'Get fleet learning data for a specific task type or all task types. Returns best agent, average efficiency, top strategies from pheromone trails, and EMA-aggregated scores.',
+    input: z.object({
+      task_type: z.string().optional().describe('Specific task type to query (omit for all)'),
+    }),
+    timeoutMs: 10000,
+    outputDescription: 'Fleet learning records with bestAgent, avgEfficiency, topStrategies, and pheromoneStrength per task type',
+  }),
+
+  defineTool({
+    name: 'peer_eval_evaluate',
+    namespace: 'peereval',
+    description: 'Trigger a manual peer evaluation for an agent task. Records self-assessment, deposits pheromones, updates fleet learning, and broadcasts best practices if score + novelty are high.',
+    input: z.object({
+      agent_id: z.string().describe('Agent that performed the task'),
+      task_id: z.string().optional().describe('Task identifier'),
+      context: z.string().optional().describe('What the agent did (for self-assessment prompt)'),
+    }),
+    timeoutMs: 15000,
+    outputDescription: 'Evaluation report with selfScore, novelty, pheromone deposited, and whether best practice was broadcast',
+  }),
+
+  defineTool({
+    name: 'peer_eval_analyze',
+    namespace: 'peereval',
+    description: 'Run RLM-powered fleet analysis — identifies underperformers, top strategies, and strategic recommendations across all task types. Expensive but high-value. Runs weekly via cron.',
+    input: z.object({}),
+    timeoutMs: 45000,
+    outputDescription: 'Strategic fleet analysis with patterns, underperformers, and recommended changes',
   }),
 ]
 

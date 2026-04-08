@@ -1649,6 +1649,85 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    // ── Pheromone Layer MCP Tools ──────────────────────────────────────────
+
+    case 'pheromone_status': {
+      const { getPheromoneState } = await import('./pheromone-layer.js')
+      return JSON.stringify(getPheromoneState())
+    }
+
+    case 'pheromone_sense': {
+      const { sense } = await import('./pheromone-layer.js')
+      const pheromones = await sense({
+        domain: args.domain as string | undefined,
+        type: args.type as any,
+        tags: args.tags as string[] | undefined,
+        minStrength: typeof args.min_strength === 'number' ? args.min_strength : undefined,
+        limit: typeof args.limit === 'number' ? args.limit : undefined,
+      })
+      return JSON.stringify(pheromones.map(p => ({
+        id: p.id, type: p.type, domain: p.domain, strength: p.strength,
+        agentId: p.agentId, label: p.label, tags: p.tags, metrics: p.metrics,
+        depositedAt: p.depositedAt, reinforcements: p.reinforcements,
+      })))
+    }
+
+    case 'pheromone_deposit': {
+      const { deposit } = await import('./pheromone-layer.js')
+      const pheromone = await deposit(
+        (args.source as string) ?? 'mcp-tool',
+        args.type as any,
+        args.domain as string,
+        typeof args.strength === 'number' ? args.strength : 0.5,
+        (args.label as string) ?? `MCP deposit: ${args.type}`,
+        (args.metadata as Record<string, number>) ?? {},
+        (args.tags as string[]) ?? [],
+      )
+      return JSON.stringify({ deposited: true, id: pheromone.id, type: pheromone.type, strength: pheromone.strength, domain: pheromone.domain })
+    }
+
+    case 'pheromone_heatmap': {
+      const { getHeatmap } = await import('./pheromone-layer.js')
+      const heatmap = await getHeatmap()
+      return JSON.stringify(heatmap)
+    }
+
+    // ── PeerEval Fleet Learning MCP Tools ────────────────────────────────────
+
+    case 'peer_eval_status': {
+      const { getPeerEvalState } = await import('./peer-eval.js')
+      return JSON.stringify(getPeerEvalState())
+    }
+
+    case 'peer_eval_fleet': {
+      const taskType = args.task_type as string | undefined
+      if (taskType) {
+        const { getFleetLearning, getWhatWorks } = await import('./peer-eval.js')
+        const learning = getFleetLearning(taskType)
+        const whatWorks = await getWhatWorks(taskType)
+        return JSON.stringify({ taskType, learning, whatWorks })
+      } else {
+        const { getAllFleetLearnings } = await import('./peer-eval.js')
+        return JSON.stringify(getAllFleetLearnings())
+      }
+    }
+
+    case 'peer_eval_evaluate': {
+      const { hookIntoExecution } = await import('./peer-eval.js')
+      const report = await hookIntoExecution(
+        args.agent_id as string,
+        (args.task_id as string) ?? uuid(),
+        (args.context as string) ?? 'Manual evaluation via MCP tool'
+      )
+      return JSON.stringify(report)
+    }
+
+    case 'peer_eval_analyze': {
+      const { runFleetAnalysis } = await import('./peer-eval.js')
+      const analysis = await runFleetAnalysis()
+      return analysis ?? 'Fleet analysis returned no results (requires RLM + sufficient eval data)'
+    }
+
     case 'hyperagent_auto_issues': {
       try {
         const limit = typeof args.limit === 'number' ? Math.min(args.limit, 200) : 50

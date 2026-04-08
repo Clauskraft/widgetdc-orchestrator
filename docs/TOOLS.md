@@ -1211,6 +1211,72 @@ List all issues discovered during autonomous execution cycles. Issues are accumu
 
 ---
 
+### `pheromone_status`
+**Namespace:** pheromone | **Timeout:** 5s | **Handler:** orchestrator
+
+Get pheromone layer status: active pheromone count, total deposits, decay cycles, amplifications, trail count. Use to check flywheel health.
+
+---
+
+### `pheromone_sense`
+**Namespace:** pheromone | **Timeout:** 5s | **Handler:** orchestrator
+
+Sense pheromones in a domain — returns active signals ranked by strength. Use before task execution to find best trails, or to check which strategies are working in a domain.
+
+**Optional:** `domain`, `type` (attraction/repellent/trail/external/amplification), `tags`, `min_strength`, `limit`
+
+---
+
+### `pheromone_deposit`
+**Namespace:** pheromone | **Timeout:** 5s | **Handler:** orchestrator
+
+Deposit a pheromone signal — attraction (good result), repellent (bad result), trail (successful path), or external (outside intelligence). Use after task completion to share learnings with the fleet.
+
+**Required:** `type`, `domain`, `source`
+**Optional:** `strength`, `label`, `tags`, `metadata`
+
+---
+
+### `pheromone_heatmap`
+**Namespace:** pheromone | **Timeout:** 5s | **Handler:** orchestrator
+
+Get cross-domain pheromone heatmap — shows which domains have the strongest signals and most activity. Use for strategic overview of where the flywheel is spinning fastest.
+
+---
+
+### `peer_eval_status`
+**Namespace:** peereval | **Timeout:** 5s | **Handler:** orchestrator
+
+Get fleet learning status: total evals, task types tracked, best practices shared. Use to check if the fleet is learning effectively.
+
+---
+
+### `peer_eval_fleet`
+**Namespace:** peereval | **Timeout:** 10s | **Handler:** orchestrator
+
+Get fleet learning data for a specific task type or all task types. Returns best agent, average efficiency, top strategies from pheromone trails, and EMA-aggregated scores.
+
+**Optional:** `task_type`
+
+---
+
+### `peer_eval_evaluate`
+**Namespace:** peereval | **Timeout:** 15s | **Handler:** orchestrator
+
+Trigger a manual peer evaluation for an agent task. Records self-assessment, deposits pheromones, updates fleet learning, and broadcasts best practices if score + novelty are high.
+
+**Required:** `agent_id`
+**Optional:** `task_id`, `context`
+
+---
+
+### `peer_eval_analyze`
+**Namespace:** peereval | **Timeout:** 45s | **Handler:** orchestrator
+
+Run RLM-powered fleet analysis — identifies underperformers, top strategies, and strategic recommendations across all task types. Expensive but high-value. Runs weekly via cron.
+
+---
+
 ## Adding a New Tool
 
 All protocols (REST, OpenAI, MCP) compile automatically from a single entry in `src/tool-registry.ts`:

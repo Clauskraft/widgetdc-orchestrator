@@ -1320,6 +1320,62 @@ await test('142. GET /api/hyperagent/auto/status returns status', async () => {
   assert(r.status !== 404, `hyperagent auto status endpoint not deployed (404)`)
 })
 
+// ── 143. pheromone_status — MCP tool exists ──
+await test('143. POST /api/tools/pheromone_status responds', async () => {
+  const r = await api('/api/tools/pheromone_status', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `pheromone_status not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'pheromone_status', `wrong tool_name`)
+})
+
+// ── 144. pheromone_sense — MCP tool exists ──
+await test('144. POST /api/tools/pheromone_sense responds', async () => {
+  const r = await api('/api/tools/pheromone_sense', { method: 'POST', body: JSON.stringify({ domain: 'test' }) })
+  assert(r.status !== 404, `pheromone_sense not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'pheromone_sense', `wrong tool_name`)
+})
+
+// ── 145. pheromone_deposit — MCP tool exists ──
+await test('145. POST /api/tools/pheromone_deposit responds', async () => {
+  const r = await api('/api/tools/pheromone_deposit', { method: 'POST', body: JSON.stringify({ type: 'attraction', domain: 'test', source: 'e2e-test' }) })
+  assert(r.status !== 404, `pheromone_deposit not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'pheromone_deposit', `wrong tool_name`)
+})
+
+// ── 146. pheromone_heatmap — MCP tool exists ──
+await test('146. POST /api/tools/pheromone_heatmap responds', async () => {
+  const r = await api('/api/tools/pheromone_heatmap', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `pheromone_heatmap not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'pheromone_heatmap', `wrong tool_name`)
+})
+
+// ── 147. peer_eval_status — MCP tool exists ──
+await test('147. POST /api/tools/peer_eval_status responds', async () => {
+  const r = await api('/api/tools/peer_eval_status', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `peer_eval_status not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'peer_eval_status', `wrong tool_name`)
+})
+
+// ── 148. peer_eval_fleet — MCP tool exists ──
+await test('148. POST /api/tools/peer_eval_fleet responds', async () => {
+  const r = await api('/api/tools/peer_eval_fleet', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `peer_eval_fleet not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'peer_eval_fleet', `wrong tool_name`)
+})
+
+// ── 149. peer_eval_evaluate — MCP tool exists ──
+await test('149. POST /api/tools/peer_eval_evaluate responds', async () => {
+  const r = await api('/api/tools/peer_eval_evaluate', { method: 'POST', body: JSON.stringify({ agent_id: 'e2e-test' }) })
+  assert(r.status !== 404, `peer_eval_evaluate not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'peer_eval_evaluate', `wrong tool_name`)
+})
+
+// ── 150. peer_eval_analyze — MCP tool exists ──
+await test('150. POST /api/tools/peer_eval_analyze responds', async () => {
+  const r = await api('/api/tools/peer_eval_analyze', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `peer_eval_analyze not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'peer_eval_analyze', `wrong tool_name`)
+})
+
 // ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped
