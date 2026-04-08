@@ -258,7 +258,7 @@ app.use('/cron', requireApiKey, cronRouter)
 app.use('/api/dashboard', dashboardRouter)
 app.use('/api/openclaw', requireApiKey, openclawRouter)
 app.use('/api/audit', requireApiKey, auditRouter)
-app.use('/api/tool-output', requireApiKey, toolOutputRouter)
+app.use('/api/tool-output', toolOutputRouter)  // Public — MCP tools embed these URLs in results
 app.use('/api/knowledge', requireApiKey, knowledgeRouter)
 app.use('/api/adoption', requireApiKey, adoptionRouter)
 app.use('/api/artifacts', requireApiKey, artifactRouter)

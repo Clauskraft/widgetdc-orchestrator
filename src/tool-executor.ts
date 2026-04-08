@@ -1853,7 +1853,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     case 'inventor_history': {
       const { getExperimentHistory } = await import('./inventor-loop.js')
       const limit = Math.min(Math.max(1, Number(args.limit) || 20), 50)
-      return getExperimentHistory(limit)
+      return JSON.stringify(getExperimentHistory(limit))
     }
 
     default: {

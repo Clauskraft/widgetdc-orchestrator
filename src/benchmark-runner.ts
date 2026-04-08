@@ -212,17 +212,18 @@ export async function loadBenchmarkRuns(): Promise<void> {
     const saved: BenchmarkRun[] = JSON.parse(raw)
     let stuckCount = 0
     for (const run of saved) {
-      // Runs that were 'running' when the process died cannot be recovered — mark failed
-      if (run.status === 'running') {
+      // Runs that were 'running' or 'pending' when the process died cannot be recovered
+      // In-memory promise chains (launchRunWhenIdle) don't survive restarts
+      if (run.status === 'running' || run.status === 'pending') {
         run.status = 'failed'
-        run.error = 'Process restarted while run was in progress (benchmark-runner restart recovery)'
+        run.error = `Process restarted while run was ${run.status} (benchmark-runner restart recovery)`
         stuckCount++
       }
       runs.set(run.runId, run)
     }
     if (stuckCount > 0) {
       await persist() // flush corrected status to Redis immediately
-      logger.warn({ stuckCount }, '[Benchmark] Marked stuck running→failed on boot (restart recovery)')
+      logger.warn({ stuckCount }, '[Benchmark] Marked stuck running/pending→failed on boot (restart recovery)')
     }
     logger.info({ count: saved.length }, '[Benchmark] Hydrated runs from Redis')
   } catch { /* non-critical */ }
@@ -276,6 +277,17 @@ async function _executeRun(
   try {
     // Wait for any externally-started Inventor experiment to finish
     await waitForInventorIdle()
+
+    // Guard: if a non-benchmark experiment was started while we waited, yield
+    const { getInventorStatus } = await import('./inventor-loop.js')
+    const currentStatus = getInventorStatus()
+    if (currentStatus.isRunning && !currentStatus.experimentName.startsWith('bench-')) {
+      run.status = 'failed'
+      run.error = `Yielded to non-benchmark experiment: ${currentStatus.experimentName}`
+      upsertBenchmarkRun(run)
+      logger.info({ runId: run.runId, yielded: currentStatus.experimentName }, '[Benchmark] Yielded to non-benchmark experiment')
+      return
+    }
 
     const { runInventor, getInventorNodes } = await import('./inventor-loop.js')
     run.status = 'running'
