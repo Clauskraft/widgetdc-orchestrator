@@ -211,41 +211,22 @@ export async function loadBenchmarkRuns(): Promise<void> {
     if (!raw) return
     const saved: BenchmarkRun[] = JSON.parse(raw)
     let stuckCount = 0
-    const pendingToRequeue: BenchmarkRun[] = []
     for (const run of saved) {
-      // Runs that were 'running' when the process died cannot be recovered — mark failed
-      if (run.status === 'running') {
+      // Runs that were 'running' or 'pending' when the process died cannot be recovered.
+      // In-memory promise chains (launchRunWhenIdle) don't survive restarts.
+      // NEVER re-queue — benchmark was hijacking inventor experiments on every deploy.
+      if (run.status === 'running' || run.status === 'pending') {
         run.status = 'failed'
-        run.error = 'Process restarted while run was in progress (benchmark-runner restart recovery)'
+        run.error = `Process restarted while run was ${run.status} (benchmark-runner restart recovery)`
         stuckCount++
       }
-      // Pending runs never started — collect them for re-queue after hydration
-      if (run.status === 'pending') pendingToRequeue.push(run)
       runs.set(run.runId, run)
     }
     if (stuckCount > 0) {
       await persist() // flush corrected status to Redis immediately
-      logger.warn({ stuckCount }, '[Benchmark] Marked stuck running→failed on boot (restart recovery)')
+      logger.warn({ stuckCount }, '[Benchmark] Marked stuck running/pending→failed on boot')
     }
-    logger.info({ count: saved.length, requeue: pendingToRequeue.length }, '[Benchmark] Hydrated runs from Redis')
-    // Re-queue pending runs — the promise queue was lost on restart, but state is intact
-    if (pendingToRequeue.length > 0) {
-      for (const run of pendingToRequeue) {
-        const task = getBenchmarkTask(run.taskId)
-        if (!task) continue
-        const inventorConfig = {
-          experimentName: run.inventorExperimentName,
-          taskDescription: `${task.researcherPrompt}\n\nBENCHMARK: ${task.id} | STRATEGY: ${run.strategy} | RUN: ${run.runId}`,
-          initialArtifact: task.initialArtifact,
-          sampling: buildSamplingConfig(run.strategy as SamplingAlgorithm),
-          cognition: { topK: 5, threshold: 0.25 },
-          pipeline: { maxSteps: run.maxRounds, maxArtifactLength: 6000, engineerTimeoutMs: 90000, numWorkers: 1 },
-          chainMode: 'sequential' as const,
-        }
-        launchRunWhenIdle(run, inventorConfig).catch(() => {})
-      }
-      logger.info({ count: pendingToRequeue.length }, '[Benchmark] Re-queued pending runs after restart')
-    }
+    logger.info({ count: saved.length }, '[Benchmark] Hydrated runs from Redis')
   } catch { /* non-critical */ }
 }
 

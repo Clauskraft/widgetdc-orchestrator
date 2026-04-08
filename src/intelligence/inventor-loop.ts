@@ -806,6 +806,23 @@ export function stopInventor(): { success: boolean; message: string } {
   return { success: true, message: `Stopping experiment "${currentConfig?.experimentName ?? ''}" after step ${currentStep}` }
 }
 
+/**
+ * Load nodes from a specific experiment's Redis key — survives experiment switches.
+ * Unlike getInventorNodes() which returns the in-memory Map (overwritten by each new experiment),
+ * this reads directly from Redis persistence keyed by experiment name.
+ */
+export async function getNodesByExperiment(experimentName: string): Promise<InventorNode[]> {
+  const redis = getRedis()
+  if (!redis) return []
+  try {
+    const raw = await redis.get(nodeKey(experimentName))
+    if (!raw) return []
+    return JSON.parse(raw) as InventorNode[]
+  } catch {
+    return []
+  }
+}
+
 export async function getExperimentHistory(limit = 20): Promise<Array<Record<string, unknown>>> {
   const redis = getRedis()
   if (!redis) return []
