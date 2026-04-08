@@ -38906,7 +38906,7 @@ function upsertBenchmarkRun(run) {
   persist2().catch(() => {
   });
 }
-async function startBenchmarkRun(taskId, strategy, maxRounds, baseUrl, apiKey) {
+async function startBenchmarkRun(taskId, strategy, maxRounds) {
   const task = getBenchmarkTask(taskId);
   if (!task) throw new Error(`Unknown benchmark task: ${taskId}`);
   const runId = `bench-${taskId}-${strategy}-${Date.now()}`;
@@ -38928,53 +38928,72 @@ async function startBenchmarkRun(taskId, strategy, maxRounds, baseUrl, apiKey) {
   };
   runs.set(runId, run);
   await persist2();
-  const url = baseUrl ?? process.env.ORCH_URL ?? "http://localhost:3000";
-  const token = apiKey ?? process.env.ORCH_API_KEY ?? "WidgeTDC_Orch_2026";
   const samplingConfig = buildSamplingConfig(strategy);
-  const toolPayload = {
-    experiment_name: experimentName,
-    task_description: `${task.researcherPrompt}
+  const inventorConfig = {
+    experimentName,
+    taskDescription: `${task.researcherPrompt}
 
 BENCHMARK: ${task.id} | STRATEGY: ${strategy} | RUN: ${runId}`,
-    initial_artifact: task.initialArtifact,
-    sampling_algorithm: samplingConfig.algorithm,
-    sample_n: samplingConfig.sampleN,
-    max_steps: run.maxRounds
-  };
-  fetch(`${url}/api/tools/inventor_run`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${token}`
+    initialArtifact: task.initialArtifact,
+    sampling: samplingConfig,
+    cognition: { topK: 5, threshold: 0.25 },
+    pipeline: {
+      maxSteps: run.maxRounds,
+      maxArtifactLength: 6e3,
+      engineerTimeoutMs: 9e4,
+      numWorkers: 1
     },
-    body: JSON.stringify(toolPayload),
-    signal: AbortSignal.timeout(15e3)
-  }).then(async (res) => {
-    const body = await res.json().catch(() => null);
-    if (res.ok && body?.success !== false) {
-      run.status = "running";
+    chainMode: "sequential"
+  };
+  try {
+    const { runInventor: runInventor2, getInventorStatus: getInventorStatus2 } = await Promise.resolve().then(() => (init_inventor_loop(), inventor_loop_exports));
+    const status = getInventorStatus2();
+    if (status.isRunning) {
+      setTimeout(async () => {
+        try {
+          const { runInventor: ri } = await Promise.resolve().then(() => (init_inventor_loop(), inventor_loop_exports));
+          run.status = "running";
+          upsertBenchmarkRun(run);
+          await ri(inventorConfig, false);
+          run.status = "completed";
+          run.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+        } catch (err) {
+          run.status = "failed";
+          run.error = String(err);
+        }
+        upsertBenchmarkRun(run);
+      }, 1e4);
+      run.status = "pending";
     } else {
-      run.status = "failed";
-      const errMsg = body?.error?.message ?? body?.error ?? `HTTP ${res.status}`;
-      run.error = String(errMsg);
+      run.status = "running";
+      upsertBenchmarkRun(run);
+      runInventor2(inventorConfig, false).then(() => {
+        run.status = "completed";
+        run.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+        upsertBenchmarkRun(run);
+      }).catch((err) => {
+        run.status = "failed";
+        run.error = String(err);
+        upsertBenchmarkRun(run);
+        logger.warn({ runId, err: String(err) }, "[Benchmark] Inventor run failed");
+      });
     }
-    upsertBenchmarkRun(run);
-  }).catch((err) => {
+  } catch (err) {
     run.status = "failed";
     run.error = String(err);
     upsertBenchmarkRun(run);
-    logger.warn({ runId, err: String(err) }, "[Benchmark] Failed to launch Inventor");
-  });
+    logger.warn({ runId, err: String(err) }, "[Benchmark] Failed to import inventor-loop");
+  }
   return run;
 }
-async function startAblationStudy(taskId, maxRoundsPerStrategy = 20, baseUrl, apiKey) {
+async function startAblationStudy(taskId, maxRoundsPerStrategy = 20) {
   const task = getBenchmarkTask(taskId);
   if (!task) throw new Error(`Unknown benchmark task: ${taskId}`);
   const strategies = ["ucb1", "greedy", "random", "island"];
   const ablationId = `ablation-${taskId}-${Date.now()}`;
   const runList = [];
   for (const strategy of strategies) {
-    const run = await startBenchmarkRun(taskId, strategy, maxRoundsPerStrategy, baseUrl, apiKey);
+    const run = await startBenchmarkRun(taskId, strategy, maxRoundsPerStrategy);
     runList.push(run);
     await new Promise((r) => setTimeout(r, 500));
   }

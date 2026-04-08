@@ -251,8 +251,6 @@ export async function startBenchmarkRun(
   taskId: string,
   strategy: SamplingAlgorithm,
   maxRounds?: number,
-  baseUrl?: string,
-  apiKey?: string,
 ): Promise<BenchmarkRun> {
   const task = getBenchmarkTask(taskId)
   if (!task) throw new Error(`Unknown benchmark task: ${taskId}`)
@@ -280,45 +278,69 @@ export async function startBenchmarkRun(
   await persist()
 
   // Launch Inventor via the REST API (fire-and-forget style — status tracked via polling)
-  const url = baseUrl ?? process.env.ORCH_URL ?? 'http://localhost:3000'
-  const token = apiKey ?? process.env.ORCH_API_KEY ?? 'WidgeTDC_Orch_2026'
-
-  // Inventor is exposed via the tool gateway at /api/tools/inventor_run
-  // Map InventorConfig fields → inventor_run tool parameters
+  // Call Inventor directly via in-process import — avoids HTTP loopback issues.
+  // runInventor is fire-and-forget; we mark the run as 'running' immediately.
   const samplingConfig = buildSamplingConfig(strategy)
-  const toolPayload = {
-    experiment_name: experimentName,
-    task_description: `${task.researcherPrompt}\n\nBENCHMARK: ${task.id} | STRATEGY: ${strategy} | RUN: ${runId}`,
-    initial_artifact: task.initialArtifact,
-    sampling_algorithm: samplingConfig.algorithm,
-    sample_n: samplingConfig.sampleN,
-    max_steps: run.maxRounds,
+  const inventorConfig = {
+    experimentName,
+    taskDescription: `${task.researcherPrompt}\n\nBENCHMARK: ${task.id} | STRATEGY: ${strategy} | RUN: ${runId}`,
+    initialArtifact: task.initialArtifact,
+    sampling: samplingConfig,
+    cognition: { topK: 5, threshold: 0.25 },
+    pipeline: {
+      maxSteps: run.maxRounds,
+      maxArtifactLength: 6000,
+      engineerTimeoutMs: 90000,
+      numWorkers: 1,
+    },
+    chainMode: 'sequential' as const,
   }
 
-  fetch(`${url}/api/tools/inventor_run`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`,
-    },
-    body: JSON.stringify(toolPayload),
-    signal: AbortSignal.timeout(15_000),
-  }).then(async res => {
-    const body = await res.json().catch(() => null) as Record<string, unknown> | null
-    if (res.ok && body?.success !== false) {
-      run.status = 'running'
+  try {
+    const { runInventor, getInventorStatus } = await import('./inventor-loop.js')
+
+    // If another experiment is already running, queue this one to start after a delay
+    const status = getInventorStatus()
+    if (status.isRunning) {
+      // Retry after 10s — ablation runs are sequential by design
+      setTimeout(async () => {
+        try {
+          const { runInventor: ri } = await import('./inventor-loop.js')
+          run.status = 'running'
+          upsertBenchmarkRun(run)
+          await ri(inventorConfig, false)
+          run.status = 'completed'
+          run.completedAt = new Date().toISOString()
+        } catch (err) {
+          run.status = 'failed'
+          run.error = String(err)
+        }
+        upsertBenchmarkRun(run)
+      }, 10_000)
+      run.status = 'pending'
     } else {
-      run.status = 'failed'
-      const errMsg = (body?.error as Record<string, unknown> | null)?.message ?? body?.error ?? `HTTP ${res.status}`
-      run.error = String(errMsg)
+      run.status = 'running'
+      upsertBenchmarkRun(run)
+      // Fire-and-forget
+      runInventor(inventorConfig, false)
+        .then(() => {
+          run.status = 'completed'
+          run.completedAt = new Date().toISOString()
+          upsertBenchmarkRun(run)
+        })
+        .catch(err => {
+          run.status = 'failed'
+          run.error = String(err)
+          upsertBenchmarkRun(run)
+          logger.warn({ runId, err: String(err) }, '[Benchmark] Inventor run failed')
+        })
     }
-    upsertBenchmarkRun(run)
-  }).catch(err => {
+  } catch (err) {
     run.status = 'failed'
     run.error = String(err)
     upsertBenchmarkRun(run)
-    logger.warn({ runId, err: String(err) }, '[Benchmark] Failed to launch Inventor')
-  })
+    logger.warn({ runId, err: String(err) }, '[Benchmark] Failed to import inventor-loop')
+  }
 
   return run
 }
@@ -330,8 +352,6 @@ export async function startBenchmarkRun(
 export async function startAblationStudy(
   taskId: string,
   maxRoundsPerStrategy: number = 20,
-  baseUrl?: string,
-  apiKey?: string,
 ): Promise<{ ablationId: string; runs: BenchmarkRun[] }> {
   const task = getBenchmarkTask(taskId)
   if (!task) throw new Error(`Unknown benchmark task: ${taskId}`)
@@ -342,7 +362,7 @@ export async function startAblationStudy(
 
   // Queue all runs (they will start sequentially — each waits for Inventor to be free)
   for (const strategy of strategies) {
-    const run = await startBenchmarkRun(taskId, strategy, maxRoundsPerStrategy, baseUrl, apiKey)
+    const run = await startBenchmarkRun(taskId, strategy, maxRoundsPerStrategy)
     runList.push(run)
     // Brief pause between submissions to avoid race conditions
     await new Promise(r => setTimeout(r, 500))
