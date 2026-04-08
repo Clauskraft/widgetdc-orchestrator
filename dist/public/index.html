@@ -485,6 +485,20 @@
           <tbody id="agents-table"><tr><td colspan="10"><div class="skeleton skeleton-line" style="width:80%"></div><div class="skeleton skeleton-line" style="width:60%"></div></td></tr></tbody>
         </table></div>
       </div>
+      <div class="section-box" style="margin-top:var(--sp-4)">
+        <h2>Agent Task Assignment</h2>
+        <div style="display:flex;gap:var(--sp-2);padding:var(--sp-3)">
+          <select id="agent-assign-select" style="width:200px" aria-label="Select agent"></select>
+          <input type="text" id="agent-assign-task" placeholder="Describe task..." style="flex:1" aria-label="Task description">
+          <select id="agent-assign-mode" style="width:130px" aria-label="Chain mode">
+            <option value="sequential">Sequential</option>
+            <option value="parallel">Parallel</option>
+            <option value="debate">Debate</option>
+          </select>
+          <button onclick="assignAgentTask()">▶ Execute</button>
+        </div>
+        <div id="agent-trace" style="max-height:400px;overflow-y:auto;font-family:monospace;font-size:0.8rem;padding:var(--sp-3);background:var(--bg);border-radius:var(--radius-md);display:none"></div>
+      </div>
     </div>
 
     <!-- Chat Panel -->
@@ -597,6 +611,7 @@
         <button class="btn-secondary btn-sm" onclick="fetchDomainCoverage()">Domain Coverage</button>
         <button class="btn-secondary btn-sm" onclick="fetchKnowledgeGaps()">Gap Analysis</button>
         <button class="btn-secondary btn-sm" onclick="fetchGraphTopology()">Topology</button>
+        <button class="btn-secondary btn-sm" onclick="launchGraphExplorer()">🔍 Explore Graph</button>
       </div>
       <div id="knowledge-content">
         <div class="empty-state"><div class="empty-icon">&#9733;</div>Select a view to explore the Neo4j knowledge graph<div class="empty-hint">Graph stats, domain coverage, gap analysis, and topology</div></div>
@@ -739,6 +754,9 @@
         <div class="empty-state"><div class="empty-icon">&#9888;</div>Platform anomaly detection and loose ends watcher<div class="empty-hint">Monitors failed chains, stale agents, graph inconsistencies, and platform drift</div></div>
       </div>
     </div>
+
+    <!-- Floating Interaction Counter -->
+    <div id="cockpit-interaction-counter-widget" style="position:fixed;bottom:20px;right:20px;background:var(--accent);color:white;border-radius:50%;width:48px;height:48px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.9rem;box-shadow:var(--shadow-lg);cursor:pointer;z-index:999;transition:all 0.2s;user-select:none" title="Cockpit interactions in this session" onclick="trackCockpitAction('view_counter', 'dashboard', {})"><span id="cockpit-interaction-counter">0</span></div>
   </main>
 
 <script>
@@ -1030,6 +1048,7 @@ document.querySelectorAll('.nav-item').forEach(function(el) {
     el.setAttribute('aria-selected', 'true')
     el.tabIndex = 0
     var panel = el.dataset.panel
+    trackCockpitAction('panel_switch', panel, {})
     document.querySelectorAll('.panel').forEach(function(p) { p.classList.remove('active') })
     document.getElementById('panel-' + panel).classList.add('active')
     document.getElementById('header-panel-name').textContent = panelNames[panel] || panel
@@ -1146,6 +1165,7 @@ function renderDashboard() {
     ? '<tr><td colspan="7" class="empty-state">No cron jobs</td></tr>'
     : d.cronJobs.map(function(j) { return '<tr><td><code>' + h(j.id) + '</code></td><td>' + h(j.name) + '</td><td><code>' + h(j.schedule) + '</code></td><td><span class="badge badge-' + (j.enabled ? 'online' : 'offline') + '">' + (j.enabled ? 'on' : 'off') + '</span></td><td>' + (j.last_run ? h(j.last_run.slice(11,19)) : '-') + '</td><td>' + j.run_count + '</td><td><button class="btn-secondary btn-sm" onclick="triggerCron(\'' + h(j.id) + '\')">Run</button> <button class="btn-secondary btn-sm" onclick="toggleCron(\'' + h(j.id) + '\',' + !j.enabled + ')">' + (j.enabled ? 'Disable' : 'Enable') + '</button></td></tr>' }).join('')
 
+  populateAgentSelect()
   renderChatSidebar()
 }
 
@@ -1935,8 +1955,241 @@ async function fetchKnowledgeGaps() {
   } catch (err) { document.getElementById('knowledge-content').innerHTML = '<div class="error-state">\u274C ' + h(err.message) + '<div class="error-action"><button class="btn-sm" onclick="fetchKnowledgeGaps()">Retry</button></div></div>' }
 }
 
+// ─── Feature 1: Interactive Graph Explorer ──────────────────────────────────
+var cytoscapeLoaded = false
+var graphExplorerState = { selectedLabel: null, expandedRels: {} }
+
+async function launchGraphExplorer() {
+  var contentEl = document.getElementById('knowledge-content')
+  contentEl.innerHTML = '<div class="empty-state"><div class="skeleton skeleton-card" style="width:100%;height:300px"></div></div>'
+  trackCockpitAction('launch', 'knowledge', { feature: 'graph_explorer' })
+
+  // Load Cytoscape.js dynamically if needed
+  if (!window.cytoscape) {
+    try {
+      var script = document.createElement('script')
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js'
+      script.onload = function() { cytoscapeLoaded = true; renderGraphExplorer() }
+      script.onerror = function() { contentEl.innerHTML = '<div class="error-state">Failed to load Cytoscape.js</div>' }
+      document.head.appendChild(script)
+    } catch(e) { contentEl.innerHTML = '<div class="error-state">Failed to load graph library</div>' }
+  } else {
+    cytoscapeLoaded = true
+    renderGraphExplorer()
+  }
+}
+
+async function renderGraphExplorer() {
+  var contentEl = document.getElementById('knowledge-content')
+  try {
+    var result = await api('/tools/call', { method: 'POST', body: JSON.stringify({ agent_id: 'command-center', tool_name: 'graph.read_cypher', call_id: uuid(), arguments: { query: "MATCH (n) RETURN labels(n)[0] AS label, count(n) AS cnt ORDER BY cnt DESC LIMIT 30" } }) })
+    var data = result.result || result.data && result.data.result || result
+    var records = data.results || data.records || data.rows || data
+    if (!Array.isArray(records) || records.length === 0) { contentEl.innerHTML = '<div class="empty-state">No node data found</div>'; return }
+
+    // Build HTML with search and graph container
+    var html = '<div class="section-box" style="min-height:600px"><h2>Interactive Graph Explorer</h2>'
+    html += '<div style="display:flex;gap:var(--sp-2);margin-bottom:var(--sp-3)"><input type="text" id="graph-search" placeholder="Filter by label..." style="flex:1;padding:var(--sp-2);border:1px solid var(--border);border-radius:var(--radius-md);background:var(--bg3);color:var(--text)" oninput="filterGraphNodes()"><button onclick="resetGraphExplorer()" style="padding:var(--sp-2) var(--sp-3);background:var(--bg4);border:1px solid var(--border);border-radius:var(--radius-md);cursor:pointer">Reset</button></div>'
+    html += '<div id="graph-canvas" style="width:100%;height:500px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-md)"></div>'
+    html += '<div id="graph-details" style="margin-top:var(--sp-4);padding:var(--sp-3);background:var(--bg3);border-radius:var(--radius-md);display:none"><h3 id="details-label"></h3><div id="details-info" style="font-size:0.85rem;color:var(--text2)"></div></div>'
+    html += '</div>'
+    contentEl.innerHTML = html
+
+    // Prepare nodes with colors
+    var nodes = records.map(function(r) {
+      var label = r.label || 'Unknown'
+      var cnt = r.cnt || 0
+      var color = 'var(--accent)'
+      if (label.includes('McKinseyInsight')) color = 'var(--purple)'
+      else if (label.includes('VectorDocument')) color = 'var(--blue)'
+      else if (label.includes('Agent')) color = 'var(--green)'
+      else if (label.includes('LLMDecision')) color = 'var(--orange)'
+      else if (label.includes('ConsultingDomain')) color = 'var(--cyan)'
+      return { data: { id: label, label: label, count: cnt, color: color }, size: Math.min(100, 30 + Math.sqrt(cnt) * 5) }
+    })
+
+    // Initialize Cytoscape
+    var cy = window.cytoscape({
+      container: document.getElementById('graph-canvas'),
+      elements: nodes,
+      style: [
+        { selector: 'node', style: {
+          'content': 'data(label)',
+          'width': 'mapData(count, 1, 10000, 30, 100)',
+          'height': 'mapData(count, 1, 10000, 30, 100)',
+          'background-color': function(ele) { var lbl = ele.data('label'); if (lbl.includes('McKinseyInsight')) return '#a855f7'; if (lbl.includes('VectorDocument')) return '#3b82f6'; if (lbl.includes('Agent')) return '#22c55e'; if (lbl.includes('LLMDecision')) return '#f97316'; if (lbl.includes('ConsultingDomain')) return '#06b6d4'; return '#6366f1' },
+          'color': '#fafafa',
+          'text-valign': 'center',
+          'text-halign': 'center',
+          'font-size': '11px',
+          'overlay-padding': '8px',
+          'border-width': '2px',
+          'border-color': '#ffffff20'
+        } }
+      ],
+      layout: { name: 'cose', avoidOverlap: true, gravity: -500, cooling: 0.99, minTemp: 1 }
+    })
+
+    // Store cy instance and nodes data
+    window.graphExplorerCy = cy
+    window.graphExplorerNodes = records
+    graphExplorerState.selectedLabel = null
+
+    // Click handler
+    cy.on('tap', 'node', function(evt) {
+      var node = evt.target
+      var label = node.data('label')
+      graphExplorerState.selectedLabel = label
+      trackCockpitAction('graph_node_click', 'knowledge', { label: label })
+      showGraphNodeDetails(label)
+    })
+
+    showToast('Graph loaded: ' + nodes.length + ' node types', 'success')
+  } catch (err) {
+    contentEl.innerHTML = '<div class="error-state">Failed to load graph: ' + h(err.message) + '</div>'
+  }
+}
+
+async function showGraphNodeDetails(label) {
+  try {
+    var detailsEl = document.getElementById('graph-details')
+    detailsEl.style.display = 'block'
+    document.getElementById('details-label').textContent = label
+    document.getElementById('details-info').innerHTML = '<p style="color:var(--text3)">Loading relationships...</p>'
+
+    var result = await api('/tools/call', { method: 'POST', body: JSON.stringify({ agent_id: 'command-center', tool_name: 'graph.read_cypher', call_id: uuid(), arguments: { query: "MATCH (n:" + label + ")-[r]->(m) RETURN type(r) AS rel, labels(m)[0] AS target, count(*) AS cnt ORDER BY cnt DESC LIMIT 10" } }) })
+    var data = result.result || result.data && result.data.result || result
+    var records = data.results || data.records || data.rows || data
+
+    var html = '<table style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:1px solid var(--border)"><th style="text-align:left;padding:var(--sp-2)">Relationship</th><th style="text-align:left;padding:var(--sp-2)">Target Type</th><th style="text-align:right;padding:var(--sp-2)">Count</th></tr></thead><tbody>'
+    if (Array.isArray(records) && records.length > 0) {
+      for (var i = 0; i < records.length; i++) {
+        var r = records[i]
+        html += '<tr style="border-bottom:1px solid var(--border2)"><td style="padding:var(--sp-2)"><code style="color:var(--accent2)">' + h(r.rel || '') + '</code></td><td style="padding:var(--sp-2)">' + h(r.target || '-') + '</td><td style="padding:var(--sp-2);text-align:right">' + (r.cnt || 0) + '</td></tr>'
+      }
+    } else {
+      html += '<tr><td colspan="3" style="padding:var(--sp-3);text-align:center;color:var(--text3)">No relationships found</td></tr>'
+    }
+    html += '</tbody></table>'
+    document.getElementById('details-info').innerHTML = html
+  } catch (err) {
+    document.getElementById('details-info').innerHTML = '<p style="color:var(--red)">Failed to load details: ' + h(err.message) + '</p>'
+  }
+}
+
+function filterGraphNodes() {
+  var cy = window.graphExplorerCy
+  if (!cy) return
+  var query = document.getElementById('graph-search').value.toLowerCase()
+  cy.nodes().forEach(function(node) {
+    var matches = !query || node.data('label').toLowerCase().includes(query)
+    node.style('display', matches ? 'element' : 'none')
+  })
+}
+
+function resetGraphExplorer() {
+  var cy = window.graphExplorerCy
+  if (cy) {
+    cy.nodes().forEach(function(node) { node.style('display', 'element') })
+    cy.fit()
+  }
+  document.getElementById('graph-search').value = ''
+  document.getElementById('graph-details').style.display = 'none'
+  graphExplorerState.selectedLabel = null
+}
+
+// ─── Feature 2: Agent Task Assignment ────────────────────────────────────────
+var agentTaskChainId = null
+
+function populateAgentSelect() {
+  var agents = dashboardData && dashboardData.agents || []
+  var select = document.getElementById('agent-assign-select')
+  if (!select) return
+  select.innerHTML = '<option value="">-- Select an agent --</option>'
+  for (var i = 0; i < agents.length; i++) {
+    var opt = document.createElement('option')
+    opt.value = agents[i].agent_id
+    opt.textContent = agents[i].display_name || agents[i].agent_id
+    select.appendChild(opt)
+  }
+}
+
+async function assignAgentTask() {
+  var agentId = document.getElementById('agent-assign-select').value
+  var taskDesc = document.getElementById('agent-assign-task').value.trim()
+  var mode = document.getElementById('agent-assign-mode').value
+
+  if (!agentId) { showToast('Please select an agent', 'warning'); return }
+  if (!taskDesc) { showToast('Please describe a task', 'warning'); return }
+
+  var chainId = 'cockpit-' + Date.now().toString(36)
+  agentTaskChainId = chainId
+  trackCockpitAction('assign_task', 'agents', { agent: agentId, mode: mode })
+
+  var traceEl = document.getElementById('agent-trace')
+  traceEl.style.display = 'block'
+  traceEl.innerHTML = '<div style="color:var(--text3);font-size:0.75rem">Starting chain "' + chainId + '" in ' + mode + ' mode...</div>'
+
+  try {
+    var chainDef = {
+      chain_id: chainId,
+      mode: mode,
+      steps: [{ agent_id: agentId, prompt: taskDesc }]
+    }
+
+    var res = await api('/chains/execute', { method: 'POST', body: JSON.stringify(chainDef) })
+    var execId = res.data && res.data.execution_id || res.execution_id || chainId
+
+    appendTrace(chainId, 'System', 'Chain started: ' + execId, 'info')
+
+    // Poll for status
+    var attempts = 0
+    var pollInterval = setInterval(async function() {
+      attempts++
+      if (attempts > 120) { clearInterval(pollInterval); appendTrace(chainId, 'System', 'Poll timeout', 'error'); return }
+      try {
+        var statusRes = await api('/chains/' + execId + '/status')
+        var status = statusRes.data || statusRes
+        if (status.steps && Array.isArray(status.steps)) {
+          for (var j = 0; j < status.steps.length; j++) {
+            var step = status.steps[j]
+            if (step.agent_id && step.status) {
+              var color = step.status === 'completed' ? 'var(--green)' : step.status === 'running' ? 'var(--yellow)' : step.status === 'failed' ? 'var(--red)' : 'var(--text3)'
+              appendTrace(chainId, step.agent_id, '[' + step.status.toUpperCase() + '] ' + (step.action || step.tool_name || 'action'), step.status === 'failed' ? 'error' : 'info')
+            }
+          }
+        }
+        if (status.status === 'completed' || status.status === 'failed') {
+          clearInterval(pollInterval)
+          appendTrace(chainId, 'System', 'Chain ' + status.status, status.status === 'completed' ? 'success' : 'error')
+          if (status.result) appendTrace(chainId, 'Result', typeof status.result === 'string' ? status.result : JSON.stringify(status.result), 'info')
+        }
+      } catch(err) {
+        console.warn('Poll failed:', err)
+      }
+    }, 2000)
+
+  } catch (err) {
+    appendTrace(chainId, 'System', 'Error: ' + err.message, 'error')
+    showToast('Task assignment failed: ' + err.message, 'error')
+  }
+}
+
+function appendTrace(chainId, from, msg, type) {
+  if (agentTaskChainId !== chainId) return
+  var traceEl = document.getElementById('agent-trace')
+  var timeStr = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  var color = type === 'success' ? 'var(--green)' : type === 'error' ? 'var(--red)' : type === 'info' ? 'var(--accent)' : 'var(--text3)'
+  var line = document.createElement('div')
+  line.style.cssText = 'color:' + color + ';margin-bottom:4px;padding:4px;border-left:2px solid ' + color + ';padding-left:8px'
+  line.textContent = '[' + timeStr + '] ' + from + ': ' + msg
+  traceEl.appendChild(line)
+  traceEl.scrollTop = traceEl.scrollHeight
+}
+
 async function fetchGraphTopology() {
   document.getElementById('knowledge-content').innerHTML = '<div class="empty-state"><div class="skeleton skeleton-card" style="width:100%;height:200px"></div></div>'
+  trackCockpitAction('fetch', 'knowledge', { view: 'topology' })
   try {
     var result = await api('/tools/call', { method: 'POST', body: JSON.stringify({ agent_id: 'command-center', tool_name: 'graph.read_cypher', call_id: uuid(), arguments: { query: "MATCH (n) RETURN labels(n)[0] AS label, count(n) AS cnt ORDER BY cnt DESC LIMIT 40" } }) })
     var data = result.result || result.data && result.data.result || result
@@ -1951,6 +2204,51 @@ async function fetchGraphTopology() {
     html += '</tbody></table></div>'
     document.getElementById('knowledge-content').innerHTML = html
   } catch (err) { document.getElementById('knowledge-content').innerHTML = '<div class="error-state">\u274C ' + h(err.message) + '</div>' }
+}
+
+// ─── Feature 3: CockpitInteraction Tracking ─────────────────────────────────
+var cockpitInteractions = []
+var cockpitSessionId = 'session-' + Date.now().toString(36)
+
+function trackCockpitAction(action, panel, details) {
+  var interaction = {
+    action: action,
+    panel: panel,
+    details: details || {},
+    ts: Date.now(),
+    sessionId: cockpitSessionId
+  }
+  cockpitInteractions.push(interaction)
+  if (cockpitInteractions.length > 50) cockpitInteractions = cockpitInteractions.slice(-50)
+
+  // Emit EventBus event
+  EventBus.emit('cockpit:interaction', interaction)
+
+  // Post to memory_store for persistence
+  try {
+    api('/tools/call', {
+      method: 'POST',
+      body: JSON.stringify({
+        agent_id: 'command-center',
+        tool_name: 'memory_store',
+        call_id: uuid(),
+        arguments: {
+          agent_id: 'command-center',
+          key: 'cockpit_action_' + Date.now().toString(36),
+          value: JSON.stringify(interaction),
+          ttl: 3600
+        }
+      })
+    }).catch(function(err) { console.warn('Interaction tracking failed:', err) })
+  } catch(e) {}
+
+  // Update interaction counter
+  updateInteractionCounter()
+}
+
+function updateInteractionCounter() {
+  var el = document.getElementById('cockpit-interaction-counter')
+  if (el) el.textContent = cockpitInteractions.length
 }
 
 // ─── Audit Log ──────────────────────────────────────────────────────────────
