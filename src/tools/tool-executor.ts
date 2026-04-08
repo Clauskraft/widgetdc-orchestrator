@@ -1813,11 +1813,15 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     }
 
     case 'inventor_nodes': {
-      const { getInventorNodes } = await import('../intelligence/inventor-loop.js')
+      const { getInventorNodes, getNodesByExperiment } = await import('../intelligence/inventor-loop.js')
       const sort = (args.sort as string) ?? 'score'
       const limit = Math.min((args.limit as number) ?? 50, 200)
       const offset = (args.offset as number) ?? 0
-      let nodes = getInventorNodes()
+      // If experiment_name is provided, load from Redis (survives experiment switches)
+      const experimentName = args.experiment_name as string | undefined
+      let nodes = experimentName
+        ? await getNodesByExperiment(experimentName)
+        : getInventorNodes()
       if (sort === 'created') {
         nodes = [...nodes].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       } else {
