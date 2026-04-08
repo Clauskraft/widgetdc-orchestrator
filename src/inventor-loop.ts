@@ -148,7 +148,8 @@ async function foldParentContext(
       agent_id: 'inventor-folder',
     }, 15000)
 
-    const folded = String(foldResult.answer || foldResult.result || rawContext)
+    const fr = foldResult as Record<string, unknown> | null
+    const folded = String(fr?.answer ?? fr?.result ?? fr?.reasoning ?? rawContext)
     logger.info({ original: rawContext.length, folded: folded.length, ratio: (folded.length / rawContext.length).toFixed(2) },
       'Inventor: context folded via RLM')
     return folded
@@ -207,7 +208,20 @@ Respond in JSON format:
       },
     }, config.pipeline.engineerTimeoutMs)
 
-    const text = String(result.answer || result.result || '')
+    if (!result) throw new Error('RLM returned null (non-OK response)')
+
+    // Defensive extraction — RLM response structure varies by version
+    const r = result as Record<string, unknown>
+    const text = String(
+      r.answer ?? r.result ?? r.reasoning ?? r.plan ??
+      (r.analysis && typeof r.analysis === 'object' ? JSON.stringify(r.analysis) : '') ??
+      (r.content ?? '')
+    )
+
+    if (!text) {
+      logger.warn({ resultKeys: Object.keys(r) }, 'Inventor: researcher got empty text from RLM')
+      throw new Error(`RLM returned no usable text (keys: ${Object.keys(r).join(', ')})`)
+    }
 
     // Try to parse JSON response
     try {
@@ -310,7 +324,8 @@ Provide:
       agent_id: 'inventor-analyzer',
     }, 15000)
 
-    return String(analyzeResult.answer || analyzeResult.result || 'Analysis unavailable')
+    const ar = analyzeResult as Record<string, unknown> | null
+    return String(ar?.answer ?? ar?.result ?? ar?.reasoning ?? 'Analysis unavailable')
   } catch {
     return `Score: ${result.score.toFixed(3)}. ${result.success ? 'Passed' : 'Failed'}. ${result.error || ''}`
   }
