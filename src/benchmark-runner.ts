@@ -210,7 +210,20 @@ export async function loadBenchmarkRuns(): Promise<void> {
     const raw = await redis.get(REDIS_KEY)
     if (!raw) return
     const saved: BenchmarkRun[] = JSON.parse(raw)
-    for (const run of saved) runs.set(run.runId, run)
+    let stuckCount = 0
+    for (const run of saved) {
+      // Runs that were 'running' when the process died cannot be recovered — mark failed
+      if (run.status === 'running') {
+        run.status = 'failed'
+        run.error = 'Process restarted while run was in progress (benchmark-runner restart recovery)'
+        stuckCount++
+      }
+      runs.set(run.runId, run)
+    }
+    if (stuckCount > 0) {
+      await persist() // flush corrected status to Redis immediately
+      logger.warn({ stuckCount }, '[Benchmark] Marked stuck running→failed on boot (restart recovery)')
+    }
     logger.info({ count: saved.length }, '[Benchmark] Hydrated runs from Redis')
   } catch { /* non-critical */ }
 }
@@ -485,7 +498,7 @@ export function syncRunWithInventorStatus(
   run.bestScore = Math.max(...sortedByTime.map(n => n.score), 0)
   run.bestRound = findBestRound(sortedByTime)
   run.status = isRunning ? 'running' : 'completed'
-  if (!isRunning && run.status === 'running') {
+  if (!isRunning) {
     run.completedAt = new Date().toISOString()
     if (run.paperBaseline != null) {
       // Denormalise score for comparison: paper uses raw sum_radii

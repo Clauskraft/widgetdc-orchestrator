@@ -199,18 +199,30 @@ Respond in JSON format:
 }`
 
   try {
-    const result = await callCognitiveRaw('reason', {
-      prompt,
-      agent_id: 'inventor-researcher',
-      depth: 2,
-      context: {
-        parentCount: parentNodes.length,
-        bestParentScore: parentNodes.length > 0 ? Math.max(...parentNodes.map(n => n.score)) : 0,
-        cognitionCount: cognitionItems.length,
-      },
-    }, config.pipeline.engineerTimeoutMs)
+    // Retry up to 3 attempts with backoff to handle cold-start transient failures
+    let result = null
+    let lastRlmErr: Error | null = null
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) {
+        const delayMs = 3000 * attempt
+        logger.warn({ attempt, delayMs }, 'Inventor: researcher retrying after RLM null response')
+        await new Promise(r => setTimeout(r, delayMs))
+      }
+      result = await callCognitiveRaw('reason', {
+        prompt,
+        agent_id: 'inventor-researcher',
+        depth: 2,
+        context: {
+          parentCount: parentNodes.length,
+          bestParentScore: parentNodes.length > 0 ? Math.max(...parentNodes.map(n => n.score)) : 0,
+          cognitionCount: cognitionItems.length,
+        },
+      }, config.pipeline.engineerTimeoutMs)
+      if (result) break
+      lastRlmErr = new Error('RLM returned null (non-OK response)')
+    }
 
-    if (!result) throw new Error('RLM returned null (non-OK response)')
+    if (!result) throw lastRlmErr ?? new Error('RLM returned null after 3 attempts')
 
     // Defensive extraction — RLM response structure varies by version
     const r = result as Record<string, unknown>
