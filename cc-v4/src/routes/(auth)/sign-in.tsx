@@ -32,8 +32,7 @@ function SignInPage() {
       if (result) {
         setAccessToken(apiKey)
         setUser({
-          email: 'user@widgetdc.dev',
-          role: ['admin'],
+          email: 'operator@widgetdc.dev',
         })
         await navigate({ to: '/' })
       }

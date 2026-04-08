@@ -92,7 +92,7 @@ function ChainsPage() {
 
   const { data: raw, isLoading } = useQuery<ChainsResponse>({
     queryKey: ['chains'],
-    queryFn: () => apiGet('/api/chains'),
+    queryFn: () => apiGet('/chains'),
     refetchInterval: 8000,
   })
 

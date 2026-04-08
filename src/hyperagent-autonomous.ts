@@ -148,8 +148,9 @@ const edgeWeights: Record<string, number> = {
   Forklarer: 1 / 6, Vokser: 1 / 6, Integrerer: 1 / 6,
 }
 
-/** Known discovered issues (accumulated across cycles) */
+/** Known discovered issues (accumulated across cycles, capped at 500) */
 const discoveredIssues: string[] = []
+const MAX_DISCOVERED_ISSUES = 500
 
 // ─── SSE Streaming ──────────────────────────────────────────────────────────
 
@@ -429,6 +430,7 @@ async function discoverNewIssues(executionContext: string): Promise<string[]> {
           const desc = typeof issue === 'string' ? issue : JSON.stringify(issue)
           if (!discoveredIssues.includes(desc)) {
             discoveredIssues.push(desc)
+            if (discoveredIssues.length > MAX_DISCOVERED_ISSUES) discoveredIssues.splice(0, discoveredIssues.length - MAX_DISCOVERED_ISSUES)
             newIssues.push(desc)
             stream('issue_discovered', { issue: desc })
           }
@@ -763,19 +765,13 @@ export async function runAutonomousCycle(
         // ── D) EXECUTE — Run via chain engine (mode resolved above)
         //   Auto-approve for Phase 1+: the autonomous executor self-approves staged plans.
         //   Approval audit trail is preserved (approvedBy: 'hyperagent-auto').
-        if (plan.status === 'approved' || plan.status === 'pending_approval' || effectivePhase === 'phase_0') {
-          // Self-approve if plan is pending_approval (staged_write profile)
-          if (plan.status === 'pending_approval') {
-            try {
-              await approvePlan(plan.planId, `hyperagent-auto:${effectivePhase}`)
-              stream('auto_approved', { planId: plan.planId, targetId: target.id, phase: effectivePhase })
-              logger.info({ planId: plan.planId, targetId: target.id }, 'HyperAgent-Auto: self-approved staged plan')
-            } catch (approveErr) {
-              logger.warn({ planId: plan.planId, error: String(approveErr) }, 'HyperAgent-Auto: self-approve failed, attempting execution anyway')
-            }
-          }
+        if (plan.status === 'approved' || effectivePhase === 'phase_0') {
           stream('target_step', { targetId: target.id, step: 'execute' })
-          const execution = await executePlan(plan.planId)
+          const EXEC_TIMEOUT_MS = 120_000
+          const execution = await Promise.race([
+            executePlan(plan.planId),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`executePlan timeout after ${EXEC_TIMEOUT_MS}ms`)), EXEC_TIMEOUT_MS)),
+          ])
 
           if (execution.status === 'completed') {
             targetsCompleted++

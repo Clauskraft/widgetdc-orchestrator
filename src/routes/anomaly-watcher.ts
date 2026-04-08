@@ -75,9 +75,17 @@ anomalyWatcherRouter.get('/patterns', (_req: Request, res: Response) => {
 })
 
 /**
- * POST /scan — Trigger on-demand anomaly scan
+ * POST /scan — Trigger on-demand anomaly scan (debounced: min 30s between scans)
  */
+let lastScanAt = 0
+const SCAN_COOLDOWN_MS = 30_000
 anomalyWatcherRouter.post('/scan', async (_req: Request, res: Response) => {
+  const now = Date.now()
+  if (now - lastScanAt < SCAN_COOLDOWN_MS) {
+    res.status(429).json({ success: false, error: 'Scan cooldown active', retryAfterMs: SCAN_COOLDOWN_MS - (now - lastScanAt) })
+    return
+  }
+  lastScanAt = now
   try {
     const result = await runAnomalyScan()
     res.json({

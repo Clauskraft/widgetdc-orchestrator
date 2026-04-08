@@ -61,7 +61,7 @@ function ChatPage() {
 
   // Load history on mount
   useEffect(() => {
-    apiGet<{ messages?: Message[]; history?: Message[] }>('/api/chat/history?limit=50')
+    apiGet<{ messages?: Message[]; history?: Message[] }>('/chat/history?limit=50')
       .then(data => {
         const hist = (data as any).messages ?? (data as any).history ?? []
         setMessages(hist)
@@ -89,7 +89,7 @@ function ChatPage() {
     ws.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data) as Message
-        if (!msg.id || !msg.content && !msg.text) return
+        if (!msg.id || (!msg.content && !msg.text)) return
         setMessages(prev => {
           if (prev.some(p => p.id === msg.id)) return prev
           return [...prev, msg].slice(-200)
@@ -128,7 +128,7 @@ function ChatPage() {
     }
     setMessages(prev => [...prev, tempMsg])
     try {
-      await apiPost('/api/chat/message', {
+      await apiPost('/chat/message', {
         from: AGENT_ID,
         content: text,
         type: 'user-message',
