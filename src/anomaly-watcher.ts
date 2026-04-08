@@ -21,6 +21,7 @@ import { callMcpTool } from './mcp-caller.js'
 import { callCognitiveRaw, isRlmAvailable } from './cognitive-proxy.js'
 import { broadcastSSE } from './sse.js'
 import { broadcastMessage } from './chat-broadcaster.js'
+import { onAnomaly } from './pheromone-layer.js'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -380,6 +381,11 @@ async function learnFromAnomalies(anomalies: AnomalyEvent[]): Promise<void> {
   if (state.patterns.length > MAX_PATTERNS) {
     state.patterns.sort((a, b) => b.count - a.count)
     state.patterns = state.patterns.slice(0, MAX_PATTERNS)
+  }
+
+  // Deposit pheromones for each anomaly (attraction for positive, repellent for negative)
+  for (const a of anomalies) {
+    onAnomaly(a.type, a.valence, a.source, a.severity).catch(() => {})
   }
 
   // Store to memory layer — with valence tag

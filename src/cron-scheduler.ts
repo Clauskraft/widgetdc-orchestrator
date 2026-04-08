@@ -22,6 +22,8 @@ import { buildCommunitySummaries } from './hierarchical-intelligence.js'
 import { retrainRoutingWeights } from './adaptive-rag.js'
 import { runAutonomousCycle, getAutonomousStatus } from './hyperagent-autonomous.js'
 import { runAnomalyScan } from './anomaly-watcher.js'
+import { runPheromoneCron } from './pheromone-layer.js'
+import { runFleetAnalysis } from './peer-eval.js'
 
 interface CronJob {
   id: string
@@ -573,6 +575,53 @@ export async function runCronJob(jobId: string): Promise<void> {
       return
     }
 
+    // Pheromone Layer: decay + persist + cross-pillar amplification
+    if (job.id === 'pheromone-decay') {
+      try {
+        const result = await runPheromoneCron()
+        job.last_run = new Date().toISOString()
+        job.last_status = `${result.decayed} decayed, ${result.evaporated} evaporated, ${result.persisted} persisted, ${result.amplified} amplified`
+        job.run_count++
+        persistCronJobs()
+      } catch (err) {
+        job.last_run = new Date().toISOString()
+        job.last_status = 'failed'
+        job.run_count++
+        persistCronJobs()
+        logger.error({ id: job.id, err: String(err) }, 'Pheromone decay cron failed')
+      }
+      return
+    }
+
+    // PeerEval Fleet Analysis: RLM-powered fleet-wide strategic reasoning
+    if (job.id === 'fleet-analysis') {
+      try {
+        const analysis = await runFleetAnalysis()
+        job.last_run = new Date().toISOString()
+        job.last_status = analysis.length > 50 ? 'completed' : 'no-data'
+        job.run_count++
+        persistCronJobs()
+
+        if (analysis.length > 50) {
+          broadcastMessage({
+            from: 'Orchestrator',
+            to: 'All',
+            source: 'orchestrator',
+            type: 'Message',
+            message: `Fleet analysis: ${analysis.slice(0, 200)}...`,
+            timestamp: new Date().toISOString(),
+          })
+        }
+      } catch (err) {
+        job.last_run = new Date().toISOString()
+        job.last_status = 'failed'
+        job.run_count++
+        persistCronJobs()
+        logger.error({ id: job.id, err: String(err) }, 'Fleet analysis cron failed')
+      }
+      return
+    }
+
     const result = await executeChain(job.chain)
     job.last_run = new Date().toISOString()
     job.last_status = result.status
@@ -1046,6 +1095,36 @@ export function registerDefaultLoops(): void {
     enabled: true,
     chain: {
       name: 'Anomaly Scan',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // PHEROMONE LAYER — Stigmergic decay + trail persistence + cross-pillar amplification
+  // ═══════════════════════════════════════════════════════════════════════
+  registerCronJob({
+    id: 'pheromone-decay',
+    name: 'Pheromone Decay + Trail Persistence',
+    schedule: '*/15 * * * *', // Every 15 minutes
+    enabled: true,
+    chain: {
+      name: 'Pheromone Lifecycle',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // PEER-EVAL FLEET ANALYSIS — RLM-powered strategic fleet reasoning
+  // ═══════════════════════════════════════════════════════════════════════
+  registerCronJob({
+    id: 'fleet-analysis',
+    name: 'PeerEval Fleet Intelligence Analysis',
+    schedule: '0 6 * * 1', // Weekly Monday 06:00 UTC
+    enabled: true,
+    chain: {
+      name: 'Fleet Analysis',
       mode: 'sequential',
       steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
     },

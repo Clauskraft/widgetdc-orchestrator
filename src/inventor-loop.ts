@@ -28,6 +28,8 @@ import type {
   InventorNode, InventorConfig, InventorStatus,
   InventorStepResult, TrialResult, CognitionItem,
 } from './inventor-types.js'
+import { onInventorTrial } from './pheromone-layer.js'
+import { hookIntoExecution } from './peer-eval.js'
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -445,6 +447,19 @@ async function runStep(config: InventorConfig): Promise<InventorStepResult> {
 
   // Register with sampler
   if (sampler) sampler.onNodeAdded(node)
+
+  // ── Pheromone + PeerEval: deposit trail + evaluate trial ──
+  onInventorTrial(nodeId, result.score, config.experimentName, node.island).catch(() => {})
+  hookIntoExecution('inventor', nodeId, {
+    taskType: `inventor-trial:${config.experimentName}`,
+    chainId: config.experimentName,
+    success: result.success,
+    metrics: {
+      latency_ms: Date.now() - t0,
+      quality_score: result.score,
+    },
+    insights: node.analysis ? [node.analysis.slice(0, 200)] : [],
+  }).catch(() => {})
 
   // Update best
   if (result.score > bestScore) {

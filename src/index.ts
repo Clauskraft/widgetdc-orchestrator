@@ -90,6 +90,10 @@ import { hyperagentAutoRouter } from './routes/hyperagent-autonomous.js'
 import { inventorRouter } from './routes/inventor.js'
 import { anomalyWatcherRouter } from './routes/anomaly-watcher.js'
 import { initAnomalyWatcher, getWatcherState } from './anomaly-watcher.js'
+import { pheromoneRouter } from './routes/pheromone.js'
+import { peerEvalRouter } from './routes/peer-eval.js'
+import { initPheromoneLayer, getPheromoneState } from './pheromone-layer.js'
+import { initPeerEval, getPeerEvalState } from './peer-eval.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -280,6 +284,12 @@ app.use('/api/inventor', requireApiKey, apiRateLimiter, inventorRouter)
 // Proactive Anomaly Watcher: DETECT→LEARN→REASON→ACT→REMEMBER pipeline
 app.use('/api/anomaly-watcher', requireApiKey, anomalyWatcherRouter)
 
+// Pheromone Layer: stigmergic communication substrate (5 pheromone types, TTL decay)
+app.use('/api/pheromone', requireApiKey, pheromoneRouter)
+
+// PeerEval: fleet learning engine (self-assessment + best practice broadcasting)
+app.use('/api/peer-eval', requireApiKey, peerEvalRouter)
+
 // HyperAgent Autonomous Executor: self-driving cycle engine with SSE streaming
 app.use('/api/hyperagent/auto', requireApiKey, apiRateLimiter, hyperagentAutoRouter)
 
@@ -355,6 +365,8 @@ app.get('/health', (_req, res) => {
     backend_circuit_breaker: getBackendCircuitState(),
     rate_limit_backpressure: getRateLimitState(),
     anomaly_watcher: (() => { const s = getWatcherState(); return { totalScans: s.totalScans, activeAnomalies: s.activeAnomalies.length, patterns: s.patterns.length } })(),
+    pheromone_layer: getPheromoneState(),
+    peer_eval: getPeerEvalState(),
     timestamp: new Date().toISOString(),
   })
 })
@@ -411,6 +423,9 @@ async function boot() {
   registerDefaultLoops()
   // Initialize proactive anomaly watcher (loads state from Redis)
   await initAnomalyWatcher()
+  // Initialize pheromone layer + peer-eval fleet learning
+  await initPheromoneLayer()
+  await initPeerEval()
   // S1.2 (6-edges handlingsplan): fire any overdue absolute-hour jobs at boot.
   // Non-blocking — server continues starting even if individual jobs fail.
   bootKickstartOverdueJobs().catch(err => {

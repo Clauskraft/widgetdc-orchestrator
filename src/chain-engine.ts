@@ -15,6 +15,7 @@ import { broadcastMessage } from './chat-broadcaster.js'
 import { logger } from './logger.js'
 import { getRedis } from './redis.js'
 import { resolveRoutingDecision } from './routing-engine.js'
+import { hookIntoExecution } from './peer-eval.js'
 import type {
   AgentWorkflowEnvelope,
   RoutingCapability,
@@ -169,7 +170,7 @@ async function executeStep(step: ChainStep, previousOutput: unknown): Promise<St
       throw new Error('Step must have either tool_name or cognitive_action')
     }
 
-    return {
+    const successResult: StepResult = {
       step_id: stepId,
       agent_id: step.agent_id,
       action: step.tool_name ?? `cognitive:${step.cognitive_action}`,
@@ -177,15 +178,34 @@ async function executeStep(step: ChainStep, previousOutput: unknown): Promise<St
       output,
       duration_ms: Date.now() - t0,
     }
+
+    // PeerEval + Pheromone hook: evaluate success
+    hookIntoExecution(step.agent_id, stepId, {
+      taskType: step.tool_name ?? step.cognitive_action ?? 'unknown',
+      success: true,
+      metrics: { latency_ms: successResult.duration_ms },
+    }).catch(() => {}) // non-blocking
+
+    return successResult
   } catch (err) {
-    return {
+    const durationMs = Date.now() - t0
+    const errorResult: StepResult = {
       step_id: stepId,
       agent_id: step.agent_id,
       action: step.tool_name ?? `cognitive:${step.cognitive_action}`,
       status: 'error',
       output: err instanceof Error ? err.message : String(err),
-      duration_ms: Date.now() - t0,
+      duration_ms: durationMs,
     }
+
+    // PeerEval + Pheromone hook: evaluate failure
+    hookIntoExecution(step.agent_id, stepId, {
+      taskType: step.tool_name ?? step.cognitive_action ?? 'unknown',
+      success: false,
+      metrics: { latency_ms: durationMs },
+    }).catch(() => {}) // non-blocking
+
+    return errorResult
   }
 }
 
