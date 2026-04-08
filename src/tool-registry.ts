@@ -1075,6 +1075,24 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     timeoutMs: 5000,
     outputDescription: 'Best InventorNode with highest score, full artifact and metadata',
   }),
+
+  defineTool({
+    name: 'inventor_stop',
+    namespace: 'inventor',
+    description: 'Stop the currently running Inventor experiment gracefully. The experiment will halt after the current step completes and persist results to history.',
+    input: z.object({}),
+    timeoutMs: 5000,
+  }),
+
+  defineTool({
+    name: 'inventor_history',
+    namespace: 'inventor',
+    description: 'List past Inventor experiments with their status, scores, and configuration. Returns up to 20 most recent experiments from Redis history.',
+    input: z.object({
+      limit: z.number().optional().describe('Max experiments to return (default: 20, max: 50)'),
+    }),
+    timeoutMs: 5000,
+  }),
 ]
 
 // ─── Protocol Compilers ─────────────────────────────────────────────────────

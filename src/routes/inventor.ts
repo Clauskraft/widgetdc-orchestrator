@@ -11,6 +11,8 @@ import {
   getInventorNodes,
   getInventorNode,
   getBestNode,
+  stopInventor,
+  getExperimentHistory,
 } from '../inventor-loop.js'
 import type { InventorConfig } from '../inventor-types.js'
 import { logger } from '../logger.js'
@@ -168,4 +170,30 @@ inventorRouter.get('/best', (_req: Request, res: Response) => {
     return
   }
   res.json({ success: true, data: best })
+})
+
+/**
+ * POST /api/inventor/stop — Stop the currently running experiment.
+ */
+inventorRouter.post('/stop', async (_req: Request, res: Response) => {
+  try {
+    const result = stopInventor()
+    res.json(result)
+  } catch (err) {
+    res.status(500).json({ error: String(err) })
+  }
+})
+
+/**
+ * GET /api/inventor/history — List past experiments.
+ * Query: ?limit=20
+ */
+inventorRouter.get('/history', async (req: Request, res: Response) => {
+  try {
+    const limit = Math.min(Math.max(1, Number(req.query.limit) || 20), 50)
+    const history = await getExperimentHistory(limit)
+    res.json({ success: true, experiments: history, count: history.length })
+  } catch (err) {
+    res.status(500).json({ error: String(err) })
+  }
 })

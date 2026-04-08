@@ -1411,6 +1411,20 @@ await test('155. POST /api/tools/inventor_best responds', async () => {
   assert(r.body?.data?.tool_name === 'inventor_best', `wrong tool_name`)
 })
 
+// ── 156. inventor_stop — MCP tool exists ──
+await test('156. POST /api/tools/inventor_stop responds', async () => {
+  const r = await api('/api/tools/inventor_stop', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `inventor_stop not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'inventor_stop', `wrong tool_name`)
+})
+
+// ── 157. inventor_history — MCP tool exists ──
+await test('157. POST /api/tools/inventor_history responds', async () => {
+  const r = await api('/api/tools/inventor_history', { method: 'POST', body: JSON.stringify({ limit: 5 }) })
+  assert(r.status !== 404, `inventor_history not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'inventor_history', `wrong tool_name`)
+})
+
 // ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped

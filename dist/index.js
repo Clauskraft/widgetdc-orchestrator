@@ -13937,6 +13937,22 @@ var init_tool_registry = __esm({
         input: z.object({}),
         timeoutMs: 5e3,
         outputDescription: "Best InventorNode with highest score, full artifact and metadata"
+      }),
+      defineTool({
+        name: "inventor_stop",
+        namespace: "inventor",
+        description: "Stop the currently running Inventor experiment gracefully. The experiment will halt after the current step completes and persist results to history.",
+        input: z.object({}),
+        timeoutMs: 5e3
+      }),
+      defineTool({
+        name: "inventor_history",
+        namespace: "inventor",
+        description: "List past Inventor experiments with their status, scores, and configuration. Returns up to 20 most recent experiments from Redis history.",
+        input: z.object({
+          limit: z.number().optional().describe("Max experiments to return (default: 20, max: 50)")
+        }),
+        timeoutMs: 5e3
       })
     ];
   }
@@ -21009,10 +21025,12 @@ var init_inventor_sampler = __esm({
 var inventor_loop_exports = {};
 __export(inventor_loop_exports, {
   getBestNode: () => getBestNode,
+  getExperimentHistory: () => getExperimentHistory,
   getInventorNode: () => getInventorNode,
   getInventorNodes: () => getInventorNodes,
   getInventorStatus: () => getInventorStatus,
-  runInventor: () => runInventor
+  runInventor: () => runInventor,
+  stopInventor: () => stopInventor
 });
 import { v4 as uuid24 } from "uuid";
 function stream2(event, data) {
@@ -21457,6 +21475,11 @@ async function runInventor(config2, resume = false) {
   try {
     const RAG_RETRAIN_INTERVAL = 5;
     for (let step = currentStep2; step < config2.pipeline.maxSteps; step++) {
+      if (abortRequested) {
+        logger.info({ step: currentStep2 }, "Inventor: abort requested \u2014 stopping gracefully");
+        stream2("abort", { step: currentStep2, reason: "User requested stop" });
+        break;
+      }
       try {
         const result = await runStep(config2);
         results.push(result);
@@ -21479,8 +21502,33 @@ async function runInventor(config2, resume = false) {
       }
     }
   } finally {
+    try {
+      const redis2 = getRedis();
+      if (redis2) {
+        const historyEntry = JSON.stringify({
+          experimentName: currentConfig?.experimentName ?? "unnamed",
+          taskDescription: currentConfig?.taskDescription ?? "",
+          status: abortRequested ? "aborted" : "completed",
+          steps: results.length,
+          maxSteps: currentConfig?.pipeline.maxSteps ?? 0,
+          nodesCreated: nodes.size,
+          bestScore: bestScore === -Infinity ? 0 : bestScore,
+          bestNodeId,
+          samplingAlgorithm: currentConfig?.sampling.algorithm ?? "ucb1",
+          chainMode: currentConfig?.chainMode ?? "sequential",
+          startedAt,
+          completedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          aborted: abortRequested
+        });
+        await redis2.lpush(historyKey(), historyEntry);
+        await redis2.ltrim(historyKey(), 0, 49);
+      }
+    } catch (histErr) {
+      logger.error({ error: histErr }, "Inventor: failed to persist history");
+    }
     isRunning3 = false;
     currentConfig = null;
+    abortRequested = false;
     stream2("run_complete", {
       totalSteps: results.length,
       bestScore,
@@ -21521,7 +21569,23 @@ function getInventorNode(id) {
 function getBestNode() {
   return bestNodeId ? nodes.get(bestNodeId) : void 0;
 }
-var isRunning3, currentConfig, currentStep2, bestScore, bestNodeId, startedAt, lastStepAt, lastError, sampler, nodes, REDIS_PREFIX9, nodeKey, stateKey, samplerKey;
+function stopInventor() {
+  if (!isRunning3) return { success: false, message: "No experiment is currently running" };
+  abortRequested = true;
+  logger.info("Inventor: stop requested \u2014 will halt after current step completes");
+  return { success: true, message: `Stopping experiment "${currentConfig?.experimentName ?? ""}" after step ${currentStep2}` };
+}
+async function getExperimentHistory(limit = 20) {
+  const redis2 = getRedis();
+  if (!redis2) return [];
+  try {
+    const entries = await redis2.lrange(historyKey(), 0, limit - 1);
+    return entries.map((e) => JSON.parse(e));
+  } catch {
+    return [];
+  }
+}
+var isRunning3, currentConfig, currentStep2, bestScore, bestNodeId, startedAt, lastStepAt, lastError, sampler, abortRequested, nodes, REDIS_PREFIX9, nodeKey, stateKey, samplerKey, historyKey;
 var init_inventor_loop = __esm({
   "src/inventor-loop.ts"() {
     "use strict";
@@ -21544,11 +21608,13 @@ var init_inventor_loop = __esm({
     lastStepAt = null;
     lastError = null;
     sampler = null;
+    abortRequested = false;
     nodes = /* @__PURE__ */ new Map();
     REDIS_PREFIX9 = "inventor:";
     nodeKey = (expName) => `${REDIS_PREFIX9}${expName}:nodes`;
     stateKey = (expName) => `${REDIS_PREFIX9}${expName}:state`;
     samplerKey = (expName) => `${REDIS_PREFIX9}${expName}:sampler`;
+    historyKey = () => `${REDIS_PREFIX9}history`;
   }
 });
 
@@ -23006,6 +23072,15 @@ ${lines.join("\n")}`;
       const best = getBestNode2();
       if (!best) return "No nodes yet \u2014 run an experiment first with inventor_run";
       return JSON.stringify(best);
+    }
+    case "inventor_stop": {
+      const { stopInventor: stopInventor2 } = await Promise.resolve().then(() => (init_inventor_loop(), inventor_loop_exports));
+      return stopInventor2();
+    }
+    case "inventor_history": {
+      const { getExperimentHistory: getExperimentHistory2 } = await Promise.resolve().then(() => (init_inventor_loop(), inventor_loop_exports));
+      const limit = Math.min(Math.max(1, Number(args.limit) || 20), 50);
+      return getExperimentHistory2(limit);
     }
     default: {
       try {
@@ -37836,6 +37911,23 @@ inventorRouter.get("/best", (_req, res) => {
     return;
   }
   res.json({ success: true, data: best });
+});
+inventorRouter.post("/stop", async (_req, res) => {
+  try {
+    const result = stopInventor();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+inventorRouter.get("/history", async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(1, Number(req.query.limit) || 20), 50);
+    const history = await getExperimentHistory(limit);
+    res.json({ success: true, experiments: history, count: history.length });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 // src/routes/anomaly-watcher.ts

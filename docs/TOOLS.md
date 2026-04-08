@@ -1319,6 +1319,22 @@ Get the best-scoring Inventor trial node from the current or last experiment. Re
 
 ---
 
+### `inventor_stop`
+**Namespace:** inventor | **Timeout:** 5s | **Handler:** orchestrator
+
+Stop a running Inventor evolution experiment. Returns success status and confirmation message.
+
+---
+
+### `inventor_history`
+**Namespace:** inventor | **Timeout:** 5s | **Handler:** orchestrator
+
+List evolution experiment history from the current or last session. Sortable and paginated results.
+
+**Optional:** `limit` (max results, default 50)
+
+---
+
 ## Adding a New Tool
 
 All protocols (REST, OpenAI, MCP) compile automatically from a single entry in `src/tool-registry.ts`:

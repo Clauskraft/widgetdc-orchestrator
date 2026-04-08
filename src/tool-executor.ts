@@ -1840,6 +1840,17 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       return JSON.stringify(best)
     }
 
+    case 'inventor_stop': {
+      const { stopInventor } = await import('./inventor-loop.js')
+      return stopInventor()
+    }
+
+    case 'inventor_history': {
+      const { getExperimentHistory } = await import('./inventor-loop.js')
+      const limit = Math.min(Math.max(1, Number(args.limit) || 20), 50)
+      return getExperimentHistory(limit)
+    }
+
     default: {
       // Check forged tools before giving up
       try {

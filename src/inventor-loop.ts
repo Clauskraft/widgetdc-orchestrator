@@ -42,6 +42,7 @@ let startedAt: string | null = null
 let lastStepAt: string | null = null
 let lastError: string | null = null
 let sampler: Sampler | null = null
+let abortRequested = false
 
 /** In-memory node store (persisted to Redis after each step) */
 const nodes: Map<string, InventorNode> = new Map()
@@ -52,6 +53,7 @@ const REDIS_PREFIX = 'inventor:'
 const nodeKey = (expName: string) => `${REDIS_PREFIX}${expName}:nodes`
 const stateKey = (expName: string) => `${REDIS_PREFIX}${expName}:state`
 const samplerKey = (expName: string) => `${REDIS_PREFIX}${expName}:sampler`
+const historyKey = () => `${REDIS_PREFIX}history`
 
 // ─── SSE Streaming ───────────────────────────────────────────────────────────
 
@@ -624,6 +626,13 @@ export async function runInventor(
     // Run evolution steps
     const RAG_RETRAIN_INTERVAL = 5 // Retrain adaptive RAG every 5 steps
     for (let step = currentStep; step < config.pipeline.maxSteps; step++) {
+      // Check abort flag
+      if (abortRequested) {
+        logger.info({ step: currentStep }, 'Inventor: abort requested — stopping gracefully')
+        stream('abort', { step: currentStep, reason: 'User requested stop' })
+        break
+      }
+
       try {
         const result = await runStep(config)
         results.push(result)
@@ -648,8 +657,35 @@ export async function runInventor(
       }
     }
   } finally {
+    // Persist to experiment history
+    try {
+      const redis = getRedis()
+      if (redis) {
+        const historyEntry = JSON.stringify({
+          experimentName: currentConfig?.experimentName ?? 'unnamed',
+          taskDescription: currentConfig?.taskDescription ?? '',
+          status: abortRequested ? 'aborted' : 'completed',
+          steps: results.length,
+          maxSteps: currentConfig?.pipeline.maxSteps ?? 0,
+          nodesCreated: nodes.size,
+          bestScore: bestScore === -Infinity ? 0 : bestScore,
+          bestNodeId,
+          samplingAlgorithm: currentConfig?.sampling.algorithm ?? 'ucb1',
+          chainMode: currentConfig?.chainMode ?? 'sequential',
+          startedAt,
+          completedAt: new Date().toISOString(),
+          aborted: abortRequested,
+        })
+        await redis.lpush(historyKey(), historyEntry)
+        await redis.ltrim(historyKey(), 0, 49) // Keep last 50 experiments
+      }
+    } catch (histErr) {
+      logger.error({ error: histErr }, 'Inventor: failed to persist history')
+    }
+
     isRunning = false
     currentConfig = null
+    abortRequested = false
 
     stream('run_complete', {
       totalSteps: results.length,
@@ -701,4 +737,22 @@ export function getInventorNode(id: string): InventorNode | undefined {
 
 export function getBestNode(): InventorNode | undefined {
   return bestNodeId ? nodes.get(bestNodeId) : undefined
+}
+
+export function stopInventor(): { success: boolean; message: string } {
+  if (!isRunning) return { success: false, message: 'No experiment is currently running' }
+  abortRequested = true
+  logger.info('Inventor: stop requested — will halt after current step completes')
+  return { success: true, message: `Stopping experiment "${currentConfig?.experimentName ?? ''}" after step ${currentStep}` }
+}
+
+export async function getExperimentHistory(limit = 20): Promise<Array<Record<string, unknown>>> {
+  const redis = getRedis()
+  if (!redis) return []
+  try {
+    const entries = await redis.lrange(historyKey(), 0, limit - 1)
+    return entries.map(e => JSON.parse(e))
+  } catch {
+    return []
+  }
 }
