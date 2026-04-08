@@ -219,33 +219,56 @@ export async function loadBenchmarkRuns(): Promise<void> {
 
 /**
  * Wait for the Inventor to finish its current experiment (if any).
- * Polls every 30s with a 3-hour hard limit.
+ * Polls every 5s with a 3-hour hard limit.
  */
 async function waitForInventorIdle(maxWaitMs = 3 * 60 * 60 * 1000): Promise<void> {
   const { getInventorStatus } = await import('./inventor-loop.js')
   const deadline = Date.now() + maxWaitMs
   while (Date.now() < deadline) {
     if (!getInventorStatus().isRunning) return
-    await new Promise(r => setTimeout(r, 30_000))
+    await new Promise(r => setTimeout(r, 5_000))
   }
   throw new Error('Inventor did not become idle within the timeout window')
 }
 
 /**
- * Wait for idle, then run the experiment, then sync score history.
+ * Module-level promise queue — serialises all benchmark runs so they never
+ * compete for the Inventor singleton. Each call chains onto the tail of the
+ * previous run; .catch() on the tail is intentional (a failing run must not
+ * block the queue from advancing to the next run).
+ */
+let _runQueueTail: Promise<void> = Promise.resolve()
+
+/**
+ * Enqueue a run. Returns immediately; execution starts after all previously
+ * enqueued runs have completed (or failed).
  * Runs entirely in the background — all state changes go through upsertBenchmarkRun.
  */
 async function launchRunWhenIdle(
   run: BenchmarkRun,
   inventorConfig: Record<string, unknown>,
 ): Promise<void> {
+  // Chain onto the queue tail so runs execute one at a time
+  const prev = _runQueueTail
+  _runQueueTail = prev
+    .catch(() => { /* previous run failed — still advance */ })
+    .then(() => _executeRun(run, inventorConfig))
+    .catch(() => { /* swallow so queue tail never rejects */ })
+}
+
+async function _executeRun(
+  run: BenchmarkRun,
+  inventorConfig: Record<string, unknown>,
+): Promise<void> {
   try {
+    // Wait for any externally-started Inventor experiment to finish
     await waitForInventorIdle()
 
     const { runInventor, getInventorNodes } = await import('./inventor-loop.js')
     run.status = 'running'
     upsertBenchmarkRun(run)
 
+    logger.info({ runId: run.runId, strategy: run.strategy }, '[Benchmark] Starting Inventor run')
     await runInventor(inventorConfig as Parameters<typeof runInventor>[0], false)
 
     // Sync score history from Inventor nodes
@@ -259,11 +282,13 @@ async function launchRunWhenIdle(
 
     run.completedAt = new Date().toISOString()
     upsertBenchmarkRun(run)
+    logger.info({ runId: run.runId, bestScore: run.bestScore }, '[Benchmark] Run completed')
   } catch (err) {
     run.status = 'failed'
     run.error = String(err)
     upsertBenchmarkRun(run)
     logger.warn({ runId: run.runId, err: String(err) }, '[Benchmark] Run failed')
+    throw err // re-throw so queue chain sees the failure
   }
 }
 

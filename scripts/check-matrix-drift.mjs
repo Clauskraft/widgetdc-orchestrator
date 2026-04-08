@@ -69,9 +69,25 @@ function emit(verdict) {
 
 // ─── Locate the two copies ─────────────────────────────────────────────────
 
-const UPSTREAM_PATH = FIXTURE
-  ? path.resolve(FIXTURE)
-  : path.join(ROOT, 'node_modules/@widgetdc/contracts/dist/llm/llm-matrix.json')
+import { readdirSync } from 'fs'
+
+// Resolve upstream path — fall back to .contracts-* alt symlink if primary is broken (Windows host FS)
+function resolveUpstreamMatrix() {
+  const primary = path.join(ROOT, 'node_modules/@widgetdc/contracts/dist/llm/llm-matrix.json')
+  if (existsSync(primary)) return primary
+  try {
+    const widgetdcDir = path.join(ROOT, 'node_modules/@widgetdc')
+    const entries = readdirSync(widgetdcDir)
+    const alt = entries.find(e => e.startsWith('.contracts-'))
+    if (alt) {
+      const altPath = path.join(widgetdcDir, alt, 'dist/llm/llm-matrix.json')
+      if (existsSync(altPath)) return altPath
+    }
+  } catch { /* */ }
+  return primary
+}
+
+const UPSTREAM_PATH = FIXTURE ? path.resolve(FIXTURE) : resolveUpstreamMatrix()
 const BUNDLED_PATH = path.join(ROOT, 'dist/llm-matrix.json')
 
 // F5 (v4.1.3 fix): Reject --fixture paths outside the repo root to prevent

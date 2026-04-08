@@ -13,12 +13,29 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 // S2: Verify contracts symlink before build
-const contractsDist = './node_modules/@widgetdc/contracts/dist/orchestrator'
+// Fall back to the stable .contracts-* symlink if the primary link is broken (Windows host FS quirk)
+import { readdirSync } from 'fs'
+import { join } from 'path'
+let contractsDist = './node_modules/@widgetdc/contracts/dist/orchestrator'
 if (!existsSync(contractsDist)) {
-  console.error('❌ @widgetdc/contracts dist not found at', contractsDist)
-  console.error('   Fix: cd ../widgetdc-contracts && npm install && npm run build')
-  console.error('   Then: cd ../widgetdc-orchestrator && npm install')
-  process.exit(1)
+  // Look for any .contracts-* symlink that has the dist
+  const widgetdcDir = './node_modules/@widgetdc'
+  try {
+    const entries = readdirSync(widgetdcDir)
+    const alt = entries.find(e => e.startsWith('.contracts-') && existsSync(join(widgetdcDir, e, 'dist/orchestrator')))
+    if (alt) {
+      contractsDist = join(widgetdcDir, alt, 'dist/orchestrator')
+      console.log(`ℹ️  Using contracts alt symlink: ${contractsDist}`)
+    } else {
+      console.error('❌ @widgetdc/contracts dist not found at', contractsDist)
+      console.error('   Fix: cd ../widgetdc-contracts && npm install && npm run build')
+      console.error('   Then: cd ../widgetdc-orchestrator && npm install')
+      process.exit(1)
+    }
+  } catch {
+    console.error('❌ @widgetdc/contracts dist not found at', contractsDist)
+    process.exit(1)
+  }
 }
 
 // Bulletproof W3: Build-time tool registry ↔ executor parity check
@@ -62,6 +79,11 @@ const external = [
   'node:*',
 ]
 
+// Resolve the working contracts dist path for esbuild alias (broken symlink workaround).
+// Alias maps @widgetdc/contracts → <altPath>/dist so sub-path imports like
+// @widgetdc/contracts/llm resolve to <altPath>/dist/llm correctly.
+const contractsAbsPath = new URL(contractsDist.replace('/orchestrator', ''), import.meta.url).pathname
+
 await esbuild.build({
   entryPoints: ['src/index.ts'],
   bundle: true,
@@ -72,6 +94,7 @@ await esbuild.build({
   external,
   sourcemap: false,
   minify: false,
+  alias: { '@widgetdc/contracts': contractsAbsPath },
   banner: {
     js: `import { createRequire } from 'module'; const require = createRequire(import.meta.url);`,
   },
@@ -103,7 +126,10 @@ if (existsSync('frontend/inventor-dashboard.html')) {
 // fs.readFileSync from __dirname. After esbuild bundles the orchestrator, that
 // __dirname resolves to dist/, so the JSON must be copied alongside dist/index.js.
 // Upstream fix (contracts → JSON import) is queued as Wave 3.1 follow-up.
-const matrixJsonSrc = './node_modules/@widgetdc/contracts/dist/llm/llm-matrix.json'
+// Use the resolved contracts dist path (handles broken symlink on Windows-hosted FS)
+const matrixJsonSrc = existsSync('./node_modules/@widgetdc/contracts/dist/llm/llm-matrix.json')
+  ? './node_modules/@widgetdc/contracts/dist/llm/llm-matrix.json'
+  : `${contractsAbsPath}/llm/llm-matrix.json`
 if (existsSync(matrixJsonSrc)) {
   copyFileSync(matrixJsonSrc, 'dist/llm-matrix.json')
   console.log('✓ Copied llm-matrix.json → dist/ (for bundled @widgetdc/contracts LlmMatrix)')
