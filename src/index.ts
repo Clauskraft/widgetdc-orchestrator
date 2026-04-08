@@ -387,15 +387,18 @@ app.get('/health', (_req, res) => {
 // ─── SPA fallback — serve index.html for all non-API routes ──────────────────
 // React SPA with client-side routing (TanStack Router) needs catch-all
 app.get('*', (req, res, next) => {
-  // Skip API routes and static assets
-  if (req.path.startsWith('/api/') || req.path.startsWith('/agents') ||
-      req.path.startsWith('/tools') || req.path.startsWith('/chat') ||
-      req.path.startsWith('/chains') || req.path.startsWith('/cognitive') ||
-      req.path.startsWith('/cron') || req.path.startsWith('/ws') ||
-      req.path.startsWith('/health') || req.path.startsWith('/sse')) {
+  // Always skip: WebSocket upgrade, SSE streams, health check, static assets with extensions
+  if (req.path.startsWith('/ws') || req.path.startsWith('/sse') ||
+      req.path.startsWith('/health') || req.path.match(/\.\w+$/)) {
     return next()
   }
-  res.sendFile(path.join(__dirname, 'public', 'index.html'))
+  // For paths that overlap with API routes (/chains, /agents, /chat, etc.):
+  // Serve SPA for browser navigation (Accept: text/html), pass through for API calls (Accept: json)
+  const acceptsHtml = req.accepts('html', 'json') === 'html'
+  if (acceptsHtml) {
+    return res.sendFile(path.join(__dirname, 'public', 'index.html'))
+  }
+  next()
 })
 
 // ─── JSON parse error handler (P1 fix: return 400 not 500 for malformed JSON) ─
