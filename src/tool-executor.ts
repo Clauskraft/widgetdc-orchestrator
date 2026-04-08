@@ -980,7 +980,11 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       try {
         const { retrainRoutingWeights } = await import('./adaptive-rag.js')
         const result = await retrainRoutingWeights()
-        return `Retrain complete (${result.training_samples} samples):\n  Compound metric: ${result.compound_metric.toFixed(3)}\n  Old weights: ${JSON.stringify(result.old_weights)}\n  New weights: ${JSON.stringify(result.new_weights)}`
+        const samples = result.weights.training_samples ?? 0
+        const summary = result.adjustments.length > 0
+          ? result.adjustments.slice(0, 3).join('; ')
+          : 'No adjustments needed'
+        return `Retrain complete (${samples} samples, ${result.stats.length} strategies): ${summary}`
       } catch (err) {
         return `Retrain failed: ${err}`
       }

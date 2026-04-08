@@ -16,6 +16,8 @@ import { logger } from './logger.js'
 import { getRedis } from './redis.js'
 import { resolveRoutingDecision } from './routing-engine.js'
 import { hookIntoExecution } from './peer-eval.js'
+import { recordToolCall } from './adoption-telemetry.js'
+import { runFailureHarvest } from './failure-harvester.js'
 import type {
   AgentWorkflowEnvelope,
   RoutingCapability,
@@ -192,12 +194,16 @@ async function executeStep(step: ChainStep, previousOutput: unknown): Promise<St
       duration_ms: Date.now() - t0,
     }
 
-    // PeerEval + Pheromone hook: evaluate success
+    // PeerEval + Pheromone + Adaptive RAG: evaluate success with enriched context
     hookIntoExecution(step.agent_id, stepId, {
       taskType: step.tool_name ?? step.cognitive_action ?? 'unknown',
       success: true,
-      metrics: { latency_ms: successResult.duration_ms },
+      inputs: step.arguments,
+      outputs: typeof output === 'object' && output !== null ? output as Record<string, unknown> : { result: output },
+      metrics: { latency_ms: successResult.duration_ms, quality_score: 0.75 },
     }).catch(() => {}) // non-blocking
+    // Adoption telemetry: capture chain-internal tool calls (bypass HTTP layer)
+    recordToolCall(step.tool_name ?? step.cognitive_action ?? 'chain-step')
 
     return successResult
   } catch (err) {
@@ -211,12 +217,34 @@ async function executeStep(step: ChainStep, previousOutput: unknown): Promise<St
       duration_ms: durationMs,
     }
 
-    // PeerEval + Pheromone hook: evaluate failure
-    hookIntoExecution(step.agent_id, stepId, {
-      taskType: step.tool_name ?? step.cognitive_action ?? 'unknown',
-      success: false,
-      metrics: { latency_ms: durationMs },
-    }).catch(() => {}) // non-blocking
+    // PeerEval + Pheromone + Adaptive RAG: fold error for insights then evaluate failure
+    ;(async () => {
+      try {
+        let insights: string[] = []
+        const errMsg = err instanceof Error ? err.message : String(err)
+        const folded = await callMcpTool({
+          toolName: 'context_fold',
+          args: {
+            content: `Step ${stepId} (${step.tool_name ?? step.cognitive_action}) failed after ${durationMs}ms: ${errMsg}`,
+            strategy: 'error-pattern-extraction',
+            target_length: 300,
+          },
+          callId: uuid(),
+          timeoutMs: 5000,
+        })
+        if (folded.status === 'success') {
+          insights = [String(folded.result).slice(0, 300)]
+        }
+        await hookIntoExecution(step.agent_id, stepId, {
+          taskType: step.tool_name ?? step.cognitive_action ?? 'unknown',
+          success: false,
+          metrics: { latency_ms: durationMs, quality_score: 0.1 },
+          insights,
+        })
+      } catch { /* non-blocking — failure path must never throw */ }
+    })()
+    // Adoption telemetry: record even failures (helps understand error rate)
+    recordToolCall(step.tool_name ?? step.cognitive_action ?? 'chain-step')
 
     return errorResult
   }
@@ -654,6 +682,11 @@ export async function executeChain(def: ChainDefinition): Promise<ChainExecution
     steps: execution.steps_completed,
     ms: execution.duration_ms,
   }, 'Chain execution complete')
+
+  // Flywheel: on chain failure, trigger failure harvest → circuit-breaker updates (non-blocking)
+  if (execution.status === 'failed') {
+    runFailureHarvest(24).catch(() => {})
+  }
 
   // F4: Mandatory compound hook — auto-enrich from chain output (flywheel)
   if (execution.status === 'completed' && execution.final_output) {

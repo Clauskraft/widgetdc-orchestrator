@@ -12180,752 +12180,6 @@ var init_peer_eval = __esm({
   }
 });
 
-// src/chain-engine.ts
-var chain_engine_exports = {};
-__export(chain_engine_exports, {
-  FUNNEL_STAGES: () => FUNNEL_STAGES,
-  executeChain: () => executeChain,
-  getExecution: () => getExecution,
-  listExecutions: () => listExecutions
-});
-import { v4 as uuid7 } from "uuid";
-function persistExecution(exec) {
-  executions.set(exec.execution_id, exec);
-  const redis2 = getRedis();
-  if (redis2) {
-    redis2.hset("orchestrator:chains", exec.execution_id, JSON.stringify(exec)).catch(() => {
-    });
-    redis2.expire("orchestrator:chains", 86400).catch(() => {
-    });
-  }
-}
-function getExecution(id) {
-  return executions.get(id);
-}
-function listExecutions() {
-  return Array.from(executions.values()).sort((a, b) => b.started_at.localeCompare(a.started_at)).slice(0, 50);
-}
-async function executeStep(step, previousOutput) {
-  const stepId = step.id ?? uuid7().slice(0, 8);
-  const t0 = Date.now();
-  const prevStr = typeof previousOutput === "string" ? previousOutput : JSON.stringify(previousOutput ?? "");
-  try {
-    let output;
-    if (step.cognitive_action) {
-      const prompt = step.prompt?.replace(/\{\{prev\}\}/g, prevStr) ?? prevStr;
-      output = await callCognitive(step.cognitive_action, {
-        prompt,
-        context: step.arguments,
-        agent_id: step.agent_id,
-        llm_provider: step.llm_provider,
-        llm_model: step.llm_model
-      }, step.timeout_ms);
-    } else if (step.tool_name) {
-      const args = { ...step.arguments };
-      for (const [k, v] of Object.entries(args)) {
-        if (typeof v === "string") {
-          args[k] = v.replace(/\{\{prev\}\}/g, prevStr);
-        }
-      }
-      if (typeof args.context === "string") {
-        args.context = { instruction: args.context };
-      }
-      const result = await callMcpTool({
-        toolName: step.tool_name,
-        args,
-        callId: uuid7(),
-        timeoutMs: step.timeout_ms ?? 3e4
-      });
-      if (result.status !== "success") {
-        throw new Error(result.error_message ?? `Tool ${step.tool_name} failed: ${result.status}`);
-      }
-      output = result.result;
-    } else {
-      throw new Error("Step must have either tool_name or cognitive_action");
-    }
-    const successResult = {
-      step_id: stepId,
-      agent_id: step.agent_id,
-      action: step.tool_name ?? `cognitive:${step.cognitive_action}`,
-      status: "success",
-      output,
-      duration_ms: Date.now() - t0
-    };
-    hookIntoExecution(step.agent_id, stepId, {
-      taskType: step.tool_name ?? step.cognitive_action ?? "unknown",
-      success: true,
-      metrics: { latency_ms: successResult.duration_ms }
-    }).catch(() => {
-    });
-    return successResult;
-  } catch (err) {
-    const durationMs = Date.now() - t0;
-    const errorResult = {
-      step_id: stepId,
-      agent_id: step.agent_id,
-      action: step.tool_name ?? `cognitive:${step.cognitive_action}`,
-      status: "error",
-      output: err instanceof Error ? err.message : String(err),
-      duration_ms: durationMs
-    };
-    hookIntoExecution(step.agent_id, stepId, {
-      taskType: step.tool_name ?? step.cognitive_action ?? "unknown",
-      success: false,
-      metrics: { latency_ms: durationMs }
-    }).catch(() => {
-    });
-    return errorResult;
-  }
-}
-async function runSequential(steps) {
-  const results = [];
-  let previousOutput = null;
-  for (const step of steps) {
-    const result = await executeStep(step, previousOutput);
-    results.push(result);
-    if (result.status === "error") break;
-    previousOutput = result.output;
-  }
-  return results;
-}
-async function runParallel(steps) {
-  return Promise.all(steps.map((step) => executeStep(step, null)));
-}
-async function runLoop(steps, maxIterations, exitCondition) {
-  const allResults = [];
-  let previousOutput = null;
-  for (let i = 0; i < maxIterations; i++) {
-    const iterResults = await runSequential(
-      steps.map((s) => ({ ...s, id: `${s.id ?? s.agent_id}-iter${i}` }))
-    );
-    allResults.push(...iterResults);
-    const lastResult = iterResults[iterResults.length - 1];
-    if (lastResult?.status === "error") break;
-    previousOutput = lastResult?.output;
-    const outputStr = JSON.stringify(previousOutput);
-    if (exitCondition && outputStr.includes(exitCondition)) {
-      logger.info({ iteration: i, exitCondition }, "Loop exit condition met");
-      break;
-    }
-  }
-  return allResults;
-}
-async function classifyComplexity(query) {
-  try {
-    const result = await callCognitive("reason", {
-      prompt: `Classify this query's complexity for a multi-agent system. Reply with ONLY one word: simple, medium, or complex.
-
-Query: "${query}"
-
-Rules:
-- simple: direct lookup, single-hop, factual (\u2192 sequential chain)
-- medium: multi-step, requires 2-3 sources, some reasoning (\u2192 parallel chain)
-- complex: multi-hop reasoning, debate-worthy, ambiguous, strategic (\u2192 debate+parallel)`,
-      context: {},
-      agent_id: "orchestrator"
-    }, 15e3);
-    const text = String(result ?? "").toLowerCase().trim();
-    if (text.includes("complex")) return "complex";
-    if (text.includes("medium")) return "medium";
-    return "simple";
-  } catch {
-    return "medium";
-  }
-}
-async function runAdaptive(steps, query, judgeAgent, confidenceThreshold = 0.6) {
-  const complexity = query ? await classifyComplexity(query) : "medium";
-  logger.info({ complexity, query: query?.slice(0, 80) }, "AGoT: classified complexity");
-  let results;
-  let topology;
-  switch (complexity) {
-    case "simple":
-      topology = "sequential";
-      results = await runSequential(steps);
-      break;
-    case "medium":
-      topology = "parallel";
-      results = await runParallel(steps);
-      break;
-    case "complex":
-      topology = "debate+verify";
-      results = await runDebateGVU(steps, judgeAgent, confidenceThreshold);
-      break;
-    default:
-      topology = "sequential";
-      results = await runSequential(steps);
-  }
-  results.forEach((r) => {
-    r.topology = topology;
-  });
-  return { results, chosen_topology: topology };
-}
-async function persistFunnelState(state4) {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  await redis2.set(
-    `${FUNNEL_REDIS_PREFIX}${state4.execution_id}`,
-    JSON.stringify(state4),
-    "EX",
-    86400 * 7
-    // 7 day TTL
-  ).catch(() => {
-  });
-}
-async function loadFunnelState(executionId) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
-  try {
-    const raw = await redis2.get(`${FUNNEL_REDIS_PREFIX}${executionId}`);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-async function runFunnel(steps, entryStage = "signal", preloadedContext, executionId) {
-  const execId = executionId ?? uuid7();
-  const entryIndex = FUNNEL_STAGES.indexOf(entryStage);
-  let state4 = await loadFunnelState(execId);
-  if (!state4) {
-    state4 = {
-      execution_id: execId,
-      current_stage: entryStage,
-      stage_outputs: {},
-      started_at: (/* @__PURE__ */ new Date()).toISOString(),
-      last_updated: (/* @__PURE__ */ new Date()).toISOString()
-    };
-    if (preloadedContext && entryIndex > 0) {
-      const prevStage = FUNNEL_STAGES[entryIndex - 1];
-      state4.stage_outputs[prevStage] = preloadedContext;
-    }
-  }
-  const results = [];
-  for (let i = entryIndex; i < FUNNEL_STAGES.length; i++) {
-    const stage = FUNNEL_STAGES[i];
-    const step = steps[i];
-    if (!step) {
-      logger.info({ stage, index: i }, "Funnel: no step defined for stage, skipping");
-      continue;
-    }
-    const prevStage = i > 0 ? FUNNEL_STAGES[i - 1] : null;
-    const previousOutput = prevStage ? state4.stage_outputs[prevStage] : preloadedContext ?? null;
-    state4.current_stage = stage;
-    state4.last_updated = (/* @__PURE__ */ new Date()).toISOString();
-    await persistFunnelState(state4);
-    logger.info({ stage, step_index: i, execution_id: execId }, "Funnel: executing stage");
-    const taggedStep = { ...step, id: step.id ?? `funnel-${stage}` };
-    const result = await executeStep(taggedStep, previousOutput);
-    result.funnel_stage = stage;
-    result.stage_index = i;
-    results.push(result);
-    state4.stage_outputs[stage] = result.output;
-    state4.last_updated = (/* @__PURE__ */ new Date()).toISOString();
-    await persistFunnelState(state4);
-    if (result.status === "error") {
-      logger.warn({ stage, error: result.output }, "Funnel: stage failed, state saved for resume");
-      break;
-    }
-  }
-  return { results, funnel_state: state4 };
-}
-async function runDebateGVU(steps, judgeAgent, confidenceThreshold = 0.6) {
-  const debateResults = await runParallel(steps);
-  if (!judgeAgent) return debateResults;
-  const positions = debateResults.map((r) => ({
-    agent: r.agent_id,
-    position: typeof r.output === "string" ? r.output.slice(0, 500) : JSON.stringify(r.output).slice(0, 500),
-    status: r.status
-  }));
-  const verifyResult = await executeStep({
-    agent_id: judgeAgent,
-    cognitive_action: "analyze",
-    prompt: `You are the VERIFIER in a GVU (Generator-Verifier-Updater) loop.
-
-Score each position on a 0-1 confidence scale and synthesize the best answer.
-Only accept positions with confidence >= ${confidenceThreshold}.
-
-Positions:
-${JSON.stringify(positions, null, 2)}
-
-Reply as JSON: {"synthesis": "best answer", "scores": [{"agent": "id", "confidence": 0.0-1.0, "accepted": true/false}], "overall_confidence": 0.0-1.0}`
-  }, positions);
-  let verification = {};
-  try {
-    const raw = String(verifyResult.output ?? "");
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (match) verification = JSON.parse(match[0]);
-  } catch {
-    verification = { synthesis: verifyResult.output, overall_confidence: 0.5, scores: [] };
-  }
-  for (const r of debateResults) {
-    const score = verification.scores?.find((s) => s.agent === r.agent_id);
-    r.confidence = score?.confidence ?? 0.5;
-    r.verified = score?.accepted ?? r.confidence >= confidenceThreshold;
-  }
-  verifyResult.confidence = verification.overall_confidence ?? 0.5;
-  verifyResult.verified = true;
-  verifyResult.output = verification.synthesis ?? verifyResult.output;
-  return [...debateResults, verifyResult];
-}
-async function resolveAutoSteps(def) {
-  const routingDecisions = [];
-  let workflowEnvelope;
-  const resolvedSteps = def.steps.map((step, index) => {
-    if (step.agent_id !== "auto") return step;
-    const resolution = resolveRoutingDecision({
-      message: step.prompt ?? def.query ?? def.name,
-      capabilityHint: step.capability,
-      routeScope: ["widgetdc-orchestrator", "widgetdc-librechat"],
-      operatorVisible: true,
-      recentExecutions: listExecutions(),
-      workflowId: def.chain_id ?? `adaptive-${index}-${Date.now().toString(36)}`
-    });
-    routingDecisions.push(resolution.decision);
-    workflowEnvelope = workflowEnvelope ?? resolution.workflowEnvelope;
-    return {
-      ...step,
-      agent_id: resolution.selectedAgentId
-    };
-  });
-  return { steps: resolvedSteps, routingDecisions, workflowEnvelope };
-}
-async function executeChain(def) {
-  const executionId = uuid7();
-  const chainId = def.chain_id ?? uuid7().slice(0, 12);
-  const t0 = Date.now();
-  const execution = {
-    execution_id: executionId,
-    chain_id: chainId,
-    name: def.name,
-    mode: def.mode,
-    status: "running",
-    steps_completed: 0,
-    steps_total: def.steps.length,
-    results: [],
-    started_at: (/* @__PURE__ */ new Date()).toISOString()
-  };
-  persistExecution(execution);
-  logger.info({ execution_id: executionId, chain: def.name, mode: def.mode, steps: def.steps.length }, "Chain execution started");
-  broadcastMessage({
-    from: "Orchestrator",
-    to: "All",
-    source: "orchestrator",
-    type: "Message",
-    message: `Chain "${def.name}" started (${def.mode}, ${def.steps.length} steps)`,
-    timestamp: (/* @__PURE__ */ new Date()).toISOString()
-  });
-  try {
-    const { steps: resolvedSteps, routingDecisions, workflowEnvelope } = def.mode === "adaptive" || def.steps.some((step) => step.agent_id === "auto") ? await resolveAutoSteps(def) : { steps: def.steps, routingDecisions: [], workflowEnvelope: void 0 };
-    execution.routing_decisions = routingDecisions;
-    execution.workflow_envelope = workflowEnvelope;
-    let results;
-    switch (def.mode) {
-      case "sequential":
-        results = await runSequential(resolvedSteps);
-        break;
-      case "parallel":
-        results = await runParallel(resolvedSteps);
-        break;
-      case "loop":
-        results = await runLoop(resolvedSteps, def.max_iterations ?? 5, def.exit_condition);
-        break;
-      case "debate":
-        results = await runDebateGVU(resolvedSteps, def.judge_agent, def.confidence_threshold);
-        break;
-      case "adaptive": {
-        const adaptive = await runAdaptive(resolvedSteps, def.query, def.judge_agent, def.confidence_threshold);
-        results = adaptive.results;
-        execution.chosen_topology = adaptive.chosen_topology;
-        break;
-      }
-      case "funnel": {
-        const funnelResult = await runFunnel(
-          resolvedSteps,
-          def.funnel_entry,
-          def.funnel_context,
-          executionId
-        );
-        results = funnelResult.results;
-        execution.funnel_state = funnelResult.funnel_state;
-        break;
-      }
-      default:
-        throw new Error(`Unknown chain mode: ${def.mode}`);
-    }
-    const failed = results.some((r) => r.status === "error");
-    execution.results = results;
-    execution.steps_completed = results.filter((r) => r.status === "success").length;
-    execution.status = failed ? "failed" : "completed";
-    execution.final_output = results[results.length - 1]?.output;
-    execution.duration_ms = Date.now() - t0;
-    execution.completed_at = (/* @__PURE__ */ new Date()).toISOString();
-  } catch (err) {
-    execution.status = "failed";
-    execution.error = err instanceof Error ? err.message : String(err);
-    execution.duration_ms = Date.now() - t0;
-    execution.completed_at = (/* @__PURE__ */ new Date()).toISOString();
-  }
-  persistExecution(execution);
-  logger.info({
-    execution_id: executionId,
-    status: execution.status,
-    steps: execution.steps_completed,
-    ms: execution.duration_ms
-  }, "Chain execution complete");
-  if (execution.status === "completed" && execution.final_output) {
-    try {
-      const { hookAutoEnrichment: hookAutoEnrichment3 } = await Promise.resolve().then(() => (init_compound_hooks(), compound_hooks_exports));
-      const outputStr = typeof execution.final_output === "string" ? execution.final_output : JSON.stringify(execution.final_output).slice(0, 3e3);
-      hookAutoEnrichment3(outputStr, def.name);
-    } catch {
-    }
-  }
-  broadcastMessage({
-    from: "Orchestrator",
-    to: "All",
-    source: "orchestrator",
-    type: "Message",
-    message: `Chain "${def.name}" ${execution.status} (${execution.steps_completed}/${execution.steps_total} steps, ${execution.duration_ms}ms)`,
-    timestamp: (/* @__PURE__ */ new Date()).toISOString()
-  });
-  return execution;
-}
-var FUNNEL_STAGES, executions, FUNNEL_REDIS_PREFIX;
-var init_chain_engine = __esm({
-  "src/chain-engine.ts"() {
-    "use strict";
-    init_mcp_caller();
-    init_cognitive_proxy();
-    init_chat_broadcaster();
-    init_logger();
-    init_redis();
-    init_routing_engine();
-    init_peer_eval();
-    FUNNEL_STAGES = [
-      "signal",
-      "pattern",
-      "block",
-      "assembly",
-      "arbitration",
-      "decision",
-      "artifact"
-    ];
-    executions = /* @__PURE__ */ new Map();
-    setInterval(() => {
-      const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1e3).toISOString();
-      for (const [id, exec] of executions) {
-        if (exec.started_at < cutoff) executions.delete(id);
-      }
-    }, 30 * 60 * 1e3);
-    FUNNEL_REDIS_PREFIX = "orchestrator:funnel:";
-  }
-});
-
-// src/verification-gate.ts
-import { v4 as uuid8 } from "uuid";
-async function verifyChainOutput(chainOutput, config2) {
-  const maxRetries = config2.max_retries ?? 3;
-  const start = Date.now();
-  let retries = 0;
-  let lastResult = null;
-  while (retries <= maxRetries) {
-    const checkResults = await runChecksParallel(config2.checks, chainOutput);
-    const tripwireTripped = config2.tripwire_check ? checkResults.some((c) => c.name === config2.tripwire_check && c.status !== "pass") : false;
-    const allPassed = checkResults.every((c) => c.status === "pass");
-    lastResult = {
-      passed: allPassed && !tripwireTripped,
-      checks: checkResults,
-      retries_attempted: retries,
-      total_duration_ms: Date.now() - start,
-      aborted_by_tripwire: tripwireTripped
-    };
-    if (allPassed) {
-      logger.info({ retries, checks: checkResults.length }, "Verification gate: PASSED");
-      return lastResult;
-    }
-    if (tripwireTripped) {
-      logger.warn({ tripwire: config2.tripwire_check }, "Verification gate: TRIPWIRE ABORT");
-      return lastResult;
-    }
-    retries++;
-    if (retries <= maxRetries) {
-      logger.info({ retry: retries, maxRetries, failed: checkResults.filter((c) => c.status !== "pass").map((c) => c.name) }, "Verification gate: retrying");
-      await new Promise((r) => setTimeout(r, 1e3 * retries));
-    }
-  }
-  logger.warn({ retries: maxRetries }, "Verification gate: FAILED after max retries");
-  return lastResult;
-}
-async function runChecksParallel(checks, chainOutput) {
-  const results = await Promise.allSettled(
-    checks.map(async (check) => {
-      const start = Date.now();
-      try {
-        const args = { ...check.arguments };
-        for (const [k, v] of Object.entries(args)) {
-          if (v === "{{output}}") args[k] = chainOutput;
-        }
-        const result = await callMcpTool({
-          toolName: check.tool_name,
-          args,
-          callId: `verify-${uuid8().substring(0, 8)}`,
-          timeoutMs: 15e3
-        });
-        let passed = true;
-        if (check.validate) {
-          passed = check.validate(result);
-        } else if (check.expected_key) {
-          const actual = result?.[check.expected_key];
-          passed = actual === check.expected_value;
-        }
-        return {
-          name: check.name,
-          status: passed ? "pass" : "fail",
-          output: result,
-          duration_ms: Date.now() - start
-        };
-      } catch (err) {
-        return {
-          name: check.name,
-          status: "error",
-          output: String(err),
-          duration_ms: Date.now() - start
-        };
-      }
-    })
-  );
-  return results.map(
-    (r, i) => r.status === "fulfilled" ? r.value : {
-      name: checks[i].name,
-      status: "error",
-      output: String(r.reason),
-      duration_ms: 0
-    }
-  );
-}
-var init_verification_gate = __esm({
-  "src/verification-gate.ts"() {
-    "use strict";
-    init_logger();
-    init_mcp_caller();
-  }
-});
-
-// src/investigate-chain.ts
-function buildInvestigateChain(topic) {
-  return {
-    chain_id: `investigate-${Date.now().toString(36)}`,
-    name: `Investigate: ${topic}`,
-    description: `Multi-agent deep investigation of "${topic}"`,
-    mode: "sequential",
-    steps: [
-      // Step 1: Graph exploration
-      {
-        id: "graph-explore",
-        agent_id: "graph-steward",
-        tool_name: "graph.read_cypher",
-        arguments: {
-          query: `MATCH (n) WHERE toLower(n.title) CONTAINS toLower($topic) OR toLower(coalesce(n.name,'')) CONTAINS toLower($topic) OR toLower(coalesce(n.description,'')) CONTAINS toLower($topic) WITH n LIMIT 20 OPTIONAL MATCH (n)-[r]-(m) RETURN labels(n)[0] AS type, coalesce(n.title, n.name, n.id) AS name, collect(DISTINCT {rel: type(r), target: coalesce(m.title, m.name, labels(m)[0])}) AS connections LIMIT 20`,
-          params: { topic }
-        },
-        timeout_ms: 2e4
-      },
-      // Step 2: Compliance analysis
-      {
-        id: "compliance-analysis",
-        agent_id: "regulatory-navigator",
-        tool_name: "srag.query",
-        arguments: {
-          query: `Compliance and regulatory framework analysis for: ${topic}. Include relevant Danish/EU regulations, governance requirements, and risk considerations. Previous graph findings: {{prev}}`
-        },
-        timeout_ms: 3e4
-      },
-      // Step 3: Strategic recommendations
-      {
-        id: "strategic-recommendations",
-        agent_id: "consulting-partner",
-        tool_name: "kg_rag.query",
-        arguments: {
-          question: `Strategic consulting analysis for: ${topic}. Provide actionable recommendations, patterns, and best practices. Previous compliance findings: {{prev}}`,
-          max_evidence: 15
-        },
-        timeout_ms: 3e4
-      },
-      // Step 4: Deep reasoning synthesis
-      {
-        id: "deep-reasoning",
-        agent_id: "orchestrator",
-        cognitive_action: "reason",
-        prompt: `Synthesize a comprehensive deep analysis of "${topic}" based on all previous findings:
-
-{{prev}}
-
-Provide:
-1. Key findings from graph exploration
-2. Compliance implications
-3. Strategic recommendations
-4. Risk assessment
-5. Suggested next actions`,
-        timeout_ms: 45e3
-      },
-      // Step 5: Artifact assembly — handled post-chain
-      // We use a lightweight step that signals assembly
-      {
-        id: "signal-assembly",
-        agent_id: "orchestrator",
-        tool_name: "graph.health",
-        arguments: {},
-        timeout_ms: 1e4
-      }
-    ]
-  };
-}
-function assembleArtifactBlocks(topic, execution) {
-  const blocks = [];
-  const results = execution.results;
-  const graphResult = results.find((r) => r.step_id === "graph-explore");
-  if (graphResult && graphResult.status === "success") {
-    blocks.push({
-      type: "cypher",
-      label: "Graph Exploration",
-      content: {
-        query: `MATCH (n) WHERE toLower(n.title) CONTAINS toLower("${topic}") ... (see full chain)`
-      }
-    });
-    blocks.push({
-      type: "text",
-      label: "Graph Results",
-      content: {
-        body: typeof graphResult.output === "string" ? graphResult.output : JSON.stringify(graphResult.output, null, 2)
-      }
-    });
-  }
-  const complianceResult = results.find((r) => r.step_id === "compliance-analysis");
-  if (complianceResult && complianceResult.status === "success") {
-    blocks.push({
-      type: "text",
-      label: "Compliance & Regulatory Analysis",
-      content: {
-        body: typeof complianceResult.output === "string" ? complianceResult.output : JSON.stringify(complianceResult.output, null, 2)
-      }
-    });
-  }
-  const strategyResult = results.find((r) => r.step_id === "strategic-recommendations");
-  if (strategyResult && strategyResult.status === "success") {
-    blocks.push({
-      type: "text",
-      label: "Strategic Recommendations",
-      content: {
-        body: typeof strategyResult.output === "string" ? strategyResult.output : JSON.stringify(strategyResult.output, null, 2)
-      }
-    });
-  }
-  const reasoningResult = results.find((r) => r.step_id === "deep-reasoning");
-  if (reasoningResult && reasoningResult.status === "success") {
-    blocks.push({
-      type: "text",
-      label: "Deep Reasoning Synthesis",
-      content: {
-        body: typeof reasoningResult.output === "string" ? reasoningResult.output : JSON.stringify(reasoningResult.output, null, 2)
-      }
-    });
-  }
-  blocks.push({
-    type: "kpi_card",
-    label: "Investigation Metrics",
-    content: {
-      label: "Steps Completed",
-      value: `${execution.steps_completed}/${execution.steps_total}`,
-      trend: execution.status === "completed" ? "up" : "down"
-    }
-  });
-  if (execution.duration_ms) {
-    blocks.push({
-      type: "kpi_card",
-      content: {
-        label: "Duration",
-        value: `${(execution.duration_ms / 1e3).toFixed(1)}s`
-      }
-    });
-  }
-  const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${config.port}`;
-  blocks.push({
-    type: "deep_link",
-    label: "Access Links",
-    content: {
-      label: "View in Command Center",
-      uri: `${baseUrl}/#chains`
-    }
-  });
-  blocks.push({
-    type: "deep_link",
-    content: {
-      label: "Open in Obsidian",
-      uri: `obsidian://widgetdc?action=investigate&topic=${encodeURIComponent(topic)}`
-    }
-  });
-  return blocks;
-}
-async function createArtifact(topic, blocks, execution) {
-  const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${config.port}`;
-  const apiKey = process.env.ORCHESTRATOR_API_KEY ?? "";
-  try {
-    const resp = await fetch(`${baseUrl}/api/artifacts`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        title: `Investigation: ${topic}`,
-        source: "investigate-chain",
-        blocks,
-        tags: ["investigation", "multi-agent", topic.toLowerCase().replace(/\s+/g, "-")],
-        graph_refs: execution.results.filter((r) => r.step_id === "graph-explore" && r.status === "success").map((r) => `neo4j:investigate:${topic}`),
-        created_by: "investigate-chain"
-      })
-    });
-    if (!resp.ok) {
-      logger.warn({ status: resp.status }, "Failed to create investigation artifact");
-      return null;
-    }
-    const data = await resp.json();
-    if (data.success && data.artifact) {
-      const id = data.artifact.$id;
-      return {
-        artifactId: id,
-        artifactUrl: `${baseUrl}/api/artifacts/${encodeURIComponent(id)}`
-      };
-    }
-    return null;
-  } catch (err) {
-    logger.warn({ err: String(err) }, "Artifact creation failed for investigation");
-    return null;
-  }
-}
-async function runInvestigation(topic) {
-  const chainDef = buildInvestigateChain(topic);
-  logger.info({ topic, chain_id: chainDef.chain_id }, "Starting investigation chain");
-  const execution = await executeChain(chainDef);
-  const blocks = assembleArtifactBlocks(topic, execution);
-  const artifact = await createArtifact(topic, blocks, execution);
-  const result = { execution };
-  if (artifact) {
-    result.artifact_id = artifact.artifactId;
-    result.artifact_url = artifact.artifactUrl;
-    result.artifact_markdown_url = `${artifact.artifactUrl}.md`;
-    logger.info({ artifact_id: artifact.artifactId, topic }, "Investigation artifact created");
-  }
-  return result;
-}
-var init_investigate_chain = __esm({
-  "src/investigate-chain.ts"() {
-    "use strict";
-    init_chain_engine();
-    init_config();
-    init_logger();
-  }
-});
-
 // src/tool-registry.ts
 var tool_registry_exports = {};
 __export(tool_registry_exports, {
@@ -13961,13 +13215,1094 @@ var init_tool_registry = __esm({
   }
 });
 
+// src/adoption-telemetry.ts
+function isoWeek() {
+  const now = /* @__PURE__ */ new Date();
+  const d = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const week = Math.ceil(((d.getTime() - yearStart.getTime()) / 864e5 + 1) / 7);
+  return `${d.getUTCFullYear()}${String(week).padStart(2, "0")}`;
+}
+function recordToolCall(toolName) {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  const windowKey = `orchestrator:telemetry:window:${isoWeek()}`;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  redis2.pipeline().zincrby(KEY_CALLS, 1, toolName).zincrby(windowKey, 1, toolName).expire(windowKey, WINDOW_TTL).hset(KEY_LAST, toolName, now).exec().catch((err) => {
+    const nowMs = Date.now();
+    const last = lastErrorLog.get(toolName) ?? 0;
+    if (nowMs - last > ERROR_THROTTLE_MS) {
+      lastErrorLog.set(toolName, nowMs);
+      logger.warn({ err: String(err), tool: toolName }, "telemetry: Redis write failed (throttled)");
+    }
+  });
+}
+async function computeTelemetry() {
+  const redis2 = getRedis();
+  const allTools = TOOL_REGISTRY.map((t) => t.name);
+  const now = Date.now();
+  const empty = (tool) => ({
+    tool,
+    namespace: TOOL_REGISTRY.find((t) => t.name === tool)?.namespace ?? "unknown",
+    lifetime_calls: 0,
+    weekly_calls: 0,
+    last_called: null,
+    stale: false,
+    advanced: ADVANCED_TOOLS.has(tool)
+  });
+  if (!redis2) {
+    const tools2 = allTools.map(empty);
+    return buildSummary(tools2);
+  }
+  const windowKey = `orchestrator:telemetry:window:${isoWeek()}`;
+  const [lifetimeRaw, weeklyRaw, lastRaw] = await Promise.all([
+    redis2.zrange(KEY_CALLS, 0, -1, "WITHSCORES"),
+    redis2.zrange(windowKey, 0, -1, "WITHSCORES"),
+    redis2.hgetall(KEY_LAST)
+  ]);
+  const parseZSet = (raw) => {
+    const m = /* @__PURE__ */ new Map();
+    for (let i = 0; i < raw.length - 1; i += 2) {
+      m.set(raw[i], parseInt(raw[i + 1], 10) || 0);
+    }
+    return m;
+  };
+  const lifetimeCounts = parseZSet(lifetimeRaw);
+  const weeklyCounts = parseZSet(weeklyRaw);
+  const lastCalled = lastRaw ?? {};
+  const tools = allTools.map((name) => {
+    const ns = TOOL_REGISTRY.find((t) => t.name === name)?.namespace ?? "unknown";
+    const lc = lastCalled[name] ?? null;
+    const life = lifetimeCounts.get(name) ?? 0;
+    const stale = life > 0 && lc !== null && now - new Date(lc).getTime() > STALE_MS;
+    return {
+      tool: name,
+      namespace: ns,
+      lifetime_calls: life,
+      weekly_calls: weeklyCounts.get(name) ?? 0,
+      last_called: lc,
+      stale,
+      advanced: ADVANCED_TOOLS.has(name)
+    };
+  });
+  return buildSummary(tools);
+}
+function buildSummary(tools) {
+  const total = tools.length;
+  const calledEver = tools.filter((t) => t.lifetime_calls > 0);
+  const calledWeek = tools.filter((t) => t.weekly_calls > 0);
+  const zeroCalls = tools.filter((t) => t.lifetime_calls === 0).map((t) => t.tool);
+  const stale = tools.filter((t) => t.stale).map((t) => t.tool);
+  const hotTools = [...tools].sort((a, b) => b.lifetime_calls - a.lifetime_calls).slice(0, 5).map((t) => ({ tool: t.tool, calls: t.lifetime_calls }));
+  const advancedTools = tools.filter((t) => t.advanced);
+  const advancedUsed = advancedTools.filter((t) => t.weekly_calls > 0);
+  return {
+    generated_at: (/* @__PURE__ */ new Date()).toISOString(),
+    total_tools: total,
+    tools_called_ever: calledEver.length,
+    tools_called_this_week: calledWeek.length,
+    zero_call_tools: zeroCalls,
+    stale_tools: stale,
+    hot_tools: hotTools,
+    kpis: {
+      utilisation_rate_pct: pct(calledWeek.length, total),
+      advanced_utilisation_pct: pct(advancedUsed.length, advancedTools.length),
+      zero_call_rate_pct: pct(zeroCalls.length, total),
+      stale_rate_pct: pct(stale.length, total)
+    },
+    tools
+  };
+}
+function pct(n, d) {
+  return d === 0 ? 0 : Math.round(n / d * 1e3) / 10;
+}
+var KEY_CALLS, KEY_LAST, WINDOW_TTL, STALE_MS, ADVANCED_TOOLS, lastErrorLog, ERROR_THROTTLE_MS;
+var init_adoption_telemetry = __esm({
+  "src/adoption-telemetry.ts"() {
+    "use strict";
+    init_redis();
+    init_logger();
+    init_tool_registry();
+    KEY_CALLS = "orchestrator:telemetry:calls";
+    KEY_LAST = "orchestrator:telemetry:last_called";
+    WINDOW_TTL = 30 * 24 * 3600;
+    STALE_MS = 30 * 24 * 3600 * 1e3;
+    ADVANCED_TOOLS = new Set(
+      TOOL_REGISTRY.filter((t) => t.namespace === "intelligence").map((t) => t.name)
+    );
+    lastErrorLog = /* @__PURE__ */ new Map();
+    ERROR_THROTTLE_MS = 5 * 60 * 1e3;
+  }
+});
+
+// src/failure-harvester.ts
+var failure_harvester_exports = {};
+__export(failure_harvester_exports, {
+  buildFailureSummary: () => buildFailureSummary,
+  harvestFailures: () => harvestFailures,
+  runFailureHarvest: () => runFailureHarvest
+});
+import { v4 as uuid7 } from "uuid";
+function categorizeFailure(error) {
+  const lower = error.toLowerCase();
+  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) return "timeout";
+  if (lower.includes("502") || lower.includes("bad gateway") || lower.includes("econnrefused")) return "502";
+  if (lower.includes("401") || lower.includes("403") || lower.includes("unauthorized") || lower.includes("forbidden")) return "auth";
+  if (lower.includes("validation") || lower.includes("invalid") || lower.includes("required")) return "validation";
+  if (lower.includes("mcp") || lower.includes("tool_not_found") || lower.includes("tool call")) return "mcp_error";
+  return "unknown";
+}
+async function harvestFailures(windowHours = 24) {
+  const redis2 = getRedis();
+  if (!redis2) {
+    logger.warn("Failure harvester: Redis not available");
+    return [];
+  }
+  const events = [];
+  const cutoff = new Date(Date.now() - windowHours * 36e5).toISOString();
+  try {
+    let cursor = "0";
+    do {
+      const [nextCursor, fields] = await redis2.hscan("orchestrator:chains", cursor, "COUNT", 200);
+      cursor = nextCursor;
+      for (let i = 0; i < fields.length; i += 2) {
+        const execId = fields[i];
+        const json = fields[i + 1];
+        try {
+          const exec = JSON.parse(json);
+          if (exec.status !== "failed") continue;
+          if (exec.started_at < cutoff) continue;
+          const failedSteps = exec.results?.filter((r) => r.status === "error") ?? [];
+          const errorMsg = exec.error ?? failedSteps.map((s) => String(s.output)).join("; ") ?? "unknown";
+          events.push({
+            $id: `failure-event:${uuid7()}`,
+            execution_id: execId,
+            chain_name: exec.name,
+            category: categorizeFailure(errorMsg),
+            error_message: errorMsg.slice(0, 500),
+            affected_tool: failedSteps[0]?.action ?? null,
+            affected_agent: failedSteps[0]?.agent_id ?? null,
+            timestamp: exec.started_at
+          });
+        } catch {
+        }
+      }
+    } while (cursor !== "0");
+    logger.info({ harvested: events.length, window_hours: windowHours }, "Failure harvester scan complete");
+  } catch (err) {
+    logger.error({ err: String(err) }, "Failure harvester scan failed");
+  }
+  return events;
+}
+async function persistToGraph2(events) {
+  let persisted = 0;
+  for (const evt of events) {
+    try {
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `
+            MERGE (f:FailureEvent {execution_id: $execution_id})
+            SET f.chain_name = $chain_name,
+                f.category = $category,
+                f.error_message = $error_message,
+                f.affected_tool = $affected_tool,
+                f.affected_agent = $affected_agent,
+                f.timestamp = datetime($timestamp),
+                f.harvested_at = datetime()
+          `,
+          params: {
+            execution_id: evt.execution_id,
+            chain_name: evt.chain_name,
+            category: evt.category,
+            error_message: evt.error_message,
+            affected_tool: evt.affected_tool ?? "",
+            affected_agent: evt.affected_agent ?? "",
+            timestamp: evt.timestamp
+          }
+        },
+        callId: uuid7(),
+        timeoutMs: 1e4
+      });
+      persisted++;
+    } catch (err) {
+      logger.warn({ err: String(err), execution_id: evt.execution_id }, "Failed to persist failure event");
+    }
+  }
+  if (persisted > 0) {
+    try {
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `
+            MATCH (f:FailureEvent) WHERE f.affected_tool <> ''
+            MATCH (t:Tool {name: f.affected_tool})
+            MERGE (f)-[:AFFECTED_TOOL]->(t)
+          `,
+          params: {}
+        },
+        callId: uuid7(),
+        timeoutMs: 1e4
+      });
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `
+            MATCH (f:FailureEvent) WHERE f.affected_agent <> ''
+            MATCH (a:Agent {id: f.affected_agent})
+            MERGE (f)-[:AFFECTED_AGENT]->(a)
+          `,
+          params: {}
+        },
+        callId: uuid7(),
+        timeoutMs: 1e4
+      });
+    } catch {
+    }
+  }
+  return persisted;
+}
+function buildFailureSummary(events, windowHours = 24) {
+  const byCategory = {
+    timeout: 0,
+    "502": 0,
+    auth: 0,
+    validation: 0,
+    mcp_error: 0,
+    unknown: 0
+  };
+  const toolCounts = /* @__PURE__ */ new Map();
+  const agentCounts = /* @__PURE__ */ new Map();
+  for (const evt of events) {
+    byCategory[evt.category]++;
+    if (evt.affected_tool) toolCounts.set(evt.affected_tool, (toolCounts.get(evt.affected_tool) ?? 0) + 1);
+    if (evt.affected_agent) agentCounts.set(evt.affected_agent, (agentCounts.get(evt.affected_agent) ?? 0) + 1);
+  }
+  const topTools = [...toolCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([tool, count]) => ({ tool, count }));
+  const topAgents = [...agentCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([agent, count]) => ({ agent, count }));
+  return {
+    $id: `failure-summary:${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}`,
+    total_failures: events.length,
+    by_category: byCategory,
+    top_tools: topTools,
+    top_agents: topAgents,
+    recent: events.slice(-20),
+    harvested_at: (/* @__PURE__ */ new Date()).toISOString(),
+    window_hours: windowHours
+  };
+}
+async function runFailureHarvest(windowHours = 24) {
+  const events = await harvestFailures(windowHours);
+  const persisted = await persistToGraph2(events);
+  const summary = buildFailureSummary(events, windowHours);
+  const redis2 = getRedis();
+  if (redis2) {
+    await redis2.set("orchestrator:failure-summary", JSON.stringify(summary), "EX", 3600).catch(() => {
+    });
+  }
+  broadcastSSE("failure-harvest", summary);
+  logger.info({
+    total: events.length,
+    persisted,
+    categories: summary.by_category
+  }, "Failure harvest cycle complete");
+  return summary;
+}
+var init_failure_harvester = __esm({
+  "src/failure-harvester.ts"() {
+    "use strict";
+    init_redis();
+    init_mcp_caller();
+    init_logger();
+    init_sse();
+  }
+});
+
+// src/chain-engine.ts
+var chain_engine_exports = {};
+__export(chain_engine_exports, {
+  FUNNEL_STAGES: () => FUNNEL_STAGES,
+  executeChain: () => executeChain,
+  getExecution: () => getExecution,
+  listExecutions: () => listExecutions
+});
+import { v4 as uuid8 } from "uuid";
+function persistExecution(exec) {
+  executions.set(exec.execution_id, exec);
+  const redis2 = getRedis();
+  if (redis2) {
+    redis2.hset("orchestrator:chains", exec.execution_id, JSON.stringify(exec)).catch(() => {
+    });
+    redis2.expire("orchestrator:chains", 86400).catch(() => {
+    });
+  }
+}
+function getExecution(id) {
+  return executions.get(id);
+}
+function listExecutions() {
+  return Array.from(executions.values()).sort((a, b) => b.started_at.localeCompare(a.started_at)).slice(0, 50);
+}
+async function executeStep(step, previousOutput) {
+  const stepId = step.id ?? uuid8().slice(0, 8);
+  const t0 = Date.now();
+  const prevStr = typeof previousOutput === "string" ? previousOutput : JSON.stringify(previousOutput ?? "");
+  try {
+    let output;
+    if (step.cognitive_action) {
+      const prompt = step.prompt?.replace(/\{\{prev\}\}/g, prevStr) ?? prevStr;
+      output = await callCognitive(step.cognitive_action, {
+        prompt,
+        context: step.arguments,
+        agent_id: step.agent_id,
+        llm_provider: step.llm_provider,
+        llm_model: step.llm_model
+      }, step.timeout_ms);
+    } else if (step.tool_name) {
+      const args = { ...step.arguments };
+      for (const [k, v] of Object.entries(args)) {
+        if (typeof v === "string") {
+          args[k] = v.replace(/\{\{prev\}\}/g, prevStr);
+        }
+      }
+      if (typeof args.context === "string") {
+        args.context = { instruction: args.context };
+      }
+      const result = await callMcpTool({
+        toolName: step.tool_name,
+        args,
+        callId: uuid8(),
+        timeoutMs: step.timeout_ms ?? 3e4
+      });
+      if (result.status !== "success") {
+        throw new Error(result.error_message ?? `Tool ${step.tool_name} failed: ${result.status}`);
+      }
+      output = result.result;
+    } else {
+      throw new Error("Step must have either tool_name or cognitive_action");
+    }
+    const successResult = {
+      step_id: stepId,
+      agent_id: step.agent_id,
+      action: step.tool_name ?? `cognitive:${step.cognitive_action}`,
+      status: "success",
+      output,
+      duration_ms: Date.now() - t0
+    };
+    hookIntoExecution(step.agent_id, stepId, {
+      taskType: step.tool_name ?? step.cognitive_action ?? "unknown",
+      success: true,
+      inputs: step.arguments,
+      outputs: typeof output === "object" && output !== null ? output : { result: output },
+      metrics: { latency_ms: successResult.duration_ms, quality_score: 0.75 }
+    }).catch(() => {
+    });
+    recordToolCall(step.tool_name ?? step.cognitive_action ?? "chain-step");
+    return successResult;
+  } catch (err) {
+    const durationMs = Date.now() - t0;
+    const errorResult = {
+      step_id: stepId,
+      agent_id: step.agent_id,
+      action: step.tool_name ?? `cognitive:${step.cognitive_action}`,
+      status: "error",
+      output: err instanceof Error ? err.message : String(err),
+      duration_ms: durationMs
+    };
+    (async () => {
+      try {
+        let insights = [];
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const folded = await callMcpTool({
+          toolName: "context_fold",
+          args: {
+            content: `Step ${stepId} (${step.tool_name ?? step.cognitive_action}) failed after ${durationMs}ms: ${errMsg}`,
+            strategy: "error-pattern-extraction",
+            target_length: 300
+          },
+          callId: uuid8(),
+          timeoutMs: 5e3
+        });
+        if (folded.status === "success") {
+          insights = [String(folded.result).slice(0, 300)];
+        }
+        await hookIntoExecution(step.agent_id, stepId, {
+          taskType: step.tool_name ?? step.cognitive_action ?? "unknown",
+          success: false,
+          metrics: { latency_ms: durationMs, quality_score: 0.1 },
+          insights
+        });
+      } catch {
+      }
+    })();
+    recordToolCall(step.tool_name ?? step.cognitive_action ?? "chain-step");
+    return errorResult;
+  }
+}
+async function runSequential(steps) {
+  const results = [];
+  let previousOutput = null;
+  for (const step of steps) {
+    const result = await executeStep(step, previousOutput);
+    results.push(result);
+    if (result.status === "error") break;
+    previousOutput = result.output;
+  }
+  return results;
+}
+async function runParallel(steps) {
+  return Promise.all(steps.map((step) => executeStep(step, null)));
+}
+async function runLoop(steps, maxIterations, exitCondition) {
+  const allResults = [];
+  let previousOutput = null;
+  for (let i = 0; i < maxIterations; i++) {
+    const iterResults = await runSequential(
+      steps.map((s) => ({ ...s, id: `${s.id ?? s.agent_id}-iter${i}` }))
+    );
+    allResults.push(...iterResults);
+    const lastResult = iterResults[iterResults.length - 1];
+    if (lastResult?.status === "error") break;
+    previousOutput = lastResult?.output;
+    const outputStr = JSON.stringify(previousOutput);
+    if (exitCondition && outputStr.includes(exitCondition)) {
+      logger.info({ iteration: i, exitCondition }, "Loop exit condition met");
+      break;
+    }
+  }
+  return allResults;
+}
+async function classifyComplexity(query) {
+  try {
+    const result = await callCognitive("reason", {
+      prompt: `Classify this query's complexity for a multi-agent system. Reply with ONLY one word: simple, medium, or complex.
+
+Query: "${query}"
+
+Rules:
+- simple: direct lookup, single-hop, factual (\u2192 sequential chain)
+- medium: multi-step, requires 2-3 sources, some reasoning (\u2192 parallel chain)
+- complex: multi-hop reasoning, debate-worthy, ambiguous, strategic (\u2192 debate+parallel)`,
+      context: {},
+      agent_id: "orchestrator"
+    }, 15e3);
+    const text = String(result ?? "").toLowerCase().trim();
+    if (text.includes("complex")) return "complex";
+    if (text.includes("medium")) return "medium";
+    return "simple";
+  } catch {
+    return "medium";
+  }
+}
+async function runAdaptive(steps, query, judgeAgent, confidenceThreshold = 0.6) {
+  const complexity = query ? await classifyComplexity(query) : "medium";
+  logger.info({ complexity, query: query?.slice(0, 80) }, "AGoT: classified complexity");
+  let results;
+  let topology;
+  switch (complexity) {
+    case "simple":
+      topology = "sequential";
+      results = await runSequential(steps);
+      break;
+    case "medium":
+      topology = "parallel";
+      results = await runParallel(steps);
+      break;
+    case "complex":
+      topology = "debate+verify";
+      results = await runDebateGVU(steps, judgeAgent, confidenceThreshold);
+      break;
+    default:
+      topology = "sequential";
+      results = await runSequential(steps);
+  }
+  results.forEach((r) => {
+    r.topology = topology;
+  });
+  return { results, chosen_topology: topology };
+}
+async function persistFunnelState(state4) {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  await redis2.set(
+    `${FUNNEL_REDIS_PREFIX}${state4.execution_id}`,
+    JSON.stringify(state4),
+    "EX",
+    86400 * 7
+    // 7 day TTL
+  ).catch(() => {
+  });
+}
+async function loadFunnelState(executionId) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${FUNNEL_REDIS_PREFIX}${executionId}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+async function runFunnel(steps, entryStage = "signal", preloadedContext, executionId) {
+  const execId = executionId ?? uuid8();
+  const entryIndex = FUNNEL_STAGES.indexOf(entryStage);
+  let state4 = await loadFunnelState(execId);
+  if (!state4) {
+    state4 = {
+      execution_id: execId,
+      current_stage: entryStage,
+      stage_outputs: {},
+      started_at: (/* @__PURE__ */ new Date()).toISOString(),
+      last_updated: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    if (preloadedContext && entryIndex > 0) {
+      const prevStage = FUNNEL_STAGES[entryIndex - 1];
+      state4.stage_outputs[prevStage] = preloadedContext;
+    }
+  }
+  const results = [];
+  for (let i = entryIndex; i < FUNNEL_STAGES.length; i++) {
+    const stage = FUNNEL_STAGES[i];
+    const step = steps[i];
+    if (!step) {
+      logger.info({ stage, index: i }, "Funnel: no step defined for stage, skipping");
+      continue;
+    }
+    const prevStage = i > 0 ? FUNNEL_STAGES[i - 1] : null;
+    const previousOutput = prevStage ? state4.stage_outputs[prevStage] : preloadedContext ?? null;
+    state4.current_stage = stage;
+    state4.last_updated = (/* @__PURE__ */ new Date()).toISOString();
+    await persistFunnelState(state4);
+    logger.info({ stage, step_index: i, execution_id: execId }, "Funnel: executing stage");
+    const taggedStep = { ...step, id: step.id ?? `funnel-${stage}` };
+    const result = await executeStep(taggedStep, previousOutput);
+    result.funnel_stage = stage;
+    result.stage_index = i;
+    results.push(result);
+    state4.stage_outputs[stage] = result.output;
+    state4.last_updated = (/* @__PURE__ */ new Date()).toISOString();
+    await persistFunnelState(state4);
+    if (result.status === "error") {
+      logger.warn({ stage, error: result.output }, "Funnel: stage failed, state saved for resume");
+      break;
+    }
+  }
+  return { results, funnel_state: state4 };
+}
+async function runDebateGVU(steps, judgeAgent, confidenceThreshold = 0.6) {
+  const debateResults = await runParallel(steps);
+  if (!judgeAgent) return debateResults;
+  const positions = debateResults.map((r) => ({
+    agent: r.agent_id,
+    position: typeof r.output === "string" ? r.output.slice(0, 500) : JSON.stringify(r.output).slice(0, 500),
+    status: r.status
+  }));
+  const verifyResult = await executeStep({
+    agent_id: judgeAgent,
+    cognitive_action: "analyze",
+    prompt: `You are the VERIFIER in a GVU (Generator-Verifier-Updater) loop.
+
+Score each position on a 0-1 confidence scale and synthesize the best answer.
+Only accept positions with confidence >= ${confidenceThreshold}.
+
+Positions:
+${JSON.stringify(positions, null, 2)}
+
+Reply as JSON: {"synthesis": "best answer", "scores": [{"agent": "id", "confidence": 0.0-1.0, "accepted": true/false}], "overall_confidence": 0.0-1.0}`
+  }, positions);
+  let verification = {};
+  try {
+    const raw = String(verifyResult.output ?? "");
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (match) verification = JSON.parse(match[0]);
+  } catch {
+    verification = { synthesis: verifyResult.output, overall_confidence: 0.5, scores: [] };
+  }
+  for (const r of debateResults) {
+    const score = verification.scores?.find((s) => s.agent === r.agent_id);
+    r.confidence = score?.confidence ?? 0.5;
+    r.verified = score?.accepted ?? r.confidence >= confidenceThreshold;
+  }
+  verifyResult.confidence = verification.overall_confidence ?? 0.5;
+  verifyResult.verified = true;
+  verifyResult.output = verification.synthesis ?? verifyResult.output;
+  return [...debateResults, verifyResult];
+}
+async function resolveAutoSteps(def) {
+  const routingDecisions = [];
+  let workflowEnvelope;
+  const resolvedSteps = def.steps.map((step, index) => {
+    if (step.agent_id !== "auto") return step;
+    const resolution = resolveRoutingDecision({
+      message: step.prompt ?? def.query ?? def.name,
+      capabilityHint: step.capability,
+      routeScope: ["widgetdc-orchestrator", "widgetdc-librechat"],
+      operatorVisible: true,
+      recentExecutions: listExecutions(),
+      workflowId: def.chain_id ?? `adaptive-${index}-${Date.now().toString(36)}`
+    });
+    routingDecisions.push(resolution.decision);
+    workflowEnvelope = workflowEnvelope ?? resolution.workflowEnvelope;
+    return {
+      ...step,
+      agent_id: resolution.selectedAgentId
+    };
+  });
+  return { steps: resolvedSteps, routingDecisions, workflowEnvelope };
+}
+async function executeChain(def) {
+  const executionId = uuid8();
+  const chainId = def.chain_id ?? uuid8().slice(0, 12);
+  const t0 = Date.now();
+  const execution = {
+    execution_id: executionId,
+    chain_id: chainId,
+    name: def.name,
+    mode: def.mode,
+    status: "running",
+    steps_completed: 0,
+    steps_total: def.steps.length,
+    results: [],
+    started_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  persistExecution(execution);
+  logger.info({ execution_id: executionId, chain: def.name, mode: def.mode, steps: def.steps.length }, "Chain execution started");
+  broadcastMessage({
+    from: "Orchestrator",
+    to: "All",
+    source: "orchestrator",
+    type: "Message",
+    message: `Chain "${def.name}" started (${def.mode}, ${def.steps.length} steps)`,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  });
+  try {
+    const { steps: resolvedSteps, routingDecisions, workflowEnvelope } = def.mode === "adaptive" || def.steps.some((step) => step.agent_id === "auto") ? await resolveAutoSteps(def) : { steps: def.steps, routingDecisions: [], workflowEnvelope: void 0 };
+    execution.routing_decisions = routingDecisions;
+    execution.workflow_envelope = workflowEnvelope;
+    let results;
+    switch (def.mode) {
+      case "sequential":
+        results = await runSequential(resolvedSteps);
+        break;
+      case "parallel":
+        results = await runParallel(resolvedSteps);
+        break;
+      case "loop":
+        results = await runLoop(resolvedSteps, def.max_iterations ?? 5, def.exit_condition);
+        break;
+      case "debate":
+        results = await runDebateGVU(resolvedSteps, def.judge_agent, def.confidence_threshold);
+        break;
+      case "adaptive": {
+        const adaptive = await runAdaptive(resolvedSteps, def.query, def.judge_agent, def.confidence_threshold);
+        results = adaptive.results;
+        execution.chosen_topology = adaptive.chosen_topology;
+        break;
+      }
+      case "funnel": {
+        const funnelResult = await runFunnel(
+          resolvedSteps,
+          def.funnel_entry,
+          def.funnel_context,
+          executionId
+        );
+        results = funnelResult.results;
+        execution.funnel_state = funnelResult.funnel_state;
+        break;
+      }
+      default:
+        throw new Error(`Unknown chain mode: ${def.mode}`);
+    }
+    const failed = results.some((r) => r.status === "error");
+    execution.results = results;
+    execution.steps_completed = results.filter((r) => r.status === "success").length;
+    execution.status = failed ? "failed" : "completed";
+    execution.final_output = results[results.length - 1]?.output;
+    execution.duration_ms = Date.now() - t0;
+    execution.completed_at = (/* @__PURE__ */ new Date()).toISOString();
+  } catch (err) {
+    execution.status = "failed";
+    execution.error = err instanceof Error ? err.message : String(err);
+    execution.duration_ms = Date.now() - t0;
+    execution.completed_at = (/* @__PURE__ */ new Date()).toISOString();
+  }
+  persistExecution(execution);
+  logger.info({
+    execution_id: executionId,
+    status: execution.status,
+    steps: execution.steps_completed,
+    ms: execution.duration_ms
+  }, "Chain execution complete");
+  if (execution.status === "failed") {
+    runFailureHarvest(24).catch(() => {
+    });
+  }
+  if (execution.status === "completed" && execution.final_output) {
+    try {
+      const { hookAutoEnrichment: hookAutoEnrichment3 } = await Promise.resolve().then(() => (init_compound_hooks(), compound_hooks_exports));
+      const outputStr = typeof execution.final_output === "string" ? execution.final_output : JSON.stringify(execution.final_output).slice(0, 3e3);
+      hookAutoEnrichment3(outputStr, def.name);
+    } catch {
+    }
+  }
+  broadcastMessage({
+    from: "Orchestrator",
+    to: "All",
+    source: "orchestrator",
+    type: "Message",
+    message: `Chain "${def.name}" ${execution.status} (${execution.steps_completed}/${execution.steps_total} steps, ${execution.duration_ms}ms)`,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  });
+  return execution;
+}
+var FUNNEL_STAGES, executions, FUNNEL_REDIS_PREFIX;
+var init_chain_engine = __esm({
+  "src/chain-engine.ts"() {
+    "use strict";
+    init_mcp_caller();
+    init_cognitive_proxy();
+    init_chat_broadcaster();
+    init_logger();
+    init_redis();
+    init_routing_engine();
+    init_peer_eval();
+    init_adoption_telemetry();
+    init_failure_harvester();
+    FUNNEL_STAGES = [
+      "signal",
+      "pattern",
+      "block",
+      "assembly",
+      "arbitration",
+      "decision",
+      "artifact"
+    ];
+    executions = /* @__PURE__ */ new Map();
+    setInterval(() => {
+      const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1e3).toISOString();
+      for (const [id, exec] of executions) {
+        if (exec.started_at < cutoff) executions.delete(id);
+      }
+    }, 30 * 60 * 1e3);
+    FUNNEL_REDIS_PREFIX = "orchestrator:funnel:";
+  }
+});
+
+// src/verification-gate.ts
+import { v4 as uuid9 } from "uuid";
+async function verifyChainOutput(chainOutput, config2) {
+  const maxRetries = config2.max_retries ?? 3;
+  const start = Date.now();
+  let retries = 0;
+  let lastResult = null;
+  while (retries <= maxRetries) {
+    const checkResults = await runChecksParallel(config2.checks, chainOutput);
+    const tripwireTripped = config2.tripwire_check ? checkResults.some((c) => c.name === config2.tripwire_check && c.status !== "pass") : false;
+    const allPassed = checkResults.every((c) => c.status === "pass");
+    lastResult = {
+      passed: allPassed && !tripwireTripped,
+      checks: checkResults,
+      retries_attempted: retries,
+      total_duration_ms: Date.now() - start,
+      aborted_by_tripwire: tripwireTripped
+    };
+    if (allPassed) {
+      logger.info({ retries, checks: checkResults.length }, "Verification gate: PASSED");
+      return lastResult;
+    }
+    if (tripwireTripped) {
+      logger.warn({ tripwire: config2.tripwire_check }, "Verification gate: TRIPWIRE ABORT");
+      return lastResult;
+    }
+    retries++;
+    if (retries <= maxRetries) {
+      logger.info({ retry: retries, maxRetries, failed: checkResults.filter((c) => c.status !== "pass").map((c) => c.name) }, "Verification gate: retrying");
+      await new Promise((r) => setTimeout(r, 1e3 * retries));
+    }
+  }
+  logger.warn({ retries: maxRetries }, "Verification gate: FAILED after max retries");
+  return lastResult;
+}
+async function runChecksParallel(checks, chainOutput) {
+  const results = await Promise.allSettled(
+    checks.map(async (check) => {
+      const start = Date.now();
+      try {
+        const args = { ...check.arguments };
+        for (const [k, v] of Object.entries(args)) {
+          if (v === "{{output}}") args[k] = chainOutput;
+        }
+        const result = await callMcpTool({
+          toolName: check.tool_name,
+          args,
+          callId: `verify-${uuid9().substring(0, 8)}`,
+          timeoutMs: 15e3
+        });
+        let passed = true;
+        if (check.validate) {
+          passed = check.validate(result);
+        } else if (check.expected_key) {
+          const actual = result?.[check.expected_key];
+          passed = actual === check.expected_value;
+        }
+        return {
+          name: check.name,
+          status: passed ? "pass" : "fail",
+          output: result,
+          duration_ms: Date.now() - start
+        };
+      } catch (err) {
+        return {
+          name: check.name,
+          status: "error",
+          output: String(err),
+          duration_ms: Date.now() - start
+        };
+      }
+    })
+  );
+  return results.map(
+    (r, i) => r.status === "fulfilled" ? r.value : {
+      name: checks[i].name,
+      status: "error",
+      output: String(r.reason),
+      duration_ms: 0
+    }
+  );
+}
+var init_verification_gate = __esm({
+  "src/verification-gate.ts"() {
+    "use strict";
+    init_logger();
+    init_mcp_caller();
+  }
+});
+
+// src/investigate-chain.ts
+function buildInvestigateChain(topic) {
+  return {
+    chain_id: `investigate-${Date.now().toString(36)}`,
+    name: `Investigate: ${topic}`,
+    description: `Multi-agent deep investigation of "${topic}"`,
+    mode: "sequential",
+    steps: [
+      // Step 1: Graph exploration
+      {
+        id: "graph-explore",
+        agent_id: "graph-steward",
+        tool_name: "graph.read_cypher",
+        arguments: {
+          query: `MATCH (n) WHERE toLower(n.title) CONTAINS toLower($topic) OR toLower(coalesce(n.name,'')) CONTAINS toLower($topic) OR toLower(coalesce(n.description,'')) CONTAINS toLower($topic) WITH n LIMIT 20 OPTIONAL MATCH (n)-[r]-(m) RETURN labels(n)[0] AS type, coalesce(n.title, n.name, n.id) AS name, collect(DISTINCT {rel: type(r), target: coalesce(m.title, m.name, labels(m)[0])}) AS connections LIMIT 20`,
+          params: { topic }
+        },
+        timeout_ms: 2e4
+      },
+      // Step 2: Compliance analysis
+      {
+        id: "compliance-analysis",
+        agent_id: "regulatory-navigator",
+        tool_name: "srag.query",
+        arguments: {
+          query: `Compliance and regulatory framework analysis for: ${topic}. Include relevant Danish/EU regulations, governance requirements, and risk considerations. Previous graph findings: {{prev}}`
+        },
+        timeout_ms: 3e4
+      },
+      // Step 3: Strategic recommendations
+      {
+        id: "strategic-recommendations",
+        agent_id: "consulting-partner",
+        tool_name: "kg_rag.query",
+        arguments: {
+          question: `Strategic consulting analysis for: ${topic}. Provide actionable recommendations, patterns, and best practices. Previous compliance findings: {{prev}}`,
+          max_evidence: 15
+        },
+        timeout_ms: 3e4
+      },
+      // Step 4: Deep reasoning synthesis
+      {
+        id: "deep-reasoning",
+        agent_id: "orchestrator",
+        cognitive_action: "reason",
+        prompt: `Synthesize a comprehensive deep analysis of "${topic}" based on all previous findings:
+
+{{prev}}
+
+Provide:
+1. Key findings from graph exploration
+2. Compliance implications
+3. Strategic recommendations
+4. Risk assessment
+5. Suggested next actions`,
+        timeout_ms: 45e3
+      },
+      // Step 5: Artifact assembly — handled post-chain
+      // We use a lightweight step that signals assembly
+      {
+        id: "signal-assembly",
+        agent_id: "orchestrator",
+        tool_name: "graph.health",
+        arguments: {},
+        timeout_ms: 1e4
+      }
+    ]
+  };
+}
+function assembleArtifactBlocks(topic, execution) {
+  const blocks = [];
+  const results = execution.results;
+  const graphResult = results.find((r) => r.step_id === "graph-explore");
+  if (graphResult && graphResult.status === "success") {
+    blocks.push({
+      type: "cypher",
+      label: "Graph Exploration",
+      content: {
+        query: `MATCH (n) WHERE toLower(n.title) CONTAINS toLower("${topic}") ... (see full chain)`
+      }
+    });
+    blocks.push({
+      type: "text",
+      label: "Graph Results",
+      content: {
+        body: typeof graphResult.output === "string" ? graphResult.output : JSON.stringify(graphResult.output, null, 2)
+      }
+    });
+  }
+  const complianceResult = results.find((r) => r.step_id === "compliance-analysis");
+  if (complianceResult && complianceResult.status === "success") {
+    blocks.push({
+      type: "text",
+      label: "Compliance & Regulatory Analysis",
+      content: {
+        body: typeof complianceResult.output === "string" ? complianceResult.output : JSON.stringify(complianceResult.output, null, 2)
+      }
+    });
+  }
+  const strategyResult = results.find((r) => r.step_id === "strategic-recommendations");
+  if (strategyResult && strategyResult.status === "success") {
+    blocks.push({
+      type: "text",
+      label: "Strategic Recommendations",
+      content: {
+        body: typeof strategyResult.output === "string" ? strategyResult.output : JSON.stringify(strategyResult.output, null, 2)
+      }
+    });
+  }
+  const reasoningResult = results.find((r) => r.step_id === "deep-reasoning");
+  if (reasoningResult && reasoningResult.status === "success") {
+    blocks.push({
+      type: "text",
+      label: "Deep Reasoning Synthesis",
+      content: {
+        body: typeof reasoningResult.output === "string" ? reasoningResult.output : JSON.stringify(reasoningResult.output, null, 2)
+      }
+    });
+  }
+  blocks.push({
+    type: "kpi_card",
+    label: "Investigation Metrics",
+    content: {
+      label: "Steps Completed",
+      value: `${execution.steps_completed}/${execution.steps_total}`,
+      trend: execution.status === "completed" ? "up" : "down"
+    }
+  });
+  if (execution.duration_ms) {
+    blocks.push({
+      type: "kpi_card",
+      content: {
+        label: "Duration",
+        value: `${(execution.duration_ms / 1e3).toFixed(1)}s`
+      }
+    });
+  }
+  const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${config.port}`;
+  blocks.push({
+    type: "deep_link",
+    label: "Access Links",
+    content: {
+      label: "View in Command Center",
+      uri: `${baseUrl}/#chains`
+    }
+  });
+  blocks.push({
+    type: "deep_link",
+    content: {
+      label: "Open in Obsidian",
+      uri: `obsidian://widgetdc?action=investigate&topic=${encodeURIComponent(topic)}`
+    }
+  });
+  return blocks;
+}
+async function createArtifact(topic, blocks, execution) {
+  const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${config.port}`;
+  const apiKey = process.env.ORCHESTRATOR_API_KEY ?? "";
+  try {
+    const resp = await fetch(`${baseUrl}/api/artifacts`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        title: `Investigation: ${topic}`,
+        source: "investigate-chain",
+        blocks,
+        tags: ["investigation", "multi-agent", topic.toLowerCase().replace(/\s+/g, "-")],
+        graph_refs: execution.results.filter((r) => r.step_id === "graph-explore" && r.status === "success").map((r) => `neo4j:investigate:${topic}`),
+        created_by: "investigate-chain"
+      })
+    });
+    if (!resp.ok) {
+      logger.warn({ status: resp.status }, "Failed to create investigation artifact");
+      return null;
+    }
+    const data = await resp.json();
+    if (data.success && data.artifact) {
+      const id = data.artifact.$id;
+      return {
+        artifactId: id,
+        artifactUrl: `${baseUrl}/api/artifacts/${encodeURIComponent(id)}`
+      };
+    }
+    return null;
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Artifact creation failed for investigation");
+    return null;
+  }
+}
+async function runInvestigation(topic) {
+  const chainDef = buildInvestigateChain(topic);
+  logger.info({ topic, chain_id: chainDef.chain_id }, "Starting investigation chain");
+  const execution = await executeChain(chainDef);
+  const blocks = assembleArtifactBlocks(topic, execution);
+  const artifact = await createArtifact(topic, blocks, execution);
+  const result = { execution };
+  if (artifact) {
+    result.artifact_id = artifact.artifactId;
+    result.artifact_url = artifact.artifactUrl;
+    result.artifact_markdown_url = `${artifact.artifactUrl}.md`;
+    logger.info({ artifact_id: artifact.artifactId, topic }, "Investigation artifact created");
+  }
+  return result;
+}
+var init_investigate_chain = __esm({
+  "src/investigate-chain.ts"() {
+    "use strict";
+    init_chain_engine();
+    init_config();
+    init_logger();
+  }
+});
+
 // src/document-intelligence.ts
 var document_intelligence_exports = {};
 __export(document_intelligence_exports, {
   batchIngest: () => batchIngest,
   ingestDocument: () => ingestDocument
 });
-import { v4 as uuid9 } from "uuid";
+import { v4 as uuid10 } from "uuid";
 async function persistResult(result) {
   const redis2 = getRedis();
   if (!redis2) return;
@@ -13978,7 +14313,7 @@ async function persistResult(result) {
 }
 async function ingestDocument(req) {
   const t0 = Date.now();
-  const ingestionId = `widgetdc:ingestion:${uuid9()}`;
+  const ingestionId = `widgetdc:ingestion:${uuid10()}`;
   logger.info({
     id: ingestionId,
     filename: req.filename,
@@ -14046,7 +14381,7 @@ async function ingestDocument(req) {
             source: req.source_url ?? req.filename,
             domain: req.domain ?? "general"
           },
-          callId: uuid9(),
+          callId: uuid10(),
           timeoutMs: 2e4
         });
       } catch {
@@ -14122,7 +14457,7 @@ async function tryMercuryExtract(prompt) {
     const result = await callMcpTool({
       toolName: "llm.generate",
       args: { prompt },
-      callId: uuid9(),
+      callId: uuid10(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return null;
@@ -14188,7 +14523,7 @@ MERGE (n)-[:EXTRACTED_FROM]->(d)`,
             filename: req.filename
           }
         },
-        callId: uuid9(),
+        callId: uuid10(),
         timeoutMs: 1e4
       });
       merged++;
@@ -14205,7 +14540,7 @@ MERGE (n)-[:EXTRACTED_FROM]->(d)`,
 MERGE (a)-[:${rel.type.replace(/[^A-Z_]/g, "_")}]->(b)`,
           params: { from: rel.from, to: rel.to }
         },
-        callId: uuid9(),
+        callId: uuid10(),
         timeoutMs: 5e3
       });
     } catch {
@@ -14243,7 +14578,7 @@ var graph_hygiene_cron_exports = {};
 __export(graph_hygiene_cron_exports, {
   runGraphHygiene: () => runGraphHygiene
 });
-import { v4 as uuid10 } from "uuid";
+import { v4 as uuid11 } from "uuid";
 function neo4jInt(val) {
   if (typeof val === "number") return val;
   if (val && typeof val === "object" && "low" in val) return val.low;
@@ -14253,7 +14588,7 @@ async function queryMetric(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid10(),
+    callId: uuid11(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -14364,7 +14699,7 @@ SET s.orphan_ratio = $orphan_ratio,
         _force: true
         // Infrastructure write — bypass validation
       },
-      callId: uuid10(),
+      callId: uuid11(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -14377,7 +14712,7 @@ SET s.orphan_ratio = $orphan_ratio,
         query: `MATCH (s:GraphHealthSnapshot) WHERE s.timestamp < datetime() - duration('P90D') DETACH DELETE s`,
         _force: true
       },
-      callId: uuid10(),
+      callId: uuid11(),
       timeoutMs: 1e4
     });
   } catch {
@@ -14424,7 +14759,7 @@ __export(similarity_engine_exports, {
   findSimilarClients: () => findSimilarClients,
   getClientDetails: () => getClientDetails
 });
-import { v4 as uuid11 } from "uuid";
+import { v4 as uuid12 } from "uuid";
 async function findSimilarClients(req) {
   const t0 = Date.now();
   const maxResults = Math.min(Math.max(req.max_results ?? 5, 1), 20);
@@ -14473,7 +14808,7 @@ RETURN n.id AS id, labels(n) AS labels, coalesce(n.name, n.title) AS name
 LIMIT 1`,
         params: { q: query }
       },
-      callId: uuid11(),
+      callId: uuid12(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -14522,7 +14857,7 @@ RETURN other.id AS client_id,
     const result = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params: { sourceId: nodeId, relTypes } },
-      callId: uuid11(),
+      callId: uuid12(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return [];
@@ -14568,7 +14903,7 @@ async function computeSemanticSimilarity(query, maxResults) {
     const result = await callMcpTool({
       toolName: "srag.query",
       args: { query },
-      callId: uuid11(),
+      callId: uuid12(),
       timeoutMs: 2e4
     });
     if (result.status !== "success") return [];
@@ -14627,7 +14962,7 @@ RETURN n AS client,
        collect(DISTINCT {rel: type(r), target: coalesce(related.name, related.title), target_type: labels(related)[0]}) AS relationships`,
         params: { id: clientId }
       },
-      callId: uuid11(),
+      callId: uuid12(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -14666,7 +15001,7 @@ __export(deliverable_engine_exports, {
   getDeliverable: () => getDeliverable,
   listDeliverables: () => listDeliverables
 });
-import { v4 as uuid12 } from "uuid";
+import { v4 as uuid13 } from "uuid";
 async function persist(d) {
   deliverableCache.set(d.$id, d);
   if (deliverableCache.size > CACHE_MAX_SIZE) {
@@ -14718,7 +15053,7 @@ async function generateDeliverable(req) {
   }
   activeGenerations++;
   const t0 = Date.now();
-  const deliverableId = `widgetdc:deliverable:${uuid12()}`;
+  const deliverableId = `widgetdc:deliverable:${uuid13()}`;
   const format = req.format ?? "markdown";
   const maxSections = Math.min(Math.max(req.max_sections ?? 5, 2), 8);
   const deliverable = {
@@ -14976,7 +15311,7 @@ async function renderPDF(deliverable) {
         content: deliverable.markdown,
         template: deliverable.type
       },
-      callId: uuid12(),
+      callId: uuid13(),
       timeoutMs: 45e3
     });
     if (result.status === "success" && result.result) {
@@ -15179,7 +15514,7 @@ __export(osint_scanner_exports, {
   getOsintStatus: () => getOsintStatus,
   runOsintScan: () => runOsintScan
 });
-import { v4 as uuid13 } from "uuid";
+import { v4 as uuid14 } from "uuid";
 async function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -15204,7 +15539,7 @@ async function checkToolAvailability() {
     const result = await callMcpTool({
       toolName: "the_snout.domain_intel",
       args: { domain: "borger.dk", type: "basic" },
-      callId: uuid13(),
+      callId: uuid14(),
       timeoutMs: 1e4
     });
     return result.status === "success";
@@ -15221,7 +15556,7 @@ async function scanCTForDomain(domain, toolsAvailable) {
       const result = await callMcpTool({
         toolName: "the_snout.ct_transparency",
         args: { domain },
-        callId: uuid13(),
+        callId: uuid14(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (result.status === "success" && result.result) {
@@ -15236,7 +15571,7 @@ async function scanCTForDomain(domain, toolsAvailable) {
       const fallbackResult = await callMcpTool({
         toolName: "the_snout.domain_intel",
         args: { domain, type: "ct" },
-        callId: uuid13(),
+        callId: uuid14(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (fallbackResult.status === "success" && fallbackResult.result) {
@@ -15281,7 +15616,7 @@ async function scanDMARCForDomain(domain, toolsAvailable) {
       const result = await callMcpTool({
         toolName: "the_snout.domain_intel",
         args: { domain, type: "dmarc" },
-        callId: uuid13(),
+        callId: uuid14(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (result.status === "success" && result.result) {
@@ -15364,7 +15699,7 @@ async function ingestCTResults(ctResults) {
             },
             _force: true
           },
-          callId: uuid13(),
+          callId: uuid14(),
           timeoutMs: 15e3
         });
         if (result.status === "success") {
@@ -15427,7 +15762,7 @@ async function ingestDMARCResults(dmarcResults) {
             },
             _force: true
           },
-          callId: uuid13(),
+          callId: uuid14(),
           timeoutMs: 15e3
         });
         if (result.status === "success") {
@@ -15462,7 +15797,7 @@ async function persistScanResult(result) {
   }
 }
 async function runOsintScan(options) {
-  const scanId = uuid13();
+  const scanId = uuid14();
   const startedAt2 = (/* @__PURE__ */ new Date()).toISOString();
   const t0 = Date.now();
   const domains = options?.domains ?? [...DK_PUBLIC_DOMAINS];
@@ -15607,7 +15942,7 @@ __export(evolution_loop_exports, {
   getEvolutionStatus: () => getEvolutionStatus,
   runEvolutionLoop: () => runEvolutionLoop
 });
-import { v4 as uuid14 } from "uuid";
+import { v4 as uuid15 } from "uuid";
 async function persistCycle(cycle) {
   const redis2 = getRedis();
   if (!redis2) return;
@@ -15656,7 +15991,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (n) RETURN labels(n)[0] AS label, count(*) AS count ORDER BY count DESC LIMIT 15"
       },
-      callId: uuid14(),
+      callId: uuid15(),
       timeoutMs: 1e4
     }),
     callMcpTool({
@@ -15664,7 +15999,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (f:FailureMemory) WHERE f.last_seen > datetime() - duration('P7D') RETURN f.category AS category, f.pattern AS pattern, f.hit_count AS hits ORDER BY f.hit_count DESC LIMIT 10"
       },
-      callId: uuid14(),
+      callId: uuid15(),
       timeoutMs: 1e4
     }),
     callMcpTool({
@@ -15672,7 +16007,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (l:Lesson) WHERE l.created_at > datetime() - duration('P7D') RETURN l.agent_id AS agent, l.lesson AS lesson, l.context AS context ORDER BY l.created_at DESC LIMIT 10"
       },
-      callId: uuid14(),
+      callId: uuid15(),
       timeoutMs: 1e4
     })
   ]);
@@ -15728,7 +16063,7 @@ async function stageOrient(observeResult, focusArea) {
         RETURN labels(b)[0] AS label, coalesce(b.name, b.title, b.id) AS name, b.status AS status, b.quality_score AS quality
         ORDER BY coalesce(b.quality_score, 0) ASC LIMIT 10`
     },
-    callId: uuid14(),
+    callId: uuid15(),
     timeoutMs: 1e4
   });
   const blocks = blocksResult.status === "success" ? Array.isArray(blocksResult.result) ? blocksResult.result : blocksResult.result?.results ?? [] : [];
@@ -15850,7 +16185,7 @@ async function stageLearn(cycleId, observeResult, orientResult, actResult) {
           estimated_impact: orientResult.estimated_impact
         }
       },
-      callId: uuid14(),
+      callId: uuid15(),
       timeoutMs: 15e3
     });
     if (writeResult.status === "success") {
@@ -15880,7 +16215,7 @@ async function stageLearn(cycleId, observeResult, orientResult, actResult) {
             cycle_id: cycleId
           }
         },
-        callId: uuid14(),
+        callId: uuid15(),
         timeoutMs: 1e4
       });
       if (lessonResult.status === "success") {
@@ -15897,7 +16232,7 @@ async function runEvolutionLoop(opts) {
     throw new Error("Evolution loop already running. Only 1 concurrent cycle allowed.");
   }
   isRunning = true;
-  const cycleId = uuid14();
+  const cycleId = uuid15();
   const startedAt2 = (/* @__PURE__ */ new Date()).toISOString();
   const t0 = Date.now();
   const focusArea = opts?.focus_area?.slice(0, 200);
@@ -16202,7 +16537,7 @@ var moa_router_exports = {};
 __export(moa_router_exports, {
   routeMoA: () => routeMoA
 });
-import { v4 as uuid15 } from "uuid";
+import { v4 as uuid16 } from "uuid";
 async function classifyQuery2(query, provider) {
   try {
     const result = await chatLLM({
@@ -16249,7 +16584,7 @@ function selectAgents(domains, maxAgents) {
 }
 async function dispatchAgents(query, agents) {
   const chainDef = {
-    name: `moa-${uuid15().slice(0, 8)}`,
+    name: `moa-${uuid16().slice(0, 8)}`,
     mode: "parallel",
     steps: agents.map((a) => ({
       agent_id: a.agent_id,
@@ -16304,7 +16639,7 @@ async function routeMoA(request) {
   const t0 = Date.now();
   const provider = request.provider ?? "deepseek";
   const maxAgents = request.max_agents ?? 3;
-  const taskId = `moa-${uuid15()}`;
+  const taskId = `moa-${uuid16()}`;
   const board = createBlackboard(taskId);
   const classification = await classifyQuery2(request.query, provider);
   await board.write("observations", {
@@ -16562,7 +16897,7 @@ __export(skill_forge_exports, {
   loadForgedTools: () => loadForgedTools,
   verifyForgedTool: () => verifyForgedTool
 });
-import { v4 as uuid16 } from "uuid";
+import { v4 as uuid17 } from "uuid";
 function getForgedTools() {
   return [...FORGED_TOOLS.values()];
 }
@@ -16649,7 +16984,7 @@ Handler type: ${handlerType}` }
   }
   const namespace = name.split("_")[0] || "custom";
   const spec2 = {
-    id: uuid16(),
+    id: uuid17(),
     name,
     namespace,
     description,
@@ -16685,7 +17020,7 @@ async function verifyForgedTool(name) {
       const result = await callMcpTool({
         toolName: spec2.handler_config.backend_tool,
         args: {},
-        callId: uuid16(),
+        callId: uuid17(),
         timeoutMs: 1e4
       });
       testResult = result.status === "success" ? "Backend tool reachable" : `Backend error: ${result.error_message}`;
@@ -16694,7 +17029,7 @@ async function verifyForgedTool(name) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: "RETURN 1 AS test" },
-        callId: uuid16(),
+        callId: uuid17(),
         timeoutMs: 5e3
       });
       testResult = result.status === "success" ? "Cypher engine reachable" : `Cypher error: ${result.error_message}`;
@@ -16726,7 +17061,7 @@ async function executeForgedTool(name, args) {
         const result = await callMcpTool({
           toolName: spec2.handler_config.backend_tool,
           args,
-          callId: uuid16(),
+          callId: uuid17(),
           timeoutMs: 3e4
         });
         return result.status === "success" ? JSON.stringify(result.result, null, 2).slice(0, 1e3) : `Error: ${result.error_message}`;
@@ -16736,7 +17071,7 @@ async function executeForgedTool(name, args) {
         const result = await callMcpTool({
           toolName: "graph.read_cypher",
           args: { query: spec2.handler_config.cypher_template, params: args },
-          callId: uuid16(),
+          callId: uuid17(),
           timeoutMs: 15e3
         });
         return result.status === "success" ? JSON.stringify(result.result, null, 2).slice(0, 1e3) : `Error: ${result.error_message}`;
@@ -16807,7 +17142,7 @@ __export(engagement_engine_exports, {
   matchPrecedents: () => matchPrecedents,
   recordOutcome: () => recordOutcome
 });
-import { v4 as uuid17 } from "uuid";
+import { v4 as uuid18 } from "uuid";
 async function saveEngagement(e) {
   engagementCache.set(e.$id, e);
   const redis2 = getRedis();
@@ -16884,7 +17219,7 @@ MERGE (eng)-[:USES_METHODOLOGY]->(m)`,
         },
         _force: true
       },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -16920,7 +17255,7 @@ SET eng.status = 'completed'`,
         },
         _force: true
       },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -16943,7 +17278,7 @@ async function indexEngagementForPrecedent(e) {
         orgId: "default",
         _force: true
       },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 15e3
     });
   } catch (err) {
@@ -16953,7 +17288,7 @@ async function indexEngagementForPrecedent(e) {
 async function createEngagement(req) {
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const e = {
-    $id: `eng-${uuid17()}`,
+    $id: `eng-${uuid18()}`,
     $schema: "https://widgetdc.io/schemas/engagement/v1",
     client: req.client.slice(0, 120),
     domain: req.domain.slice(0, 60),
@@ -17033,7 +17368,7 @@ ORDER BY
 LIMIT ${Math.floor(limit)}`,
         params: { domain: req.domain }
       },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return [];
@@ -17082,7 +17417,7 @@ async function queryKgRag(query, maxEvidence = 10) {
     const result = await callMcpTool({
       toolName: "kg_rag.query",
       args: { question: query, max_evidence: maxEvidence },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 45e3
     });
     if (result.status !== "success") return { answer: "", sources: [] };
@@ -17111,7 +17446,7 @@ async function foldContext(text, query, maxTokens = 1500) {
         max_tokens: maxTokens,
         domain: "consulting"
       },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 2e4
     });
     if (result.status !== "success") return null;
@@ -17146,7 +17481,7 @@ async function proposeViaConsensus(engagementId, req, planSummary) {
           budget_dkk: req.budget_dkk ?? 0
         }
       },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return { proposalId: null, quorum: 0 };
@@ -17172,7 +17507,7 @@ async function voteOnConsensus(proposalId, decision, confidence, reasoning) {
         confidence: Math.min(1, Math.max(0, confidence)),
         reasoning: reasoning.slice(0, 500)
       },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 1e4
     });
     if (result.status !== "success") return false;
@@ -17193,7 +17528,7 @@ async function planViaRlmMission(engagementId, req, maxSteps = 3) {
         maxSteps,
         maxDepth: 2
       },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 2e4
     });
     if (startResult.status !== "success") return { missionId: null, insights: [], stepsExecuted: 0 };
@@ -17207,7 +17542,7 @@ async function planViaRlmMission(engagementId, req, maxSteps = 3) {
       const stepResult = await callMcpTool({
         toolName: "rlm.execute_step",
         args: { missionId },
-        callId: uuid17(),
+        callId: uuid18(),
         timeoutMs: 6e4
       });
       if (stepResult.status !== "success") break;
@@ -17285,7 +17620,7 @@ async function enforceConsensusGate(engagementId, req) {
 }
 async function generatePlan(req) {
   const t0 = Date.now();
-  const engagementId = req.engagement_id ?? `eng-${uuid17()}`;
+  const engagementId = req.engagement_id ?? `eng-${uuid18()}`;
   enforceInputSanityGate(req);
   const highStakes = isHighStakesPlan(req);
   const complex = req.duration_weeks > GATE_DURATION_WEEKS;
@@ -17467,7 +17802,7 @@ Return ONLY JSON matching the schema, no prose.`;
       const r = await callMcpTool({
         toolName: "llm.generate",
         args: { prompt: mercuryPrompt },
-        callId: uuid17(),
+        callId: uuid18(),
         timeoutMs: 3e4
       });
       if (r.status === "success") {
@@ -17773,189 +18108,6 @@ var init_working_memory = __esm({
     init_logger();
     PREFIX = "wm:";
     DEFAULT_TTL2 = 86400;
-  }
-});
-
-// src/failure-harvester.ts
-var failure_harvester_exports = {};
-__export(failure_harvester_exports, {
-  buildFailureSummary: () => buildFailureSummary,
-  harvestFailures: () => harvestFailures,
-  runFailureHarvest: () => runFailureHarvest
-});
-import { v4 as uuid18 } from "uuid";
-function categorizeFailure(error) {
-  const lower = error.toLowerCase();
-  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) return "timeout";
-  if (lower.includes("502") || lower.includes("bad gateway") || lower.includes("econnrefused")) return "502";
-  if (lower.includes("401") || lower.includes("403") || lower.includes("unauthorized") || lower.includes("forbidden")) return "auth";
-  if (lower.includes("validation") || lower.includes("invalid") || lower.includes("required")) return "validation";
-  if (lower.includes("mcp") || lower.includes("tool_not_found") || lower.includes("tool call")) return "mcp_error";
-  return "unknown";
-}
-async function harvestFailures(windowHours = 24) {
-  const redis2 = getRedis();
-  if (!redis2) {
-    logger.warn("Failure harvester: Redis not available");
-    return [];
-  }
-  const events = [];
-  const cutoff = new Date(Date.now() - windowHours * 36e5).toISOString();
-  try {
-    let cursor = "0";
-    do {
-      const [nextCursor, fields] = await redis2.hscan("orchestrator:chains", cursor, "COUNT", 200);
-      cursor = nextCursor;
-      for (let i = 0; i < fields.length; i += 2) {
-        const execId = fields[i];
-        const json = fields[i + 1];
-        try {
-          const exec = JSON.parse(json);
-          if (exec.status !== "failed") continue;
-          if (exec.started_at < cutoff) continue;
-          const failedSteps = exec.results?.filter((r) => r.status === "error") ?? [];
-          const errorMsg = exec.error ?? failedSteps.map((s) => String(s.output)).join("; ") ?? "unknown";
-          events.push({
-            $id: `failure-event:${uuid18()}`,
-            execution_id: execId,
-            chain_name: exec.name,
-            category: categorizeFailure(errorMsg),
-            error_message: errorMsg.slice(0, 500),
-            affected_tool: failedSteps[0]?.action ?? null,
-            affected_agent: failedSteps[0]?.agent_id ?? null,
-            timestamp: exec.started_at
-          });
-        } catch {
-        }
-      }
-    } while (cursor !== "0");
-    logger.info({ harvested: events.length, window_hours: windowHours }, "Failure harvester scan complete");
-  } catch (err) {
-    logger.error({ err: String(err) }, "Failure harvester scan failed");
-  }
-  return events;
-}
-async function persistToGraph2(events) {
-  let persisted = 0;
-  for (const evt of events) {
-    try {
-      await callMcpTool({
-        toolName: "graph.write_cypher",
-        args: {
-          query: `
-            MERGE (f:FailureEvent {execution_id: $execution_id})
-            SET f.chain_name = $chain_name,
-                f.category = $category,
-                f.error_message = $error_message,
-                f.affected_tool = $affected_tool,
-                f.affected_agent = $affected_agent,
-                f.timestamp = datetime($timestamp),
-                f.harvested_at = datetime()
-          `,
-          params: {
-            execution_id: evt.execution_id,
-            chain_name: evt.chain_name,
-            category: evt.category,
-            error_message: evt.error_message,
-            affected_tool: evt.affected_tool ?? "",
-            affected_agent: evt.affected_agent ?? "",
-            timestamp: evt.timestamp
-          }
-        },
-        callId: uuid18(),
-        timeoutMs: 1e4
-      });
-      persisted++;
-    } catch (err) {
-      logger.warn({ err: String(err), execution_id: evt.execution_id }, "Failed to persist failure event");
-    }
-  }
-  if (persisted > 0) {
-    try {
-      await callMcpTool({
-        toolName: "graph.write_cypher",
-        args: {
-          query: `
-            MATCH (f:FailureEvent) WHERE f.affected_tool <> ''
-            MATCH (t:Tool {name: f.affected_tool})
-            MERGE (f)-[:AFFECTED_TOOL]->(t)
-          `,
-          params: {}
-        },
-        callId: uuid18(),
-        timeoutMs: 1e4
-      });
-      await callMcpTool({
-        toolName: "graph.write_cypher",
-        args: {
-          query: `
-            MATCH (f:FailureEvent) WHERE f.affected_agent <> ''
-            MATCH (a:Agent {id: f.affected_agent})
-            MERGE (f)-[:AFFECTED_AGENT]->(a)
-          `,
-          params: {}
-        },
-        callId: uuid18(),
-        timeoutMs: 1e4
-      });
-    } catch {
-    }
-  }
-  return persisted;
-}
-function buildFailureSummary(events, windowHours = 24) {
-  const byCategory = {
-    timeout: 0,
-    "502": 0,
-    auth: 0,
-    validation: 0,
-    mcp_error: 0,
-    unknown: 0
-  };
-  const toolCounts = /* @__PURE__ */ new Map();
-  const agentCounts = /* @__PURE__ */ new Map();
-  for (const evt of events) {
-    byCategory[evt.category]++;
-    if (evt.affected_tool) toolCounts.set(evt.affected_tool, (toolCounts.get(evt.affected_tool) ?? 0) + 1);
-    if (evt.affected_agent) agentCounts.set(evt.affected_agent, (agentCounts.get(evt.affected_agent) ?? 0) + 1);
-  }
-  const topTools = [...toolCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([tool, count]) => ({ tool, count }));
-  const topAgents = [...agentCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([agent, count]) => ({ agent, count }));
-  return {
-    $id: `failure-summary:${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}`,
-    total_failures: events.length,
-    by_category: byCategory,
-    top_tools: topTools,
-    top_agents: topAgents,
-    recent: events.slice(-20),
-    harvested_at: (/* @__PURE__ */ new Date()).toISOString(),
-    window_hours: windowHours
-  };
-}
-async function runFailureHarvest(windowHours = 24) {
-  const events = await harvestFailures(windowHours);
-  const persisted = await persistToGraph2(events);
-  const summary = buildFailureSummary(events, windowHours);
-  const redis2 = getRedis();
-  if (redis2) {
-    await redis2.set("orchestrator:failure-summary", JSON.stringify(summary), "EX", 3600).catch(() => {
-    });
-  }
-  broadcastSSE("failure-harvest", summary);
-  logger.info({
-    total: events.length,
-    persisted,
-    categories: summary.by_category
-  }, "Failure harvest cycle complete");
-  return summary;
-}
-var init_failure_harvester = __esm({
-  "src/failure-harvester.ts"() {
-    "use strict";
-    init_redis();
-    init_mcp_caller();
-    init_logger();
-    init_sse();
   }
 });
 
@@ -22237,10 +22389,9 @@ ${result.merged_context}`;
       try {
         const { retrainRoutingWeights: retrainRoutingWeights2 } = await Promise.resolve().then(() => (init_adaptive_rag(), adaptive_rag_exports));
         const result = await retrainRoutingWeights2();
-        return `Retrain complete (${result.training_samples} samples):
-  Compound metric: ${result.compound_metric.toFixed(3)}
-  Old weights: ${JSON.stringify(result.old_weights)}
-  New weights: ${JSON.stringify(result.new_weights)}`;
+        const samples = result.weights.training_samples ?? 0;
+        const summary = result.adjustments.length > 0 ? result.adjustments.slice(0, 3).join("; ") : "No adjustments needed";
+        return `Retrain complete (${samples} samples, ${result.stats.length} strategies): ${summary}`;
       } catch (err) {
         return `Retrain failed: ${err}`;
       }
@@ -27870,124 +28021,7 @@ init_slack();
 import { Router as Router6 } from "express";
 init_redis();
 init_tool_executor();
-
-// src/adoption-telemetry.ts
-init_redis();
-init_logger();
-init_tool_registry();
-var KEY_CALLS = "orchestrator:telemetry:calls";
-var KEY_LAST = "orchestrator:telemetry:last_called";
-var WINDOW_TTL = 30 * 24 * 3600;
-var STALE_MS = 30 * 24 * 3600 * 1e3;
-function isoWeek() {
-  const now = /* @__PURE__ */ new Date();
-  const d = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
-  const dayNum = d.getUTCDay() || 7;
-  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
-  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-  const week = Math.ceil(((d.getTime() - yearStart.getTime()) / 864e5 + 1) / 7);
-  return `${d.getUTCFullYear()}${String(week).padStart(2, "0")}`;
-}
-var ADVANCED_TOOLS = new Set(
-  TOOL_REGISTRY.filter((t) => t.namespace === "intelligence").map((t) => t.name)
-);
-var lastErrorLog = /* @__PURE__ */ new Map();
-var ERROR_THROTTLE_MS = 5 * 60 * 1e3;
-function recordToolCall(toolName) {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  const windowKey = `orchestrator:telemetry:window:${isoWeek()}`;
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  redis2.pipeline().zincrby(KEY_CALLS, 1, toolName).zincrby(windowKey, 1, toolName).expire(windowKey, WINDOW_TTL).hset(KEY_LAST, toolName, now).exec().catch((err) => {
-    const nowMs = Date.now();
-    const last = lastErrorLog.get(toolName) ?? 0;
-    if (nowMs - last > ERROR_THROTTLE_MS) {
-      lastErrorLog.set(toolName, nowMs);
-      logger.warn({ err: String(err), tool: toolName }, "telemetry: Redis write failed (throttled)");
-    }
-  });
-}
-async function computeTelemetry() {
-  const redis2 = getRedis();
-  const allTools = TOOL_REGISTRY.map((t) => t.name);
-  const now = Date.now();
-  const empty = (tool) => ({
-    tool,
-    namespace: TOOL_REGISTRY.find((t) => t.name === tool)?.namespace ?? "unknown",
-    lifetime_calls: 0,
-    weekly_calls: 0,
-    last_called: null,
-    stale: false,
-    advanced: ADVANCED_TOOLS.has(tool)
-  });
-  if (!redis2) {
-    const tools2 = allTools.map(empty);
-    return buildSummary(tools2);
-  }
-  const windowKey = `orchestrator:telemetry:window:${isoWeek()}`;
-  const [lifetimeRaw, weeklyRaw, lastRaw] = await Promise.all([
-    redis2.zrange(KEY_CALLS, 0, -1, "WITHSCORES"),
-    redis2.zrange(windowKey, 0, -1, "WITHSCORES"),
-    redis2.hgetall(KEY_LAST)
-  ]);
-  const parseZSet = (raw) => {
-    const m = /* @__PURE__ */ new Map();
-    for (let i = 0; i < raw.length - 1; i += 2) {
-      m.set(raw[i], parseInt(raw[i + 1], 10) || 0);
-    }
-    return m;
-  };
-  const lifetimeCounts = parseZSet(lifetimeRaw);
-  const weeklyCounts = parseZSet(weeklyRaw);
-  const lastCalled = lastRaw ?? {};
-  const tools = allTools.map((name) => {
-    const ns = TOOL_REGISTRY.find((t) => t.name === name)?.namespace ?? "unknown";
-    const lc = lastCalled[name] ?? null;
-    const life = lifetimeCounts.get(name) ?? 0;
-    const stale = life > 0 && lc !== null && now - new Date(lc).getTime() > STALE_MS;
-    return {
-      tool: name,
-      namespace: ns,
-      lifetime_calls: life,
-      weekly_calls: weeklyCounts.get(name) ?? 0,
-      last_called: lc,
-      stale,
-      advanced: ADVANCED_TOOLS.has(name)
-    };
-  });
-  return buildSummary(tools);
-}
-function buildSummary(tools) {
-  const total = tools.length;
-  const calledEver = tools.filter((t) => t.lifetime_calls > 0);
-  const calledWeek = tools.filter((t) => t.weekly_calls > 0);
-  const zeroCalls = tools.filter((t) => t.lifetime_calls === 0).map((t) => t.tool);
-  const stale = tools.filter((t) => t.stale).map((t) => t.tool);
-  const hotTools = [...tools].sort((a, b) => b.lifetime_calls - a.lifetime_calls).slice(0, 5).map((t) => ({ tool: t.tool, calls: t.lifetime_calls }));
-  const advancedTools = tools.filter((t) => t.advanced);
-  const advancedUsed = advancedTools.filter((t) => t.weekly_calls > 0);
-  return {
-    generated_at: (/* @__PURE__ */ new Date()).toISOString(),
-    total_tools: total,
-    tools_called_ever: calledEver.length,
-    tools_called_this_week: calledWeek.length,
-    zero_call_tools: zeroCalls,
-    stale_tools: stale,
-    hot_tools: hotTools,
-    kpis: {
-      utilisation_rate_pct: pct(calledWeek.length, total),
-      advanced_utilisation_pct: pct(advancedUsed.length, advancedTools.length),
-      zero_call_rate_pct: pct(zeroCalls.length, total),
-      stale_rate_pct: pct(stale.length, total)
-    },
-    tools
-  };
-}
-function pct(n, d) {
-  return d === 0 ? 0 : Math.round(n / d * 1e3) / 10;
-}
-
-// src/routes/tools.ts
+init_adoption_telemetry();
 var toolsRouter = Router6();
 toolsRouter.post("/call", async (req, res) => {
   const result = validate(validateToolCall, req.body);
@@ -29538,6 +29572,7 @@ init_competitive_crawler();
 init_redis();
 init_logger();
 init_mcp_caller();
+init_adoption_telemetry();
 import { Router as Router10 } from "express";
 import { v4 as uuid27 } from "uuid";
 var adoptionRouter = Router10();
@@ -35043,6 +35078,7 @@ mcpGatewayRouter.delete("/", (_req, res) => {
 init_tool_executor();
 init_tool_registry();
 init_logger();
+init_adoption_telemetry();
 import { Router as Router26 } from "express";
 import { v4 as uuid34 } from "uuid";
 var toolGatewayRouter = Router26();
