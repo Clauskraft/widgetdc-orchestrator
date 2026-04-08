@@ -227,6 +227,21 @@ app.use(express.static(path.join(__dirname, 'public'), {
   setHeaders: (res) => { res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate') },
 }))
 
+// ─── SPA content negotiation (MUST be before API routes) ────────────────────
+// Browser navigation (Accept: text/html) gets the SPA; API calls (Accept: json) pass through.
+const spaIndexPath = path.join(__dirname, 'public', 'index.html')
+app.use((req, res, next) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return next()
+  // Skip WebSocket, SSE, health, and static assets
+  if (req.path.startsWith('/ws') || req.path.startsWith('/sse') ||
+      req.path.startsWith('/health') || req.path.match(/\.\w+$/)) return next()
+  // Serve SPA for browser navigation, let API calls through
+  if (req.accepts('html', 'json') === 'html') {
+    return res.sendFile(spaIndexPath)
+  }
+  next()
+})
+
 // ─── Audit middleware (logs all mutations) ───────────────────────────────────
 app.use(auditMiddleware)
 
@@ -385,21 +400,7 @@ app.get('/health', (_req, res) => {
 })
 
 // ─── SPA fallback — serve index.html for all non-API routes ──────────────────
-// React SPA with client-side routing (TanStack Router) needs catch-all
-app.get('*', (req, res, next) => {
-  // Always skip: WebSocket upgrade, SSE streams, health check, static assets with extensions
-  if (req.path.startsWith('/ws') || req.path.startsWith('/sse') ||
-      req.path.startsWith('/health') || req.path.match(/\.\w+$/)) {
-    return next()
-  }
-  // For paths that overlap with API routes (/chains, /agents, /chat, etc.):
-  // Serve SPA for browser navigation (Accept: text/html), pass through for API calls (Accept: json)
-  const acceptsHtml = req.accepts('html', 'json') === 'html'
-  if (acceptsHtml) {
-    return res.sendFile(path.join(__dirname, 'public', 'index.html'))
-  }
-  next()
-})
+// SPA catch-all handled by middleware above (before API routes)
 
 // ─── JSON parse error handler (P1 fix: return 400 not 500 for malformed JSON) ─
 app.use((err: Error & { type?: string }, req: express.Request, res: express.Response, next: express.NextFunction) => {

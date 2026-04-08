@@ -39437,6 +39437,15 @@ app.use(express.static(path2.join(__dirname3, "public"), {
     res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
   }
 }));
+var spaIndexPath = path2.join(__dirname3, "public", "index.html");
+app.use((req, res, next) => {
+  if (req.method !== "GET" && req.method !== "HEAD") return next();
+  if (req.path.startsWith("/ws") || req.path.startsWith("/sse") || req.path.startsWith("/health") || req.path.match(/\.\w+$/)) return next();
+  if (req.accepts("html", "json") === "html") {
+    return res.sendFile(spaIndexPath);
+  }
+  next();
+});
 app.use(auditMiddleware);
 app.use("/agents", requireApiKey, agentsRouter);
 app.use("/tools", requireApiKey, apiRateLimiter, toolsRouter);
@@ -39540,16 +39549,6 @@ app.get("/health", (_req, res) => {
     peer_eval: getPeerEvalState(),
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   });
-});
-app.get("*", (req, res, next) => {
-  if (req.path.startsWith("/ws") || req.path.startsWith("/sse") || req.path.startsWith("/health") || req.path.match(/\.\w+$/)) {
-    return next();
-  }
-  const acceptsHtml = req.accepts("html", "json") === "html";
-  if (acceptsHtml) {
-    return res.sendFile(path2.join(__dirname3, "public", "index.html"));
-  }
-  next();
 });
 app.use((err, req, res, next) => {
   if (err.type === "entity.parse.failed") {
