@@ -238,6 +238,36 @@ export const AGENT_SEEDS: AgentHandshakeData[] = [
     allowed_tool_namespaces: ['analyst', 'report', '*'],
   },
 
+  // ─── Orchestrator Inventor ─────────────────────────────────────────────
+  // ASI-Evolve-inspired closed-loop evolution engine. Runs LEARN→DESIGN→
+  // EXPERIMENT→ANALYZE cycles with UCB1/Island sampling. Deposits pheromones,
+  // triggers PeerEval, and feeds adaptive RAG rewards.
+  {
+    agent_id: 'orchestrator_inventor',
+    display_name: 'Orchestrator Inventor',
+    source: 'core',
+    version: '1.0',
+    status: 'online',
+    capabilities: [
+      'evolution_loop',
+      'trial_design',
+      'trial_execution',
+      'ucb1_sampling',
+      'island_sampling',
+      'rlm_reasoning',
+      'pheromone_deposit',
+      'peer_eval',
+      'adaptive_rag_reward',
+      'frontend_evaluation',
+      'architecture_evolution',
+    ],
+    allowed_tool_namespaces: [
+      'inventor', 'evolution', 'cognitive', 'knowledge',
+      'pheromone', 'peereval', 'graph', 'memory',
+      'chains', 'rlm', '*',
+    ],
+  },
+
   // ─── HyperAgent Autonomous Executor ────────────────────────────────────
   // Maintained ONLY in widgetdc-orchestrator. Callable from ALL repos via MCP.
   // Drives 72-target registry through graduated autonomy phases with

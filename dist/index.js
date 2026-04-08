@@ -9469,6 +9469,13 @@ function isRlmAvailable() {
   return config.rlmUrl.length > 0;
 }
 async function callCognitive(action, params, timeoutMs) {
+  if (params.llm_provider) {
+    init_llm_proxy();
+    var _sysP = "You are a WidgeTDC platform agent (" + (params.agent_id || "unknown") + "). Action: " + action + ". Produce concrete, actionable output.";
+    var _r = await chatLLM({ provider: params.llm_provider, messages: [{ role: "system", content: _sysP }, { role: "user", content: params.prompt }], model: params.llm_model, max_tokens: 4e3, temperature: 0.3 });
+    logger.info({ action, provider: params.llm_provider, model: _r.model, agent: params.agent_id }, "Cognitive LLM-direct bypass");
+    return _r.content;
+  }
   if (!config.rlmUrl) {
     throw new Error("RLM Engine not configured (set RLM_URL)");
   }
@@ -9545,6 +9552,13 @@ async function callCognitive(action, params, timeoutMs) {
   }
 }
 async function callCognitiveRaw(action, params, timeoutMs) {
+  if (params.llm_provider) {
+    init_llm_proxy();
+    var _sysP2 = "You are a WidgeTDC platform agent (" + (params.agent_id || "unknown") + "). Action: " + action + ". Produce concrete, actionable output.";
+    var _r2 = await chatLLM({ provider: params.llm_provider, messages: [{ role: "system", content: _sysP2 }, { role: "user", content: params.prompt }], model: params.llm_model, max_tokens: 4e3, temperature: 0.3 });
+    logger.info({ action, provider: params.llm_provider, model: _r2.model, agent: params.agent_id }, "CognitiveRaw LLM-direct bypass");
+    return { result: _r2.content, answer: _r2.content, routing: { provider: _r2.provider, model: _r2.model, domain: action, latency_ms: _r2.duration_ms, cost: 0 }, quality: { overall_score: 0.7 } };
+  }
   if (!config.rlmUrl) return null;
   const path3 = COGNITIVE_ROUTES[action];
   if (!path3) {
@@ -12110,7 +12124,9 @@ async function executeStep(step, previousOutput) {
       output = await callCognitive(step.cognitive_action, {
         prompt,
         context: step.arguments,
-        agent_id: step.agent_id
+        agent_id: step.agent_id,
+        llm_provider: step.llm_provider,
+        llm_model: step.llm_model
       }, step.timeout_ms);
     } else if (step.tool_name) {
       const args = { ...step.arguments };
@@ -34254,10 +34270,25 @@ var AGENT_SEEDS = [
     capabilities: ["data_analysis", "reporting", "visualization"],
     allowed_tool_namespaces: ["analyst", "report", "*"]
   },
+  // ─── Orchestrator Inventor ─────────────────────────────────────────────
+  {
+    agent_id: "orchestrator_inventor",
+    display_name: "Orchestrator Inventor",
+    source: "core",
+    version: "1.0",
+    status: "online",
+    capabilities: [
+      "evolution_loop", "trial_design", "trial_execution",
+      "ucb1_sampling", "island_sampling", "rlm_reasoning",
+      "pheromone_deposit", "peer_eval", "adaptive_rag_reward",
+      "frontend_evaluation", "architecture_evolution"
+    ],
+    allowed_tool_namespaces: [
+      "inventor", "evolution", "cognitive", "knowledge",
+      "pheromone", "peereval", "graph", "memory", "chains", "rlm", "*"
+    ]
+  },
   // ─── HyperAgent Autonomous Executor ────────────────────────────────────
-  // Maintained ONLY in widgetdc-orchestrator. Callable from ALL repos via MCP.
-  // Drives 72-target registry through graduated autonomy phases with
-  // persistent cross-repo memory (Redis + Neo4j Lesson nodes).
   {
     agent_id: "hyperagent-auto",
     display_name: "HyperAgent Autonomous Executor",

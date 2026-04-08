@@ -15,6 +15,9 @@ interface CognitiveRequest {
   agent_id?: string
   depth?: number
   mode?: string
+  /** Override: bypass RLM and use orchestrator llm-proxy directly */
+  llm_provider?: string
+  llm_model?: string
 }
 
 interface CognitiveResponse {
@@ -59,6 +62,27 @@ export async function callCognitive(
   params: CognitiveRequest,
   timeoutMs?: number,
 ): Promise<unknown> {
+  // ── LLM Direct Bypass: skip RLM routing, use orchestrator llm-proxy ──
+  // When llm_provider is set, bypass RLM entirely and call the LLM directly.
+  // This avoids RLM's internal routing which may select suboptimal models
+  // (e.g. gemini-flash-lite instead of gemini-2.0-flash for complex tasks).
+  if (params.llm_provider) {
+    const { chatLLM } = await import('./llm-proxy.js')
+    const systemPrompt = `You are a WidgeTDC platform agent (${params.agent_id ?? 'unknown'}). Action: ${action}. Produce concrete, actionable output.`
+    const result = await chatLLM({
+      provider: params.llm_provider,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: params.prompt },
+      ],
+      model: params.llm_model,
+      max_tokens: 4000,
+      temperature: 0.3,
+    })
+    logger.info({ action, provider: params.llm_provider, model: result.model, agent: params.agent_id }, 'Cognitive LLM-direct bypass')
+    return result.content
+  }
+
   if (!config.rlmUrl) {
     throw new Error('RLM Engine not configured (set RLM_URL)')
   }
@@ -162,6 +186,29 @@ export async function callCognitiveRaw(
   params: CognitiveRequest,
   timeoutMs?: number,
 ): Promise<CognitiveRawResponse | null> {
+  // ── LLM Direct Bypass (same as callCognitive) ──
+  if (params.llm_provider) {
+    const { chatLLM } = await import('./llm-proxy.js')
+    const systemPrompt = `You are a WidgeTDC platform agent (${params.agent_id ?? 'unknown'}). Action: ${action}. Produce concrete, actionable output.`
+    const result = await chatLLM({
+      provider: params.llm_provider,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: params.prompt },
+      ],
+      model: params.llm_model,
+      max_tokens: 4000,
+      temperature: 0.3,
+    })
+    logger.info({ action, provider: params.llm_provider, model: result.model, agent: params.agent_id }, 'CognitiveRaw LLM-direct bypass')
+    return {
+      result: result.content,
+      answer: result.content,
+      routing: { provider: result.provider, model: result.model, domain: action, latency_ms: result.duration_ms, cost: 0 },
+      quality: { overall_score: 0.7 },
+    } as CognitiveRawResponse
+  }
+
   if (!config.rlmUrl) return null
 
   const path = COGNITIVE_ROUTES[action]
