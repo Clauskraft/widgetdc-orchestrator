@@ -12,13 +12,13 @@
  * Rate-limited: max 1 concurrent loop. Timeout: 5 min/stage, 20 min total.
  */
 import { v4 as uuid } from 'uuid'
-import { callCognitive, isRlmAvailable } from './cognitive-proxy.js'
-import { callMcpTool } from './mcp-caller.js'
-import { executeChain } from './chain-engine.js'
-import { getRedis } from './redis.js'
-import { logger } from './logger.js'
-import { broadcastMessage } from './chat-broadcaster.js'
-import { broadcastSSE } from './sse.js'
+import { callCognitive, isRlmAvailable } from '../cognitive-proxy.js'
+import { callMcpTool } from '../mcp-caller.js'
+import { executeChain } from '../chain-engine.js'
+import { getRedis } from '../redis.js'
+import { logger } from '../logger.js'
+import { broadcastMessage } from '../chat-broadcaster.js'
+import { broadcastSSE } from '../sse.js'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 

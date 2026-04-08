@@ -491,7 +491,7 @@ export async function runCronJob(jobId: string): Promise<void> {
     // Special handler for autonomous evolution loop (LIN-342)
     if (job.id === 'evolution-loop') {
       try {
-        const { runEvolutionLoop } = await import('./evolution-loop.js')
+        const { runEvolutionLoop } = await import('./intelligence/evolution-loop.js')
         const cycle = await runEvolutionLoop()
         job.last_run = new Date().toISOString()
         job.last_status = cycle.status

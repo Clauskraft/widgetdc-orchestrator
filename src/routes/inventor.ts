@@ -13,8 +13,8 @@ import {
   getBestNode,
   stopInventor,
   getExperimentHistory,
-} from '../inventor-loop.js'
-import type { InventorConfig } from '../inventor-types.js'
+} from '../intelligence/inventor-loop.js'
+import type { InventorConfig } from '../intelligence/inventor-types.js'
 import { logger } from '../logger.js'
 
 export const inventorRouter = Router()

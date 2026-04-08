@@ -8,7 +8,7 @@
  * Researcher agent to use as starting points for new variations.
  */
 import type { InventorNode, SamplingAlgorithm } from './inventor-types.js'
-import { logger } from './logger.js'
+import { logger } from '../logger.js'
 
 // ─── Base Sampler Interface ──────────────────────────────────────────────────
 

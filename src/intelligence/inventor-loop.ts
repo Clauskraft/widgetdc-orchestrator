@@ -16,20 +16,20 @@
  *   - SSE for live streaming to Command Center
  */
 import { v4 as uuid } from 'uuid'
-import { callCognitiveRaw, isRlmAvailable } from './cognitive-proxy.js'
-import { dualChannelRAG } from './dual-rag.js'
-import { callMcpTool } from './mcp-caller.js'
-import { getRedis } from './redis.js'
-import { broadcastSSE } from './sse.js'
-import { broadcastMessage } from './chat-broadcaster.js'
-import { logger } from './logger.js'
+import { callCognitiveRaw, isRlmAvailable } from '../cognitive-proxy.js'
+import { dualChannelRAG } from '../dual-rag.js'
+import { callMcpTool } from '../mcp-caller.js'
+import { getRedis } from '../redis.js'
+import { broadcastSSE } from '../sse.js'
+import { broadcastMessage } from '../chat-broadcaster.js'
+import { logger } from '../logger.js'
 import { createSampler, type Sampler } from './inventor-sampler.js'
 import type {
   InventorNode, InventorConfig, InventorStatus,
   InventorStepResult, TrialResult, CognitionItem,
 } from './inventor-types.js'
-import { onInventorTrial } from './pheromone-layer.js'
-import { hookIntoExecution } from './peer-eval.js'
+import { onInventorTrial } from '../pheromone-layer.js'
+import { hookIntoExecution } from '../peer-eval.js'
 
 // ─── State ───────────────────────────────────────────────────────────────────
 

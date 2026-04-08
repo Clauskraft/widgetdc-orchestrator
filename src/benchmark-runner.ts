@@ -19,7 +19,7 @@
 
 import { getRedis } from './redis.js'
 import { logger } from './logger.js'
-import type { SamplingAlgorithm } from './inventor-types.js'
+import type { SamplingAlgorithm } from './intelligence/inventor-types.js'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -236,7 +236,7 @@ export async function loadBenchmarkRuns(): Promise<void> {
  * Polls every 5s with a 3-hour hard limit.
  */
 async function waitForInventorIdle(maxWaitMs = 3 * 60 * 60 * 1000): Promise<void> {
-  const { getInventorStatus } = await import('./inventor-loop.js')
+  const { getInventorStatus } = await import('./intelligence/inventor-loop.js')
   const deadline = Date.now() + maxWaitMs
   while (Date.now() < deadline) {
     if (!getInventorStatus().isRunning) return
@@ -279,7 +279,7 @@ async function _executeRun(
     await waitForInventorIdle()
 
     // Guard: if a non-benchmark experiment was started while we waited, yield
-    const { getInventorStatus } = await import('./inventor-loop.js')
+    const { getInventorStatus } = await import('./intelligence/inventor-loop.js')
     const currentStatus = getInventorStatus()
     if (currentStatus.isRunning && !currentStatus.experimentName.startsWith('bench-')) {
       run.status = 'failed'
@@ -289,7 +289,7 @@ async function _executeRun(
       return
     }
 
-    const { runInventor, getInventorNodes } = await import('./inventor-loop.js')
+    const { runInventor, getInventorNodes } = await import('./intelligence/inventor-loop.js')
     run.status = 'running'
     upsertBenchmarkRun(run)
 

@@ -22,7 +22,7 @@ import {
   syncRunWithInventorStatus,
 } from '../benchmark-runner.js'
 import { logger } from '../logger.js'
-import type { SamplingAlgorithm } from '../inventor-types.js'
+import type { SamplingAlgorithm } from '../intelligence/inventor-types.js'
 
 export const benchmarkRouter = Router()
 

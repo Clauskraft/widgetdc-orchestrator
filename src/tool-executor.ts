@@ -951,7 +951,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     }
 
     case 'run_evolution': {
-      const { runEvolutionLoop } = await import('./evolution-loop.js')
+      const { runEvolutionLoop } = await import('./intelligence/evolution-loop.js')
       const result = await runEvolutionLoop({
         focus_area: args.focus_area as string | undefined,
         dry_run: (args.dry_run as boolean) ?? false,
@@ -1767,7 +1767,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     // ── Inventor (ASI-Evolve MCP Tools — LIN-XXX) ────────────────────────
 
     case 'inventor_run': {
-      const { runInventor, getInventorStatus: getStatus } = await import('./inventor-loop.js')
+      const { runInventor, getInventorStatus: getStatus } = await import('./intelligence/inventor-loop.js')
       const status = getStatus()
       if (status.isRunning) {
         return JSON.stringify({
@@ -1808,12 +1808,12 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     }
 
     case 'inventor_status': {
-      const { getInventorStatus: getStatus } = await import('./inventor-loop.js')
+      const { getInventorStatus: getStatus } = await import('./intelligence/inventor-loop.js')
       return JSON.stringify(getStatus())
     }
 
     case 'inventor_nodes': {
-      const { getInventorNodes } = await import('./inventor-loop.js')
+      const { getInventorNodes } = await import('./intelligence/inventor-loop.js')
       const sort = (args.sort as string) ?? 'score'
       const limit = Math.min((args.limit as number) ?? 50, 200)
       const offset = (args.offset as number) ?? 0
@@ -1829,7 +1829,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     }
 
     case 'inventor_node': {
-      const { getInventorNode } = await import('./inventor-loop.js')
+      const { getInventorNode } = await import('./intelligence/inventor-loop.js')
       const nodeId = args.node_id as string
       if (!nodeId) return 'Error: node_id is required'
       const node = getInventorNode(nodeId)
@@ -1838,20 +1838,20 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     }
 
     case 'inventor_best': {
-      const { getBestNode } = await import('./inventor-loop.js')
+      const { getBestNode } = await import('./intelligence/inventor-loop.js')
       const best = getBestNode()
       if (!best) return 'No nodes yet — run an experiment first with inventor_run'
       return JSON.stringify(best)
     }
 
     case 'inventor_stop': {
-      const { stopInventor } = await import('./inventor-loop.js')
+      const { stopInventor } = await import('./intelligence/inventor-loop.js')
       const result = stopInventor()
       return `${result.success ? 'Stopped' : 'Failed'}: ${result.message}`
     }
 
     case 'inventor_history': {
-      const { getExperimentHistory } = await import('./inventor-loop.js')
+      const { getExperimentHistory } = await import('./intelligence/inventor-loop.js')
       const limit = Math.min(Math.max(1, Number(args.limit) || 20), 50)
       return JSON.stringify(getExperimentHistory(limit))
     }

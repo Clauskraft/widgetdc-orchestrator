@@ -15703,7 +15703,7 @@ var init_osint_scanner = __esm({
   }
 });
 
-// src/evolution-loop.ts
+// src/intelligence/evolution-loop.ts
 var evolution_loop_exports = {};
 __export(evolution_loop_exports, {
   getEvolutionHistory: () => getEvolutionHistory,
@@ -16134,7 +16134,7 @@ async function getEvolutionHistory(limit = 10) {
 }
 var isRunning, currentStage, lastCycle, totalCycles, STAGE_TIMEOUT_MS, TOTAL_TIMEOUT_MS, REDIS_PREFIX6, REDIS_HISTORY_KEY, REDIS_TTL;
 var init_evolution_loop = __esm({
-  "src/evolution-loop.ts"() {
+  "src/intelligence/evolution-loop.ts"() {
     "use strict";
     init_cognitive_proxy();
     init_mcp_caller();
@@ -20755,7 +20755,7 @@ var init_hyperagent_autonomous = __esm({
   }
 });
 
-// src/inventor-sampler.ts
+// src/intelligence/inventor-sampler.ts
 function createSampler(config2) {
   switch (config2.algorithm) {
     case "ucb1":
@@ -20772,7 +20772,7 @@ function createSampler(config2) {
 }
 var UCB1Sampler, GreedySampler, RandomSampler, IslandSampler;
 var init_inventor_sampler = __esm({
-  "src/inventor-sampler.ts"() {
+  "src/intelligence/inventor-sampler.ts"() {
     "use strict";
     init_logger();
     UCB1Sampler = class {
@@ -20941,7 +20941,7 @@ var init_inventor_sampler = __esm({
   }
 });
 
-// src/inventor-loop.ts
+// src/intelligence/inventor-loop.ts
 var inventor_loop_exports = {};
 __export(inventor_loop_exports, {
   getBestNode: () => getBestNode,
@@ -21518,7 +21518,7 @@ async function getExperimentHistory(limit = 20) {
 }
 var isRunning3, currentConfig, currentStep2, bestScore, bestNodeId, startedAt, lastStepAt, lastError, sampler, abortRequested, nodes, REDIS_PREFIX10, nodeKey, stateKey, samplerKey, historyKey;
 var init_inventor_loop = __esm({
-  "src/inventor-loop.ts"() {
+  "src/intelligence/inventor-loop.ts"() {
     "use strict";
     init_cognitive_proxy();
     init_dual_rag();

@@ -6,7 +6,7 @@
  *   GET  /api/evolution/history  — Last 10 executions from Redis
  */
 import { Router, Request, Response } from 'express'
-import { runEvolutionLoop, getEvolutionStatus, getEvolutionHistory } from '../evolution-loop.js'
+import { runEvolutionLoop, getEvolutionStatus, getEvolutionHistory } from '../intelligence/evolution-loop.js'
 import { logger } from '../logger.js'
 
 export const evolutionRouter = Router()
