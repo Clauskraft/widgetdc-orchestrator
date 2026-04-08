@@ -35858,7 +35858,7 @@ app.use(helmet({
 }));
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin) return callback(null, true);
+    if (!origin || origin === "null") return callback(null, true);
     const trusted = [
       "https://consulting-production-b5d8.up.railway.app",
       "https://orchestrator-production-c27e.up.railway.app",

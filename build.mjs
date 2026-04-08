@@ -83,6 +83,11 @@ await esbuild.build({
 // Copy frontend to dist/public/
 mkdirSync('dist/public', { recursive: true })
 copyFileSync('frontend/index.html', 'dist/public/index.html')
+// Inventor dashboard (ASI-Evolve evolution engine UI)
+if (existsSync('frontend/inventor-dashboard.html')) {
+  copyFileSync('frontend/inventor-dashboard.html', 'dist/public/inventor-dashboard.html')
+  console.log('✓ Copied inventor-dashboard.html → dist/public/')
+}
 
 // Wave 3 (2026-04-05): widgetdc-contracts' LlmMatrix reads llm-matrix.json via
 // fs.readFileSync from __dirname. After esbuild bundles the orchestrator, that

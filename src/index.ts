@@ -104,7 +104,8 @@ app.use(helmet({
 app.use(cors({
   origin: (origin, callback) => {
     // Allow requests with no origin (curl, MCP clients, server-to-server)
-    if (!origin) return callback(null, true)
+    // Also allow 'null' origin (file:// and sandboxed iframes — e.g. Inventor dashboard opened locally)
+    if (!origin || origin === 'null') return callback(null, true)
 
     // Always allow known WidgeTDC services
     const trusted = [
