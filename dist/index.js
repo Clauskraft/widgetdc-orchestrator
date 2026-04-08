@@ -7077,16 +7077,16 @@ var init_assert = __esm({
     init_errors2();
     init_error();
     init_check();
-    __classPrivateFieldSet = function(receiver, state, value, kind, f) {
+    __classPrivateFieldSet = function(receiver, state2, value, kind, f) {
       if (kind === "m") throw new TypeError("Private method is not writable");
       if (kind === "a" && !f) throw new TypeError("Private accessor was defined without a setter");
-      if (typeof state === "function" ? receiver !== state || !f : !state.has(receiver)) throw new TypeError("Cannot write private member to an object whose class did not declare it");
-      return kind === "a" ? f.call(receiver, value) : f ? f.value = value : state.set(receiver, value), value;
+      if (typeof state2 === "function" ? receiver !== state2 || !f : !state2.has(receiver)) throw new TypeError("Cannot write private member to an object whose class did not declare it");
+      return kind === "a" ? f.call(receiver, value) : f ? f.value = value : state2.set(receiver, value), value;
     };
-    __classPrivateFieldGet = function(receiver, state, kind, f) {
+    __classPrivateFieldGet = function(receiver, state2, kind, f) {
       if (kind === "a" && !f) throw new TypeError("Private accessor was defined without a getter");
-      if (typeof state === "function" ? receiver !== state || !f : !state.has(receiver)) throw new TypeError("Cannot read private member from an object whose class did not declare it");
-      return kind === "m" ? f : kind === "a" ? f.call(receiver) : f ? f.value : state.get(receiver);
+      if (typeof state2 === "function" ? receiver !== state2 || !f : !state2.has(receiver)) throw new TypeError("Cannot read private member from an object whose class did not declare it");
+      return kind === "m" ? f : kind === "a" ? f.call(receiver) : f ? f.value : state2.get(receiver);
     };
     AssertError = class extends TypeBoxError {
       constructor(iterator) {
@@ -9100,8 +9100,48 @@ var init_write_gate = __esm({
 var mcp_caller_exports = {};
 __export(mcp_caller_exports, {
   callMcpTool: () => callMcpTool,
-  getBackendCircuitState: () => getBackendCircuitState
+  getBackendCircuitState: () => getBackendCircuitState,
+  getRateLimitState: () => getRateLimitState
 });
+function recordRateLimit() {
+  const now = Date.now();
+  _rlTimestamps.push(now);
+  _rlTimestamps = _rlTimestamps.filter((t) => now - t < RL_WINDOW_MS);
+  if (_rlTimestamps.length >= RL_THRESHOLD) {
+    _rlDelayMs = Math.min(_rlDelayMs === 0 ? 1e3 : _rlDelayMs * 2, RL_MAX_DELAY_MS);
+    if (_rlDelayMs >= 5e3) {
+      logger.warn(
+        { delay_ms: _rlDelayMs, count_in_window: _rlTimestamps.length },
+        "MCP rate-limit backpressure: throttling all calls"
+      );
+    }
+  }
+}
+function decayRateLimitDelay() {
+  const now = Date.now();
+  if (now - _rlLastDecay > RL_WINDOW_MS && _rlDelayMs > 0) {
+    _rlTimestamps = _rlTimestamps.filter((t) => now - t < RL_WINDOW_MS);
+    if (_rlTimestamps.length < RL_THRESHOLD) {
+      _rlDelayMs = Math.floor(_rlDelayMs * RL_DECAY_FACTOR);
+      if (_rlDelayMs < 200) _rlDelayMs = 0;
+    }
+    _rlLastDecay = now;
+  }
+}
+async function applyBackpressure() {
+  decayRateLimitDelay();
+  if (_rlDelayMs > 0) {
+    await new Promise((r) => setTimeout(r, _rlDelayMs + Math.floor(Math.random() * 500)));
+  }
+}
+function getRateLimitState() {
+  return {
+    current_delay_ms: _rlDelayMs,
+    hits_in_window: _rlTimestamps.length,
+    threshold: RL_THRESHOLD,
+    window_ms: RL_WINDOW_MS
+  };
+}
 function backendRecordSuccess() {
   if (_backendFailures > 0) {
     logger.info({ previous_failures: _backendFailures }, "Backend circuit breaker CLOSED \u2014 backend recovered");
@@ -9246,6 +9286,7 @@ async function callMcpTool(opts) {
   });
 }
 async function callMcpToolOnce(opts, url, body, timeoutMs, log, t0) {
+  await applyBackpressure();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -9265,6 +9306,7 @@ async function callMcpToolOnce(opts, url, body, timeoutMs, log, t0) {
     if (!res.ok) {
       const errorText = await res.text().catch(() => `HTTP ${res.status}`);
       log.warn({ status: res.status, tool: opts.toolName, duration_ms }, "MCP call HTTP error");
+      if (res.status === 429) recordRateLimit();
       const errorCode = res.status === 401 || res.status === 403 ? "UNAUTHORIZED" : res.status === 404 ? "TOOL_NOT_FOUND" : res.status === 429 ? "RATE_LIMITED" : "BACKEND_ERROR";
       return {
         call_id: opts.callId,
@@ -9395,7 +9437,7 @@ async function aggregateSseStream(res, callId, log) {
     throw Object.assign(new Error(`SSE_PARSE_ERROR: ${err}`), { code: "SSE_PARSE_ERROR" });
   }
 }
-var MAX_RETRIES, RETRY_DELAY_MS, BACKEND_CB_THRESHOLD, BACKEND_CB_COOLDOWN_MS, _backendFailures, _backendCircuitOpenUntil, _backendCircuitLoggedAt, _auditLessonsCache, AUDIT_LESSONS_TTL_MS;
+var MAX_RETRIES, RETRY_DELAY_MS, RL_WINDOW_MS, RL_THRESHOLD, RL_MAX_DELAY_MS, RL_DECAY_FACTOR, _rlTimestamps, _rlDelayMs, _rlLastDecay, BACKEND_CB_THRESHOLD, BACKEND_CB_COOLDOWN_MS, _backendFailures, _backendCircuitOpenUntil, _backendCircuitLoggedAt, _auditLessonsCache, AUDIT_LESSONS_TTL_MS;
 var init_mcp_caller = __esm({
   "src/mcp-caller.ts"() {
     "use strict";
@@ -9405,6 +9447,13 @@ var init_mcp_caller = __esm({
     init_tracing();
     MAX_RETRIES = 2;
     RETRY_DELAY_MS = 1e3;
+    RL_WINDOW_MS = 1e4;
+    RL_THRESHOLD = 5;
+    RL_MAX_DELAY_MS = 3e4;
+    RL_DECAY_FACTOR = 0.8;
+    _rlTimestamps = [];
+    _rlDelayMs = 0;
+    _rlLastDecay = Date.now();
     BACKEND_CB_THRESHOLD = 5;
     BACKEND_CB_COOLDOWN_MS = 6e4;
     _backendFailures = 0;
@@ -10698,15 +10747,15 @@ async function retrainRoutingWeights() {
   }, "Adaptive RAG: retraining complete");
   return { weights: newWeights, stats, adjustments };
 }
-async function sendQLearningReward(state, action, reward) {
+async function sendQLearningReward(state2, action, reward) {
   if (!isRlmAvailable()) return;
   try {
     await callCognitive("learn", {
       prompt: JSON.stringify({
         state: {
-          query_type: state.query_type,
-          channel_count: state.channels_used.length,
-          result_density: state.result_count > 0 ? 1 : 0
+          query_type: state2.query_type,
+          channel_count: state2.channels_used.length,
+          result_density: state2.result_count > 0 ? 1 : 0
         },
         action: {
           strategy: action.strategy,
@@ -11414,12 +11463,12 @@ async function runAdaptive(steps, query, judgeAgent, confidenceThreshold = 0.6) 
   });
   return { results, chosen_topology: topology };
 }
-async function persistFunnelState(state) {
+async function persistFunnelState(state2) {
   const redis2 = getRedis();
   if (!redis2) return;
   await redis2.set(
-    `${FUNNEL_REDIS_PREFIX}${state.execution_id}`,
-    JSON.stringify(state),
+    `${FUNNEL_REDIS_PREFIX}${state2.execution_id}`,
+    JSON.stringify(state2),
     "EX",
     86400 * 7
     // 7 day TTL
@@ -11439,9 +11488,9 @@ async function loadFunnelState(executionId) {
 async function runFunnel(steps, entryStage = "signal", preloadedContext, executionId) {
   const execId = executionId ?? uuid5();
   const entryIndex = FUNNEL_STAGES.indexOf(entryStage);
-  let state = await loadFunnelState(execId);
-  if (!state) {
-    state = {
+  let state2 = await loadFunnelState(execId);
+  if (!state2) {
+    state2 = {
       execution_id: execId,
       current_stage: entryStage,
       stage_outputs: {},
@@ -11450,7 +11499,7 @@ async function runFunnel(steps, entryStage = "signal", preloadedContext, executi
     };
     if (preloadedContext && entryIndex > 0) {
       const prevStage = FUNNEL_STAGES[entryIndex - 1];
-      state.stage_outputs[prevStage] = preloadedContext;
+      state2.stage_outputs[prevStage] = preloadedContext;
     }
   }
   const results = [];
@@ -11462,25 +11511,25 @@ async function runFunnel(steps, entryStage = "signal", preloadedContext, executi
       continue;
     }
     const prevStage = i > 0 ? FUNNEL_STAGES[i - 1] : null;
-    const previousOutput = prevStage ? state.stage_outputs[prevStage] : preloadedContext ?? null;
-    state.current_stage = stage;
-    state.last_updated = (/* @__PURE__ */ new Date()).toISOString();
-    await persistFunnelState(state);
+    const previousOutput = prevStage ? state2.stage_outputs[prevStage] : preloadedContext ?? null;
+    state2.current_stage = stage;
+    state2.last_updated = (/* @__PURE__ */ new Date()).toISOString();
+    await persistFunnelState(state2);
     logger.info({ stage, step_index: i, execution_id: execId }, "Funnel: executing stage");
     const taggedStep = { ...step, id: step.id ?? `funnel-${stage}` };
     const result = await executeStep(taggedStep, previousOutput);
     result.funnel_stage = stage;
     result.stage_index = i;
     results.push(result);
-    state.stage_outputs[stage] = result.output;
-    state.last_updated = (/* @__PURE__ */ new Date()).toISOString();
-    await persistFunnelState(state);
+    state2.stage_outputs[stage] = result.output;
+    state2.last_updated = (/* @__PURE__ */ new Date()).toISOString();
+    await persistFunnelState(state2);
     if (result.status === "error") {
       logger.warn({ stage, error: result.output }, "Funnel: stage failed, state saved for resume");
       break;
     }
   }
-  return { results, funnel_state: state };
+  return { results, funnel_state: state2 };
 }
 async function runDebateGVU(steps, judgeAgent, confidenceThreshold = 0.6) {
   const debateResults = await runParallel(steps);
@@ -21498,7 +21547,7 @@ var TypeCompiler;
   }
   function* FromRef19(schema, references, value) {
     const target = Deref(schema, references);
-    if (state.functions.has(schema.$ref))
+    if (state2.functions.has(schema.$ref))
       return yield `${CreateFunctionName(schema.$ref)}(${value})`;
     yield* Visit20(target, references, value);
   }
@@ -21567,8 +21616,8 @@ var TypeCompiler;
     yield Policy.IsVoidLike(value);
   }
   function* FromKind4(schema, references, value) {
-    const instance = state.instances.size;
-    state.instances.set(instance, schema);
+    const instance = state2.instances.size;
+    state2.instances.set(instance, schema);
     yield `kind('${schema[Kind]}', ${instance}, ${value})`;
   }
   function* Visit20(schema, references, value, useHoisting = true) {
@@ -21576,12 +21625,12 @@ var TypeCompiler;
     const schema_ = schema;
     if (useHoisting && IsString(schema.$id)) {
       const functionName = CreateFunctionName(schema.$id);
-      if (state.functions.has(functionName)) {
+      if (state2.functions.has(functionName)) {
         return yield `${functionName}(${value})`;
       } else {
-        state.functions.set(functionName, "<deferred>");
+        state2.functions.set(functionName, "<deferred>");
         const functionCode = CreateFunction(functionName, schema, references, "value", false);
-        state.functions.set(functionName, functionCode);
+        state2.functions.set(functionName, functionCode);
         return yield `${functionName}(${value})`;
       }
     }
@@ -21658,7 +21707,7 @@ var TypeCompiler;
         return yield* FromKind4(schema_, references_, value);
     }
   }
-  const state = {
+  const state2 = {
     language: "javascript",
     // target language
     functions: /* @__PURE__ */ new Map(),
@@ -21675,8 +21724,8 @@ var TypeCompiler;
     return `check_${Identifier.Encode($id)}`;
   }
   function CreateVariable(expression) {
-    const variableName = `local_${state.variables.size}`;
-    state.variables.set(variableName, `const ${variableName} = ${expression}`);
+    const variableName = `local_${state2.variables.size}`;
+    state2.variables.set(variableName, `const ${variableName} = ${expression}`);
     return variableName;
   }
   function CreateFunction(name, schema, references, value, useHoisting = true) {
@@ -21688,18 +21737,18 @@ var TypeCompiler;
 }`;
   }
   function CreateParameter(name, type) {
-    const annotation = state.language === "typescript" ? `: ${type}` : "";
+    const annotation = state2.language === "typescript" ? `: ${type}` : "";
     return `${name}${annotation}`;
   }
   function CreateReturns(type) {
-    return state.language === "typescript" ? `: ${type}` : "";
+    return state2.language === "typescript" ? `: ${type}` : "";
   }
   function Build(schema, references, options) {
     const functionCode = CreateFunction("check", schema, references, "value");
     const parameter = CreateParameter("value", "any");
     const returns = CreateReturns("boolean");
-    const functions = [...state.functions.values()];
-    const variables = [...state.variables.values()];
+    const functions = [...state2.functions.values()];
+    const variables = [...state2.variables.values()];
     const checkFunction = IsString(schema.$id) ? `return function check(${parameter})${returns} {
   return ${CreateFunctionName(schema.$id)}(value)
 }` : `return ${functionCode}`;
@@ -21708,10 +21757,10 @@ var TypeCompiler;
   function Code(...args) {
     const defaults = { language: "javascript" };
     const [schema, references, options] = args.length === 2 && IsArray(args[1]) ? [args[0], args[1], defaults] : args.length === 2 && !IsArray(args[1]) ? [args[0], [], args[1]] : args.length === 3 ? [args[0], args[1], args[2]] : args.length === 1 ? [args[0], [], defaults] : [null, [], defaults];
-    state.language = options.language;
-    state.variables.clear();
-    state.functions.clear();
-    state.instances.clear();
+    state2.language = options.language;
+    state2.variables.clear();
+    state2.functions.clear();
+    state2.instances.clear();
     if (!IsSchema2(schema))
       throw new TypeCompilerTypeGuardError(schema);
     for (const schema2 of references)
@@ -21723,7 +21772,7 @@ var TypeCompiler;
   function Compile(schema, references = []) {
     const generatedCode = Code(schema, references, { language: "javascript" });
     const compiledFunction = globalThis.Function("kind", "format", "hash", generatedCode);
-    const instances = new Map(state.instances);
+    const instances = new Map(state2.instances);
     function typeRegistryFunction(kind, instance, value) {
       if (!type_exports.Has(kind) || !instances.has(instance))
         return false;
@@ -27754,6 +27803,542 @@ init_graph_hygiene_cron();
 init_hierarchical_intelligence();
 init_adaptive_rag();
 init_hyperagent_autonomous();
+
+// src/anomaly-watcher.ts
+init_config();
+init_logger();
+init_redis();
+init_mcp_caller();
+init_mcp_caller();
+init_cognitive_proxy();
+init_sse();
+init_chat_broadcaster();
+var REDIS_KEY5 = "anomaly-watcher:state";
+var MAX_ACTIVE_ANOMALIES = 50;
+var MAX_PATTERNS = 100;
+var state = {
+  lastScanAt: null,
+  totalScans: 0,
+  anomaliesDetected: 0,
+  anomaliesResolved: 0,
+  activeAnomalies: [],
+  patterns: []
+};
+async function probeHealth() {
+  const t0 = Date.now();
+  let backendReachable = false;
+  let backendLatencyMs = 0;
+  try {
+    const res = await fetch(`${config.backendUrl}/health`, {
+      signal: AbortSignal.timeout(5e3)
+    });
+    backendReachable = res.ok;
+    backendLatencyMs = Date.now() - t0;
+  } catch {
+    backendLatencyMs = Date.now() - t0;
+  }
+  let redisReachable = false;
+  try {
+    const redis2 = getRedis();
+    if (redis2) {
+      await redis2.ping();
+      redisReachable = true;
+    }
+  } catch {
+  }
+  return {
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    backendCircuit: getBackendCircuitState(),
+    rateLimitState: getRateLimitState(),
+    backendReachable,
+    backendLatencyMs,
+    rlmReachable: isRlmAvailable(),
+    redisReachable
+  };
+}
+async function detectAnomalies(health) {
+  const anomalies = [];
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  if (health.rateLimitState.current_delay_ms > 0 || health.rateLimitState.hits_in_window >= 3) {
+    anomalies.push({
+      id: `rl-storm-${Date.now()}`,
+      type: "rate_limit_storm",
+      valence: "negative",
+      severity: health.rateLimitState.current_delay_ms >= 5e3 ? "critical" : "warning",
+      source: "mcp-caller",
+      description: `Rate-limit backpressure active: ${health.rateLimitState.hits_in_window} hits in ${health.rateLimitState.window_ms}ms window, delay=${health.rateLimitState.current_delay_ms}ms`,
+      metrics: {
+        delay_ms: health.rateLimitState.current_delay_ms,
+        hits_in_window: health.rateLimitState.hits_in_window
+      },
+      detectedAt: now,
+      resolvedAt: null,
+      remediation: null,
+      learnings: []
+    });
+  }
+  if (health.backendCircuit.open) {
+    anomalies.push({
+      id: `cb-open-${Date.now()}`,
+      type: "circuit_breaker_open",
+      valence: "negative",
+      severity: "critical",
+      source: "backend",
+      description: `Backend circuit breaker OPEN: ${health.backendCircuit.failures} consecutive failures, cooldown=${health.backendCircuit.cooldown_remaining_ms}ms`,
+      metrics: {
+        failures: health.backendCircuit.failures,
+        cooldown_remaining_ms: health.backendCircuit.cooldown_remaining_ms
+      },
+      detectedAt: now,
+      resolvedAt: null,
+      remediation: null,
+      learnings: []
+    });
+  }
+  if (!health.backendReachable) {
+    anomalies.push({
+      id: `backend-down-${Date.now()}`,
+      type: "timeout_cascade",
+      valence: "negative",
+      severity: "critical",
+      source: "backend",
+      description: `Backend unreachable (latency: ${health.backendLatencyMs}ms)`,
+      metrics: { latency_ms: health.backendLatencyMs },
+      detectedAt: now,
+      resolvedAt: null,
+      remediation: null,
+      learnings: []
+    });
+  } else if (health.backendLatencyMs > 5e3) {
+    anomalies.push({
+      id: `backend-slow-${Date.now()}`,
+      type: "timeout_cascade",
+      valence: "negative",
+      severity: "warning",
+      source: "backend",
+      description: `Backend high latency: ${health.backendLatencyMs}ms (threshold: 5000ms)`,
+      metrics: { latency_ms: health.backendLatencyMs },
+      detectedAt: now,
+      resolvedAt: null,
+      remediation: null,
+      learnings: []
+    });
+  }
+  if (!health.rlmReachable) {
+    anomalies.push({
+      id: `rlm-down-${Date.now()}`,
+      type: "stagnation",
+      valence: "negative",
+      severity: "warning",
+      source: "rlm-engine",
+      description: "RLM Engine unavailable \u2014 cognitive pipelines (reason, analyze, fold) will fail",
+      metrics: {},
+      detectedAt: now,
+      resolvedAt: null,
+      remediation: null,
+      learnings: []
+    });
+  }
+  if (!health.redisReachable) {
+    anomalies.push({
+      id: `redis-down-${Date.now()}`,
+      type: "stagnation",
+      valence: "negative",
+      severity: "critical",
+      source: "redis",
+      description: "Redis unreachable \u2014 edge scores, totalCycles, agent state at risk of loss on restart",
+      metrics: {},
+      detectedAt: now,
+      resolvedAt: null,
+      remediation: null,
+      learnings: []
+    });
+  }
+  if (health.backendReachable && health.backendLatencyMs < 50 && health.backendLatencyMs > 0) {
+    anomalies.push({
+      id: `perf-spike-${Date.now()}`,
+      type: "performance_spike",
+      valence: "positive",
+      severity: "info",
+      source: "backend",
+      description: `Backend responding exceptionally fast: ${health.backendLatencyMs}ms (normal 100-500ms)`,
+      metrics: { latency_ms: health.backendLatencyMs },
+      detectedAt: now,
+      resolvedAt: null,
+      remediation: null,
+      learnings: []
+    });
+  }
+  if (health.rateLimitState.current_delay_ms === 0 && health.rateLimitState.hits_in_window === 0) {
+    const stormPattern = state.patterns.find((p) => p.type === "rate_limit_storm");
+    if (stormPattern && stormPattern.count > 0) {
+      const lastStorm = new Date(stormPattern.lastSeen).getTime();
+      const timeSinceStorm = Date.now() - lastStorm;
+      if (timeSinceStorm < 36e5 && timeSinceStorm > 6e4) {
+        anomalies.push({
+          id: `recovery-${Date.now()}`,
+          type: "unexpected_success",
+          valence: "positive",
+          severity: "info",
+          source: "mcp-caller",
+          description: `Rate-limit storm self-resolved in ${Math.round(timeSinceStorm / 1e3)}s \u2014 backpressure system effective`,
+          metrics: { recovery_ms: timeSinceStorm, prior_storms: stormPattern.count },
+          detectedAt: now,
+          resolvedAt: null,
+          remediation: null,
+          learnings: []
+        });
+      }
+    }
+  }
+  try {
+    const hyperStatus = await callMcpTool({
+      toolName: "hyperagent_auto_status",
+      args: {},
+      callId: `anomaly-hyper-${Date.now()}`
+    });
+    if (hyperStatus && typeof hyperStatus === "object") {
+      const edges = hyperStatus.edge_scores;
+      if (edges) {
+        for (const [edgeName, score] of Object.entries(edges)) {
+          if (typeof score === "number" && score >= 0.85) {
+            anomalies.push({
+              id: `edge-break-${edgeName}-${Date.now()}`,
+              type: "edge_breakthrough",
+              valence: "positive",
+              severity: "info",
+              source: "hyperagent",
+              description: `Sovereign Edge "${edgeName}" reached breakthrough score: ${(score * 100).toFixed(1)}%`,
+              metrics: { edge: 0, score },
+              detectedAt: now,
+              resolvedAt: null,
+              remediation: null,
+              learnings: []
+            });
+          }
+        }
+      }
+      const totalCycles3 = hyperStatus.totalCycles;
+      const phase = hyperStatus.phase;
+      if (typeof totalCycles3 === "number" && typeof phase === "number" && phase >= 2 && totalCycles3 > 10) {
+        const cyclesPerPhase = totalCycles3 / (phase + 1);
+        if (cyclesPerPhase < 5) {
+          anomalies.push({
+            id: `pattern-emerge-${Date.now()}`,
+            type: "pattern_emergence",
+            valence: "positive",
+            severity: "info",
+            source: "hyperagent",
+            description: `Fast phase progression: ${totalCycles3} cycles across ${phase + 1} phases (${cyclesPerPhase.toFixed(1)} cycles/phase) \u2014 platform learning accelerating`,
+            metrics: { totalCycles: totalCycles3, phase, cyclesPerPhase },
+            detectedAt: now,
+            resolvedAt: null,
+            remediation: null,
+            learnings: []
+          });
+        }
+      }
+    }
+  } catch {
+  }
+  try {
+    const inventorBest = await callMcpTool({
+      toolName: "run_evolution",
+      args: { action: "status" },
+      callId: `anomaly-inventor-${Date.now()}`
+    });
+    if (inventorBest && typeof inventorBest === "object") {
+      const bestScore2 = inventorBest.best_score;
+      if (typeof bestScore2 === "number" && bestScore2 > 0.9) {
+        anomalies.push({
+          id: `inventor-high-${Date.now()}`,
+          type: "unexpected_success",
+          valence: "positive",
+          severity: "info",
+          source: "inventor",
+          description: `Inventor evolution reached high-quality trial: score ${(bestScore2 * 100).toFixed(1)}% \u2014 candidate for production adoption`,
+          metrics: { best_score: bestScore2 },
+          detectedAt: now,
+          resolvedAt: null,
+          remediation: null,
+          learnings: []
+        });
+      }
+    }
+  } catch {
+  }
+  return anomalies;
+}
+async function learnFromAnomalies(anomalies) {
+  if (anomalies.length === 0) return;
+  for (const a of anomalies) {
+    let pattern = state.patterns.find((p) => p.type === a.type);
+    if (!pattern) {
+      pattern = { type: a.type, count: 0, lastSeen: a.detectedAt, avgDurationMs: 0, knownFix: null };
+      state.patterns.push(pattern);
+    }
+    pattern.count++;
+    pattern.lastSeen = a.detectedAt;
+  }
+  if (state.patterns.length > MAX_PATTERNS) {
+    state.patterns.sort((a, b) => b.count - a.count);
+    state.patterns = state.patterns.slice(0, MAX_PATTERNS);
+  }
+  for (const a of anomalies) {
+    try {
+      await callMcpTool({
+        toolName: "memory_store",
+        args: {
+          agent_id: "anomaly-watcher",
+          key: `anomaly:${a.valence}:${a.type}:${a.id}`,
+          value: JSON.stringify({
+            type: a.type,
+            valence: a.valence,
+            severity: a.severity,
+            source: a.source,
+            description: a.description,
+            metrics: a.metrics
+          }),
+          metadata: { severity: a.severity, source: a.source, type: a.type, valence: a.valence }
+        },
+        callId: `anomaly-mem-${a.id}`
+      });
+    } catch {
+    }
+  }
+  const negatives = anomalies.filter((a) => a.valence === "negative");
+  if (negatives.length > 0) {
+    try {
+      await callMcpTool({
+        toolName: "failure_harvest",
+        args: {
+          failures: negatives.map((a) => ({
+            category: a.type,
+            pattern: a.description,
+            context: a.metrics,
+            severity: a.severity
+          }))
+        },
+        callId: `anomaly-harvest-${Date.now()}`
+      });
+    } catch {
+    }
+  }
+  try {
+    const items = anomalies.map((a) => ({
+      title: a.valence === "positive" ? `[OPPORTUNITY] ${a.type}: ${a.source}` : `[${a.severity.toUpperCase()}] ${a.type}: ${a.source}`,
+      description: a.description,
+      priority: a.valence === "positive" ? "P2" : a.severity === "critical" ? "P0" : "P1",
+      category: a.valence === "positive" ? "platform-opportunity" : "platform-health"
+    }));
+    await callMcpTool({
+      toolName: "loose_ends_scan",
+      args: { source: "anomaly-watcher", items },
+      callId: `anomaly-loose-${Date.now()}`
+    });
+  } catch {
+  }
+}
+async function reasonAboutAnomalies(anomalies) {
+  if (anomalies.length === 0 || !isRlmAvailable()) return "";
+  const negatives = anomalies.filter((a) => a.valence === "negative");
+  const positives = anomalies.filter((a) => a.valence === "positive");
+  const criticals = negatives.filter((a) => a.severity === "critical");
+  if (criticals.length === 0 && positives.length === 0) return "";
+  try {
+    let priorInsights = "";
+    try {
+      const allTypes = anomalies.map((a) => a.type);
+      const memResult = await callMcpTool({
+        toolName: "memory_retrieve",
+        args: {
+          agent_id: "anomaly-watcher",
+          query: `anomaly resolution amplification ${allTypes.join(" ")}`,
+          top_k: 5
+        },
+        callId: `anomaly-reason-mem-${Date.now()}`
+      });
+      const memories = Array.isArray(memResult.memories) ? memResult.memories : [];
+      priorInsights = memories.map((m) => String(m.value || "")).join("\n");
+    } catch {
+    }
+    const negativesSection = criticals.length > 0 ? `
+CRITICAL ANOMALIES (negative \u2014 needs remediation):
+${criticals.map((a) => `- [${a.severity}] ${a.type} from ${a.source}: ${a.description}
+  Metrics: ${JSON.stringify(a.metrics)}`).join("\n")}` : "";
+    const positivesSection = positives.length > 0 ? `
+POSITIVE ANOMALIES (unexpected successes \u2014 worth amplifying):
+${positives.map((a) => `- [${a.type}] from ${a.source}: ${a.description}
+  Metrics: ${JSON.stringify(a.metrics)}`).join("\n")}` : "";
+    const result = await callCognitiveRaw("reason", {
+      prompt: `You are the Anomaly Intelligence Agent for the WidgeTDC platform.
+You analyze BOTH negative anomalies (to fix) AND positive anomalies (to amplify and learn from).
+${negativesSection}${positivesSection}
+
+HISTORICAL PATTERNS:
+${state.patterns.filter((p) => p.count > 1).map((p) => `- ${p.type}: occurred ${p.count} times, last seen ${p.lastSeen}${p.knownFix ? `, fix: ${p.knownFix}` : ""}`).join("\n") || "(no prior patterns)"}
+
+PRIOR LEARNINGS:
+${priorInsights || "(no prior insights)"}
+
+Provide:
+${criticals.length > 0 ? `1. ROOT CAUSE ANALYSIS for negative anomalies (most likely cause)
+2. IMMEDIATE REMEDIATION steps the orchestrator can take autonomously
+3. PREVENTIVE MEASURES to add to the platform` : ""}
+${positives.length > 0 ? `${criticals.length > 0 ? "4" : "1"}. AMPLIFICATION STRATEGY for positive anomalies \u2014 what's working well and how to reinforce it
+${criticals.length > 0 ? "5" : "2"}. DEVELOPMENT IDEAS inspired by the positive patterns \u2014 new capabilities or optimizations to explore
+${criticals.length > 0 ? "6" : "3"}. PATTERN CONNECTIONS \u2014 how positive signals relate to recent changes or experiments` : ""}
+${criticals.length > 0 || positives.length > 0 ? `
+FINAL: One-liner insight to remember for next time` : ""}`,
+      agent_id: "anomaly-watcher",
+      depth: 2
+    }, 2e4);
+    const analysis = String(result.answer || result.result || "");
+    if (analysis.length > 50) {
+      const primaryType = criticals.length > 0 ? criticals[0].type : positives[0]?.type ?? "mixed";
+      const memKey = positives.length > 0 && criticals.length === 0 ? `amplification:${primaryType}:${Date.now()}` : `remediation:${primaryType}:${Date.now()}`;
+      try {
+        await callMcpTool({
+          toolName: "memory_store",
+          args: {
+            agent_id: "anomaly-watcher",
+            key: memKey,
+            value: analysis.slice(0, 2e3),
+            metadata: {
+              types: anomalies.map((a) => a.type),
+              valences: [...new Set(anomalies.map((a) => a.valence))],
+              scan: state.totalScans
+            }
+          },
+          callId: `anomaly-rem-store-${Date.now()}`
+        });
+      } catch {
+      }
+    }
+    return analysis;
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Anomaly-watcher: RLM reasoning failed");
+    return "";
+  }
+}
+async function runAnomalyScan() {
+  const t0 = Date.now();
+  state.totalScans++;
+  state.lastScanAt = (/* @__PURE__ */ new Date()).toISOString();
+  broadcastSSE("anomaly-watcher", { event: "scan_start", scan: state.totalScans });
+  const health = await probeHealth();
+  const anomalies = await detectAnomalies(health);
+  const activeTypes = new Set(anomalies.map((a) => a.type));
+  state.activeAnomalies = state.activeAnomalies.filter((a) => {
+    if (!activeTypes.has(a.type) && !a.resolvedAt) {
+      a.resolvedAt = (/* @__PURE__ */ new Date()).toISOString();
+      state.anomaliesResolved++;
+      logger.info({ type: a.type, source: a.source }, "Anomaly resolved");
+      return false;
+    }
+    return true;
+  });
+  if (anomalies.length > 0) {
+    state.anomaliesDetected += anomalies.length;
+    for (const a of anomalies) {
+      if (!state.activeAnomalies.find((x) => x.type === a.type)) {
+        state.activeAnomalies.push(a);
+      }
+    }
+    if (state.activeAnomalies.length > MAX_ACTIVE_ANOMALIES) {
+      state.activeAnomalies = state.activeAnomalies.slice(-MAX_ACTIVE_ANOMALIES);
+    }
+    await learnFromAnomalies(anomalies);
+    const analysis = await reasonAboutAnomalies(anomalies);
+    const critCount = anomalies.filter((a) => a.severity === "critical").length;
+    const positiveCount = anomalies.filter((a) => a.valence === "positive").length;
+    if (critCount > 0) {
+      broadcastMessage({
+        from: "AnomalyWatcher",
+        to: "All",
+        source: "orchestrator",
+        type: "Alert",
+        message: `${critCount} critical anomal${critCount === 1 ? "y" : "ies"} detected: ${anomalies.filter((a) => a.severity === "critical").map((a) => `${a.type}(${a.source})`).join(", ")}`
+      });
+    }
+    if (positiveCount > 0) {
+      broadcastMessage({
+        from: "AnomalyWatcher",
+        to: "All",
+        source: "orchestrator",
+        type: "Message",
+        message: `${positiveCount} positive signal${positiveCount === 1 ? "" : "s"}: ${anomalies.filter((a) => a.valence === "positive").map((a) => `${a.type}(${a.source})`).join(", ")}`
+      });
+    }
+    broadcastSSE("anomaly-watcher", {
+      event: "scan_complete",
+      scan: state.totalScans,
+      anomalies: anomalies.length,
+      critical: critCount,
+      positive: positiveCount,
+      duration_ms: Date.now() - t0
+    });
+    logger.info({
+      scan: state.totalScans,
+      anomalies: anomalies.length,
+      critical: critCount,
+      duration_ms: Date.now() - t0
+    }, "Anomaly scan complete");
+    await persistState();
+    return { anomalies, health, analysis, patterns: state.patterns };
+  }
+  broadcastSSE("anomaly-watcher", {
+    event: "scan_complete",
+    scan: state.totalScans,
+    anomalies: 0,
+    critical: 0,
+    duration_ms: Date.now() - t0
+  });
+  await persistState();
+  return { anomalies: [], health, analysis: "", patterns: state.patterns };
+}
+async function persistState() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    await redis2.set(REDIS_KEY5, JSON.stringify(state));
+  } catch {
+  }
+}
+async function loadState() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const raw = await redis2.get(REDIS_KEY5);
+    if (raw) {
+      const loaded = JSON.parse(raw);
+      state = { ...state, ...loaded };
+      logger.info(
+        { totalScans: state.totalScans, patterns: state.patterns.length },
+        "Anomaly-watcher: restored state from Redis"
+      );
+    }
+  } catch {
+  }
+}
+function getWatcherState() {
+  return { ...state };
+}
+function getActiveAnomalies() {
+  return [...state.activeAnomalies];
+}
+function getAnomalyPatterns() {
+  return [...state.patterns];
+}
+async function initAnomalyWatcher() {
+  await loadState();
+  logger.info(
+    { totalScans: state.totalScans, patterns: state.patterns.length },
+    "Anomaly-watcher initialized"
+  );
+}
+
+// src/cron-scheduler.ts
 var jobs = /* @__PURE__ */ new Map();
 var cronTasks = /* @__PURE__ */ new Map();
 var REDIS_CRON_KEY = "orchestrator:cron-jobs";
@@ -28179,6 +28764,36 @@ async function runCronJob(jobId) {
       }
       return;
     }
+    if (job.id === "anomaly-watcher") {
+      try {
+        const result2 = await runAnomalyScan();
+        const neg = result2.anomalies.filter((a) => a.valence === "negative").length;
+        const pos = result2.anomalies.filter((a) => a.valence === "positive").length;
+        const crit = result2.anomalies.filter((a) => a.severity === "critical").length;
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = result2.anomalies.length === 0 ? "clean" : `${neg} negative (${crit} critical), ${pos} positive`;
+        job.run_count++;
+        persistCronJobs();
+        if (result2.anomalies.length > 0) {
+          const emoji = crit > 0 ? "\u{1F534}" : pos > 0 ? "\u{1F7E2}" : "\u{1F7E1}";
+          broadcastMessage({
+            from: "Orchestrator",
+            to: "All",
+            source: "orchestrator",
+            type: "Message",
+            message: `${emoji} Anomaly scan: ${neg} negative (${crit} critical), ${pos} positive signals, ${result2.patterns.length} learned patterns`,
+            timestamp: (/* @__PURE__ */ new Date()).toISOString()
+          });
+        }
+      } catch (err) {
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = "failed";
+        job.run_count++;
+        persistCronJobs();
+        logger.error({ id: job.id, err: String(err) }, "Anomaly watcher cron failed");
+      }
+      return;
+    }
     const result = await executeChain(job.chain);
     job.last_run = (/* @__PURE__ */ new Date()).toISOString();
     job.last_status = result.status;
@@ -28510,6 +29125,18 @@ function registerDefaultLoops() {
           }
         }
       ]
+    }
+  });
+  registerCronJob({
+    id: "anomaly-watcher",
+    name: "Proactive Anomaly Watcher (Detect+Learn+Reason)",
+    schedule: "*/5 * * * *",
+    // Every 5 minutes
+    enabled: true,
+    chain: {
+      name: "Anomaly Scan",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
     }
   });
   registerCronJob({
@@ -29383,7 +30010,7 @@ import { Router as Router15 } from "express";
 // src/audit.ts
 init_redis();
 init_logger();
-var REDIS_KEY5 = "orchestrator:audit";
+var REDIS_KEY6 = "orchestrator:audit";
 var MAX_ENTRIES = 1e3;
 var TTL_SECONDS7 = 30 * 24 * 3600;
 var memoryAudit = [];
@@ -29392,9 +30019,9 @@ async function logAudit(entry) {
     if (isRedisEnabled()) {
       const redis2 = getRedis();
       if (redis2) {
-        await redis2.lpush(REDIS_KEY5, JSON.stringify(entry));
-        await redis2.ltrim(REDIS_KEY5, 0, MAX_ENTRIES - 1);
-        await redis2.expire(REDIS_KEY5, TTL_SECONDS7);
+        await redis2.lpush(REDIS_KEY6, JSON.stringify(entry));
+        await redis2.ltrim(REDIS_KEY6, 0, MAX_ENTRIES - 1);
+        await redis2.expire(REDIS_KEY6, TTL_SECONDS7);
         return;
       }
     }
@@ -29409,7 +30036,7 @@ async function getAuditLog(limit = 100, offset = 0) {
     if (isRedisEnabled()) {
       const redis2 = getRedis();
       if (redis2) {
-        const raw = await redis2.lrange(REDIS_KEY5, offset, offset + limit - 1);
+        const raw = await redis2.lrange(REDIS_KEY6, offset, offset + limit - 1);
         return raw.map((r) => JSON.parse(r));
       }
     }
@@ -35084,9 +35711,9 @@ var UCB1Sampler = class {
   getState() {
     return { totalVisits: this.totalVisits, c: this.c };
   }
-  loadState(state) {
-    this.totalVisits = state.totalVisits || 0;
-    this.c = state.c || 1.414;
+  loadState(state2) {
+    this.totalVisits = state2.totalVisits || 0;
+    this.c = state2.c || 1.414;
   }
 };
 var GreedySampler = class {
@@ -35196,17 +35823,17 @@ var IslandSampler = class {
       lastMigration: this.lastMigration
     };
   }
-  loadState(state) {
-    const islands = state.islands;
+  loadState(state2) {
+    const islands = state2.islands;
     if (islands) {
       this.islands.clear();
       for (const [idx, ids] of Object.entries(islands)) {
         this.islands.set(Number(idx), new Set(ids));
       }
     }
-    this.currentIsland = state.currentIsland || 0;
-    this.generationCount = state.generationCount || 0;
-    this.lastMigration = state.lastMigration || 0;
+    this.currentIsland = state2.currentIsland || 0;
+    this.generationCount = state2.generationCount || 0;
+    this.lastMigration = state2.lastMigration || 0;
   }
 };
 function createSampler(config2) {
@@ -35440,10 +36067,10 @@ async function persistNodes(experimentName) {
   await redis2.set(nodeKey(experimentName), data).catch(() => {
   });
 }
-async function persistState(experimentName) {
+async function persistState2(experimentName) {
   const redis2 = getRedis();
   if (!redis2) return;
-  const state = {
+  const state2 = {
     currentStep: currentStep2,
     bestScore,
     bestNodeId,
@@ -35451,14 +36078,14 @@ async function persistState(experimentName) {
     lastStepAt,
     lastError
   };
-  await redis2.set(stateKey(experimentName), JSON.stringify(state)).catch(() => {
+  await redis2.set(stateKey(experimentName), JSON.stringify(state2)).catch(() => {
   });
   if (sampler) {
     await redis2.set(samplerKey(experimentName), JSON.stringify(sampler.getState())).catch(() => {
     });
   }
 }
-async function loadState(experimentName) {
+async function loadState2(experimentName) {
   const redis2 = getRedis();
   if (!redis2) return false;
   try {
@@ -35470,13 +36097,13 @@ async function loadState(experimentName) {
     }
     const stateRaw = await redis2.get(stateKey(experimentName));
     if (stateRaw) {
-      const state = JSON.parse(stateRaw);
-      currentStep2 = state.currentStep || 0;
-      bestScore = state.bestScore ?? -Infinity;
-      bestNodeId = state.bestNodeId || null;
-      startedAt = state.startedAt || null;
-      lastStepAt = state.lastStepAt || null;
-      lastError = state.lastError || null;
+      const state2 = JSON.parse(stateRaw);
+      currentStep2 = state2.currentStep || 0;
+      bestScore = state2.bestScore ?? -Infinity;
+      bestNodeId = state2.bestNodeId || null;
+      startedAt = state2.startedAt || null;
+      lastStepAt = state2.lastStepAt || null;
+      lastError = state2.lastError || null;
     }
     if (sampler) {
       const samplerRaw = await redis2.get(samplerKey(experimentName));
@@ -35543,7 +36170,7 @@ async function runStep(config2) {
   }
   lastStepAt = (/* @__PURE__ */ new Date()).toISOString();
   await persistNodes(config2.experimentName);
-  await persistState(config2.experimentName);
+  await persistState2(config2.experimentName);
   if (node.analysis.length > 20) {
     try {
       await callMcpTool({
@@ -35608,7 +36235,7 @@ async function runInventor(config2, resume = false) {
     islands: config2.sampling.islands
   });
   if (resume) {
-    const loaded = await loadState(config2.experimentName);
+    const loaded = await loadState2(config2.experimentName);
     if (loaded) {
       logger.info(
         { experiment: config2.experimentName, nodes: nodes.size, step: currentStep2 },
@@ -35846,6 +36473,90 @@ inventorRouter.get("/best", (_req, res) => {
   res.json({ success: true, data: best });
 });
 
+// src/routes/anomaly-watcher.ts
+import { Router as Router45 } from "express";
+init_logger();
+var anomalyWatcherRouter = Router45();
+anomalyWatcherRouter.get("/status", (_req, res) => {
+  const state2 = getWatcherState();
+  res.json({
+    success: true,
+    data: {
+      lastScanAt: state2.lastScanAt,
+      totalScans: state2.totalScans,
+      anomaliesDetected: state2.anomaliesDetected,
+      anomaliesResolved: state2.anomaliesResolved,
+      activeCount: state2.activeAnomalies.length,
+      patternCount: state2.patterns.length,
+      activeByValence: {
+        negative: state2.activeAnomalies.filter((a) => a.valence === "negative").length,
+        positive: state2.activeAnomalies.filter((a) => a.valence === "positive").length
+      },
+      activeBySeverity: {
+        critical: state2.activeAnomalies.filter((a) => a.severity === "critical").length,
+        warning: state2.activeAnomalies.filter((a) => a.severity === "warning").length,
+        info: state2.activeAnomalies.filter((a) => a.severity === "info").length
+      }
+    }
+  });
+});
+anomalyWatcherRouter.get("/anomalies", (req, res) => {
+  let anomalies = getActiveAnomalies();
+  const valence = req.query.valence;
+  const severity = req.query.severity;
+  if (valence === "positive" || valence === "negative") {
+    anomalies = anomalies.filter((a) => a.valence === valence);
+  }
+  if (severity === "critical" || severity === "warning" || severity === "info") {
+    anomalies = anomalies.filter((a) => a.severity === severity);
+  }
+  res.json({
+    success: true,
+    data: anomalies,
+    count: anomalies.length
+  });
+});
+anomalyWatcherRouter.get("/patterns", (_req, res) => {
+  const patterns = getAnomalyPatterns();
+  res.json({
+    success: true,
+    data: patterns,
+    count: patterns.length
+  });
+});
+anomalyWatcherRouter.post("/scan", async (_req, res) => {
+  try {
+    const result = await runAnomalyScan();
+    res.json({
+      success: true,
+      data: {
+        anomalies: result.anomalies.length,
+        negative: result.anomalies.filter((a) => a.valence === "negative").length,
+        positive: result.anomalies.filter((a) => a.valence === "positive").length,
+        critical: result.anomalies.filter((a) => a.severity === "critical").length,
+        analysis: result.analysis ? result.analysis.slice(0, 500) : null,
+        health: {
+          backendReachable: result.health.backendReachable,
+          backendLatencyMs: result.health.backendLatencyMs,
+          rlmReachable: result.health.rlmReachable,
+          redisReachable: result.health.redisReachable
+        },
+        patterns: result.patterns.length
+      }
+    });
+  } catch (err) {
+    logger.error({ error: String(err) }, "On-demand anomaly scan failed");
+    res.status(500).json({
+      success: false,
+      error: {
+        code: "ANOMALY_SCAN_FAILED",
+        message: String(err),
+        status_code: 500
+      }
+    });
+  }
+});
+
 // src/index.ts
 var __dirname3 = path2.dirname(fileURLToPath3(import.meta.url));
 var app = express();
@@ -35993,6 +36704,7 @@ app.use("/api/abi", requireApiKey, abiDocsRouter);
 app.use("/api/abi", requireApiKey, abiHealthRouter);
 app.use("/api/abi", requireApiKey, abiVersioningRouter);
 app.use("/api/inventor", requireApiKey, apiRateLimiter, inventorRouter);
+app.use("/api/anomaly-watcher", requireApiKey, anomalyWatcherRouter);
 app.use("/api/hyperagent/auto", requireApiKey, apiRateLimiter, hyperagentAutoRouter);
 app.use("/api/hyperagent", requireApiKey, apiRateLimiter, hyperagentRouter);
 app.use("/api/tools", requireApiKey, apiRateLimiter, toolGatewayRouter);
@@ -36043,6 +36755,11 @@ app.get("/health", (_req, res) => {
     slack_enabled: isSlackEnabled(),
     write_gate_stats: getWriteGateStats(),
     backend_circuit_breaker: getBackendCircuitState(),
+    rate_limit_backpressure: getRateLimitState(),
+    anomaly_watcher: (() => {
+      const s = getWatcherState();
+      return { totalScans: s.totalScans, activeAnomalies: s.activeAnomalies.length, patterns: s.patterns.length };
+    })(),
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   });
 });
@@ -36083,6 +36800,7 @@ async function boot() {
   await hydrateMessages();
   await hydrateCronJobs();
   registerDefaultLoops();
+  await initAnomalyWatcher();
   bootKickstartOverdueJobs().catch((err) => {
     logger.warn({ err: String(err) }, "Cron boot-kickstart encountered error");
   });

@@ -28,6 +28,61 @@ interface McpCallOptions {
 const MAX_RETRIES = 2
 const RETRY_DELAY_MS = 1000
 
+// ─── Rate-Limit Backpressure ────────────────────────────────────────────────
+// Adaptive throttle: when 429s spike, introduce increasing delay before calls.
+// Prevents thundering-herd retry storms like the CANVAS 820-call cascade.
+const RL_WINDOW_MS = 10_000       // 10s sliding window
+const RL_THRESHOLD = 5            // 5 rate-limits in window → start throttling
+const RL_MAX_DELAY_MS = 30_000    // max 30s backoff
+const RL_DECAY_FACTOR = 0.8       // shrink delay each window without new 429s
+
+let _rlTimestamps: number[] = []   // timestamps of recent 429 responses
+let _rlDelayMs = 0                 // current adaptive delay
+let _rlLastDecay = Date.now()
+
+function recordRateLimit(): void {
+  const now = Date.now()
+  _rlTimestamps.push(now)
+  // Trim old entries
+  _rlTimestamps = _rlTimestamps.filter(t => now - t < RL_WINDOW_MS)
+  // If over threshold, increase delay exponentially
+  if (_rlTimestamps.length >= RL_THRESHOLD) {
+    _rlDelayMs = Math.min(_rlDelayMs === 0 ? 1000 : _rlDelayMs * 2, RL_MAX_DELAY_MS)
+    if (_rlDelayMs >= 5000) {
+      logger.warn({ delay_ms: _rlDelayMs, count_in_window: _rlTimestamps.length },
+        'MCP rate-limit backpressure: throttling all calls')
+    }
+  }
+}
+
+function decayRateLimitDelay(): void {
+  const now = Date.now()
+  if (now - _rlLastDecay > RL_WINDOW_MS && _rlDelayMs > 0) {
+    _rlTimestamps = _rlTimestamps.filter(t => now - t < RL_WINDOW_MS)
+    if (_rlTimestamps.length < RL_THRESHOLD) {
+      _rlDelayMs = Math.floor(_rlDelayMs * RL_DECAY_FACTOR)
+      if (_rlDelayMs < 200) _rlDelayMs = 0
+    }
+    _rlLastDecay = now
+  }
+}
+
+async function applyBackpressure(): Promise<void> {
+  decayRateLimitDelay()
+  if (_rlDelayMs > 0) {
+    await new Promise(r => setTimeout(r, _rlDelayMs + Math.floor(Math.random() * 500)))
+  }
+}
+
+export function getRateLimitState() {
+  return {
+    current_delay_ms: _rlDelayMs,
+    hits_in_window: _rlTimestamps.length,
+    threshold: RL_THRESHOLD,
+    window_ms: RL_WINDOW_MS,
+  }
+}
+
 // ─── Backend Circuit Breaker ─────────────────────────────────────────────────
 // When backend is down (502/timeout), fail fast instead of queueing 20+ cron
 // jobs that each wait 10-15s for a timeout. Pattern matches openclaw.ts.
@@ -211,6 +266,9 @@ async function callMcpToolOnce(
   opts: McpCallOptions, url: string, body: string,
   timeoutMs: number, log: ReturnType<typeof childLogger>, t0: number
 ): Promise<OrchestratorToolResult> {
+  // Rate-limit backpressure: delay if 429 storm detected
+  await applyBackpressure()
+
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
 
@@ -234,6 +292,9 @@ async function callMcpToolOnce(
     if (!res.ok) {
       const errorText = await res.text().catch(() => `HTTP ${res.status}`)
       log.warn({ status: res.status, tool: opts.toolName, duration_ms }, 'MCP call HTTP error')
+
+      // Record 429 for backpressure system
+      if (res.status === 429) recordRateLimit()
 
       // Map HTTP status to error code
       const errorCode = res.status === 401 || res.status === 403

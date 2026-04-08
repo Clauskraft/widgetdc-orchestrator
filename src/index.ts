@@ -76,7 +76,7 @@ import { deliverablesRouter } from './routes/deliverables.js'
 import { similarityRouter } from './routes/similarity.js'
 import { engagementsRouter } from './routes/engagements.js'
 import { getWriteGateStats } from './write-gate.js'
-import { getBackendCircuitState } from './mcp-caller.js'
+import { getBackendCircuitState, getRateLimitState } from './mcp-caller.js'
 import { intelligenceRouter } from './routes/intelligence.js'
 import { governanceRouter } from './routes/governance.js'
 import { osintRouter } from './routes/osint.js'
@@ -88,6 +88,8 @@ import { abiVersioningRouter } from './routes/abi-versioning.js'
 import { hyperagentRouter } from './routes/hyperagent.js'
 import { hyperagentAutoRouter } from './routes/hyperagent-autonomous.js'
 import { inventorRouter } from './routes/inventor.js'
+import { anomalyWatcherRouter } from './routes/anomaly-watcher.js'
+import { initAnomalyWatcher, getWatcherState } from './anomaly-watcher.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -275,6 +277,9 @@ app.use('/api/abi', requireApiKey, abiVersioningRouter)
 // Orchestrator_Inventor: ASI-Evolve-inspired evolution engine (testable variant)
 app.use('/api/inventor', requireApiKey, apiRateLimiter, inventorRouter)
 
+// Proactive Anomaly Watcher: DETECT→LEARN→REASON→ACT→REMEMBER pipeline
+app.use('/api/anomaly-watcher', requireApiKey, anomalyWatcherRouter)
+
 // HyperAgent Autonomous Executor: self-driving cycle engine with SSE streaming
 app.use('/api/hyperagent/auto', requireApiKey, apiRateLimiter, hyperagentAutoRouter)
 
@@ -348,6 +353,8 @@ app.get('/health', (_req, res) => {
     slack_enabled: isSlackEnabled(),
     write_gate_stats: getWriteGateStats(),
     backend_circuit_breaker: getBackendCircuitState(),
+    rate_limit_backpressure: getRateLimitState(),
+    anomaly_watcher: (() => { const s = getWatcherState(); return { totalScans: s.totalScans, activeAnomalies: s.activeAnomalies.length, patterns: s.patterns.length } })(),
     timestamp: new Date().toISOString(),
   })
 })
@@ -402,6 +409,8 @@ async function boot() {
   await hydrateMessages()
   await hydrateCronJobs()
   registerDefaultLoops()
+  // Initialize proactive anomaly watcher (loads state from Redis)
+  await initAnomalyWatcher()
   // S1.2 (6-edges handlingsplan): fire any overdue absolute-hour jobs at boot.
   // Non-blocking — server continues starting even if individual jobs fail.
   bootKickstartOverdueJobs().catch(err => {

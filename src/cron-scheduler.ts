@@ -21,6 +21,7 @@ import { runGraphHygiene } from './graph-hygiene-cron.js'
 import { buildCommunitySummaries } from './hierarchical-intelligence.js'
 import { retrainRoutingWeights } from './adaptive-rag.js'
 import { runAutonomousCycle, getAutonomousStatus } from './hyperagent-autonomous.js'
+import { runAnomalyScan } from './anomaly-watcher.js'
 
 interface CronJob {
   id: string
@@ -537,6 +538,41 @@ export async function runCronJob(jobId: string): Promise<void> {
       return
     }
 
+    // Proactive Anomaly Watcher: DETECT→LEARN→REASON→ACT→REMEMBER
+    if (job.id === 'anomaly-watcher') {
+      try {
+        const result = await runAnomalyScan()
+        const neg = result.anomalies.filter(a => a.valence === 'negative').length
+        const pos = result.anomalies.filter(a => a.valence === 'positive').length
+        const crit = result.anomalies.filter(a => a.severity === 'critical').length
+        job.last_run = new Date().toISOString()
+        job.last_status = result.anomalies.length === 0
+          ? 'clean'
+          : `${neg} negative (${crit} critical), ${pos} positive`
+        job.run_count++
+        persistCronJobs()
+
+        if (result.anomalies.length > 0) {
+          const emoji = crit > 0 ? '🔴' : pos > 0 ? '🟢' : '🟡'
+          broadcastMessage({
+            from: 'Orchestrator',
+            to: 'All',
+            source: 'orchestrator',
+            type: 'Message',
+            message: `${emoji} Anomaly scan: ${neg} negative (${crit} critical), ${pos} positive signals, ${result.patterns.length} learned patterns`,
+            timestamp: new Date().toISOString(),
+          })
+        }
+      } catch (err) {
+        job.last_run = new Date().toISOString()
+        job.last_status = 'failed'
+        job.run_count++
+        persistCronJobs()
+        logger.error({ id: job.id, err: String(err) }, 'Anomaly watcher cron failed')
+      }
+      return
+    }
+
     const result = await executeChain(job.chain)
     job.last_run = new Date().toISOString()
     job.last_status = result.status
@@ -994,6 +1030,24 @@ export function registerDefaultLoops(): void {
           },
         },
       ],
+    },
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // PROACTIVE ANOMALY WATCHER — DETECT→LEARN→REASON→ACT→REMEMBER
+  // Monitors health, detects both negative anomalies (rate-limit storms,
+  // circuit breaker flaps) AND positive anomalies (performance spikes,
+  // edge breakthroughs, unexpected successes).
+  // ═══════════════════════════════════════════════════════════════════════
+  registerCronJob({
+    id: 'anomaly-watcher',
+    name: 'Proactive Anomaly Watcher (Detect+Learn+Reason)',
+    schedule: '*/5 * * * *', // Every 5 minutes
+    enabled: true,
+    chain: {
+      name: 'Anomaly Scan',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
     },
   })
 
