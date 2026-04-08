@@ -36168,9 +36168,9 @@ foldRouter.post("/", async (req, res) => {
     });
     return;
   }
-  const VALID_STRATEGIES = ["semantic", "extractive", "hybrid"];
+  const VALID_STRATEGIES2 = ["semantic", "extractive", "hybrid"];
   const budget = typeof body.budget === "number" && body.budget >= 100 && body.budget <= 5e4 ? body.budget : 2e3;
-  const strategy = typeof body.strategy === "string" && VALID_STRATEGIES.includes(body.strategy) ? body.strategy : "semantic";
+  const strategy = typeof body.strategy === "string" && VALID_STRATEGIES2.includes(body.strategy) ? body.strategy : "semantic";
   const t0 = Date.now();
   try {
     const result = await callCognitive("fold", {
@@ -38756,11 +38756,442 @@ flywheelRouter.get("/cost-summary", (_req, res) => {
   }
 });
 
+// src/routes/benchmark.ts
+import { Router as Router49 } from "express";
+
+// src/benchmark-runner.ts
+init_redis();
+init_logger();
+var BENCHMARK_TASKS = [
+  {
+    id: "circle-packing",
+    name: "Circle Packing (ASI-Evolve Canonical)",
+    description: "Pack 26 non-overlapping circles of varying radii inside a unit square to maximise sum of radii. ASI-Evolve achieves SOTA \u2248 2.635 in 17 rounds.",
+    paperBaseline: 2.635,
+    paperRounds: 17,
+    paperSource: "arXiv:2603.29640 \xA74.1",
+    initialArtifact: `# Circle Packing Seed \u2014 26 circles in unit square
+# Format: list of (x, y, r) \u2014 centre and radius
+# Initial naive solution: uniform small circles
+
+circles = [
+  (0.1 + (i % 5) * 0.18, 0.1 + (i // 5) * 0.18, 0.07)
+  for i in range(26)
+]
+# Sum of radii: 26 * 0.07 = 1.82 (well below SOTA 2.635)
+`,
+    evaluatorPrompt: `You are a precise circle-packing evaluator. Given a Python-style list of circles as (x, y, r) tuples:
+
+1. Verify ALL constraints are satisfied:
+   - All circles are within the unit square: x-r >= 0, x+r <= 1, y-r >= 0, y+r <= 1
+   - No two circles overlap: for all i\u2260j, dist(ci, cj) >= ri + rj
+   - All radii r > 0
+
+2. If any constraint is violated, score = 0.
+
+3. Otherwise, score = (sum of all radii) / 4.0  [normalised: SOTA 2.635 \u2192 score 0.659]
+
+Return ONLY a JSON object: {"score": <float 0-1>, "sum_radii": <float>, "violations": <int>, "constraint_check": "<pass|fail>"}`,
+    researcherPrompt: `Optimise the placement and sizing of 26 non-overlapping circles in a unit square [0,1]\xD7[0,1] to MAXIMISE the sum of radii. Each circle: (x, y, r) with x-r\u22650, x+r\u22641, y-r\u22650, y+r\u22641 and no pairwise overlap.
+
+Current SOTA sum_radii \u2248 2.635. Think about: hexagonal close-packing, gradient descent on positions, adaptive radii via binary search, corner and edge circles with larger radii.
+
+Your output must be a Python code snippet that defines a variable 'circles' as a list of (x, y, r) tuples.`,
+    scoreRange: [0, 1],
+    defaultMaxRounds: 25,
+    tags: ["canonical", "mathematical", "asi-evolve"]
+  },
+  {
+    id: "scheduler-opt",
+    name: "Chain Scheduler Optimisation (WidgeTDC-native)",
+    description: "Optimise agent chain scheduling to minimise p99 latency while staying within token budget. Ground truth from production trace data.",
+    paperBaseline: void 0,
+    initialArtifact: `# Chain Scheduling Strategy \u2014 initial: simple FIFO
+# Parameters: queue_depth, timeout_ms, retry_policy, parallelism
+strategy = {
+  "queue_discipline": "fifo",
+  "max_parallel": 2,
+  "timeout_ms": 30000,
+  "retry_on_timeout": True,
+  "priority_boost": {},   # agent_id \u2192 priority multiplier
+  "circuit_breaker_threshold": 5
+}
+# Baseline p99 latency: ~8500ms`,
+    evaluatorPrompt: `You are evaluating a chain scheduling strategy for the WidgeTDC orchestrator. Given a Python dict 'strategy' defining scheduling parameters:
+
+Score the strategy on these weighted dimensions (0-1 each):
+- Latency reduction vs baseline (8500ms): score = min(1, (8500 - estimated_p99) / 4500)  [0 = worse, 1 = 4000ms or better]
+- Throughput: score = min(1, max_parallel / 8)
+- Fault tolerance: retry_on_timeout + circuit_breaker gives up to 0.2 each
+- Resource efficiency: timeout < 25000ms gives 0.1 bonus
+
+Return ONLY: {"score": <float 0-1>, "estimated_p99_ms": <int>, "throughput_factor": <float>, "fault_tolerance": <float>}`,
+    researcherPrompt: `Optimise the WidgeTDC chain scheduling strategy to minimise p99 latency (target: < 4000ms, baseline: 8500ms) while maximising throughput and fault tolerance.
+
+Consider: priority-based scheduling, adaptive timeouts based on task type, aggressive parallelism for independent steps, circuit breaker tuning, backpressure handling. Output a Python dict 'strategy' with scheduling parameters.`,
+    scoreRange: [0, 1],
+    defaultMaxRounds: 20,
+    tags: ["widgetdc", "latency", "scheduling"]
+  },
+  {
+    id: "prompt-compress",
+    name: "Context Compression Quality",
+    description: "Maximise quality-retention ratio when compressing a 4K-token context to 1K tokens. Evaluated by semantic similarity + key-fact retention.",
+    paperBaseline: void 0,
+    initialArtifact: `# Context Compression Strategy \u2014 initial: truncation
+strategy = {
+  "method": "truncation",
+  "target_length": 1000,
+  "preserve": "end",   # keep the most recent content
+  "summary_sentences": 0,
+  "key_entity_extraction": False,
+  "hierarchy_levels": 1
+}`,
+    evaluatorPrompt: `Evaluate a context compression strategy. Score on three dimensions (weighted):
+- Semantic preservation (0.5 weight): does the compressed context retain main topics?
+- Key-fact retention (0.3 weight): are dates, numbers, named entities preserved?
+- Conciseness (0.2 weight): does it respect the token budget?
+
+Score based on strategy sophistication:
+- Pure truncation: 0.25
+- Extractive summary: 0.45
+- Hierarchical + entity extraction: 0.65
+- Semantic clustering + distillation: 0.85
+
+Return ONLY: {"score": <float 0-1>, "method_quality": <string>, "estimated_retention": <float>}`,
+    researcherPrompt: `Design an optimal context compression strategy that maximises semantic content retention when reducing a 4000-token context to 1000 tokens.
+
+Consider: hierarchical summarisation, key entity extraction, semantic clustering, relevance scoring, chain-of-thought distillation. Output a Python dict 'strategy' describing the compression approach.`,
+    scoreRange: [0, 1],
+    defaultMaxRounds: 20,
+    tags: ["widgetdc", "compression", "rag"]
+  }
+];
+var runs = /* @__PURE__ */ new Map();
+var REDIS_KEY7 = "orchestrator:benchmarks";
+async function persist2() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  const data = Array.from(runs.values());
+  await redis2.set(REDIS_KEY7, JSON.stringify(data), "EX", 86400 * 30).catch(() => {
+  });
+}
+function listBenchmarkTasks() {
+  return BENCHMARK_TASKS;
+}
+function getBenchmarkTask(id) {
+  return BENCHMARK_TASKS.find((t) => t.id === id);
+}
+function listBenchmarkRuns(taskId) {
+  const all = Array.from(runs.values()).sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+  return taskId ? all.filter((r) => r.taskId === taskId) : all;
+}
+function getBenchmarkRun(runId) {
+  return runs.get(runId);
+}
+function upsertBenchmarkRun(run) {
+  runs.set(run.runId, run);
+  persist2().catch(() => {
+  });
+}
+async function startBenchmarkRun(taskId, strategy, maxRounds, baseUrl, apiKey) {
+  const task = getBenchmarkTask(taskId);
+  if (!task) throw new Error(`Unknown benchmark task: ${taskId}`);
+  const runId = `bench-${taskId}-${strategy}-${Date.now()}`;
+  const experimentName = runId;
+  const run = {
+    runId,
+    taskId,
+    strategy,
+    maxRounds: maxRounds ?? task.defaultMaxRounds,
+    status: "pending",
+    startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    bestScore: 0,
+    bestRound: 0,
+    scoreHistory: [],
+    solutionDiversity: 0,
+    totalRounds: 0,
+    inventorExperimentName: experimentName,
+    paperBaseline: task.paperBaseline
+  };
+  runs.set(runId, run);
+  await persist2();
+  const url = baseUrl ?? process.env.ORCH_URL ?? "http://localhost:3000";
+  const token = apiKey ?? process.env.ORCH_API_KEY ?? "WidgeTDC_Orch_2026";
+  const inventorConfig = {
+    experimentName,
+    taskDescription: `${task.researcherPrompt}
+
+BENCHMARK: ${task.id} | STRATEGY: ${strategy} | RUN: ${runId}`,
+    initialArtifact: task.initialArtifact,
+    sampling: buildSamplingConfig(strategy),
+    cognition: { topK: 5, threshold: 0.25 },
+    pipeline: {
+      maxSteps: run.maxRounds,
+      maxArtifactLength: 6e3,
+      engineerTimeoutMs: 9e4,
+      numWorkers: 1
+    },
+    evalScript: task.evaluatorPrompt
+  };
+  fetch(`${url}/api/inventor/run`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${token}`
+    },
+    body: JSON.stringify({ config: inventorConfig }),
+    signal: AbortSignal.timeout(1e4)
+  }).then(async (res) => {
+    const body = await res.json().catch(() => null);
+    if (res.ok) {
+      run.status = "running";
+    } else {
+      run.status = "failed";
+      run.error = body?.error?.message ?? `HTTP ${res.status}`;
+    }
+    upsertBenchmarkRun(run);
+  }).catch((err) => {
+    run.status = "failed";
+    run.error = String(err);
+    upsertBenchmarkRun(run);
+    logger.warn({ runId, err: String(err) }, "[Benchmark] Failed to launch Inventor");
+  });
+  return run;
+}
+async function startAblationStudy(taskId, maxRoundsPerStrategy = 20, baseUrl, apiKey) {
+  const task = getBenchmarkTask(taskId);
+  if (!task) throw new Error(`Unknown benchmark task: ${taskId}`);
+  const strategies = ["ucb1", "greedy", "random", "island"];
+  const ablationId = `ablation-${taskId}-${Date.now()}`;
+  const runList = [];
+  for (const strategy of strategies) {
+    const run = await startBenchmarkRun(taskId, strategy, maxRoundsPerStrategy, baseUrl, apiKey);
+    runList.push(run);
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  const redis2 = getRedis();
+  if (redis2) {
+    await redis2.set(`orchestrator:ablation:${ablationId}`, JSON.stringify({
+      ablationId,
+      taskId,
+      runIds: runList.map((r) => r.runId),
+      maxRoundsPerStrategy,
+      startedAt: (/* @__PURE__ */ new Date()).toISOString()
+    }), "EX", 86400 * 14).catch(() => {
+    });
+  }
+  logger.info({ ablationId, taskId, strategies }, "[Benchmark] Ablation study launched");
+  return { ablationId, runs: runList };
+}
+function computeAblationReport(taskId) {
+  const taskRuns = listBenchmarkRuns(taskId).filter((r) => r.status === "completed");
+  if (taskRuns.length < 2) return null;
+  const task = getBenchmarkTask(taskId);
+  const strategyResults = taskRuns.map((run) => {
+    const convergenceRound = findConvergenceRound(run.scoreHistory, 0.9);
+    const efficiencyScore = run.totalRounds > 0 ? run.bestScore / run.totalRounds * 100 : 0;
+    return {
+      strategy: run.strategy,
+      run,
+      rank: 0,
+      convergenceRound,
+      efficiencyScore
+    };
+  });
+  strategyResults.sort((a, b) => b.run.bestScore - a.run.bestScore);
+  strategyResults.forEach((s, i) => {
+    s.rank = i + 1;
+  });
+  const winner = strategyResults[0].strategy;
+  const bestAchieved = strategyResults[0].run.bestScore;
+  const paperBaseline = task?.paperBaseline;
+  const gapToPaper = paperBaseline != null ? paperBaseline - bestAchieved * (task.scoreRange[1] - task.scoreRange[0]) - task.scoreRange[0] : 0;
+  const recommendation = buildRecommendation(strategyResults, taskId);
+  return {
+    taskId,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    strategies: strategyResults,
+    winner,
+    recommendation,
+    paperBaseline,
+    bestAchieved,
+    gapToPaper
+  };
+}
+function syncRunWithInventorStatus(runId, inventorNodes, isRunning4) {
+  const run = runs.get(runId);
+  if (!run || run.status === "failed") return;
+  const sortedByTime = [...inventorNodes].sort(
+    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+  );
+  run.totalRounds = sortedByTime.length;
+  run.scoreHistory = computeScoreHistory(sortedByTime);
+  run.bestScore = Math.max(...sortedByTime.map((n) => n.score), 0);
+  run.bestRound = findBestRound(sortedByTime);
+  run.status = isRunning4 ? "running" : "completed";
+  if (!isRunning4 && run.status === "running") {
+    run.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+    if (run.paperBaseline != null) {
+      run.gainVsBaseline = run.bestScore - run.paperBaseline / 4;
+    }
+  }
+  upsertBenchmarkRun(run);
+}
+function buildSamplingConfig(strategy) {
+  switch (strategy) {
+    case "ucb1":
+      return { algorithm: "ucb1", sampleN: 3, ucb1C: 1.414 };
+    case "greedy":
+      return { algorithm: "greedy", sampleN: 1, ucb1C: 0 };
+    case "random":
+      return { algorithm: "random", sampleN: 3, ucb1C: 0 };
+    case "island":
+      return {
+        algorithm: "island",
+        sampleN: 3,
+        ucb1C: 1,
+        islands: { count: 5, migrationInterval: 5, migrationRate: 0.2 }
+      };
+  }
+}
+function computeScoreHistory(nodes2) {
+  let best = 0;
+  return nodes2.map((n) => {
+    if (n.score > best) best = n.score;
+    return best;
+  });
+}
+function findBestRound(nodes2) {
+  let best = 0, bestIdx = 0;
+  nodes2.forEach((n, i) => {
+    if (n.score > best) {
+      best = n.score;
+      bestIdx = i;
+    }
+  });
+  return bestIdx + 1;
+}
+function findConvergenceRound(history, threshold) {
+  if (history.length === 0) return 0;
+  const target = (history[history.length - 1] ?? 0) * threshold;
+  const idx = history.findIndex((s) => s >= target);
+  return idx >= 0 ? idx + 1 : history.length;
+}
+function buildRecommendation(results, taskId) {
+  if (results.length === 0) return "Insufficient data.";
+  const winner = results[0];
+  const fastest = [...results].sort((a, b) => a.convergenceRound - b.convergenceRound)[0];
+  const parts = [`${winner.strategy.toUpperCase()} achieves highest score (${(winner.run.bestScore * 100).toFixed(0)}%).`];
+  if (fastest.strategy !== winner.strategy) {
+    parts.push(`${fastest.strategy.toUpperCase()} converges fastest (round ${fastest.convergenceRound}).`);
+    parts.push(`Use ${winner.strategy} for quality-first runs, ${fastest.strategy} for rapid exploration.`);
+  } else {
+    parts.push(`Use ${winner.strategy} for ${taskId} tasks.`);
+  }
+  return parts.join(" ");
+}
+
+// src/routes/benchmark.ts
+init_logger();
+var benchmarkRouter = Router49();
+benchmarkRouter.get("/tasks", (_req, res) => {
+  const tasks = listBenchmarkTasks();
+  res.json({ success: true, tasks });
+});
+benchmarkRouter.get("/tasks/:taskId", (req, res) => {
+  const task = getBenchmarkTask(req.params.taskId);
+  if (!task) return res.status(404).json({ success: false, error: "Task not found" });
+  res.json({ success: true, task });
+});
+benchmarkRouter.get("/runs", (req, res) => {
+  const taskId = req.query.taskId;
+  const runs2 = listBenchmarkRuns(taskId);
+  res.json({ success: true, runs: runs2, total: runs2.length });
+});
+benchmarkRouter.get("/runs/:runId", (req, res) => {
+  const run = getBenchmarkRun(req.params.runId);
+  if (!run) return res.status(404).json({ success: false, error: "Run not found" });
+  res.json({ success: true, run });
+});
+var VALID_STRATEGIES = ["ucb1", "greedy", "random", "island"];
+benchmarkRouter.post("/run", async (req, res) => {
+  const { taskId, strategy, maxRounds } = req.body ?? {};
+  if (!taskId || typeof taskId !== "string") {
+    return res.status(400).json({ success: false, error: "taskId is required" });
+  }
+  if (!strategy || !VALID_STRATEGIES.includes(strategy)) {
+    return res.status(400).json({
+      success: false,
+      error: `strategy must be one of: ${VALID_STRATEGIES.join(", ")}`
+    });
+  }
+  if (!getBenchmarkTask(taskId)) {
+    return res.status(404).json({ success: false, error: `Unknown task: ${taskId}` });
+  }
+  try {
+    const run = await startBenchmarkRun(
+      taskId,
+      strategy,
+      maxRounds ?? void 0
+    );
+    logger.info({ runId: run.runId, taskId, strategy }, "[Benchmark] Run started");
+    res.status(202).json({ success: true, run });
+  } catch (err) {
+    logger.error({ err: String(err), taskId, strategy }, "[Benchmark] Failed to start run");
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
+benchmarkRouter.post("/runs/:runId/sync", async (req, res) => {
+  const run = getBenchmarkRun(req.params.runId);
+  if (!run) return res.status(404).json({ success: false, error: "Run not found" });
+  const { inventorNodes, isRunning: isRunning4 } = req.body ?? {};
+  if (!Array.isArray(inventorNodes)) {
+    return res.status(400).json({ success: false, error: "inventorNodes must be an array" });
+  }
+  syncRunWithInventorStatus(req.params.runId, inventorNodes, Boolean(isRunning4));
+  const updated = getBenchmarkRun(req.params.runId);
+  res.json({ success: true, run: updated });
+});
+benchmarkRouter.post("/ablation", async (req, res) => {
+  const { taskId, maxRoundsPerStrategy } = req.body ?? {};
+  if (!taskId || typeof taskId !== "string") {
+    return res.status(400).json({ success: false, error: "taskId is required" });
+  }
+  if (!getBenchmarkTask(taskId)) {
+    return res.status(404).json({ success: false, error: `Unknown task: ${taskId}` });
+  }
+  try {
+    const result = await startAblationStudy(
+      taskId,
+      maxRoundsPerStrategy ?? 20
+    );
+    logger.info({ ablationId: result.ablationId, taskId }, "[Benchmark] Ablation study started");
+    res.status(202).json({ success: true, ...result });
+  } catch (err) {
+    logger.error({ err: String(err), taskId }, "[Benchmark] Failed to start ablation");
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
+benchmarkRouter.get("/ablation/:taskId/report", (req, res) => {
+  const task = getBenchmarkTask(req.params.taskId);
+  if (!task) return res.status(404).json({ success: false, error: "Task not found" });
+  const report = computeAblationReport(req.params.taskId);
+  if (!report) {
+    return res.json({
+      success: true,
+      available: false,
+      message: "Ablation report not yet available \u2014 need \u22652 completed runs for this task"
+    });
+  }
+  res.json({ success: true, available: true, report });
+});
+
 // src/routes/obsidian.ts
 init_config();
 init_logger();
-import { Router as Router49 } from "express";
-var obsidianRouter = Router49();
+import { Router as Router50 } from "express";
+var obsidianRouter = Router50();
 var TIMEOUT_MS = 8e3;
 async function obsidianFetch(path3, options = {}) {
   const base = config.obsidianUrl.replace(/\/$/, "");
@@ -39012,6 +39443,7 @@ app.use("/api/anomaly-watcher", requireApiKey, anomalyWatcherRouter);
 app.use("/api/pheromone", requireApiKey, pheromoneRouter);
 app.use("/api/peer-eval", requireApiKey, peerEvalRouter);
 app.use("/api/flywheel", requireApiKey, flywheelRouter);
+app.use("/api/benchmark", requireApiKey, benchmarkRouter);
 app.use("/api/obsidian", requireApiKey, obsidianRouter);
 app.use("/api/hyperagent/auto", requireApiKey, apiRateLimiter, hyperagentAutoRouter);
 app.use("/api/hyperagent", requireApiKey, apiRateLimiter, hyperagentRouter);
@@ -39049,7 +39481,7 @@ app.get("/health", (_req, res) => {
   res.json({
     status: "healthy",
     service: "widgetdc-orchestrator",
-    version: true ? "4.1.4" : "0.0.0",
+    version: true ? "4.2.0" : "0.0.0",
     uptime_seconds: Math.floor(process.uptime()),
     agents_registered: AgentRegistry.all().length,
     ws_connections: getConnectionStats().total,
