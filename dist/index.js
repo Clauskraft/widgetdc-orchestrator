@@ -118,7 +118,10 @@ var init_config = __esm({
       // OpenTelemetry (LIN-589) — set OTEL_EXPORTER_OTLP_ENDPOINT to activate tracing
       otelEnabled: !!process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
       // F4: IP deny list — comma-separated IPs or CIDRs (e.g. "167.82.233.0/24,104.156.83.88")
-      ipDenyList: optional("IP_DENY_LIST", "")
+      ipDenyList: optional("IP_DENY_LIST", ""),
+      // Obsidian REST API (LIN-652) — set to http://localhost:27123 or a tunnel URL
+      obsidianUrl: optional("OBSIDIAN_API_URL", ""),
+      obsidianToken: optional("OBSIDIAN_API_TOKEN", "")
     };
   }
 });
@@ -38155,6 +38158,109 @@ peerEvalRouter.post("/analyze", async (_req, res) => {
   }
 });
 
+// src/routes/obsidian.ts
+init_config();
+init_logger();
+import { Router as Router48 } from "express";
+var obsidianRouter = Router48();
+var TIMEOUT_MS = 8e3;
+async function obsidianFetch(path3, options = {}) {
+  const base = config.obsidianUrl.replace(/\/$/, "");
+  const url = `${base}${path3}`;
+  const headers = {
+    "Content-Type": "application/json",
+    ...options.headers ?? {}
+  };
+  if (config.obsidianToken) {
+    headers["Authorization"] = `Bearer ${config.obsidianToken}`;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, headers, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+obsidianRouter.get("/status", async (_req, res) => {
+  if (!config.obsidianUrl) {
+    return res.status(503).json({
+      connected: false,
+      error: "OBSIDIAN_API_URL not configured",
+      setup: "Set OBSIDIAN_API_URL=http://localhost:27123 and OBSIDIAN_API_TOKEN in Railway env vars"
+    });
+  }
+  try {
+    const r = await obsidianFetch("/");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    res.json({ connected: true, ...data });
+  } catch (err) {
+    logger.warn({ err: err.message }, "Obsidian status check failed");
+    res.status(503).json({ connected: false, error: err.message });
+  }
+});
+obsidianRouter.get("/vault/stats", async (_req, res) => {
+  if (!config.obsidianUrl) return res.status(503).json({ error: "OBSIDIAN_API_URL not configured" });
+  try {
+    const r = await obsidianFetch("/vault/");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    res.json(data);
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+obsidianRouter.get("/vault/list", async (req, res) => {
+  if (!config.obsidianUrl) return res.status(503).json({ error: "OBSIDIAN_API_URL not configured" });
+  const path3 = req.query.path ?? "/";
+  try {
+    const r = await obsidianFetch(`/vault${path3}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    res.json(data);
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+obsidianRouter.get("/search", async (req, res) => {
+  if (!config.obsidianUrl) return res.status(503).json({ error: "OBSIDIAN_API_URL not configured" });
+  const query = req.query.q;
+  if (!query) return res.status(400).json({ error: "q parameter required" });
+  try {
+    const r = await obsidianFetch(`/search/simple/?query=${encodeURIComponent(query)}&contextLength=100`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    res.json(data);
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+obsidianRouter.get("/note", async (req, res) => {
+  if (!config.obsidianUrl) return res.status(503).json({ error: "OBSIDIAN_API_URL not configured" });
+  const path3 = req.query.path;
+  if (!path3) return res.status(400).json({ error: "path parameter required" });
+  try {
+    const r = await obsidianFetch(`/vault/${encodeURIComponent(path3)}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const content = await r.text();
+    res.json({ path: path3, content });
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+obsidianRouter.get("/tags", async (_req, res) => {
+  if (!config.obsidianUrl) return res.status(503).json({ error: "OBSIDIAN_API_URL not configured" });
+  try {
+    const r = await obsidianFetch("/search/simple/?query=%23&contextLength=0");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    res.json(data);
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+
 // src/index.ts
 init_pheromone_layer();
 init_peer_eval();
@@ -38307,6 +38413,7 @@ app.use("/api/inventor", requireApiKey, apiRateLimiter, inventorRouter);
 app.use("/api/anomaly-watcher", requireApiKey, anomalyWatcherRouter);
 app.use("/api/pheromone", requireApiKey, pheromoneRouter);
 app.use("/api/peer-eval", requireApiKey, peerEvalRouter);
+app.use("/api/obsidian", requireApiKey, obsidianRouter);
 app.use("/api/hyperagent/auto", requireApiKey, apiRateLimiter, hyperagentAutoRouter);
 app.use("/api/hyperagent", requireApiKey, apiRateLimiter, hyperagentRouter);
 app.use("/api/tools", requireApiKey, apiRateLimiter, toolGatewayRouter);

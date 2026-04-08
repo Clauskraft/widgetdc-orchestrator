@@ -6,13 +6,8 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  Cell, PieChart, Pie, Legend,
 } from 'recharts'
 
 interface LlmProvider {
@@ -151,6 +146,72 @@ function CostPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Provider Model Count Chart */}
+      {providerList.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Models per Provider</CardTitle>
+            <CardDescription>Available models configured in the LLM router</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart
+                data={providerList.map(p => ({ name: p.name, models: p.models?.length ?? 0 }))}
+                margin={{ top: 4, right: 8, left: -16, bottom: 4 }}
+              >
+                <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+                <Tooltip />
+                <Bar dataKey="models" radius={[4, 4, 0, 0]}>
+                  {providerList.map((_, i) => (
+                    <Cell key={i} fill={['#6366f1','#22c55e','#f59e0b','#ec4899','#14b8a6','#3b82f6','#a855f7','#ef4444'][i % 8]} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Provider Distribution Pie */}
+      {activeProviders.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Model Distribution</CardTitle>
+            <CardDescription>Share of available models across active providers</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="h-56 flex items-center justify-center gap-8">
+              <ResponsiveContainer width="50%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={activeProviders.map(p => ({ name: p.name, value: p.models?.length ?? 0 }))}
+                    cx="50%" cy="50%" outerRadius={80}
+                    dataKey="value"
+                    label={({ name, percent }) => `${(percent * 100).toFixed(0)}%`}
+                  >
+                    {activeProviders.map((_, i) => (
+                      <Cell key={i} fill={['#6366f1','#22c55e','#f59e0b','#ec4899','#14b8a6','#3b82f6','#a855f7','#ef4444'][i % 8]} />
+                    ))}
+                  </Pie>
+                  <Tooltip />
+                </PieChart>
+              </ResponsiveContainer>
+              <div className="flex flex-col gap-2 text-sm">
+                {activeProviders.map((p, i) => (
+                  <div key={p.id} className="flex items-center gap-2">
+                    <div className="w-3 h-3 rounded-full" style={{ background: ['#6366f1','#22c55e','#f59e0b','#ec4899','#14b8a6','#3b82f6','#a855f7','#ef4444'][i % 8] }} />
+                    <span className="truncate max-w-[120px]">{p.name}</span>
+                    <span className="font-mono text-muted-foreground">{p.models?.length ?? 0}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Cost Optimization Strategies */}
       <Card>

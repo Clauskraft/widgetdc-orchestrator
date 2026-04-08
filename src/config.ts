@@ -71,4 +71,8 @@ export const config = {
 
   // F4: IP deny list — comma-separated IPs or CIDRs (e.g. "167.82.233.0/24,104.156.83.88")
   ipDenyList: optional('IP_DENY_LIST', ''),
+
+  // Obsidian REST API (LIN-652) — set to http://localhost:27123 or a tunnel URL
+  obsidianUrl: optional('OBSIDIAN_API_URL', ''),
+  obsidianToken: optional('OBSIDIAN_API_TOKEN', ''),
 } as const

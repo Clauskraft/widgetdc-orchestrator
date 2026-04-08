@@ -92,6 +92,7 @@ import { anomalyWatcherRouter } from './routes/anomaly-watcher.js'
 import { initAnomalyWatcher, getWatcherState } from './anomaly-watcher.js'
 import { pheromoneRouter } from './routes/pheromone.js'
 import { peerEvalRouter } from './routes/peer-eval.js'
+import { obsidianRouter } from './routes/obsidian.js'
 import { initPheromoneLayer, getPheromoneState } from './pheromone-layer.js'
 import { initPeerEval, getPeerEvalState } from './peer-eval.js'
 
@@ -289,6 +290,9 @@ app.use('/api/pheromone', requireApiKey, pheromoneRouter)
 
 // PeerEval: fleet learning engine (self-assessment + best practice broadcasting)
 app.use('/api/peer-eval', requireApiKey, peerEvalRouter)
+
+// Obsidian Vault proxy (LIN-652) — set OBSIDIAN_API_URL + OBSIDIAN_API_TOKEN in env
+app.use('/api/obsidian', requireApiKey, obsidianRouter)
 
 // HyperAgent Autonomous Executor: self-driving cycle engine with SSE streaming
 app.use('/api/hyperagent/auto', requireApiKey, apiRateLimiter, hyperagentAutoRouter)
