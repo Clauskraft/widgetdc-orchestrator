@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WidgeTDC Command Center v3.0</title>
+  <title>WidgeTDC Command Center v3.1</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..800&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -753,7 +753,7 @@
 
 <script>
 // ═══════════════════════════════════════════════════════════════════════════════
-// WidgeTDC Command Center v3.0 — Enterprise Frontend
+// WidgeTDC Command Center v3.1 — Enterprise Frontend
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // ─── State ──────────────────────────────────────────────────────────────────
@@ -816,13 +816,122 @@ function doLogout() {
   try { document.getElementById('auth-key').value = ''; document.getElementById('auth-key').focus() } catch(e) {}
 }
 
-// ─── API Client ─────────────────────────────────────────────────────────────
+// ─── Event Bus (Gap 1: Cross-panel state sync) ─────────────────────────────
+var EventBus = (function() {
+  var listeners = {}
+  return {
+    on: function(event, fn) { (listeners[event] = listeners[event] || []).push(fn) },
+    off: function(event, fn) { if (listeners[event]) listeners[event] = listeners[event].filter(function(f) { return f !== fn }) },
+    emit: function(event, data) { (listeners[event] || []).forEach(function(fn) { try { fn(data) } catch(e) { console.warn('EventBus handler error [' + event + ']:', e) } }) },
+    channels: function() { return Object.keys(listeners) }
+  }
+})()
+
+// Cross-panel sync channels:
+// 'pheromone:update'   — emitted when any pheromone data loads
+// 'fleet:update'       — emitted when peer eval data loads
+// 'inventor:update'    — emitted when inventor status changes
+// 'anomaly:update'     — emitted when anomalies refresh
+// 'dashboard:refresh'  — emitted on manual or auto-refresh
+// 'agent:heartbeat'    — emitted on WS agent heartbeat
+
+// ─── Shortcut Registry (Gap 2: Conflict detection) ─────────────────────────
+var ShortcutRegistry = (function() {
+  var shortcuts = {}
+  var conflicts = []
+  // Browser reserved keys we must not override
+  var reserved = ['ctrl+l','ctrl+t','ctrl+w','ctrl+n','ctrl+shift+t','ctrl+shift+n','ctrl+tab','ctrl+shift+tab','f5','f11','f12','ctrl+r','ctrl+shift+i','ctrl+shift+j']
+  return {
+    register: function(combo, description, handler) {
+      var key = combo.toLowerCase()
+      if (reserved.indexOf(key) !== -1) { conflicts.push({ combo: combo, reason: 'browser-reserved' }); return false }
+      if (shortcuts[key] && shortcuts[key].description !== description) { conflicts.push({ combo: combo, existing: shortcuts[key].description, new: description }); return false }
+      shortcuts[key] = { combo: combo, description: description, handler: handler }
+      return true
+    },
+    unregister: function(combo) { delete shortcuts[combo.toLowerCase()] },
+    resolve: function(combo) { return shortcuts[combo.toLowerCase()] || null },
+    list: function() { return Object.values(shortcuts) },
+    conflicts: function() { return conflicts },
+    handleEvent: function(e) {
+      var parts = []
+      if (e.ctrlKey || e.metaKey) parts.push('ctrl')
+      if (e.shiftKey) parts.push('shift')
+      if (e.altKey) parts.push('alt')
+      parts.push(e.key.toLowerCase())
+      var combo = parts.join('+')
+      var entry = shortcuts[combo]
+      if (entry) { e.preventDefault(); entry.handler(e); return true }
+      return false
+    }
+  }
+})()
+
+// Register all shortcuts
+ShortcutRegistry.register('ctrl+k', 'Open command palette', function() { openPalette() })
+ShortcutRegistry.register('?', 'Show keyboard shortcuts', function() { document.getElementById('shortcuts-overlay').classList.add('show') })
+ShortcutRegistry.register('r', 'Refresh dashboard', function() { refreshDashboard(); showToast('Dashboard refreshed', 'info') })
+
+// ─── Unified Error Boundary (Gap 3: Categorized recovery) ──────────────────
+var ErrorBoundary = (function() {
+  var errorCounts = {}  // path -> { count, lastError, lastTime }
+  var MAX_AUTO_RETRY = 2
+  var RETRY_BACKOFF_MS = 1500
+
+  function categorize(err, status) {
+    if (status === 401 || status === 403) return { category: 'auth', action: 'reauth', label: 'Authentication required' }
+    if (status === 404) return { category: 'not-found', action: 'report', label: 'Endpoint not found' }
+    if (status === 429) return { category: 'rate-limit', action: 'backoff', label: 'Rate limited — retry in a moment' }
+    if (status >= 500) return { category: 'server', action: 'retry', label: 'Server error — retrying' }
+    if (!status && err && (err.message || '').match(/fetch|network|timeout/i)) return { category: 'network', action: 'retry', label: 'Network error — check connection' }
+    return { category: 'unknown', action: 'retry', label: err && err.message || 'Unknown error' }
+  }
+
+  return {
+    wrap: function(path, fetchFn, retryFn) {
+      return fetchFn().catch(function(err) {
+        var status = err.status || (err.response && err.response.status) || 0
+        var cat = categorize(err, status)
+        var key = path
+        errorCounts[key] = errorCounts[key] || { count: 0, lastError: null, lastTime: 0 }
+        errorCounts[key].count++
+        errorCounts[key].lastError = cat
+        errorCounts[key].lastTime = Date.now()
+
+        if (cat.action === 'reauth') {
+          showToast(cat.label, 'error')
+          throw err
+        }
+        if (cat.action === 'retry' && errorCounts[key].count <= MAX_AUTO_RETRY && retryFn) {
+          showToast(cat.label + ' (retry ' + errorCounts[key].count + '/' + MAX_AUTO_RETRY + ')', 'warning')
+          return new Promise(function(resolve) { setTimeout(resolve, RETRY_BACKOFF_MS * errorCounts[key].count) }).then(function() { return ErrorBoundary.wrap(path, fetchFn, retryFn) })
+        }
+        if (cat.action === 'backoff') {
+          showToast(cat.label, 'warning')
+        }
+        // Reset count on final failure so next manual retry starts fresh
+        errorCounts[key].count = 0
+        throw err
+      })
+    },
+    stats: function() { return Object.assign({}, errorCounts) },
+    reset: function(path) { if (path) delete errorCounts[path]; else errorCounts = {} }
+  }
+})()
+
+// ─── API Client (with ErrorBoundary integration) ────────────────────────────
 async function api(path, opts) {
   opts = opts || {}
   var headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + API_KEY }
   var res = await fetch(BASE + path, Object.assign({}, opts, { headers: Object.assign({}, headers, opts.headers || {}) }))
-  if (res.status === 401) { API_KEY = ''; localStorage.removeItem('cc_api_key'); checkAuth(); throw new Error('Unauthorized') }
+  if (res.status === 401) { API_KEY = ''; localStorage.removeItem('cc_api_key'); checkAuth(); var e = new Error('Unauthorized'); e.status = 401; throw e }
+  if (!res.ok) { var e2 = new Error('HTTP ' + res.status); e2.status = res.status; throw e2 }
   return res.json()
+}
+
+// Wrapped API call with automatic retry and error categorization
+function apiSafe(path, opts, retryFn) {
+  return ErrorBoundary.wrap(path, function() { return api(path, opts) }, retryFn)
 }
 
 // ─── WebSocket ──────────────────────────────────────────────────────────────
@@ -856,6 +965,11 @@ function connectWS() {
       chatMessages.push(msg)
       if (chatMessages.length > 500) chatMessages = chatMessages.slice(-400)
       renderChat()
+      // Emit EventBus signals for cross-panel sync
+      if (msg.channel === 'pheromone' || msg.channel === 'inventor' || msg.channel === 'fleet') {
+        EventBus.emit(msg.channel + ':update', msg)
+      }
+      if (msg.type === 'heartbeat') EventBus.emit('agent:heartbeat', msg)
     } catch(err) {}
   }
 }
@@ -892,25 +1006,42 @@ document.querySelectorAll('.nav-item').forEach(function(el) {
 })
 
 // ─── Keyboard Navigation (G+key combos) ────────────────────────────────────
+// ─── Keyboard Handler (via ShortcutRegistry) ───────────────────────────────
 var pendingG = false
 var gTimer = null
 
+// G+key navigation map — registered with conflict detection
+var gNavMap = { d: 'dashboard', c: 'chat', a: 'agents', h: 'chains', i: 'inventor', o: 'omega', k: 'knowledge', p: 'pheromone', f: 'fleet-learning', v: 'cost', u: 'audit', n: 'anomaly', w: 'openclaw', r: 'cron', t: 'adoption' }
+Object.keys(gNavMap).forEach(function(key) {
+  ShortcutRegistry.register('g+' + key, 'Go to ' + (panelNames[gNavMap[key]] || gNavMap[key]), function() {
+    var nav = document.querySelector('[data-panel="' + gNavMap[key] + '"]')
+    if (nav) nav.click()
+  })
+})
+
 document.addEventListener('keydown', function(e) {
-  // Skip if in input/textarea
   var tag = (e.target.tagName || '').toLowerCase()
   var isInput = tag === 'input' || tag === 'textarea' || tag === 'select'
 
-  if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); openPalette(); return }
+  // Ctrl/Meta combos always pass through to registry
+  if (e.ctrlKey || e.metaKey) { ShortcutRegistry.handleEvent(e); return }
+
+  // Escape handling (not registerable — context-dependent)
   if (e.key === 'Escape') {
     if (document.getElementById('cmd-overlay').classList.contains('show')) { closePalette(); return }
     if (document.getElementById('shortcuts-overlay').classList.contains('show')) { document.getElementById('shortcuts-overlay').classList.remove('show'); return }
+    return
   }
 
   if (isInput) return
 
-  if (e.key === '?') { e.preventDefault(); document.getElementById('shortcuts-overlay').classList.add('show'); return }
-  if (e.key === 'r' || e.key === 'R') { refreshDashboard(); showToast('Dashboard refreshed', 'info'); return }
+  // Single-key shortcuts via registry
+  if (!pendingG) {
+    var resolved = ShortcutRegistry.resolve(e.key.toLowerCase())
+    if (resolved) { e.preventDefault(); resolved.handler(e); return }
+  }
 
+  // G+key two-stroke navigation
   if (e.key === 'g' || e.key === 'G') {
     pendingG = true
     clearTimeout(gTimer)
@@ -920,23 +1051,21 @@ document.addEventListener('keydown', function(e) {
   if (pendingG) {
     pendingG = false
     clearTimeout(gTimer)
-    var map = { d: 'dashboard', c: 'chat', a: 'agents', h: 'chains', i: 'inventor', o: 'omega', k: 'knowledge', p: 'pheromone' }
-    var panel = map[e.key.toLowerCase()]
-    if (panel) {
-      var nav = document.querySelector('[data-panel="' + panel + '"]')
-      if (nav) nav.click()
-    }
+    var gCombo = 'g+' + e.key.toLowerCase()
+    var gEntry = ShortcutRegistry.resolve(gCombo)
+    if (gEntry) { e.preventDefault(); gEntry.handler(e) }
   }
 })
 
 // ─── Dashboard ──────────────────────────────────────────────────────────────
 async function refreshDashboard() {
   try {
-    dashboardData = await api('/api/dashboard/data')
+    dashboardData = await apiSafe('/api/dashboard/data', {}, refreshDashboard)
     renderDashboard()
+    EventBus.emit('dashboard:refresh', dashboardData)
   } catch (err) {
     console.warn('Dashboard refresh failed:', err)
-    document.getElementById('stat-cards').innerHTML = '<div class="stat-card" style="grid-column:1/-1"><div class="value" style="font-size:1rem;-webkit-text-fill-color:var(--red)">Dashboard load failed</div><div class="label">' + h(String(err)) + '</div></div>'
+    document.getElementById('stat-cards').innerHTML = '<div class="stat-card" style="grid-column:1/-1"><div class="value" style="font-size:1rem;-webkit-text-fill-color:var(--red)">Dashboard load failed</div><div class="label">' + h(String(err)) + '<br><button class="btn-sm" style="margin-top:var(--sp-2)" onclick="ErrorBoundary.reset(\'/api/dashboard/data\');refreshDashboard()">Retry</button></div></div>'
   }
 }
 
@@ -1853,6 +1982,7 @@ async function fetchPheromoneStatus() {
     }
     document.getElementById('pheromone-kpis').innerHTML = kpiHtml
     document.getElementById('pheromone-content').innerHTML = '<div class="section-box"><h2>Pheromone Status</h2><pre style="padding:var(--sp-4);font-size:0.8rem;white-space:pre-wrap;word-break:break-word">' + h(typeof data === 'string' ? data : JSON.stringify(data, null, 2)) + '</pre></div>'
+    EventBus.emit('pheromone:update', { type: 'status', data: data })
   } catch (err) { document.getElementById('pheromone-content').innerHTML = '<div class="error-state">\u274C ' + h(err.message) + '<div class="error-action"><button class="btn-sm" onclick="fetchPheromoneStatus()">Retry</button></div></div>' }
 }
 
@@ -1899,6 +2029,7 @@ async function fetchPeerEvalStatus() {
     }
     document.getElementById('fleet-learning-kpis').innerHTML = kpiHtml
     document.getElementById('fleet-learning-content').innerHTML = '<div class="section-box"><h2>Peer Evaluation Status</h2><pre style="padding:var(--sp-4);font-size:0.8rem;white-space:pre-wrap;word-break:break-word">' + h(typeof data === 'string' ? data : JSON.stringify(data, null, 2)) + '</pre></div>'
+    EventBus.emit('fleet:update', { type: 'eval-status', data: data })
   } catch (err) { document.getElementById('fleet-learning-content').innerHTML = '<div class="error-state">\u274C ' + h(err.message) + '<div class="error-action"><button class="btn-sm" onclick="fetchPeerEvalStatus()">Retry</button></div></div>' }
 }
 
@@ -1935,6 +2066,7 @@ async function fetchInventorStatus() {
     }
     document.getElementById('inventor-kpis').innerHTML = kpiHtml
     document.getElementById('inventor-content').innerHTML = '<div class="section-box"><h2>Platform Health</h2><pre style="padding:var(--sp-4);font-size:0.8rem;white-space:pre-wrap;word-break:break-word">' + h(typeof data === 'string' ? data : JSON.stringify(data, null, 2)) + '</pre></div>'
+    EventBus.emit('inventor:update', { type: 'status', data: data })
   } catch (err) { document.getElementById('inventor-content').innerHTML = '<div class="error-state">\u274C ' + h(err.message) + '<div class="error-action"><button class="btn-sm" onclick="fetchInventorStatus()">Retry</button></div></div>' }
 }
 
@@ -2137,9 +2269,38 @@ function connectSSE() {
   } catch(e) {}
 }
 
+// ─── Cross-Panel EventBus Wiring ────────────────────────────────────────────
+// When inventor completes a trial, refresh dashboard + anomaly if visible
+EventBus.on('inventor:update', function(evt) {
+  if (evt && evt.type === 'trial-complete') {
+    refreshDashboard()
+    var anomalyPanel = document.getElementById('panel-anomaly')
+    if (anomalyPanel && anomalyPanel.classList.contains('active')) fetchAnomalies()
+  }
+})
+// When pheromone signals change, update dashboard fleet health
+EventBus.on('pheromone:update', function() {
+  var dashPanel = document.getElementById('panel-dashboard')
+  if (dashPanel && dashPanel.classList.contains('active')) refreshDashboard()
+})
+// When fleet eval updates, inventor panel can reflect fleet scores
+EventBus.on('fleet:update', function(evt) {
+  var inventorPanel = document.getElementById('panel-inventor')
+  if (inventorPanel && inventorPanel.classList.contains('active')) {
+    var kpis = document.getElementById('inventor-kpis')
+    if (kpis && evt && evt.data && evt.data.average_score) {
+      var badge = document.createElement('div')
+      badge.className = 'stat-card'
+      badge.innerHTML = '<div class="value" style="-webkit-text-fill-color:var(--cyan)">' + Number(evt.data.average_score).toFixed(2) + '</div><div class="label">Fleet Avg</div>'
+      // Only add if not already present
+      if (!kpis.querySelector('[data-fleet-badge]')) { badge.setAttribute('data-fleet-badge', '1'); kpis.appendChild(badge) }
+    }
+  }
+})
+
 // ─── Boot ───────────────────────────────────────────────────────────────────
 function boot() {
-  console.log('[CC v3.0] boot()')
+  console.log('[CC v3.1] boot()')
   connectWS()
   connectSSE()
   refreshDashboard()
@@ -2150,6 +2311,10 @@ function boot() {
   addChainStep()
   if (refreshTimer) clearInterval(refreshTimer)
   refreshTimer = setInterval(refreshDashboard, 10000)
+  // Log shortcut conflicts if any
+  var sc = ShortcutRegistry.conflicts()
+  if (sc.length) console.warn('[CC] Shortcut conflicts detected:', sc)
+  console.log('[CC] ' + ShortcutRegistry.list().length + ' shortcuts registered, ' + EventBus.channels().length + ' event channels active')
 }
 
 window.onerror = function(msg, src, line) {
