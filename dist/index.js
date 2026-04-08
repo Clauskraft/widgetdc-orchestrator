@@ -13881,6 +13881,62 @@ var init_tool_registry = __esm({
         input: z.object({}),
         timeoutMs: 45e3,
         outputDescription: "Strategic fleet analysis with patterns, underperformers, and recommended changes"
+      }),
+      // ── Inventor (ASI-Evolve Closed-Loop Evolution Engine) ──────────────────
+      defineTool({
+        name: "inventor_run",
+        namespace: "inventor",
+        description: "Start or resume an Inventor evolution experiment. Fire-and-forget \u2014 poll inventor_status for progress. Requires experiment name + task description. Supports UCB1, greedy, random, or island (MAP-Elites) sampling.",
+        input: z.object({
+          experiment_name: z.string().describe("Unique experiment identifier (used for Redis/Neo4j namespacing)"),
+          task_description: z.string().describe("Problem description to evolve solutions for"),
+          initial_artifact: z.string().optional().describe("Optional seed solution to start from"),
+          sampling_algorithm: z.enum(["ucb1", "greedy", "random", "island"]).optional().describe("Sampling strategy (default: ucb1)"),
+          sample_n: z.number().optional().describe("Number of parent nodes to sample per step (default: 3)"),
+          max_steps: z.number().optional().describe("Maximum evolution steps (default: 20)"),
+          chain_mode: z.enum(["sequential", "parallel", "debate"]).optional().describe("Chain execution mode (default: sequential)"),
+          resume: z.boolean().optional().describe("Resume a paused experiment (default: false)")
+        }),
+        timeoutMs: 3e4,
+        outputDescription: "Experiment start confirmation with poll URL"
+      }),
+      defineTool({
+        name: "inventor_status",
+        namespace: "inventor",
+        description: "Get current Inventor experiment status: running state, current step, total steps, nodes created, best score, best node ID, sampling algorithm, and last error if any.",
+        input: z.object({}),
+        timeoutMs: 5e3,
+        outputDescription: "InventorStatus with isRunning, currentStep, totalSteps, nodesCreated, bestScore, bestNodeId"
+      }),
+      defineTool({
+        name: "inventor_nodes",
+        namespace: "inventor",
+        description: "List all Inventor trial nodes from current or last experiment. Sortable by score or creation time. Each node has: artifact, score, metrics, analysis, motivation, parent lineage.",
+        input: z.object({
+          sort: z.enum(["score", "created"]).optional().describe("Sort order (default: score)"),
+          limit: z.number().optional().describe("Max nodes to return (default: 50, max: 200)"),
+          offset: z.number().optional().describe("Pagination offset (default: 0)")
+        }),
+        timeoutMs: 5e3,
+        outputDescription: "Paginated array of InventorNodes sorted by score or creation time"
+      }),
+      defineTool({
+        name: "inventor_node",
+        namespace: "inventor",
+        description: "Get a specific Inventor trial node by ID. Returns full artifact, score, metrics, analysis, motivation, parent ID, island, visit count, and timestamps.",
+        input: z.object({
+          node_id: z.string().describe("The trial node ID to retrieve")
+        }),
+        timeoutMs: 5e3,
+        outputDescription: "Complete InventorNode with artifact and all metadata"
+      }),
+      defineTool({
+        name: "inventor_best",
+        namespace: "inventor",
+        description: "Get the best-scoring Inventor trial node from the current or last experiment. Returns the winning solution with full artifact, score breakdown, and evolution lineage.",
+        input: z.object({}),
+        timeoutMs: 5e3,
+        outputDescription: "Best InventorNode with highest score, full artifact and metadata"
       })
     ];
   }
@@ -20763,15 +20819,738 @@ var init_hyperagent_autonomous = __esm({
   }
 });
 
-// src/tool-executor.ts
+// src/inventor-sampler.ts
+function createSampler(config2) {
+  switch (config2.algorithm) {
+    case "ucb1":
+      return new UCB1Sampler(config2.ucb1C ?? 1.414);
+    case "greedy":
+      return new GreedySampler();
+    case "random":
+      return new RandomSampler();
+    case "island":
+      return new IslandSampler(config2.islands ?? { count: 5, migrationInterval: 10, migrationRate: 0.1 });
+    default:
+      return new UCB1Sampler();
+  }
+}
+var UCB1Sampler, GreedySampler, RandomSampler, IslandSampler;
+var init_inventor_sampler = __esm({
+  "src/inventor-sampler.ts"() {
+    "use strict";
+    init_logger();
+    UCB1Sampler = class {
+      algorithm = "ucb1";
+      c;
+      totalVisits = 0;
+      pheromoneBias = /* @__PURE__ */ new Map();
+      alpha = 0.3;
+      // pheromone influence weight
+      constructor(c = 1.414) {
+        this.c = c;
+      }
+      setPheromoneSignals(signals) {
+        this.pheromoneBias = signals;
+      }
+      sample(nodes2, n) {
+        if (nodes2.length === 0) return [];
+        if (nodes2.length <= n) return [...nodes2];
+        const minScore = Math.min(...nodes2.map((nd) => nd.score));
+        const maxScore = Math.max(...nodes2.map((nd) => nd.score));
+        const scoreRange = maxScore - minScore || 1;
+        const scored = nodes2.map((node) => {
+          const normalizedScore = (node.score - minScore) / scoreRange;
+          const exploration = node.visitCount === 0 ? Infinity : this.c * Math.sqrt(Math.log(Math.max(this.totalVisits, 1)) / node.visitCount);
+          const pheromoneBoost = this.pheromoneBias.get(node.id) ?? 0;
+          return { node, ucb1: normalizedScore + exploration + this.alpha * pheromoneBoost };
+        });
+        scored.sort((a, b) => b.ucb1 - a.ucb1);
+        const selected = scored.slice(0, n).map((s) => s.node);
+        for (const node of selected) {
+          node.visitCount++;
+          this.totalVisits++;
+        }
+        return selected;
+      }
+      onNodeAdded(_node) {
+      }
+      getState() {
+        return { totalVisits: this.totalVisits, c: this.c };
+      }
+      loadState(state4) {
+        this.totalVisits = state4.totalVisits || 0;
+        this.c = state4.c || 1.414;
+      }
+    };
+    GreedySampler = class {
+      algorithm = "greedy";
+      sample(nodes2, n) {
+        if (nodes2.length === 0) return [];
+        const sorted = [...nodes2].sort((a, b) => b.score - a.score);
+        return sorted.slice(0, n);
+      }
+      onNodeAdded(_node) {
+      }
+      getState() {
+        return {};
+      }
+      loadState(_state) {
+      }
+    };
+    RandomSampler = class {
+      algorithm = "random";
+      sample(nodes2, n) {
+        if (nodes2.length === 0) return [];
+        const shuffled = [...nodes2].sort(() => Math.random() - 0.5);
+        return shuffled.slice(0, n);
+      }
+      onNodeAdded(_node) {
+      }
+      getState() {
+        return {};
+      }
+      loadState(_state) {
+      }
+    };
+    IslandSampler = class {
+      algorithm = "island";
+      islands = /* @__PURE__ */ new Map();
+      islandCount;
+      migrationInterval;
+      migrationRate;
+      currentIsland = 0;
+      generationCount = 0;
+      lastMigration = 0;
+      constructor(config2) {
+        this.islandCount = config2.count;
+        this.migrationInterval = config2.migrationInterval;
+        this.migrationRate = config2.migrationRate;
+        for (let i = 0; i < this.islandCount; i++) {
+          this.islands.set(i, /* @__PURE__ */ new Set());
+        }
+      }
+      sample(nodes2, n) {
+        if (nodes2.length === 0) return [];
+        this.generationCount++;
+        if (this.generationCount - this.lastMigration >= this.migrationInterval) {
+          this.migrate(nodes2);
+          this.lastMigration = this.generationCount;
+        }
+        const islandNodeIds = this.islands.get(this.currentIsland) ?? /* @__PURE__ */ new Set();
+        const islandNodes = nodes2.filter((nd) => islandNodeIds.has(nd.id));
+        this.currentIsland = (this.currentIsland + 1) % this.islandCount;
+        if (islandNodes.length === 0) {
+          const sorted2 = [...nodes2].sort((a, b) => b.score - a.score);
+          return sorted2.slice(0, n);
+        }
+        const explorationCount = Math.max(1, Math.floor(n * 0.3));
+        const exploitationCount = n - explorationCount;
+        const sorted = [...islandNodes].sort((a, b) => b.score - a.score);
+        const exploited = sorted.slice(0, exploitationCount);
+        const remaining = islandNodes.filter((nd) => !exploited.includes(nd));
+        const shuffled = remaining.sort(() => Math.random() - 0.5);
+        const explored = shuffled.slice(0, explorationCount);
+        return [...exploited, ...explored];
+      }
+      onNodeAdded(node) {
+        const targetIsland = node.island >= 0 ? node.island : this.currentIsland;
+        const island = this.islands.get(targetIsland % this.islandCount);
+        if (island) island.add(node.id);
+        node.island = targetIsland % this.islandCount;
+      }
+      migrate(allNodes) {
+        const nodeMap = new Map(allNodes.map((n) => [n.id, n]));
+        for (let i = 0; i < this.islandCount; i++) {
+          const islandIds = this.islands.get(i) ?? /* @__PURE__ */ new Set();
+          const islandNodes = [...islandIds].map((id) => nodeMap.get(id)).filter((n) => n !== void 0).sort((a, b) => b.score - a.score);
+          const migrantCount = Math.max(1, Math.floor(islandNodes.length * this.migrationRate));
+          const migrants = islandNodes.slice(0, migrantCount);
+          const leftNeighbor = (i - 1 + this.islandCount) % this.islandCount;
+          const rightNeighbor = (i + 1) % this.islandCount;
+          for (const migrant of migrants) {
+            const targetIsland = Math.random() < 0.5 ? leftNeighbor : rightNeighbor;
+            const target = this.islands.get(targetIsland);
+            if (target && !target.has(migrant.id)) {
+              target.add(migrant.id);
+            }
+          }
+        }
+        logger.debug({ generation: this.generationCount }, "Inventor: island migration completed");
+      }
+      getState() {
+        const islands = {};
+        this.islands.forEach((ids, idx) => {
+          islands[idx] = [...ids];
+        });
+        return {
+          islands,
+          currentIsland: this.currentIsland,
+          generationCount: this.generationCount,
+          lastMigration: this.lastMigration
+        };
+      }
+      loadState(state4) {
+        const islands = state4.islands;
+        if (islands) {
+          this.islands.clear();
+          for (const [idx, ids] of Object.entries(islands)) {
+            this.islands.set(Number(idx), new Set(ids));
+          }
+        }
+        this.currentIsland = state4.currentIsland || 0;
+        this.generationCount = state4.generationCount || 0;
+        this.lastMigration = state4.lastMigration || 0;
+      }
+    };
+  }
+});
+
+// src/inventor-loop.ts
+var inventor_loop_exports = {};
+__export(inventor_loop_exports, {
+  getBestNode: () => getBestNode,
+  getInventorNode: () => getInventorNode,
+  getInventorNodes: () => getInventorNodes,
+  getInventorStatus: () => getInventorStatus,
+  runInventor: () => runInventor
+});
 import { v4 as uuid24 } from "uuid";
+function stream2(event, data) {
+  broadcastSSE("inventor", { event, ...data, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+}
+async function retrieveCognition(query, topK) {
+  const items = [];
+  try {
+    const ragResponse = await dualChannelRAG(query, {
+      maxResults: topK,
+      maxHops: 2,
+      forceChannels: ["graphrag", "srag"]
+    });
+    items.push(...ragResponse.results.map((r, i) => ({
+      id: `rag-${i}`,
+      title: r.content.slice(0, 80),
+      content: r.content,
+      domain: [],
+      source: r.source,
+      score: r.score
+    })));
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Inventor: RAG retrieval failed");
+  }
+  try {
+    const memResult = await callMcpTool({
+      toolName: "memory_retrieve",
+      args: {
+        agent_id: "inventor-analyzer",
+        query,
+        top_k: Math.min(topK, 5)
+      },
+      callId: `inventor-mem-retrieve-${Date.now()}`
+    });
+    const memories = Array.isArray(memResult.memories) ? memResult.memories : [];
+    items.push(...memories.map((m, i) => ({
+      id: `mem-${i}`,
+      title: String(m.key || "").slice(0, 80),
+      content: String(m.value || ""),
+      domain: [],
+      source: "memory",
+      score: Number(m.score ?? 0.5)
+    })));
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Inventor: memory retrieval failed (non-blocking)");
+  }
+  return items.sort((a, b) => b.score - a.score).slice(0, topK);
+}
+async function foldParentContext(parentNodes, task) {
+  if (parentNodes.length === 0) return "";
+  const rawContext = parentNodes.map(
+    (n) => `[Node ${n.id}] score=${n.score.toFixed(3)}
+analysis: ${n.analysis}
+motivation: ${n.motivation}
+artifact: ${n.artifact.slice(0, 500)}`
+  ).join("\n---\n");
+  if (rawContext.length < 2e3) return rawContext;
+  try {
+    const foldResult = await callCognitiveRaw("fold", {
+      prompt: `Compress the following parent solutions into a dense summary preserving: key scores, best approaches, identified weaknesses, and actionable patterns. Task: ${task}`,
+      context: { raw_context: rawContext, node_count: parentNodes.length },
+      agent_id: "inventor-folder"
+    }, 15e3);
+    const folded = String(foldResult.answer || foldResult.result || rawContext);
+    logger.info(
+      { original: rawContext.length, folded: folded.length, ratio: (folded.length / rawContext.length).toFixed(2) },
+      "Inventor: context folded via RLM"
+    );
+    return folded;
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Inventor: context fold failed, using raw");
+    return rawContext;
+  }
+}
+async function runResearcher(task, parentNodes, cognitionItems, config2) {
+  const parentContext = await foldParentContext(parentNodes, task);
+  const cognitionContext = cognitionItems.map(
+    (c) => `[${c.source}] ${c.title}
+  ${c.content.slice(0, 200)}`
+  ).join("\n\n");
+  const prompt = `You are the Researcher agent in an evolutionary AI system.
+
+TASK: ${task}
+
+PARENT SOLUTIONS (sampled via ${config2.sampling.algorithm}):
+${parentContext || "(no parents yet \u2014 generate an initial solution)"}
+
+RELEVANT KNOWLEDGE (from RAG):
+${cognitionContext || "(no prior knowledge available)"}
+
+Generate a NEW solution that improves on the best parent.
+- If parents exist, create a variation that addresses their weaknesses
+- If no parents, generate an initial high-quality solution
+- Max artifact length: ${config2.pipeline.maxArtifactLength} characters
+
+Respond in JSON format:
+{
+  "motivation": "Why this variation should improve on parents...",
+  "artifact": "The complete solution code/config..."
+}`;
+  try {
+    const result = await callCognitiveRaw("reason", {
+      prompt,
+      agent_id: "inventor-researcher",
+      depth: 2,
+      context: {
+        parentCount: parentNodes.length,
+        bestParentScore: parentNodes.length > 0 ? Math.max(...parentNodes.map((n) => n.score)) : 0,
+        cognitionCount: cognitionItems.length
+      }
+    }, config2.pipeline.engineerTimeoutMs);
+    const text = String(result.answer || result.result || "");
+    try {
+      const jsonMatch = text.match(/\{[\s\S]*"artifact"[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return {
+          artifact: String(parsed.artifact || "").slice(0, config2.pipeline.maxArtifactLength),
+          motivation: String(parsed.motivation || "No motivation provided")
+        };
+      }
+    } catch {
+    }
+    return {
+      artifact: text.slice(0, config2.pipeline.maxArtifactLength),
+      motivation: "Generated via RLM reasoning (raw output)"
+    };
+  } catch (err) {
+    throw new Error(`Researcher failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+async function runEngineer(node, config2) {
+  const t0 = Date.now();
+  try {
+    const result = await callMcpTool({
+      toolName: "critique_refine",
+      args: {
+        content: node.artifact,
+        criteria: `Evaluate this solution for: ${config2.taskDescription}. Score 0-100 on: correctness, efficiency, elegance, completeness.`,
+        mode: "evaluate"
+      },
+      callId: `inventor-eng-${node.id}`
+    });
+    const resultObj = typeof result === "object" && result !== null ? result : {};
+    const score = Number(resultObj.score ?? resultObj.overall_score ?? 50) / 100;
+    const metrics2 = {
+      correctness: Number(resultObj.correctness ?? 0.5),
+      efficiency: Number(resultObj.efficiency ?? 0.5),
+      elegance: Number(resultObj.elegance ?? 0.5),
+      completeness: Number(resultObj.completeness ?? 0.5)
+    };
+    return {
+      nodeId: node.id,
+      success: score > 0.3,
+      score,
+      metrics: metrics2,
+      output: JSON.stringify(resultObj).slice(0, 2e3),
+      durationMs: Date.now() - t0,
+      tokensUsed: 0
+    };
+  } catch (err) {
+    return {
+      nodeId: node.id,
+      success: false,
+      score: 0,
+      metrics: {},
+      output: "",
+      error: err instanceof Error ? err.message : String(err),
+      durationMs: Date.now() - t0,
+      tokensUsed: 0
+    };
+  }
+}
+async function runAnalyzer(node, result, parentNode, config2) {
+  try {
+    const analyzeResult = await callCognitiveRaw("analyze", {
+      prompt: `Analyze this evolutionary trial result.
+
+TASK: ${config2.taskDescription}
+TRIAL NODE: ${node.id} (score: ${result.score.toFixed(3)})
+PARENT: ${parentNode ? `${parentNode.id} (score: ${parentNode.score.toFixed(3)})` : "none (seed)"}
+MOTIVATION: ${node.motivation}
+SUCCESS: ${result.success}
+METRICS: ${JSON.stringify(result.metrics)}
+
+Provide:
+1. Why this solution scored as it did
+2. What the key improvement/regression was vs parent
+3. One actionable insight for the next iteration`,
+      agent_id: "inventor-analyzer"
+    }, 15e3);
+    return String(analyzeResult.answer || analyzeResult.result || "Analysis unavailable");
+  } catch {
+    return `Score: ${result.score.toFixed(3)}. ${result.success ? "Passed" : "Failed"}. ${result.error || ""}`;
+  }
+}
+async function persistNodes(experimentName) {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  const data = JSON.stringify([...nodes.values()]);
+  await redis2.set(nodeKey(experimentName), data).catch(() => {
+  });
+}
+async function persistState(experimentName) {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  const state4 = {
+    currentStep: currentStep2,
+    bestScore,
+    bestNodeId,
+    startedAt,
+    lastStepAt,
+    lastError
+  };
+  await redis2.set(stateKey(experimentName), JSON.stringify(state4)).catch(() => {
+  });
+  if (sampler) {
+    await redis2.set(samplerKey(experimentName), JSON.stringify(sampler.getState())).catch(() => {
+    });
+  }
+}
+async function loadState2(experimentName) {
+  const redis2 = getRedis();
+  if (!redis2) return false;
+  try {
+    const nodesRaw = await redis2.get(nodeKey(experimentName));
+    if (nodesRaw) {
+      const parsed = JSON.parse(nodesRaw);
+      nodes.clear();
+      for (const n of parsed) nodes.set(n.id, n);
+    }
+    const stateRaw = await redis2.get(stateKey(experimentName));
+    if (stateRaw) {
+      const state4 = JSON.parse(stateRaw);
+      currentStep2 = state4.currentStep || 0;
+      bestScore = state4.bestScore ?? -Infinity;
+      bestNodeId = state4.bestNodeId || null;
+      startedAt = state4.startedAt || null;
+      lastStepAt = state4.lastStepAt || null;
+      lastError = state4.lastError || null;
+    }
+    if (sampler) {
+      const samplerRaw = await redis2.get(samplerKey(experimentName));
+      if (samplerRaw) sampler.loadState(JSON.parse(samplerRaw));
+    }
+    return nodes.size > 0;
+  } catch {
+    return false;
+  }
+}
+async function runStep(config2) {
+  currentStep2++;
+  const stepId = `step-${currentStep2}`;
+  const t0 = Date.now();
+  stream2("step_start", { step: currentStep2, maxSteps: config2.pipeline.maxSteps });
+  const allNodes = [...nodes.values()].filter((n) => n.status === "completed");
+  const parentNodes = sampler?.sample(allNodes, config2.sampling.sampleN) ?? [];
+  const cognitionQuery = parentNodes.length > 0 ? `${config2.taskDescription}. Best approach: ${parentNodes[0].analysis.slice(0, 200)}` : config2.taskDescription;
+  const cognitionItems = await retrieveCognition(cognitionQuery, config2.cognition.topK);
+  stream2("learn", {
+    step: currentStep2,
+    parentCount: parentNodes.length,
+    cognitionCount: cognitionItems.length,
+    bestParentScore: parentNodes.length > 0 ? Math.max(...parentNodes.map((n) => n.score)) : null
+  });
+  stream2("design", { step: currentStep2 });
+  const { artifact, motivation } = await runResearcher(
+    config2.taskDescription,
+    parentNodes,
+    cognitionItems,
+    config2
+  );
+  const nodeId = `inv-${uuid24().slice(0, 8)}`;
+  const parentId = parentNodes.length > 0 ? parentNodes[0].id : null;
+  const node = {
+    id: nodeId,
+    parentId,
+    artifact,
+    taskDescription: config2.taskDescription,
+    score: 0,
+    metrics: {},
+    analysis: "",
+    motivation,
+    island: parentNodes.length > 0 ? parentNodes[0].island : 0,
+    visitCount: 0,
+    chainMode: config2.chainMode || "sequential",
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    status: "running"
+  };
+  nodes.set(nodeId, node);
+  stream2("experiment", { step: currentStep2, nodeId });
+  const result = await runEngineer(node, config2);
+  node.score = result.score;
+  node.metrics = result.metrics;
+  node.status = result.success ? "completed" : "failed";
+  stream2("analyze", { step: currentStep2, nodeId, score: result.score });
+  const parentNode = parentId ? nodes.get(parentId) ?? null : null;
+  node.analysis = await runAnalyzer(node, result, parentNode, config2);
+  if (sampler) sampler.onNodeAdded(node);
+  onInventorTrial(nodeId, result.score, config2.experimentName, node.island).catch(() => {
+  });
+  hookIntoExecution("inventor", nodeId, {
+    taskType: `inventor-trial:${config2.experimentName}`,
+    chainId: config2.experimentName,
+    success: result.success,
+    metrics: {
+      latency_ms: Date.now() - t0,
+      quality_score: result.score
+    },
+    insights: node.analysis ? [node.analysis.slice(0, 200)] : []
+  }).catch(() => {
+  });
+  if (result.score > bestScore) {
+    bestScore = result.score;
+    bestNodeId = nodeId;
+    stream2("new_best", { step: currentStep2, nodeId, score: result.score });
+  }
+  lastStepAt = (/* @__PURE__ */ new Date()).toISOString();
+  await persistNodes(config2.experimentName);
+  await persistState(config2.experimentName);
+  if (node.analysis.length > 20) {
+    try {
+      await callMcpTool({
+        toolName: "memory_store",
+        args: {
+          agent_id: "inventor-analyzer",
+          key: `insight:${nodeId}`,
+          value: `[${result.success ? "SUCCESS" : "FAIL"}:${result.score.toFixed(3)}] ${node.analysis}`,
+          metadata: {
+            score: result.score,
+            success: result.success,
+            step: currentStep2,
+            experiment: config2.experimentName,
+            parentId: parentId || "seed",
+            island: node.island
+          }
+        },
+        callId: `inventor-mem-${nodeId}`
+      });
+    } catch {
+    }
+  }
+  try {
+    await callMcpTool({
+      toolName: "adaptive_rag_reward",
+      args: {
+        query: config2.taskDescription,
+        reward: result.score,
+        metadata: {
+          source: "inventor",
+          nodeId,
+          step: currentStep2,
+          experiment: config2.experimentName
+        }
+      },
+      callId: `inventor-rag-reward-${nodeId}`
+    });
+  } catch {
+  }
+  const stepResult = {
+    stepNumber: currentStep2,
+    nodeId,
+    parentId,
+    score: result.score,
+    bestScore,
+    analysis: node.analysis.slice(0, 300),
+    durationMs: Date.now() - t0
+  };
+  stream2("step_complete", { ...stepResult });
+  return stepResult;
+}
+async function runInventor(config2, resume = false) {
+  if (isRunning3) throw new Error("Inventor already running");
+  isRunning3 = true;
+  currentConfig = config2;
+  startedAt = (/* @__PURE__ */ new Date()).toISOString();
+  lastError = null;
+  const results = [];
+  sampler = createSampler({
+    algorithm: config2.sampling.algorithm,
+    ucb1C: config2.sampling.ucb1C,
+    islands: config2.sampling.islands
+  });
+  if (resume) {
+    const loaded = await loadState2(config2.experimentName);
+    if (loaded) {
+      logger.info(
+        { experiment: config2.experimentName, nodes: nodes.size, step: currentStep2 },
+        "Inventor: resumed from Redis"
+      );
+    }
+  } else {
+    nodes.clear();
+    currentStep2 = 0;
+    bestScore = -Infinity;
+    bestNodeId = null;
+  }
+  stream2("run_start", {
+    experiment: config2.experimentName,
+    maxSteps: config2.pipeline.maxSteps,
+    sampling: config2.sampling.algorithm,
+    resumed: resume && nodes.size > 0
+  });
+  if (config2.initialArtifact && nodes.size === 0) {
+    const seedNode = {
+      id: `inv-seed-${uuid24().slice(0, 8)}`,
+      parentId: null,
+      artifact: config2.initialArtifact,
+      taskDescription: config2.taskDescription,
+      score: 0,
+      metrics: {},
+      analysis: "Initial seed artifact",
+      motivation: "Seed solution provided by user",
+      island: 0,
+      visitCount: 0,
+      chainMode: config2.chainMode || "sequential",
+      createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+      status: "completed"
+    };
+    const seedResult = await runEngineer(seedNode, config2);
+    seedNode.score = seedResult.score;
+    seedNode.metrics = seedResult.metrics;
+    seedNode.status = seedResult.success ? "completed" : "failed";
+    nodes.set(seedNode.id, seedNode);
+    if (sampler) sampler.onNodeAdded(seedNode);
+    if (seedResult.score > bestScore) {
+      bestScore = seedResult.score;
+      bestNodeId = seedNode.id;
+    }
+    stream2("seed", { nodeId: seedNode.id, score: seedResult.score });
+  }
+  try {
+    const RAG_RETRAIN_INTERVAL = 5;
+    for (let step = currentStep2; step < config2.pipeline.maxSteps; step++) {
+      try {
+        const result = await runStep(config2);
+        results.push(result);
+        if (currentStep2 % RAG_RETRAIN_INTERVAL === 0) {
+          try {
+            await callMcpTool({
+              toolName: "adaptive_rag_retrain",
+              args: { source: "inventor", reason: `Inventor step ${currentStep2} periodic retrain` },
+              callId: `inventor-rag-retrain-${currentStep2}`
+            });
+            stream2("rag_retrain", { step: currentStep2 });
+            logger.info({ step: currentStep2 }, "Inventor: adaptive RAG retrained");
+          } catch {
+          }
+        }
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+        stream2("step_error", { step: currentStep2, error: lastError });
+        logger.error({ step: currentStep2, error: lastError }, "Inventor: step failed");
+      }
+    }
+  } finally {
+    isRunning3 = false;
+    currentConfig = null;
+    stream2("run_complete", {
+      totalSteps: results.length,
+      bestScore,
+      bestNodeId,
+      nodesCreated: nodes.size
+    });
+    broadcastMessage({
+      from: "Inventor",
+      to: "All",
+      source: "orchestrator",
+      type: "Message",
+      message: `Evolution complete: ${results.length} steps, best score ${bestScore.toFixed(3)} (node ${bestNodeId})`
+    });
+  }
+  return { steps: results, bestScore, bestNodeId };
+}
+function getInventorStatus() {
+  return {
+    isRunning: isRunning3,
+    experimentName: currentConfig?.experimentName ?? "",
+    currentStep: currentStep2,
+    totalSteps: currentConfig?.pipeline.maxSteps ?? 0,
+    nodesCreated: nodes.size,
+    bestScore: bestScore === -Infinity ? 0 : bestScore,
+    bestNodeId,
+    samplingAlgorithm: currentConfig?.sampling.algorithm ?? "ucb1",
+    startedAt,
+    lastStepAt,
+    lastError
+  };
+}
+function getInventorNodes() {
+  return [...nodes.values()];
+}
+function getInventorNode(id) {
+  return nodes.get(id);
+}
+function getBestNode() {
+  return bestNodeId ? nodes.get(bestNodeId) : void 0;
+}
+var isRunning3, currentConfig, currentStep2, bestScore, bestNodeId, startedAt, lastStepAt, lastError, sampler, nodes, REDIS_PREFIX9, nodeKey, stateKey, samplerKey;
+var init_inventor_loop = __esm({
+  "src/inventor-loop.ts"() {
+    "use strict";
+    init_cognitive_proxy();
+    init_dual_rag();
+    init_mcp_caller();
+    init_redis();
+    init_sse();
+    init_chat_broadcaster();
+    init_logger();
+    init_inventor_sampler();
+    init_pheromone_layer();
+    init_peer_eval();
+    isRunning3 = false;
+    currentConfig = null;
+    currentStep2 = 0;
+    bestScore = -Infinity;
+    bestNodeId = null;
+    startedAt = null;
+    lastStepAt = null;
+    lastError = null;
+    sampler = null;
+    nodes = /* @__PURE__ */ new Map();
+    REDIS_PREFIX9 = "inventor:";
+    nodeKey = (expName) => `${REDIS_PREFIX9}${expName}:nodes`;
+    stateKey = (expName) => `${REDIS_PREFIX9}${expName}:state`;
+    samplerKey = (expName) => `${REDIS_PREFIX9}${expName}:sampler`;
+  }
+});
+
+// src/tool-executor.ts
+import { v4 as uuid25 } from "uuid";
 function getTokenSavings() {
   return { totalTokensSaved, totalFoldingCalls, avgSavingsPerFold: totalFoldingCalls > 0 ? Math.round(totalTokensSaved / totalFoldingCalls) : 0 };
 }
 async function saveFullToolOutput(content, toolName) {
   const redis2 = getRedis();
   if (!redis2) return null;
-  const id = uuid24();
+  const id = uuid25();
   try {
     const payload = JSON.stringify({
       $id: `tool-output-${id}`,
@@ -20889,7 +21668,7 @@ function buildToolFallback(toolName, error) {
   }
 }
 async function executeToolUnified(toolName, args, opts) {
-  const callId = opts?.call_id ?? uuid24();
+  const callId = opts?.call_id ?? uuid25();
   const t0 = Date.now();
   let deprecation_notice;
   const toolDef = getTool(toolName);
@@ -20981,7 +21760,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher, params: args.params ?? {} },
-        callId: uuid24(),
+        callId: uuid25(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
@@ -21002,7 +21781,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher },
-        callId: uuid24(),
+        callId: uuid25(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Task query failed: ${result.error_message}`;
@@ -21014,7 +21793,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: args.tool_name,
         args: args.payload ?? {},
-        callId: uuid24(),
+        callId: uuid25(),
         timeoutMs: 3e4
       });
       if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
@@ -21022,8 +21801,8 @@ ${result.merged_context}`;
     }
     case "get_platform_health": {
       const [backendHealth, graphHealth] = await Promise.allSettled([
-        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid24(), timeoutMs: 1e4 }),
-        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid24(), timeoutMs: 1e4 })
+        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid25(), timeoutMs: 1e4 }),
+        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid25(), timeoutMs: 1e4 })
       ]);
       const parts = [];
       if (backendHealth.status === "fulfilled" && backendHealth.value.status === "success") {
@@ -21039,7 +21818,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: args.query },
-        callId: uuid24(),
+        callId: uuid25(),
         timeoutMs: 2e4
       });
       if (result.status !== "success") return `Document search failed: ${result.error_message}`;
@@ -21057,7 +21836,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issues",
         args: payload,
-        callId: uuid24(),
+        callId: uuid25(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
@@ -21073,7 +21852,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issue_get",
         args: { identifier },
-        callId: uuid24(),
+        callId: uuid25(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
@@ -21704,7 +22483,7 @@ ${entries.map((e) => `- ${e.key}`).join("\n")}`;
             max_tokens: budget,
             domain
           },
-          callId: uuid24(),
+          callId: uuid25(),
           timeoutMs: 25e3
         });
         if (result.status !== "success") return `Folding failed: ${result.error_message}`;
@@ -21786,7 +22565,7 @@ ${summary}`;
         const lineage = await buildLineageChain2(assemblyId);
         const now = (/* @__PURE__ */ new Date()).toISOString();
         const decision = {
-          $id: `widgetdc:decision:${uuid24()}`,
+          $id: `widgetdc:decision:${uuid25()}`,
           $schema: "https://widgetdc.io/schemas/decision/v1",
           title,
           description: typeof args.description === "string" ? args.description : "",
@@ -21869,7 +22648,7 @@ ${lines.join("\n")}`;
         const { saveDrillContext: saveDrillContext2, fetchDrillChildren: fetchDrillChildren2 } = await Promise.resolve().then(() => (init_drill(), drill_exports));
         const domain = String(args.domain ?? "");
         if (!domain) return "Error: domain required";
-        const sessionId = uuid24();
+        const sessionId = uuid25();
         const ctx = {
           stack: [],
           current_level: "domain",
@@ -22106,7 +22885,7 @@ ${lines.join("\n")}`;
       const { hookIntoExecution: hookIntoExecution2 } = await Promise.resolve().then(() => (init_peer_eval(), peer_eval_exports));
       const report = await hookIntoExecution2(
         args.agent_id,
-        args.task_id ?? uuid24(),
+        args.task_id ?? uuid25(),
         args.context ?? "Manual evaluation via MCP tool"
       );
       return JSON.stringify(report);
@@ -22144,6 +22923,79 @@ ${lines.join("\n")}`;
       } catch (err) {
         return `HyperAgent auto-issues failed: ${err instanceof Error ? err.message : String(err)}`;
       }
+    }
+    // ── Inventor (ASI-Evolve MCP Tools — LIN-XXX) ────────────────────────
+    case "inventor_run": {
+      const { runInventor: runInventor2, getInventorStatus: getStatus } = await Promise.resolve().then(() => (init_inventor_loop(), inventor_loop_exports));
+      const status = getStatus();
+      if (status.isRunning) {
+        return JSON.stringify({
+          success: false,
+          error: `Experiment '${status.experimentName}' already running (step ${status.currentStep}/${status.totalSteps})`
+        });
+      }
+      const config2 = {
+        experimentName: args.experiment_name,
+        taskDescription: args.task_description,
+        initialArtifact: args.initial_artifact,
+        sampling: {
+          algorithm: args.sampling_algorithm ?? "ucb1",
+          sampleN: args.sample_n ?? 3,
+          ucb1C: 1.414,
+          islands: { count: 5, migrationInterval: 10, migrationRate: 0.1 }
+        },
+        cognition: { topK: 5, threshold: 0.3 },
+        pipeline: {
+          maxSteps: args.max_steps ?? 20,
+          maxArtifactLength: 8e3,
+          engineerTimeoutMs: 12e4,
+          numWorkers: 1
+        },
+        chainMode: args.chain_mode ?? "sequential"
+      };
+      runInventor2(config2, args.resume ?? false).catch((err) => {
+        logger.error({ err: String(err), experiment: config2.experimentName }, "Inventor run failed");
+      });
+      return JSON.stringify({
+        success: true,
+        experiment: config2.experimentName,
+        maxSteps: config2.pipeline.maxSteps,
+        sampling: config2.sampling.algorithm,
+        message: `Inventor experiment '${config2.experimentName}' started. Poll inventor_status for progress.`
+      });
+    }
+    case "inventor_status": {
+      const { getInventorStatus: getStatus } = await Promise.resolve().then(() => (init_inventor_loop(), inventor_loop_exports));
+      return JSON.stringify(getStatus());
+    }
+    case "inventor_nodes": {
+      const { getInventorNodes: getInventorNodes2 } = await Promise.resolve().then(() => (init_inventor_loop(), inventor_loop_exports));
+      const sort = args.sort ?? "score";
+      const limit = Math.min(args.limit ?? 50, 200);
+      const offset = args.offset ?? 0;
+      let nodes2 = getInventorNodes2();
+      if (sort === "created") {
+        nodes2 = [...nodes2].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      } else {
+        nodes2 = [...nodes2].sort((a, b) => b.score - a.score);
+      }
+      const total = nodes2.length;
+      const paged = nodes2.slice(offset, offset + limit);
+      return JSON.stringify({ nodes: paged, total, limit, offset });
+    }
+    case "inventor_node": {
+      const { getInventorNode: getInventorNode2 } = await Promise.resolve().then(() => (init_inventor_loop(), inventor_loop_exports));
+      const nodeId = args.node_id;
+      if (!nodeId) return "Error: node_id is required";
+      const node = getInventorNode2(nodeId);
+      if (!node) return `Node '${nodeId}' not found`;
+      return JSON.stringify(node);
+    }
+    case "inventor_best": {
+      const { getBestNode: getBestNode2 } = await Promise.resolve().then(() => (init_inventor_loop(), inventor_loop_exports));
+      const best = getBestNode2();
+      if (!best) return "No nodes yet \u2014 run an experiment first with inventor_run";
+      return JSON.stringify(best);
     }
     default: {
       try {
@@ -28123,12 +28975,12 @@ import cron from "node-cron";
 // src/graph-self-correct.ts
 init_mcp_caller();
 init_logger();
-import { v4 as uuid25 } from "uuid";
+import { v4 as uuid26 } from "uuid";
 async function graphRead(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid25(),
+    callId: uuid26(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -28139,7 +28991,7 @@ async function graphWrite(cypher, params, force = true) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {}, _force: force },
-    callId: uuid25(),
+    callId: uuid26(),
     timeoutMs: 15e3
   });
   return result.status === "success";
@@ -28599,7 +29451,7 @@ init_redis();
 init_logger();
 init_mcp_caller();
 import { Router as Router10 } from "express";
-import { v4 as uuid26 } from "uuid";
+import { v4 as uuid27 } from "uuid";
 var adoptionRouter = Router10();
 var REDIS_KEY4 = "orchestrator:adoption-metrics";
 var REDIS_TRENDS_KEY = "orchestrator:adoption-trends";
@@ -28696,7 +29548,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (c:Conversation) WHERE c.createdAt > datetime() - duration('P1D') RETURN count(c) AS count"
       },
-      callId: uuid26(),
+      callId: uuid27(),
       timeoutMs: 1e4
     }),
     // Count artifacts from last 24h
@@ -28705,7 +29557,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (a:AnalysisArtifact) WHERE a.createdAt > datetime() - duration('P1D') RETURN count(a) AS count"
       },
-      callId: uuid26(),
+      callId: uuid27(),
       timeoutMs: 1e4
     }),
     // Count tool calls from audit trail
@@ -28714,7 +29566,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (e:AuditEvent) WHERE e.timestamp > datetime() - duration('P1D') AND e.action = 'tool_call' RETURN count(e) AS count"
       },
-      callId: uuid26(),
+      callId: uuid27(),
       timeoutMs: 1e4
     })
   ]);
@@ -28819,7 +29671,7 @@ SET m.conversations_24h = $conversations,
           featuresPct: snapshot.features_pct
         }
       },
-      callId: uuid26(),
+      callId: uuid27(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -29353,7 +30205,7 @@ async function runAnomalyScan() {
       critical: critCount,
       duration_ms: Date.now() - t0
     }, "Anomaly scan complete");
-    await persistState();
+    await persistState2();
     return { anomalies, health, analysis, patterns: state3.patterns };
   }
   broadcastSSE("anomaly-watcher", {
@@ -29363,10 +30215,10 @@ async function runAnomalyScan() {
     critical: 0,
     duration_ms: Date.now() - t0
   });
-  await persistState();
+  await persistState2();
   return { anomalies: [], health, analysis: "", patterns: state3.patterns };
 }
-async function persistState() {
+async function persistState2() {
   const redis2 = getRedis();
   if (!redis2) return;
   try {
@@ -29374,7 +30226,7 @@ async function persistState() {
   } catch {
   }
 }
-async function loadState2() {
+async function loadState3() {
   const redis2 = getRedis();
   if (!redis2) return;
   try {
@@ -29400,7 +30252,7 @@ function getAnomalyPatterns() {
   return [...state3.patterns];
 }
 async function initAnomalyWatcher() {
-  await loadState2();
+  await loadState3();
   logger.info(
     { totalScans: state3.totalScans, patterns: state3.patterns.length },
     "Anomaly-watcher initialized"
@@ -31497,7 +32349,7 @@ init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router18 } from "express";
 import { randomUUID as randomUUID3 } from "crypto";
-import { v4 as uuid27 } from "uuid";
+import { v4 as uuid28 } from "uuid";
 var notebookRouter = Router18();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
@@ -31537,7 +32389,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query, params: {} },
-        callId: uuid27(),
+        callId: uuid28(),
         timeoutMs: 15e3
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -31545,7 +32397,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "kg_rag.query",
         args: { question: query, max_evidence: 10 },
-        callId: uuid27(),
+        callId: uuid28(),
         timeoutMs: 2e4
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -31880,13 +32732,13 @@ ${compressed}`,
 init_chain_engine();
 init_cognitive_proxy();
 init_logger();
-import { v4 as uuid28 } from "uuid";
+import { v4 as uuid29 } from "uuid";
 var monitorRouter = Router19();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid28(),
+    callId: uuid29(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];
@@ -32103,16 +32955,16 @@ init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router20 } from "express";
-import { v4 as uuid29 } from "uuid";
+import { v4 as uuid30 } from "uuid";
 var assemblyRouter = Router20();
-var REDIS_PREFIX9 = "orchestrator:assembly:";
+var REDIS_PREFIX10 = "orchestrator:assembly:";
 var REDIS_INDEX4 = "orchestrator:assemblies:index";
 var TTL_SECONDS9 = 2592e3;
 async function storeAssembly(assembly) {
   const redis2 = getRedis();
   if (!redis2) return false;
   try {
-    await redis2.set(`${REDIS_PREFIX9}${assembly.$id}`, JSON.stringify(assembly), "EX", TTL_SECONDS9);
+    await redis2.set(`${REDIS_PREFIX10}${assembly.$id}`, JSON.stringify(assembly), "EX", TTL_SECONDS9);
     await redis2.sadd(REDIS_INDEX4, assembly.$id);
     return true;
   } catch (err) {
@@ -32124,7 +32976,7 @@ async function loadAssembly(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX9}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX10}${id}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -32167,7 +33019,7 @@ ORDER BY b.domain, b.name LIMIT 50`;
     const graphResult = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params },
-      callId: uuid29(),
+      callId: uuid30(),
       timeoutMs: 15e3
     });
     if (graphResult.status === "success" && graphResult.result) {
@@ -32233,7 +33085,7 @@ Reply as JSON:
   const assemblies = [];
   const now = (/* @__PURE__ */ new Date()).toISOString();
   for (const candidate of analysis.candidates.slice(0, maxCandidates)) {
-    const assemblyId = `widgetdc:assembly:${uuid29()}`;
+    const assemblyId = `widgetdc:assembly:${uuid30()}`;
     const selectedBlocks = blocks.filter((b) => candidate.block_ids.includes(b.block_id));
     const conflictCount = candidate.conflicts?.length ?? 0;
     const coherence = Math.max(0, Math.min(1, candidate.coherence ?? 0.5));
@@ -32292,7 +33144,7 @@ MERGE (a)-[:COMPOSED_OF]->(b)`,
             blockIds: selectedBlocks.map((b) => b.block_id)
           }
         },
-        callId: uuid29(),
+        callId: uuid30(),
         timeoutMs: 1e4
       });
     } catch (err) {
@@ -32328,7 +33180,7 @@ assemblyRouter.get("/", async (req, res) => {
   try {
     const pipeline = redis2.pipeline();
     for (const id of allIds) {
-      pipeline.get(`${REDIS_PREFIX9}${id}`);
+      pipeline.get(`${REDIS_PREFIX10}${id}`);
     }
     const results = await pipeline.exec();
     if (results) {
@@ -32382,7 +33234,7 @@ assemblyRouter.put("/:id", async (req, res) => {
         query: "MATCH (a:Assembly {id: $id}) SET a.status = $status, a.updated_at = datetime()",
         params: { id: assembly.$id, status: assembly.status }
       },
-      callId: uuid29(),
+      callId: uuid30(),
       timeoutMs: 5e3
     });
   } catch {
@@ -32519,9 +33371,9 @@ async function listPlans() {
 // src/harvest-pipeline.ts
 init_logger();
 init_mcp_caller();
-import { v4 as uuid30 } from "uuid";
+import { v4 as uuid31 } from "uuid";
 async function extract(domain) {
-  const callId = `harvest-extract-${uuid30().substring(0, 8)}`;
+  const callId = `harvest-extract-${uuid31().substring(0, 8)}`;
   try {
     const result = await callMcpTool({
       toolName: "srag.query",
@@ -32547,7 +33399,7 @@ function generalize(items, domain) {
     if (content.length > 2e3 || name.toLowerCase().includes("framework")) tier = "framework";
     else if (content.length > 500 || name.toLowerCase().includes("template")) tier = "template";
     return {
-      id: `harvest-${uuid30().substring(0, 12)}`,
+      id: `harvest-${uuid31().substring(0, 12)}`,
       name,
       tier,
       description: content.substring(0, 300),
@@ -32564,7 +33416,7 @@ function generalize(items, domain) {
 }
 async function store(components) {
   if (components.length === 0) return 0;
-  const callId = `harvest-store-${uuid30().substring(0, 8)}`;
+  const callId = `harvest-store-${uuid31().substring(0, 8)}`;
   const labelMap = {
     framework: "Framework",
     template: "Template",
@@ -32616,7 +33468,7 @@ async function verify(components) {
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: `${comp.tier} for ${comp.industries[0]}: ${comp.name}` },
-        callId: `harvest-verify-${uuid30().substring(0, 8)}`,
+        callId: `harvest-verify-${uuid31().substring(0, 8)}`,
         timeoutMs: 15e3
       });
       const resultStr = JSON.stringify(result).toLowerCase();
@@ -32672,7 +33524,7 @@ init_tool_executor();
 init_logger();
 init_config();
 import { Router as Router22 } from "express";
-import { v4 as uuid31 } from "uuid";
+import { v4 as uuid32 } from "uuid";
 var MATRIX_ALIAS_TARGETS = {
   "claude-sonnet": "claude-sonnet-4-20250514",
   "claude-opus": "claude-sonnet-4-20250514",
@@ -32903,7 +33755,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     return;
   }
   const { model, messages, stream: stream3, temperature, max_tokens } = req.body;
-  const requestId = `chatcmpl-${uuid31().substring(0, 12)}`;
+  const requestId = `chatcmpl-${uuid32().substring(0, 12)}`;
   const assistant = ASSISTANT_MAP.get(model);
   const resolvedModel = assistant ? assistant.baseModel : model;
   const mapping = resolveModelToProvider(resolvedModel) ?? resolveModelToProvider("gemini-flash");
@@ -33872,7 +34724,7 @@ init_mcp_caller();
 init_config();
 init_logger();
 import { Router as Router25 } from "express";
-import { v4 as uuid32 } from "uuid";
+import { v4 as uuid33 } from "uuid";
 var mcpGatewayRouter = Router25();
 var backendToolsCache = [];
 var backendToolsCacheTime = 0;
@@ -33958,7 +34810,7 @@ async function handleToolsCall(id, params) {
   if (isOrchestratorTool) {
     try {
       const results = await executeToolCalls([{
-        id: uuid32(),
+        id: uuid33(),
         function: { name: toolName, arguments: JSON.stringify(args) }
       }]);
       const result = results[0];
@@ -33986,7 +34838,7 @@ async function handleToolsCall(id, params) {
     const mcpResult = await callMcpTool({
       toolName: backendName,
       args,
-      callId: uuid32(),
+      callId: uuid33(),
       timeoutMs: 3e4
     });
     if (mcpResult.status !== "success") {
@@ -34104,7 +34956,7 @@ init_tool_executor();
 init_tool_registry();
 init_logger();
 import { Router as Router26 } from "express";
-import { v4 as uuid33 } from "uuid";
+import { v4 as uuid34 } from "uuid";
 var toolGatewayRouter = Router26();
 toolGatewayRouter.post("/:name", async (req, res) => {
   const { name } = req.params;
@@ -34121,7 +34973,7 @@ toolGatewayRouter.post("/:name", async (req, res) => {
     });
     return;
   }
-  const callId = req.body?.call_id ?? uuid33();
+  const callId = req.body?.call_id ?? uuid34();
   const args = req.body ?? {};
   logger.info({ tool: name, call_id: callId }, "REST tool gateway call");
   const result = await executeToolUnified(name, args, {
@@ -34602,12 +35454,12 @@ init_logger();
 import { Router as Router29 } from "express";
 var foldRouter = Router29();
 var DAILY_LIMIT = 100;
-var REDIS_PREFIX10 = "caas:usage:";
+var REDIS_PREFIX11 = "caas:usage:";
 async function getUsageCount(apiKey) {
   const redis2 = getRedis();
   if (!redis2) return 0;
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  const key = `${REDIS_PREFIX10}${today}:${apiKey}`;
+  const key = `${REDIS_PREFIX11}${today}:${apiKey}`;
   const count = await redis2.get(key);
   return parseInt(count ?? "0", 10);
 }
@@ -34615,7 +35467,7 @@ async function incrementUsage(apiKey) {
   const redis2 = getRedis();
   if (!redis2) return;
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  const key = `${REDIS_PREFIX10}${today}:${apiKey}`;
+  const key = `${REDIS_PREFIX11}${today}:${apiKey}`;
   await redis2.incr(key);
   await redis2.expire(key, 86400 * 2);
 }
@@ -34760,12 +35612,12 @@ import { Router as Router30 } from "express";
 init_mcp_caller();
 init_logger();
 init_sse();
-import { v4 as uuid34 } from "uuid";
+import { v4 as uuid35 } from "uuid";
 async function graphRead3(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid34(),
+    callId: uuid35(),
     timeoutMs: 3e4
   });
   if (result.status !== "success") return [];
@@ -34776,7 +35628,7 @@ async function graphWrite2(cypher, params) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {} },
-    callId: uuid34(),
+    callId: uuid35(),
     timeoutMs: 6e4
   });
   return result.status === "success";
@@ -35723,7 +36575,7 @@ init_manifesto_governance();
 init_mcp_caller();
 init_logger();
 import { Router as Router35 } from "express";
-import { v4 as uuid35 } from "uuid";
+import { v4 as uuid36 } from "uuid";
 var governanceRouter = Router35();
 governanceRouter.get("/matrix", (_req, res) => {
   res.json({
@@ -35781,7 +36633,7 @@ RETURN p.name as name, p.status as status`,
               gap_remediation: p.gap_remediation ?? ""
             }
           },
-          callId: uuid35(),
+          callId: uuid36(),
           timeoutMs: 15e3
         });
         results.push({
@@ -36852,714 +37704,9 @@ data: ${JSON.stringify({
 });
 
 // src/routes/inventor.ts
+init_inventor_loop();
+init_logger();
 import { Router as Router44 } from "express";
-
-// src/inventor-loop.ts
-init_cognitive_proxy();
-init_dual_rag();
-init_mcp_caller();
-init_redis();
-init_sse();
-init_chat_broadcaster();
-init_logger();
-import { v4 as uuid36 } from "uuid";
-
-// src/inventor-sampler.ts
-init_logger();
-var UCB1Sampler = class {
-  algorithm = "ucb1";
-  c;
-  totalVisits = 0;
-  pheromoneBias = /* @__PURE__ */ new Map();
-  alpha = 0.3;
-  // pheromone influence weight
-  constructor(c = 1.414) {
-    this.c = c;
-  }
-  setPheromoneSignals(signals) {
-    this.pheromoneBias = signals;
-  }
-  sample(nodes2, n) {
-    if (nodes2.length === 0) return [];
-    if (nodes2.length <= n) return [...nodes2];
-    const minScore = Math.min(...nodes2.map((nd) => nd.score));
-    const maxScore = Math.max(...nodes2.map((nd) => nd.score));
-    const scoreRange = maxScore - minScore || 1;
-    const scored = nodes2.map((node) => {
-      const normalizedScore = (node.score - minScore) / scoreRange;
-      const exploration = node.visitCount === 0 ? Infinity : this.c * Math.sqrt(Math.log(Math.max(this.totalVisits, 1)) / node.visitCount);
-      const pheromoneBoost = this.pheromoneBias.get(node.id) ?? 0;
-      return { node, ucb1: normalizedScore + exploration + this.alpha * pheromoneBoost };
-    });
-    scored.sort((a, b) => b.ucb1 - a.ucb1);
-    const selected = scored.slice(0, n).map((s) => s.node);
-    for (const node of selected) {
-      node.visitCount++;
-      this.totalVisits++;
-    }
-    return selected;
-  }
-  onNodeAdded(_node) {
-  }
-  getState() {
-    return { totalVisits: this.totalVisits, c: this.c };
-  }
-  loadState(state4) {
-    this.totalVisits = state4.totalVisits || 0;
-    this.c = state4.c || 1.414;
-  }
-};
-var GreedySampler = class {
-  algorithm = "greedy";
-  sample(nodes2, n) {
-    if (nodes2.length === 0) return [];
-    const sorted = [...nodes2].sort((a, b) => b.score - a.score);
-    return sorted.slice(0, n);
-  }
-  onNodeAdded(_node) {
-  }
-  getState() {
-    return {};
-  }
-  loadState(_state) {
-  }
-};
-var RandomSampler = class {
-  algorithm = "random";
-  sample(nodes2, n) {
-    if (nodes2.length === 0) return [];
-    const shuffled = [...nodes2].sort(() => Math.random() - 0.5);
-    return shuffled.slice(0, n);
-  }
-  onNodeAdded(_node) {
-  }
-  getState() {
-    return {};
-  }
-  loadState(_state) {
-  }
-};
-var IslandSampler = class {
-  algorithm = "island";
-  islands = /* @__PURE__ */ new Map();
-  islandCount;
-  migrationInterval;
-  migrationRate;
-  currentIsland = 0;
-  generationCount = 0;
-  lastMigration = 0;
-  constructor(config2) {
-    this.islandCount = config2.count;
-    this.migrationInterval = config2.migrationInterval;
-    this.migrationRate = config2.migrationRate;
-    for (let i = 0; i < this.islandCount; i++) {
-      this.islands.set(i, /* @__PURE__ */ new Set());
-    }
-  }
-  sample(nodes2, n) {
-    if (nodes2.length === 0) return [];
-    this.generationCount++;
-    if (this.generationCount - this.lastMigration >= this.migrationInterval) {
-      this.migrate(nodes2);
-      this.lastMigration = this.generationCount;
-    }
-    const islandNodeIds = this.islands.get(this.currentIsland) ?? /* @__PURE__ */ new Set();
-    const islandNodes = nodes2.filter((nd) => islandNodeIds.has(nd.id));
-    this.currentIsland = (this.currentIsland + 1) % this.islandCount;
-    if (islandNodes.length === 0) {
-      const sorted2 = [...nodes2].sort((a, b) => b.score - a.score);
-      return sorted2.slice(0, n);
-    }
-    const explorationCount = Math.max(1, Math.floor(n * 0.3));
-    const exploitationCount = n - explorationCount;
-    const sorted = [...islandNodes].sort((a, b) => b.score - a.score);
-    const exploited = sorted.slice(0, exploitationCount);
-    const remaining = islandNodes.filter((nd) => !exploited.includes(nd));
-    const shuffled = remaining.sort(() => Math.random() - 0.5);
-    const explored = shuffled.slice(0, explorationCount);
-    return [...exploited, ...explored];
-  }
-  onNodeAdded(node) {
-    const targetIsland = node.island >= 0 ? node.island : this.currentIsland;
-    const island = this.islands.get(targetIsland % this.islandCount);
-    if (island) island.add(node.id);
-    node.island = targetIsland % this.islandCount;
-  }
-  migrate(allNodes) {
-    const nodeMap = new Map(allNodes.map((n) => [n.id, n]));
-    for (let i = 0; i < this.islandCount; i++) {
-      const islandIds = this.islands.get(i) ?? /* @__PURE__ */ new Set();
-      const islandNodes = [...islandIds].map((id) => nodeMap.get(id)).filter((n) => n !== void 0).sort((a, b) => b.score - a.score);
-      const migrantCount = Math.max(1, Math.floor(islandNodes.length * this.migrationRate));
-      const migrants = islandNodes.slice(0, migrantCount);
-      const leftNeighbor = (i - 1 + this.islandCount) % this.islandCount;
-      const rightNeighbor = (i + 1) % this.islandCount;
-      for (const migrant of migrants) {
-        const targetIsland = Math.random() < 0.5 ? leftNeighbor : rightNeighbor;
-        const target = this.islands.get(targetIsland);
-        if (target && !target.has(migrant.id)) {
-          target.add(migrant.id);
-        }
-      }
-    }
-    logger.debug({ generation: this.generationCount }, "Inventor: island migration completed");
-  }
-  getState() {
-    const islands = {};
-    this.islands.forEach((ids, idx) => {
-      islands[idx] = [...ids];
-    });
-    return {
-      islands,
-      currentIsland: this.currentIsland,
-      generationCount: this.generationCount,
-      lastMigration: this.lastMigration
-    };
-  }
-  loadState(state4) {
-    const islands = state4.islands;
-    if (islands) {
-      this.islands.clear();
-      for (const [idx, ids] of Object.entries(islands)) {
-        this.islands.set(Number(idx), new Set(ids));
-      }
-    }
-    this.currentIsland = state4.currentIsland || 0;
-    this.generationCount = state4.generationCount || 0;
-    this.lastMigration = state4.lastMigration || 0;
-  }
-};
-function createSampler(config2) {
-  switch (config2.algorithm) {
-    case "ucb1":
-      return new UCB1Sampler(config2.ucb1C ?? 1.414);
-    case "greedy":
-      return new GreedySampler();
-    case "random":
-      return new RandomSampler();
-    case "island":
-      return new IslandSampler(config2.islands ?? { count: 5, migrationInterval: 10, migrationRate: 0.1 });
-    default:
-      return new UCB1Sampler();
-  }
-}
-
-// src/inventor-loop.ts
-init_pheromone_layer();
-init_peer_eval();
-var isRunning3 = false;
-var currentConfig = null;
-var currentStep2 = 0;
-var bestScore = -Infinity;
-var bestNodeId = null;
-var startedAt = null;
-var lastStepAt = null;
-var lastError = null;
-var sampler = null;
-var nodes = /* @__PURE__ */ new Map();
-var REDIS_PREFIX11 = "inventor:";
-var nodeKey = (expName) => `${REDIS_PREFIX11}${expName}:nodes`;
-var stateKey = (expName) => `${REDIS_PREFIX11}${expName}:state`;
-var samplerKey = (expName) => `${REDIS_PREFIX11}${expName}:sampler`;
-function stream2(event, data) {
-  broadcastSSE("inventor", { event, ...data, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
-}
-async function retrieveCognition(query, topK) {
-  const items = [];
-  try {
-    const ragResponse = await dualChannelRAG(query, {
-      maxResults: topK,
-      maxHops: 2,
-      forceChannels: ["graphrag", "srag"]
-    });
-    items.push(...ragResponse.results.map((r, i) => ({
-      id: `rag-${i}`,
-      title: r.content.slice(0, 80),
-      content: r.content,
-      domain: [],
-      source: r.source,
-      score: r.score
-    })));
-  } catch (err) {
-    logger.warn({ error: String(err) }, "Inventor: RAG retrieval failed");
-  }
-  try {
-    const memResult = await callMcpTool({
-      toolName: "memory_retrieve",
-      args: {
-        agent_id: "inventor-analyzer",
-        query,
-        top_k: Math.min(topK, 5)
-      },
-      callId: `inventor-mem-retrieve-${Date.now()}`
-    });
-    const memories = Array.isArray(memResult.memories) ? memResult.memories : [];
-    items.push(...memories.map((m, i) => ({
-      id: `mem-${i}`,
-      title: String(m.key || "").slice(0, 80),
-      content: String(m.value || ""),
-      domain: [],
-      source: "memory",
-      score: Number(m.score ?? 0.5)
-    })));
-  } catch (err) {
-    logger.warn({ error: String(err) }, "Inventor: memory retrieval failed (non-blocking)");
-  }
-  return items.sort((a, b) => b.score - a.score).slice(0, topK);
-}
-async function foldParentContext(parentNodes, task) {
-  if (parentNodes.length === 0) return "";
-  const rawContext = parentNodes.map(
-    (n) => `[Node ${n.id}] score=${n.score.toFixed(3)}
-analysis: ${n.analysis}
-motivation: ${n.motivation}
-artifact: ${n.artifact.slice(0, 500)}`
-  ).join("\n---\n");
-  if (rawContext.length < 2e3) return rawContext;
-  try {
-    const foldResult = await callCognitiveRaw("fold", {
-      prompt: `Compress the following parent solutions into a dense summary preserving: key scores, best approaches, identified weaknesses, and actionable patterns. Task: ${task}`,
-      context: { raw_context: rawContext, node_count: parentNodes.length },
-      agent_id: "inventor-folder"
-    }, 15e3);
-    const folded = String(foldResult.answer || foldResult.result || rawContext);
-    logger.info(
-      { original: rawContext.length, folded: folded.length, ratio: (folded.length / rawContext.length).toFixed(2) },
-      "Inventor: context folded via RLM"
-    );
-    return folded;
-  } catch (err) {
-    logger.warn({ error: String(err) }, "Inventor: context fold failed, using raw");
-    return rawContext;
-  }
-}
-async function runResearcher(task, parentNodes, cognitionItems, config2) {
-  const parentContext = await foldParentContext(parentNodes, task);
-  const cognitionContext = cognitionItems.map(
-    (c) => `[${c.source}] ${c.title}
-  ${c.content.slice(0, 200)}`
-  ).join("\n\n");
-  const prompt = `You are the Researcher agent in an evolutionary AI system.
-
-TASK: ${task}
-
-PARENT SOLUTIONS (sampled via ${config2.sampling.algorithm}):
-${parentContext || "(no parents yet \u2014 generate an initial solution)"}
-
-RELEVANT KNOWLEDGE (from RAG):
-${cognitionContext || "(no prior knowledge available)"}
-
-Generate a NEW solution that improves on the best parent.
-- If parents exist, create a variation that addresses their weaknesses
-- If no parents, generate an initial high-quality solution
-- Max artifact length: ${config2.pipeline.maxArtifactLength} characters
-
-Respond in JSON format:
-{
-  "motivation": "Why this variation should improve on parents...",
-  "artifact": "The complete solution code/config..."
-}`;
-  try {
-    const result = await callCognitiveRaw("reason", {
-      prompt,
-      agent_id: "inventor-researcher",
-      depth: 2,
-      context: {
-        parentCount: parentNodes.length,
-        bestParentScore: parentNodes.length > 0 ? Math.max(...parentNodes.map((n) => n.score)) : 0,
-        cognitionCount: cognitionItems.length
-      }
-    }, config2.pipeline.engineerTimeoutMs);
-    const text = String(result.answer || result.result || "");
-    try {
-      const jsonMatch = text.match(/\{[\s\S]*"artifact"[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        return {
-          artifact: String(parsed.artifact || "").slice(0, config2.pipeline.maxArtifactLength),
-          motivation: String(parsed.motivation || "No motivation provided")
-        };
-      }
-    } catch {
-    }
-    return {
-      artifact: text.slice(0, config2.pipeline.maxArtifactLength),
-      motivation: "Generated via RLM reasoning (raw output)"
-    };
-  } catch (err) {
-    throw new Error(`Researcher failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-async function runEngineer(node, config2) {
-  const t0 = Date.now();
-  try {
-    const result = await callMcpTool({
-      toolName: "critique_refine",
-      args: {
-        content: node.artifact,
-        criteria: `Evaluate this solution for: ${config2.taskDescription}. Score 0-100 on: correctness, efficiency, elegance, completeness.`,
-        mode: "evaluate"
-      },
-      callId: `inventor-eng-${node.id}`
-    });
-    const resultObj = typeof result === "object" && result !== null ? result : {};
-    const score = Number(resultObj.score ?? resultObj.overall_score ?? 50) / 100;
-    const metrics2 = {
-      correctness: Number(resultObj.correctness ?? 0.5),
-      efficiency: Number(resultObj.efficiency ?? 0.5),
-      elegance: Number(resultObj.elegance ?? 0.5),
-      completeness: Number(resultObj.completeness ?? 0.5)
-    };
-    return {
-      nodeId: node.id,
-      success: score > 0.3,
-      score,
-      metrics: metrics2,
-      output: JSON.stringify(resultObj).slice(0, 2e3),
-      durationMs: Date.now() - t0,
-      tokensUsed: 0
-    };
-  } catch (err) {
-    return {
-      nodeId: node.id,
-      success: false,
-      score: 0,
-      metrics: {},
-      output: "",
-      error: err instanceof Error ? err.message : String(err),
-      durationMs: Date.now() - t0,
-      tokensUsed: 0
-    };
-  }
-}
-async function runAnalyzer(node, result, parentNode, config2) {
-  try {
-    const analyzeResult = await callCognitiveRaw("analyze", {
-      prompt: `Analyze this evolutionary trial result.
-
-TASK: ${config2.taskDescription}
-TRIAL NODE: ${node.id} (score: ${result.score.toFixed(3)})
-PARENT: ${parentNode ? `${parentNode.id} (score: ${parentNode.score.toFixed(3)})` : "none (seed)"}
-MOTIVATION: ${node.motivation}
-SUCCESS: ${result.success}
-METRICS: ${JSON.stringify(result.metrics)}
-
-Provide:
-1. Why this solution scored as it did
-2. What the key improvement/regression was vs parent
-3. One actionable insight for the next iteration`,
-      agent_id: "inventor-analyzer"
-    }, 15e3);
-    return String(analyzeResult.answer || analyzeResult.result || "Analysis unavailable");
-  } catch {
-    return `Score: ${result.score.toFixed(3)}. ${result.success ? "Passed" : "Failed"}. ${result.error || ""}`;
-  }
-}
-async function persistNodes(experimentName) {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  const data = JSON.stringify([...nodes.values()]);
-  await redis2.set(nodeKey(experimentName), data).catch(() => {
-  });
-}
-async function persistState2(experimentName) {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  const state4 = {
-    currentStep: currentStep2,
-    bestScore,
-    bestNodeId,
-    startedAt,
-    lastStepAt,
-    lastError
-  };
-  await redis2.set(stateKey(experimentName), JSON.stringify(state4)).catch(() => {
-  });
-  if (sampler) {
-    await redis2.set(samplerKey(experimentName), JSON.stringify(sampler.getState())).catch(() => {
-    });
-  }
-}
-async function loadState3(experimentName) {
-  const redis2 = getRedis();
-  if (!redis2) return false;
-  try {
-    const nodesRaw = await redis2.get(nodeKey(experimentName));
-    if (nodesRaw) {
-      const parsed = JSON.parse(nodesRaw);
-      nodes.clear();
-      for (const n of parsed) nodes.set(n.id, n);
-    }
-    const stateRaw = await redis2.get(stateKey(experimentName));
-    if (stateRaw) {
-      const state4 = JSON.parse(stateRaw);
-      currentStep2 = state4.currentStep || 0;
-      bestScore = state4.bestScore ?? -Infinity;
-      bestNodeId = state4.bestNodeId || null;
-      startedAt = state4.startedAt || null;
-      lastStepAt = state4.lastStepAt || null;
-      lastError = state4.lastError || null;
-    }
-    if (sampler) {
-      const samplerRaw = await redis2.get(samplerKey(experimentName));
-      if (samplerRaw) sampler.loadState(JSON.parse(samplerRaw));
-    }
-    return nodes.size > 0;
-  } catch {
-    return false;
-  }
-}
-async function runStep(config2) {
-  currentStep2++;
-  const stepId = `step-${currentStep2}`;
-  const t0 = Date.now();
-  stream2("step_start", { step: currentStep2, maxSteps: config2.pipeline.maxSteps });
-  const allNodes = [...nodes.values()].filter((n) => n.status === "completed");
-  const parentNodes = sampler?.sample(allNodes, config2.sampling.sampleN) ?? [];
-  const cognitionQuery = parentNodes.length > 0 ? `${config2.taskDescription}. Best approach: ${parentNodes[0].analysis.slice(0, 200)}` : config2.taskDescription;
-  const cognitionItems = await retrieveCognition(cognitionQuery, config2.cognition.topK);
-  stream2("learn", {
-    step: currentStep2,
-    parentCount: parentNodes.length,
-    cognitionCount: cognitionItems.length,
-    bestParentScore: parentNodes.length > 0 ? Math.max(...parentNodes.map((n) => n.score)) : null
-  });
-  stream2("design", { step: currentStep2 });
-  const { artifact, motivation } = await runResearcher(
-    config2.taskDescription,
-    parentNodes,
-    cognitionItems,
-    config2
-  );
-  const nodeId = `inv-${uuid36().slice(0, 8)}`;
-  const parentId = parentNodes.length > 0 ? parentNodes[0].id : null;
-  const node = {
-    id: nodeId,
-    parentId,
-    artifact,
-    taskDescription: config2.taskDescription,
-    score: 0,
-    metrics: {},
-    analysis: "",
-    motivation,
-    island: parentNodes.length > 0 ? parentNodes[0].island : 0,
-    visitCount: 0,
-    chainMode: config2.chainMode || "sequential",
-    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-    status: "running"
-  };
-  nodes.set(nodeId, node);
-  stream2("experiment", { step: currentStep2, nodeId });
-  const result = await runEngineer(node, config2);
-  node.score = result.score;
-  node.metrics = result.metrics;
-  node.status = result.success ? "completed" : "failed";
-  stream2("analyze", { step: currentStep2, nodeId, score: result.score });
-  const parentNode = parentId ? nodes.get(parentId) ?? null : null;
-  node.analysis = await runAnalyzer(node, result, parentNode, config2);
-  if (sampler) sampler.onNodeAdded(node);
-  onInventorTrial(nodeId, result.score, config2.experimentName, node.island).catch(() => {
-  });
-  hookIntoExecution("inventor", nodeId, {
-    taskType: `inventor-trial:${config2.experimentName}`,
-    chainId: config2.experimentName,
-    success: result.success,
-    metrics: {
-      latency_ms: Date.now() - t0,
-      quality_score: result.score
-    },
-    insights: node.analysis ? [node.analysis.slice(0, 200)] : []
-  }).catch(() => {
-  });
-  if (result.score > bestScore) {
-    bestScore = result.score;
-    bestNodeId = nodeId;
-    stream2("new_best", { step: currentStep2, nodeId, score: result.score });
-  }
-  lastStepAt = (/* @__PURE__ */ new Date()).toISOString();
-  await persistNodes(config2.experimentName);
-  await persistState2(config2.experimentName);
-  if (node.analysis.length > 20) {
-    try {
-      await callMcpTool({
-        toolName: "memory_store",
-        args: {
-          agent_id: "inventor-analyzer",
-          key: `insight:${nodeId}`,
-          value: `[${result.success ? "SUCCESS" : "FAIL"}:${result.score.toFixed(3)}] ${node.analysis}`,
-          metadata: {
-            score: result.score,
-            success: result.success,
-            step: currentStep2,
-            experiment: config2.experimentName,
-            parentId: parentId || "seed",
-            island: node.island
-          }
-        },
-        callId: `inventor-mem-${nodeId}`
-      });
-    } catch {
-    }
-  }
-  try {
-    await callMcpTool({
-      toolName: "adaptive_rag_reward",
-      args: {
-        query: config2.taskDescription,
-        reward: result.score,
-        metadata: {
-          source: "inventor",
-          nodeId,
-          step: currentStep2,
-          experiment: config2.experimentName
-        }
-      },
-      callId: `inventor-rag-reward-${nodeId}`
-    });
-  } catch {
-  }
-  const stepResult = {
-    stepNumber: currentStep2,
-    nodeId,
-    parentId,
-    score: result.score,
-    bestScore,
-    analysis: node.analysis.slice(0, 300),
-    durationMs: Date.now() - t0
-  };
-  stream2("step_complete", { ...stepResult });
-  return stepResult;
-}
-async function runInventor(config2, resume = false) {
-  if (isRunning3) throw new Error("Inventor already running");
-  isRunning3 = true;
-  currentConfig = config2;
-  startedAt = (/* @__PURE__ */ new Date()).toISOString();
-  lastError = null;
-  const results = [];
-  sampler = createSampler({
-    algorithm: config2.sampling.algorithm,
-    ucb1C: config2.sampling.ucb1C,
-    islands: config2.sampling.islands
-  });
-  if (resume) {
-    const loaded = await loadState3(config2.experimentName);
-    if (loaded) {
-      logger.info(
-        { experiment: config2.experimentName, nodes: nodes.size, step: currentStep2 },
-        "Inventor: resumed from Redis"
-      );
-    }
-  } else {
-    nodes.clear();
-    currentStep2 = 0;
-    bestScore = -Infinity;
-    bestNodeId = null;
-  }
-  stream2("run_start", {
-    experiment: config2.experimentName,
-    maxSteps: config2.pipeline.maxSteps,
-    sampling: config2.sampling.algorithm,
-    resumed: resume && nodes.size > 0
-  });
-  if (config2.initialArtifact && nodes.size === 0) {
-    const seedNode = {
-      id: `inv-seed-${uuid36().slice(0, 8)}`,
-      parentId: null,
-      artifact: config2.initialArtifact,
-      taskDescription: config2.taskDescription,
-      score: 0,
-      metrics: {},
-      analysis: "Initial seed artifact",
-      motivation: "Seed solution provided by user",
-      island: 0,
-      visitCount: 0,
-      chainMode: config2.chainMode || "sequential",
-      createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-      status: "completed"
-    };
-    const seedResult = await runEngineer(seedNode, config2);
-    seedNode.score = seedResult.score;
-    seedNode.metrics = seedResult.metrics;
-    seedNode.status = seedResult.success ? "completed" : "failed";
-    nodes.set(seedNode.id, seedNode);
-    if (sampler) sampler.onNodeAdded(seedNode);
-    if (seedResult.score > bestScore) {
-      bestScore = seedResult.score;
-      bestNodeId = seedNode.id;
-    }
-    stream2("seed", { nodeId: seedNode.id, score: seedResult.score });
-  }
-  try {
-    const RAG_RETRAIN_INTERVAL = 5;
-    for (let step = currentStep2; step < config2.pipeline.maxSteps; step++) {
-      try {
-        const result = await runStep(config2);
-        results.push(result);
-        if (currentStep2 % RAG_RETRAIN_INTERVAL === 0) {
-          try {
-            await callMcpTool({
-              toolName: "adaptive_rag_retrain",
-              args: { source: "inventor", reason: `Inventor step ${currentStep2} periodic retrain` },
-              callId: `inventor-rag-retrain-${currentStep2}`
-            });
-            stream2("rag_retrain", { step: currentStep2 });
-            logger.info({ step: currentStep2 }, "Inventor: adaptive RAG retrained");
-          } catch {
-          }
-        }
-      } catch (err) {
-        lastError = err instanceof Error ? err.message : String(err);
-        stream2("step_error", { step: currentStep2, error: lastError });
-        logger.error({ step: currentStep2, error: lastError }, "Inventor: step failed");
-      }
-    }
-  } finally {
-    isRunning3 = false;
-    currentConfig = null;
-    stream2("run_complete", {
-      totalSteps: results.length,
-      bestScore,
-      bestNodeId,
-      nodesCreated: nodes.size
-    });
-    broadcastMessage({
-      from: "Inventor",
-      to: "All",
-      source: "orchestrator",
-      type: "Message",
-      message: `Evolution complete: ${results.length} steps, best score ${bestScore.toFixed(3)} (node ${bestNodeId})`
-    });
-  }
-  return { steps: results, bestScore, bestNodeId };
-}
-function getInventorStatus() {
-  return {
-    isRunning: isRunning3,
-    experimentName: currentConfig?.experimentName ?? "",
-    currentStep: currentStep2,
-    totalSteps: currentConfig?.pipeline.maxSteps ?? 0,
-    nodesCreated: nodes.size,
-    bestScore: bestScore === -Infinity ? 0 : bestScore,
-    bestNodeId,
-    samplingAlgorithm: currentConfig?.sampling.algorithm ?? "ucb1",
-    startedAt,
-    lastStepAt,
-    lastError
-  };
-}
-function getInventorNodes() {
-  return [...nodes.values()];
-}
-function getInventorNode(id) {
-  return nodes.get(id);
-}
-function getBestNode() {
-  return bestNodeId ? nodes.get(bestNodeId) : void 0;
-}
-
-// src/routes/inventor.ts
-init_logger();
 var inventorRouter = Router44();
 inventorRouter.post("/run", async (req, res) => {
   const { config: config2, resume } = req.body;
