@@ -281,26 +281,59 @@ async function runEngineer(
       callId: `inventor-eng-${node.id}`,
     })
 
+    // judge_response returns either a structured JSON object OR a text response.
+    // Text format: "PRISM Score: 3.4/10 (...)  P-Precision: 2/10  R-Reasoning: 2/10 ..."
+    // Try JSON first; fall back to text parsing.
     const resultObj = (typeof result === 'object' && result !== null) ? result as Record<string, unknown> : {}
-    // PRISM shape: { aggregate: 0-10, scores: { precision, reasoning, information, safety, methodology } }
-    const prismScores = (resultObj.scores && typeof resultObj.scores === 'object')
-      ? resultObj.scores as Record<string, number>
-      : {}
-    const rawAggregate = Number(
-      resultObj.aggregate ?? resultObj.overall ?? resultObj.overall_score ?? resultObj.score ??
-      (Object.keys(prismScores).length > 0
-        ? Object.values(prismScores).reduce((a: number, b: number) => a + b, 0) / Object.values(prismScores).length
-        : null) ??
-      5  // fallback to 5/10 = 0.5 only when no PRISM data at all
-    )
+    const resultText = typeof result === 'string' ? result
+      : (typeof resultObj.text === 'string' ? resultObj.text
+        : (typeof resultObj.content === 'string' ? resultObj.content : ''))
+
+    // Helper: parse "PRISM Score: N.N/10" and per-dimension lines from text
+    function parsePrismText(text: string): { aggregate: number; scores: Record<string, number> } | null {
+      const aggMatch = text.match(/PRISM\s+Score:\s*([\d.]+)\s*\/\s*10/i)
+      if (!aggMatch) return null
+      const aggregate = parseFloat(aggMatch[1])
+      const dimMap: Record<string, string> = {
+        precision: 'P-Precision', reasoning: 'R-Reasoning', information: 'I-Information',
+        safety: 'S-Safety', methodology: 'M-Methodology',
+      }
+      const scores: Record<string, number> = {}
+      for (const [key, label] of Object.entries(dimMap)) {
+        const m = text.match(new RegExp(`${label}[:\\s]+(\\d+)\\s*\\/\\s*10`, 'i'))
+        scores[key] = m ? parseInt(m[1], 10) : aggregate
+      }
+      return { aggregate, scores }
+    }
+
+    // Try structured JSON shape first (future-proof), then parse text
+    let prismScores: Record<string, number> = {}
+    let rawAggregate: number
+    const jsonPrism = (resultObj.scores && typeof resultObj.scores === 'object')
+      ? resultObj.scores as Record<string, number> : null
+    if (jsonPrism && Object.keys(jsonPrism).length > 0) {
+      prismScores = jsonPrism
+      rawAggregate = Number(resultObj.aggregate ?? resultObj.overall ?? resultObj.overall_score ?? resultObj.score ??
+        Object.values(prismScores).reduce((a: number, b: number) => a + b, 0) / Object.values(prismScores).length)
+    } else {
+      const parsed = parsePrismText(resultText)
+      if (parsed) {
+        prismScores = parsed.scores
+        rawAggregate = parsed.aggregate
+      } else {
+        // No parseable PRISM data — last resort: check if result itself is a number
+        const directScore = Number(resultObj.aggregate ?? resultObj.score ?? resultObj.overall ?? NaN)
+        rawAggregate = isNaN(directScore) ? 5 : directScore  // 5/10 = 0.5 only when truly unresolvable
+      }
+    }
     // Normalise to 0-1 (PRISM uses 0-10 scale)
     const score = Math.min(1, Math.max(0, rawAggregate > 1 ? rawAggregate / 10 : rawAggregate))
     const metrics: Record<string, number> = {
-      precision: Number(prismScores.precision ?? score),
-      reasoning: Number(prismScores.reasoning ?? score),
-      information: Number(prismScores.information ?? score),
-      safety: Number(prismScores.safety ?? score),
-      methodology: Number(prismScores.methodology ?? score),
+      precision: Number(prismScores.precision ?? score * 10) / 10,
+      reasoning: Number(prismScores.reasoning ?? score * 10) / 10,
+      information: Number(prismScores.information ?? score * 10) / 10,
+      safety: Number(prismScores.safety ?? score * 10) / 10,
+      methodology: Number(prismScores.methodology ?? score * 10) / 10,
     }
 
     return {

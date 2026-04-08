@@ -19818,6 +19818,25 @@ Respond in JSON format:
 async function runEngineer(node, config2) {
   const t0 = Date.now();
   try {
+    let parsePrismText2 = function(text) {
+      const aggMatch = text.match(/PRISM\s+Score:\s*([\d.]+)\s*\/\s*10/i);
+      if (!aggMatch) return null;
+      const aggregate = parseFloat(aggMatch[1]);
+      const dimMap = {
+        precision: "P-Precision",
+        reasoning: "R-Reasoning",
+        information: "I-Information",
+        safety: "S-Safety",
+        methodology: "M-Methodology"
+      };
+      const scores = {};
+      for (const [key, label] of Object.entries(dimMap)) {
+        const m = text.match(new RegExp(`${label}[:\\s]+(\\d+)\\s*\\/\\s*10`, "i"));
+        scores[key] = m ? parseInt(m[1], 10) : aggregate;
+      }
+      return { aggregate, scores };
+    };
+    var parsePrismText = parsePrismText2;
     const result = await callMcpTool({
       toolName: "judge_response",
       args: {
@@ -19828,18 +19847,30 @@ async function runEngineer(node, config2) {
       callId: `inventor-eng-${node.id}`
     });
     const resultObj = typeof result === "object" && result !== null ? result : {};
-    const prismScores = resultObj.scores && typeof resultObj.scores === "object" ? resultObj.scores : {};
-    const rawAggregate = Number(
-      resultObj.aggregate ?? resultObj.overall ?? resultObj.overall_score ?? resultObj.score ?? (Object.keys(prismScores).length > 0 ? Object.values(prismScores).reduce((a, b) => a + b, 0) / Object.values(prismScores).length : null) ?? 5
-      // fallback to 5/10 = 0.5 only when no PRISM data at all
-    );
+    const resultText = typeof result === "string" ? result : typeof resultObj.text === "string" ? resultObj.text : typeof resultObj.content === "string" ? resultObj.content : "";
+    let prismScores = {};
+    let rawAggregate;
+    const jsonPrism = resultObj.scores && typeof resultObj.scores === "object" ? resultObj.scores : null;
+    if (jsonPrism && Object.keys(jsonPrism).length > 0) {
+      prismScores = jsonPrism;
+      rawAggregate = Number(resultObj.aggregate ?? resultObj.overall ?? resultObj.overall_score ?? resultObj.score ?? Object.values(prismScores).reduce((a, b) => a + b, 0) / Object.values(prismScores).length);
+    } else {
+      const parsed = parsePrismText2(resultText);
+      if (parsed) {
+        prismScores = parsed.scores;
+        rawAggregate = parsed.aggregate;
+      } else {
+        const directScore = Number(resultObj.aggregate ?? resultObj.score ?? resultObj.overall ?? NaN);
+        rawAggregate = isNaN(directScore) ? 5 : directScore;
+      }
+    }
     const score = Math.min(1, Math.max(0, rawAggregate > 1 ? rawAggregate / 10 : rawAggregate));
     const metrics2 = {
-      precision: Number(prismScores.precision ?? score),
-      reasoning: Number(prismScores.reasoning ?? score),
-      information: Number(prismScores.information ?? score),
-      safety: Number(prismScores.safety ?? score),
-      methodology: Number(prismScores.methodology ?? score)
+      precision: Number(prismScores.precision ?? score * 10) / 10,
+      reasoning: Number(prismScores.reasoning ?? score * 10) / 10,
+      information: Number(prismScores.information ?? score * 10) / 10,
+      safety: Number(prismScores.safety ?? score * 10) / 10,
+      methodology: Number(prismScores.methodology ?? score * 10) / 10
     };
     return {
       nodeId: node.id,
