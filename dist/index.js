@@ -9099,374 +9099,6 @@ var init_write_gate = __esm({
   }
 });
 
-// src/mcp-caller.ts
-var mcp_caller_exports = {};
-__export(mcp_caller_exports, {
-  callMcpTool: () => callMcpTool,
-  getBackendCircuitState: () => getBackendCircuitState,
-  getRateLimitState: () => getRateLimitState
-});
-function recordRateLimit() {
-  const now = Date.now();
-  _rlTimestamps.push(now);
-  _rlTimestamps = _rlTimestamps.filter((t) => now - t < RL_WINDOW_MS);
-  if (_rlTimestamps.length >= RL_THRESHOLD) {
-    _rlDelayMs = Math.min(_rlDelayMs === 0 ? 1e3 : _rlDelayMs * 2, RL_MAX_DELAY_MS);
-    if (_rlDelayMs >= 5e3) {
-      logger.warn(
-        { delay_ms: _rlDelayMs, count_in_window: _rlTimestamps.length },
-        "MCP rate-limit backpressure: throttling all calls"
-      );
-    }
-  }
-}
-function decayRateLimitDelay() {
-  const now = Date.now();
-  if (now - _rlLastDecay > RL_WINDOW_MS && _rlDelayMs > 0) {
-    _rlTimestamps = _rlTimestamps.filter((t) => now - t < RL_WINDOW_MS);
-    if (_rlTimestamps.length < RL_THRESHOLD) {
-      _rlDelayMs = Math.floor(_rlDelayMs * RL_DECAY_FACTOR);
-      if (_rlDelayMs < 200) _rlDelayMs = 0;
-    }
-    _rlLastDecay = now;
-  }
-}
-async function applyBackpressure() {
-  decayRateLimitDelay();
-  if (_rlDelayMs > 0) {
-    await new Promise((r) => setTimeout(r, _rlDelayMs + Math.floor(Math.random() * 500)));
-  }
-}
-function getRateLimitState() {
-  return {
-    current_delay_ms: _rlDelayMs,
-    hits_in_window: _rlTimestamps.length,
-    threshold: RL_THRESHOLD,
-    window_ms: RL_WINDOW_MS
-  };
-}
-function backendRecordSuccess() {
-  if (_backendFailures > 0) {
-    logger.info({ previous_failures: _backendFailures }, "Backend circuit breaker CLOSED \u2014 backend recovered");
-  }
-  _backendFailures = 0;
-  _backendCircuitOpenUntil = 0;
-}
-function backendRecordFailure() {
-  _backendFailures++;
-  if (_backendFailures >= BACKEND_CB_THRESHOLD && _backendCircuitOpenUntil === 0) {
-    _backendCircuitOpenUntil = Date.now() + BACKEND_CB_COOLDOWN_MS;
-    logger.warn(
-      { failures: _backendFailures, cooldown_s: BACKEND_CB_COOLDOWN_MS / 1e3 },
-      "Backend circuit breaker OPEN \u2014 failing fast for all MCP calls"
-    );
-  }
-}
-function isBackendCircuitOpen() {
-  if (_backendCircuitOpenUntil === 0) return false;
-  if (Date.now() > _backendCircuitOpenUntil) {
-    _backendCircuitOpenUntil = 0;
-    logger.info("Backend circuit breaker HALF-OPEN \u2014 allowing probe call");
-    return false;
-  }
-  return true;
-}
-function getBackendCircuitState() {
-  return {
-    failures: _backendFailures,
-    open: _backendCircuitOpenUntil > 0,
-    cooldown_remaining_ms: Math.max(0, _backendCircuitOpenUntil - Date.now())
-  };
-}
-async function ensureAuditLessonsRead() {
-  const now = Date.now();
-  if (_auditLessonsCache && now - _auditLessonsCache.fetchedAt < AUDIT_LESSONS_TTL_MS) return;
-  if (isBackendCircuitOpen()) return;
-  try {
-    const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${config.backendApiKey}`,
-        "X-Call-Id": "audit-lessons-prefetch"
-      },
-      body: JSON.stringify({ tool: "audit.lessons", payload: {} }),
-      signal: AbortSignal.timeout(5e3)
-    });
-    if (res.ok) {
-      const parsed = await res.json().catch(() => null);
-      _auditLessonsCache = { data: parsed?.result ?? parsed, fetchedAt: now };
-    }
-  } catch {
-  }
-}
-async function callMcpTool(opts) {
-  return withMcpSpan(opts.toolName, opts.callId, async (span) => {
-    const log = childLogger(opts.traceId ?? opts.callId);
-    const t0 = Date.now();
-    const timeoutMs = opts.timeoutMs ?? config.mcpTimeoutMs;
-    if (isBackendCircuitOpen()) {
-      const now = Date.now();
-      if (now - _backendCircuitLoggedAt > 3e4) {
-        _backendCircuitLoggedAt = now;
-        log.warn(
-          { tool: opts.toolName, cooldown_remaining_ms: _backendCircuitOpenUntil - now },
-          "Backend circuit breaker OPEN \u2014 fast-failing MCP call"
-        );
-      }
-      span.setAttribute("mcp.circuit_breaker", "open");
-      return {
-        call_id: opts.callId,
-        status: "error",
-        result: null,
-        error_message: `Backend circuit breaker open (${_backendFailures} consecutive failures). Retrying in ${Math.ceil((_backendCircuitOpenUntil - now) / 1e3)}s.`,
-        error_code: "BACKEND_ERROR",
-        duration_ms: 0,
-        trace_id: opts.traceId ?? null,
-        completed_at: (/* @__PURE__ */ new Date()).toISOString()
-      };
-    }
-    const url = `${config.backendUrl}/api/mcp/route`;
-    const { _force: _stripForce, ...wireArgs } = opts.args;
-    const body = JSON.stringify({ tool: opts.toolName, payload: wireArgs });
-    log.debug({ tool: opts.toolName, url }, "MCP call start");
-    if (opts.toolName === "graph.write_cypher") {
-      await ensureAuditLessonsRead();
-      const query = typeof opts.args.query === "string" ? opts.args.query : "";
-      const params = opts.args.params ?? opts.args;
-      const force = opts.args._force === true;
-      const validation = validateBeforeMerge(query, params, force);
-      if (!validation.allowed) {
-        span.setAttribute("mcp.write_gate", "rejected");
-        span.setAttribute("mcp.rejection_reason", validation.reason ?? "unknown");
-        return {
-          call_id: opts.callId,
-          status: "error",
-          result: null,
-          error_message: `Write-path validation rejected: ${validation.reason}`,
-          error_code: "VALIDATION_REJECTED",
-          duration_ms: Date.now() - t0,
-          trace_id: opts.traceId ?? null,
-          completed_at: (/* @__PURE__ */ new Date()).toISOString()
-        };
-      }
-    }
-    let lastError2 = null;
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      if (attempt > 0) {
-        span.setAttribute("mcp.retry_attempt", attempt);
-        log.debug({ attempt, tool: opts.toolName }, "Retrying after transient error");
-        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
-      }
-      const result = await callMcpToolOnce(opts, url, body, timeoutMs, log, t0);
-      const isTransientError = result.status === "error" || result.status === "timeout";
-      const is502 = result.error_message?.includes("502") || result.error_message?.includes("503");
-      const isTimeout = result.status === "timeout";
-      if (isTransientError && (is502 || isTimeout)) {
-        backendRecordFailure();
-      } else if (result.status === "success") {
-        backendRecordSuccess();
-      }
-      if (result.status !== "error" || !result.error_message?.includes("503")) {
-        span.setAttribute("mcp.status", result.status);
-        span.setAttribute("mcp.duration_ms", result.duration_ms);
-        return result;
-      }
-      lastError2 = result.error_message;
-    }
-    span.setAttribute("mcp.status", "error");
-    span.setAttribute("mcp.retries_exhausted", true);
-    return {
-      call_id: opts.callId,
-      status: "error",
-      result: null,
-      error_message: `Failed after ${MAX_RETRIES + 1} attempts: ${lastError2}`,
-      error_code: "BACKEND_ERROR",
-      duration_ms: Date.now() - t0,
-      trace_id: opts.traceId ?? null,
-      completed_at: (/* @__PURE__ */ new Date()).toISOString()
-    };
-  });
-}
-async function callMcpToolOnce(opts, url, body, timeoutMs, log, t0) {
-  await applyBackpressure();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${config.backendApiKey}`,
-        "X-Trace-Id": opts.traceId ?? opts.callId,
-        "X-Call-Id": opts.callId
-      },
-      body,
-      signal: controller.signal
-    });
-    clearTimeout(timer);
-    const duration_ms = Date.now() - t0;
-    if (!res.ok) {
-      const errorText = await res.text().catch(() => `HTTP ${res.status}`);
-      log.warn({ status: res.status, tool: opts.toolName, duration_ms }, "MCP call HTTP error");
-      if (res.status === 429) recordRateLimit();
-      const errorCode = res.status === 401 || res.status === 403 ? "UNAUTHORIZED" : res.status === 404 ? "TOOL_NOT_FOUND" : res.status === 429 ? "RATE_LIMITED" : "BACKEND_ERROR";
-      return {
-        call_id: opts.callId,
-        status: errorCode === "UNAUTHORIZED" ? "unauthorized" : errorCode === "RATE_LIMITED" ? "rate_limited" : "error",
-        result: null,
-        error_message: errorText,
-        error_code: errorCode,
-        duration_ms,
-        trace_id: opts.traceId ?? null,
-        completed_at: (/* @__PURE__ */ new Date()).toISOString()
-      };
-    }
-    const contentType = res.headers.get("content-type") ?? "";
-    if (contentType.includes("text/event-stream")) {
-      const result = await aggregateSseStream(res, opts.callId, log);
-      const final_duration = Date.now() - t0;
-      log.info({ tool: opts.toolName, duration_ms: final_duration }, "MCP SSE call complete");
-      return {
-        call_id: opts.callId,
-        status: "success",
-        result,
-        error_message: null,
-        error_code: null,
-        duration_ms: final_duration,
-        trace_id: opts.traceId ?? null,
-        completed_at: (/* @__PURE__ */ new Date()).toISOString()
-      };
-    } else {
-      const raw = await res.text();
-      let result;
-      try {
-        const parsed = JSON.parse(raw);
-        if (parsed !== null && typeof parsed === "object" && "result" in parsed) {
-          result = parsed.result;
-        } else if (parsed !== null && typeof parsed === "object" && "data" in parsed) {
-          log.warn({ tool: opts.toolName }, 'MCP response used "data" envelope instead of "result" \u2014 consider standardising');
-          result = parsed.data;
-        } else {
-          log.warn({ tool: opts.toolName, keys: Object.keys(parsed ?? {}) }, "MCP response had no standard envelope \u2014 passing through raw");
-          result = parsed;
-        }
-      } catch {
-        result = raw;
-      }
-      log.info({ tool: opts.toolName, duration_ms }, "MCP JSON call complete");
-      return {
-        call_id: opts.callId,
-        status: "success",
-        result,
-        error_message: null,
-        error_code: null,
-        duration_ms,
-        trace_id: opts.traceId ?? null,
-        completed_at: (/* @__PURE__ */ new Date()).toISOString()
-      };
-    }
-  } catch (err) {
-    clearTimeout(timer);
-    const duration_ms = Date.now() - t0;
-    if (err instanceof Error && err.name === "AbortError") {
-      log.warn({ tool: opts.toolName, timeout_ms: timeoutMs }, "MCP call timed out");
-      return {
-        call_id: opts.callId,
-        status: "timeout",
-        result: null,
-        error_message: `Call timed out after ${timeoutMs}ms`,
-        error_code: "TIMEOUT",
-        duration_ms,
-        trace_id: opts.traceId ?? null,
-        completed_at: (/* @__PURE__ */ new Date()).toISOString()
-      };
-    }
-    const message = err instanceof Error ? err.message : String(err);
-    log.error({ tool: opts.toolName, err: message }, "MCP call failed");
-    return {
-      call_id: opts.callId,
-      status: "error",
-      result: null,
-      error_message: message,
-      error_code: "BACKEND_ERROR",
-      duration_ms,
-      trace_id: opts.traceId ?? null,
-      completed_at: (/* @__PURE__ */ new Date()).toISOString()
-    };
-  }
-}
-async function aggregateSseStream(res, callId, log) {
-  const events = [];
-  let lastResult = null;
-  try {
-    if (!res.body) {
-      throw new Error("SSE response has no body");
-    }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith(":")) continue;
-        if (trimmed.startsWith("data:")) {
-          const dataStr = trimmed.slice(5).trim();
-          if (dataStr === "[DONE]" || dataStr === "done") continue;
-          try {
-            const parsed = JSON.parse(dataStr);
-            events.push(parsed);
-            if (parsed?.result !== void 0) lastResult = parsed.result;
-            else if (parsed?.content !== void 0) lastResult = parsed.content;
-            else if (parsed?.type !== "ping" && parsed?.type !== "heartbeat") lastResult = parsed;
-          } catch {
-            if (dataStr.length > 0) lastResult = dataStr;
-          }
-        }
-      }
-    }
-    log.debug({ event_count: events.length, call_id: callId }, "SSE stream aggregated");
-    if (lastResult !== null && lastResult !== void 0) return lastResult;
-    if (events.length === 1) return events[0];
-    if (events.length > 1) return events;
-    return null;
-  } catch (err) {
-    log.warn({ err: String(err), call_id: callId }, "SSE stream parse error");
-    throw Object.assign(new Error(`SSE_PARSE_ERROR: ${err}`), { code: "SSE_PARSE_ERROR" });
-  }
-}
-var MAX_RETRIES, RETRY_DELAY_MS, RL_WINDOW_MS, RL_THRESHOLD, RL_MAX_DELAY_MS, RL_DECAY_FACTOR, _rlTimestamps, _rlDelayMs, _rlLastDecay, BACKEND_CB_THRESHOLD, BACKEND_CB_COOLDOWN_MS, _backendFailures, _backendCircuitOpenUntil, _backendCircuitLoggedAt, _auditLessonsCache, AUDIT_LESSONS_TTL_MS;
-var init_mcp_caller = __esm({
-  "src/mcp-caller.ts"() {
-    "use strict";
-    init_config();
-    init_logger();
-    init_write_gate();
-    init_tracing();
-    MAX_RETRIES = 2;
-    RETRY_DELAY_MS = 1e3;
-    RL_WINDOW_MS = 1e4;
-    RL_THRESHOLD = 5;
-    RL_MAX_DELAY_MS = 3e4;
-    RL_DECAY_FACTOR = 0.8;
-    _rlTimestamps = [];
-    _rlDelayMs = 0;
-    _rlLastDecay = Date.now();
-    BACKEND_CB_THRESHOLD = 5;
-    BACKEND_CB_COOLDOWN_MS = 6e4;
-    _backendFailures = 0;
-    _backendCircuitOpenUntil = 0;
-    _backendCircuitLoggedAt = 0;
-    _auditLessonsCache = null;
-    AUDIT_LESSONS_TTL_MS = 10 * 60 * 1e3;
-  }
-});
-
 // ../widgetdc-contracts/dist/llm/LlmMatrix.js
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -15687,7 +15319,7 @@ async function scanCTForDomain(domain, toolsAvailable) {
   if (!toolsAvailable) {
     return buildCTFallback(domain);
   }
-  for (let attempt = 0; attempt <= MAX_RETRIES2; attempt++) {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const result = await callMcpTool({
         toolName: "the_snout.ct_transparency",
@@ -15721,7 +15353,7 @@ async function scanCTForDomain(domain, toolsAvailable) {
       }
       return buildCTFallback(domain);
     } catch (err) {
-      if (attempt === MAX_RETRIES2) {
+      if (attempt === MAX_RETRIES) {
         logger.warn({ domain, err: String(err) }, "CT scan failed after retries, using fallback");
         return buildCTFallback(domain);
       }
@@ -15747,7 +15379,7 @@ async function scanDMARCForDomain(domain, toolsAvailable) {
   if (!toolsAvailable) {
     return buildDMARCFallback(domain);
   }
-  for (let attempt = 0; attempt <= MAX_RETRIES2; attempt++) {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const result = await callMcpTool({
         toolName: "the_snout.domain_intel",
@@ -15768,7 +15400,7 @@ async function scanDMARCForDomain(domain, toolsAvailable) {
       }
       return buildDMARCFallback(domain);
     } catch (err) {
-      if (attempt === MAX_RETRIES2) {
+      if (attempt === MAX_RETRIES) {
         logger.warn({ domain, err: String(err) }, "DMARC scan failed after retries, using fallback");
         return buildDMARCFallback(domain);
       }
@@ -16004,7 +15636,7 @@ async function getOsintStatus() {
   }
   return null;
 }
-var DK_PUBLIC_DOMAINS, MAX_CONCURRENT2, BATCH_DELAY_MS, DOMAIN_TIMEOUT_MS, MAX_RETRIES2, MERGE_BATCH_SIZE;
+var DK_PUBLIC_DOMAINS, MAX_CONCURRENT2, BATCH_DELAY_MS, DOMAIN_TIMEOUT_MS, MAX_RETRIES, MERGE_BATCH_SIZE;
 var init_osint_scanner = __esm({
   "src/osint-scanner.ts"() {
     "use strict";
@@ -16066,7 +15698,7 @@ var init_osint_scanner = __esm({
     MAX_CONCURRENT2 = 5;
     BATCH_DELAY_MS = 1e3;
     DOMAIN_TIMEOUT_MS = 3e4;
-    MAX_RETRIES2 = 2;
+    MAX_RETRIES = 2;
     MERGE_BATCH_SIZE = 20;
   }
 });
@@ -21918,6 +21550,13 @@ var init_inventor_loop = __esm({
 });
 
 // src/tool-executor.ts
+var tool_executor_exports = {};
+__export(tool_executor_exports, {
+  ORCHESTRATOR_TOOLS: () => ORCHESTRATOR_TOOLS,
+  executeToolCalls: () => executeToolCalls,
+  executeToolUnified: () => executeToolUnified,
+  getTokenSavings: () => getTokenSavings
+});
 import { v4 as uuid25 } from "uuid";
 function getTokenSavings() {
   return { totalTokensSaved, totalFoldingCalls, avgSavingsPerFold: totalFoldingCalls > 0 ? Math.round(totalTokensSaved / totalFoldingCalls) : 0 };
@@ -23379,7 +23018,7 @@ ${lines.join("\n")}`;
     case "inventor_history": {
       const { getExperimentHistory: getExperimentHistory2 } = await Promise.resolve().then(() => (init_inventor_loop(), inventor_loop_exports));
       const limit = Math.min(Math.max(1, Number(args.limit) || 20), 50);
-      return getExperimentHistory2(limit);
+      return JSON.stringify(getExperimentHistory2(limit));
     }
     default: {
       try {
@@ -23412,6 +23051,410 @@ var init_tool_executor = __esm({
     TOOL_OUTPUT_PREFIX = "orchestrator:tool-output:";
     TOOL_OUTPUT_TTL_SECONDS = Number(process.env.TOOL_OUTPUT_TTL_SECONDS ?? 86400);
     PUBLIC_URL_BASE = process.env.PUBLIC_URL_BASE ?? "https://orchestrator-production-c27e.up.railway.app";
+  }
+});
+
+// src/mcp-caller.ts
+var mcp_caller_exports = {};
+__export(mcp_caller_exports, {
+  callMcpTool: () => callMcpTool,
+  getBackendCircuitState: () => getBackendCircuitState,
+  getRateLimitState: () => getRateLimitState
+});
+function recordRateLimit() {
+  const now = Date.now();
+  _rlTimestamps.push(now);
+  _rlTimestamps = _rlTimestamps.filter((t) => now - t < RL_WINDOW_MS);
+  if (_rlTimestamps.length >= RL_THRESHOLD) {
+    _rlDelayMs = Math.min(_rlDelayMs === 0 ? 1e3 : _rlDelayMs * 2, RL_MAX_DELAY_MS);
+    if (_rlDelayMs >= 5e3) {
+      logger.warn(
+        { delay_ms: _rlDelayMs, count_in_window: _rlTimestamps.length },
+        "MCP rate-limit backpressure: throttling all calls"
+      );
+    }
+  }
+}
+function decayRateLimitDelay() {
+  const now = Date.now();
+  if (now - _rlLastDecay > RL_WINDOW_MS && _rlDelayMs > 0) {
+    _rlTimestamps = _rlTimestamps.filter((t) => now - t < RL_WINDOW_MS);
+    if (_rlTimestamps.length < RL_THRESHOLD) {
+      _rlDelayMs = Math.floor(_rlDelayMs * RL_DECAY_FACTOR);
+      if (_rlDelayMs < 200) _rlDelayMs = 0;
+    }
+    _rlLastDecay = now;
+  }
+}
+async function applyBackpressure() {
+  decayRateLimitDelay();
+  if (_rlDelayMs > 0) {
+    await new Promise((r) => setTimeout(r, _rlDelayMs + Math.floor(Math.random() * 500)));
+  }
+}
+function getRateLimitState() {
+  return {
+    current_delay_ms: _rlDelayMs,
+    hits_in_window: _rlTimestamps.length,
+    threshold: RL_THRESHOLD,
+    window_ms: RL_WINDOW_MS
+  };
+}
+function backendRecordSuccess() {
+  if (_backendFailures > 0) {
+    logger.info({ previous_failures: _backendFailures }, "Backend circuit breaker CLOSED \u2014 backend recovered");
+  }
+  _backendFailures = 0;
+  _backendCircuitOpenUntil = 0;
+}
+function backendRecordFailure() {
+  _backendFailures++;
+  if (_backendFailures >= BACKEND_CB_THRESHOLD && _backendCircuitOpenUntil === 0) {
+    _backendCircuitOpenUntil = Date.now() + BACKEND_CB_COOLDOWN_MS;
+    logger.warn(
+      { failures: _backendFailures, cooldown_s: BACKEND_CB_COOLDOWN_MS / 1e3 },
+      "Backend circuit breaker OPEN \u2014 failing fast for all MCP calls"
+    );
+  }
+}
+function isBackendCircuitOpen() {
+  if (_backendCircuitOpenUntil === 0) return false;
+  if (Date.now() > _backendCircuitOpenUntil) {
+    _backendCircuitOpenUntil = 0;
+    logger.info("Backend circuit breaker HALF-OPEN \u2014 allowing probe call");
+    return false;
+  }
+  return true;
+}
+function getBackendCircuitState() {
+  return {
+    failures: _backendFailures,
+    open: _backendCircuitOpenUntil > 0,
+    cooldown_remaining_ms: Math.max(0, _backendCircuitOpenUntil - Date.now())
+  };
+}
+async function ensureAuditLessonsRead() {
+  const now = Date.now();
+  if (_auditLessonsCache && now - _auditLessonsCache.fetchedAt < AUDIT_LESSONS_TTL_MS) return;
+  if (isBackendCircuitOpen()) return;
+  try {
+    const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${config.backendApiKey}`,
+        "X-Call-Id": "audit-lessons-prefetch"
+      },
+      body: JSON.stringify({ tool: "audit.lessons", payload: {} }),
+      signal: AbortSignal.timeout(5e3)
+    });
+    if (res.ok) {
+      const parsed = await res.json().catch(() => null);
+      _auditLessonsCache = { data: parsed?.result ?? parsed, fetchedAt: now };
+    }
+  } catch {
+  }
+}
+async function callMcpTool(opts) {
+  if (LOCAL_TOOLS.has(opts.toolName)) {
+    const t0 = Date.now();
+    try {
+      const { executeToolUnified: executeToolUnified2 } = await Promise.resolve().then(() => (init_tool_executor(), tool_executor_exports));
+      const result = await executeToolUnified2(opts.toolName, opts.args, { call_id: opts.callId, fold: false });
+      return {
+        call_id: opts.callId,
+        status: result.error ? "error" : "success",
+        result: result.error ? null : result.result,
+        error_message: result.error ?? null,
+        error_code: result.error ? "LOCAL_ERROR" : null,
+        duration_ms: Date.now() - t0,
+        trace_id: opts.traceId ?? null,
+        completed_at: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    } catch (err) {
+      return {
+        call_id: opts.callId,
+        status: "error",
+        result: null,
+        error_message: `Local execution failed: ${err instanceof Error ? err.message : String(err)}`,
+        error_code: "LOCAL_ERROR",
+        duration_ms: Date.now() - t0,
+        trace_id: opts.traceId ?? null,
+        completed_at: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+  }
+  return withMcpSpan(opts.toolName, opts.callId, async (span) => {
+    const log = childLogger(opts.traceId ?? opts.callId);
+    const t0 = Date.now();
+    const timeoutMs = opts.timeoutMs ?? config.mcpTimeoutMs;
+    if (isBackendCircuitOpen()) {
+      const now = Date.now();
+      if (now - _backendCircuitLoggedAt > 3e4) {
+        _backendCircuitLoggedAt = now;
+        log.warn(
+          { tool: opts.toolName, cooldown_remaining_ms: _backendCircuitOpenUntil - now },
+          "Backend circuit breaker OPEN \u2014 fast-failing MCP call"
+        );
+      }
+      span.setAttribute("mcp.circuit_breaker", "open");
+      return {
+        call_id: opts.callId,
+        status: "error",
+        result: null,
+        error_message: `Backend circuit breaker open (${_backendFailures} consecutive failures). Retrying in ${Math.ceil((_backendCircuitOpenUntil - now) / 1e3)}s.`,
+        error_code: "BACKEND_ERROR",
+        duration_ms: 0,
+        trace_id: opts.traceId ?? null,
+        completed_at: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+    const url = `${config.backendUrl}/api/mcp/route`;
+    const { _force: _stripForce, ...wireArgs } = opts.args;
+    const body = JSON.stringify({ tool: opts.toolName, payload: wireArgs });
+    log.debug({ tool: opts.toolName, url }, "MCP call start");
+    if (opts.toolName === "graph.write_cypher") {
+      await ensureAuditLessonsRead();
+      const query = typeof opts.args.query === "string" ? opts.args.query : "";
+      const params = opts.args.params ?? opts.args;
+      const force = opts.args._force === true;
+      const validation = validateBeforeMerge(query, params, force);
+      if (!validation.allowed) {
+        span.setAttribute("mcp.write_gate", "rejected");
+        span.setAttribute("mcp.rejection_reason", validation.reason ?? "unknown");
+        return {
+          call_id: opts.callId,
+          status: "error",
+          result: null,
+          error_message: `Write-path validation rejected: ${validation.reason}`,
+          error_code: "VALIDATION_REJECTED",
+          duration_ms: Date.now() - t0,
+          trace_id: opts.traceId ?? null,
+          completed_at: (/* @__PURE__ */ new Date()).toISOString()
+        };
+      }
+    }
+    let lastError2 = null;
+    for (let attempt = 0; attempt <= MAX_RETRIES2; attempt++) {
+      if (attempt > 0) {
+        span.setAttribute("mcp.retry_attempt", attempt);
+        log.debug({ attempt, tool: opts.toolName }, "Retrying after transient error");
+        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
+      }
+      const result = await callMcpToolOnce(opts, url, body, timeoutMs, log, t0);
+      const isTransientError = result.status === "error" || result.status === "timeout";
+      const is502 = result.error_message?.includes("502") || result.error_message?.includes("503");
+      const isTimeout = result.status === "timeout";
+      if (isTransientError && (is502 || isTimeout)) {
+        backendRecordFailure();
+      } else if (result.status === "success") {
+        backendRecordSuccess();
+      }
+      if (result.status !== "error" || !result.error_message?.includes("503")) {
+        span.setAttribute("mcp.status", result.status);
+        span.setAttribute("mcp.duration_ms", result.duration_ms);
+        return result;
+      }
+      lastError2 = result.error_message;
+    }
+    span.setAttribute("mcp.status", "error");
+    span.setAttribute("mcp.retries_exhausted", true);
+    return {
+      call_id: opts.callId,
+      status: "error",
+      result: null,
+      error_message: `Failed after ${MAX_RETRIES2 + 1} attempts: ${lastError2}`,
+      error_code: "BACKEND_ERROR",
+      duration_ms: Date.now() - t0,
+      trace_id: opts.traceId ?? null,
+      completed_at: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  });
+}
+async function callMcpToolOnce(opts, url, body, timeoutMs, log, t0) {
+  await applyBackpressure();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${config.backendApiKey}`,
+        "X-Trace-Id": opts.traceId ?? opts.callId,
+        "X-Call-Id": opts.callId
+      },
+      body,
+      signal: controller.signal
+    });
+    clearTimeout(timer);
+    const duration_ms = Date.now() - t0;
+    if (!res.ok) {
+      const errorText = await res.text().catch(() => `HTTP ${res.status}`);
+      log.warn({ status: res.status, tool: opts.toolName, duration_ms }, "MCP call HTTP error");
+      if (res.status === 429) recordRateLimit();
+      const errorCode = res.status === 401 || res.status === 403 ? "UNAUTHORIZED" : res.status === 404 ? "TOOL_NOT_FOUND" : res.status === 429 ? "RATE_LIMITED" : "BACKEND_ERROR";
+      return {
+        call_id: opts.callId,
+        status: errorCode === "UNAUTHORIZED" ? "unauthorized" : errorCode === "RATE_LIMITED" ? "rate_limited" : "error",
+        result: null,
+        error_message: errorText,
+        error_code: errorCode,
+        duration_ms,
+        trace_id: opts.traceId ?? null,
+        completed_at: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+    const contentType = res.headers.get("content-type") ?? "";
+    if (contentType.includes("text/event-stream")) {
+      const result = await aggregateSseStream(res, opts.callId, log);
+      const final_duration = Date.now() - t0;
+      log.info({ tool: opts.toolName, duration_ms: final_duration }, "MCP SSE call complete");
+      return {
+        call_id: opts.callId,
+        status: "success",
+        result,
+        error_message: null,
+        error_code: null,
+        duration_ms: final_duration,
+        trace_id: opts.traceId ?? null,
+        completed_at: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    } else {
+      const raw = await res.text();
+      let result;
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed !== null && typeof parsed === "object" && "result" in parsed) {
+          result = parsed.result;
+        } else if (parsed !== null && typeof parsed === "object" && "data" in parsed) {
+          log.warn({ tool: opts.toolName }, 'MCP response used "data" envelope instead of "result" \u2014 consider standardising');
+          result = parsed.data;
+        } else {
+          log.warn({ tool: opts.toolName, keys: Object.keys(parsed ?? {}) }, "MCP response had no standard envelope \u2014 passing through raw");
+          result = parsed;
+        }
+      } catch {
+        result = raw;
+      }
+      log.info({ tool: opts.toolName, duration_ms }, "MCP JSON call complete");
+      return {
+        call_id: opts.callId,
+        status: "success",
+        result,
+        error_message: null,
+        error_code: null,
+        duration_ms,
+        trace_id: opts.traceId ?? null,
+        completed_at: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+  } catch (err) {
+    clearTimeout(timer);
+    const duration_ms = Date.now() - t0;
+    if (err instanceof Error && err.name === "AbortError") {
+      log.warn({ tool: opts.toolName, timeout_ms: timeoutMs }, "MCP call timed out");
+      return {
+        call_id: opts.callId,
+        status: "timeout",
+        result: null,
+        error_message: `Call timed out after ${timeoutMs}ms`,
+        error_code: "TIMEOUT",
+        duration_ms,
+        trace_id: opts.traceId ?? null,
+        completed_at: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    log.error({ tool: opts.toolName, err: message }, "MCP call failed");
+    return {
+      call_id: opts.callId,
+      status: "error",
+      result: null,
+      error_message: message,
+      error_code: "BACKEND_ERROR",
+      duration_ms,
+      trace_id: opts.traceId ?? null,
+      completed_at: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }
+}
+async function aggregateSseStream(res, callId, log) {
+  const events = [];
+  let lastResult = null;
+  try {
+    if (!res.body) {
+      throw new Error("SSE response has no body");
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith(":")) continue;
+        if (trimmed.startsWith("data:")) {
+          const dataStr = trimmed.slice(5).trim();
+          if (dataStr === "[DONE]" || dataStr === "done") continue;
+          try {
+            const parsed = JSON.parse(dataStr);
+            events.push(parsed);
+            if (parsed?.result !== void 0) lastResult = parsed.result;
+            else if (parsed?.content !== void 0) lastResult = parsed.content;
+            else if (parsed?.type !== "ping" && parsed?.type !== "heartbeat") lastResult = parsed;
+          } catch {
+            if (dataStr.length > 0) lastResult = dataStr;
+          }
+        }
+      }
+    }
+    log.debug({ event_count: events.length, call_id: callId }, "SSE stream aggregated");
+    if (lastResult !== null && lastResult !== void 0) return lastResult;
+    if (events.length === 1) return events[0];
+    if (events.length > 1) return events;
+    return null;
+  } catch (err) {
+    log.warn({ err: String(err), call_id: callId }, "SSE stream parse error");
+    throw Object.assign(new Error(`SSE_PARSE_ERROR: ${err}`), { code: "SSE_PARSE_ERROR" });
+  }
+}
+var MAX_RETRIES2, RETRY_DELAY_MS, RL_WINDOW_MS, RL_THRESHOLD, RL_MAX_DELAY_MS, RL_DECAY_FACTOR, _rlTimestamps, _rlDelayMs, _rlLastDecay, BACKEND_CB_THRESHOLD, BACKEND_CB_COOLDOWN_MS, _backendFailures, _backendCircuitOpenUntil, _backendCircuitLoggedAt, _auditLessonsCache, AUDIT_LESSONS_TTL_MS, LOCAL_TOOLS;
+var init_mcp_caller = __esm({
+  "src/mcp-caller.ts"() {
+    "use strict";
+    init_config();
+    init_logger();
+    init_write_gate();
+    init_tracing();
+    MAX_RETRIES2 = 2;
+    RETRY_DELAY_MS = 1e3;
+    RL_WINDOW_MS = 1e4;
+    RL_THRESHOLD = 5;
+    RL_MAX_DELAY_MS = 3e4;
+    RL_DECAY_FACTOR = 0.8;
+    _rlTimestamps = [];
+    _rlDelayMs = 0;
+    _rlLastDecay = Date.now();
+    BACKEND_CB_THRESHOLD = 5;
+    BACKEND_CB_COOLDOWN_MS = 6e4;
+    _backendFailures = 0;
+    _backendCircuitOpenUntil = 0;
+    _backendCircuitLoggedAt = 0;
+    _auditLessonsCache = null;
+    AUDIT_LESSONS_TTL_MS = 10 * 60 * 1e3;
+    LOCAL_TOOLS = /* @__PURE__ */ new Set([
+      "memory_store",
+      "memory_retrieve",
+      "adaptive_rag_reward",
+      "critique_refine",
+      "context_fold",
+      "failure_harvest"
+    ]);
   }
 });
 
@@ -31619,7 +31662,7 @@ function registerDefaultLoops() {
   registerCronJob({
     id: "health-pulse",
     name: "Platform Health Pulse",
-    schedule: "*/5 * * * *",
+    schedule: "0,5,10,15,20,25,30,35,40,45,50,55 * * * *",
     enabled: true,
     chain: {
       name: "Health Pulse",
@@ -31741,7 +31784,8 @@ function registerDefaultLoops() {
   registerCronJob({
     id: "cia-guardian",
     name: "CIA Guardian (Autonomous Remediation)",
-    schedule: "*/10 * * * *",
+    schedule: "2,12,22,32,42,52 * * * *",
+    // Every 10 min, offset +2 from health-pulse
     enabled: true,
     chain: {
       name: "CIA Health Scan",
@@ -31780,8 +31824,8 @@ function registerDefaultLoops() {
   registerCronJob({
     id: "anomaly-watcher",
     name: "Proactive Anomaly Watcher (Detect+Learn+Reason)",
-    schedule: "*/5 * * * *",
-    // Every 5 minutes
+    schedule: "1,6,11,16,21,26,31,36,41,46,51,56 * * * *",
+    // Every 5 min, offset +1 from health-pulse
     enabled: true,
     chain: {
       name: "Anomaly Scan",
@@ -31792,8 +31836,8 @@ function registerDefaultLoops() {
   registerCronJob({
     id: "pheromone-decay",
     name: "Pheromone Decay + Trail Persistence",
-    schedule: "*/15 * * * *",
-    // Every 15 minutes
+    schedule: "3,18,33,48 * * * *",
+    // Every 15 min, offset +3 from health-pulse
     enabled: true,
     chain: {
       name: "Pheromone Lifecycle",
@@ -38964,16 +39008,16 @@ async function loadBenchmarkRuns() {
     const saved = JSON.parse(raw);
     let stuckCount = 0;
     for (const run of saved) {
-      if (run.status === "running") {
+      if (run.status === "running" || run.status === "pending") {
         run.status = "failed";
-        run.error = "Process restarted while run was in progress (benchmark-runner restart recovery)";
+        run.error = `Process restarted while run was ${run.status} (benchmark-runner restart recovery)`;
         stuckCount++;
       }
       runs.set(run.runId, run);
     }
     if (stuckCount > 0) {
       await persist2();
-      logger.warn({ stuckCount }, "[Benchmark] Marked stuck running\u2192failed on boot (restart recovery)");
+      logger.warn({ stuckCount }, "[Benchmark] Marked stuck running/pending\u2192failed on boot (restart recovery)");
     }
     logger.info({ count: saved.length }, "[Benchmark] Hydrated runs from Redis");
   } catch {
@@ -38998,6 +39042,15 @@ async function launchRunWhenIdle(run, inventorConfig) {
 async function _executeRun(run, inventorConfig) {
   try {
     await waitForInventorIdle();
+    const { getInventorStatus: getInventorStatus2 } = await Promise.resolve().then(() => (init_inventor_loop(), inventor_loop_exports));
+    const currentStatus = getInventorStatus2();
+    if (currentStatus.isRunning && !currentStatus.experimentName.startsWith("bench-")) {
+      run.status = "failed";
+      run.error = `Yielded to non-benchmark experiment: ${currentStatus.experimentName}`;
+      upsertBenchmarkRun(run);
+      logger.info({ runId: run.runId, yielded: currentStatus.experimentName }, "[Benchmark] Yielded to non-benchmark experiment");
+      return;
+    }
     const { runInventor: runInventor2, getInventorNodes: getInventorNodes2 } = await Promise.resolve().then(() => (init_inventor_loop(), inventor_loop_exports));
     run.status = "running";
     upsertBenchmarkRun(run);
@@ -39542,7 +39595,7 @@ app.use("/cron", requireApiKey, cronRouter);
 app.use("/api/dashboard", dashboardRouter);
 app.use("/api/openclaw", requireApiKey, openclawRouter);
 app.use("/api/audit", requireApiKey, auditRouter);
-app.use("/api/tool-output", requireApiKey, toolOutputRouter);
+app.use("/api/tool-output", toolOutputRouter);
 app.use("/api/knowledge", requireApiKey, knowledgeRouter);
 app.use("/api/adoption", requireApiKey, adoptionRouter);
 app.use("/api/artifacts", requireApiKey, artifactRouter);

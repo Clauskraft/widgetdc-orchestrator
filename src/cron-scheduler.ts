@@ -990,11 +990,11 @@ function buildKnowledgeBriefing(feed: Record<string, unknown>): string {
  * Register default platform health loops.
  */
 export function registerDefaultLoops(): void {
-  // Health check every 5 minutes
+  // Health check every 5 minutes (offset: minute 0)
   registerCronJob({
     id: 'health-pulse',
     name: 'Platform Health Pulse',
-    schedule: '*/5 * * * *',
+    schedule: '0,5,10,15,20,25,30,35,40,45,50,55 * * * *',
     enabled: true,
     chain: {
       name: 'Health Pulse',
@@ -1129,7 +1129,7 @@ export function registerDefaultLoops(): void {
   registerCronJob({
     id: 'cia-guardian',
     name: 'CIA Guardian (Autonomous Remediation)',
-    schedule: '*/10 * * * *',
+    schedule: '2,12,22,32,42,52 * * * *', // Every 10 min, offset +2 from health-pulse
     enabled: true,
     chain: {
       name: 'CIA Health Scan',
@@ -1176,7 +1176,7 @@ export function registerDefaultLoops(): void {
   registerCronJob({
     id: 'anomaly-watcher',
     name: 'Proactive Anomaly Watcher (Detect+Learn+Reason)',
-    schedule: '*/5 * * * *', // Every 5 minutes
+    schedule: '1,6,11,16,21,26,31,36,41,46,51,56 * * * *', // Every 5 min, offset +1 from health-pulse
     enabled: true,
     chain: {
       name: 'Anomaly Scan',
@@ -1191,7 +1191,7 @@ export function registerDefaultLoops(): void {
   registerCronJob({
     id: 'pheromone-decay',
     name: 'Pheromone Decay + Trail Persistence',
-    schedule: '*/15 * * * *', // Every 15 minutes
+    schedule: '3,18,33,48 * * * *', // Every 15 min, offset +3 from health-pulse
     enabled: true,
     chain: {
       name: 'Pheromone Lifecycle',

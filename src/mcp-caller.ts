@@ -157,7 +157,43 @@ async function ensureAuditLessonsRead(): Promise<void> {
   }
 }
 
+// Tools that have local implementations in tool-executor.ts — execute locally instead of remote MCP
+const LOCAL_TOOLS = new Set([
+  'memory_store', 'memory_retrieve', 'adaptive_rag_reward',
+  'critique_refine', 'context_fold', 'failure_harvest',
+])
+
 export async function callMcpTool(opts: McpCallOptions): Promise<OrchestratorToolResult> {
+  // Local-first: if tool has a local executor case, run it locally (avoids 404 on backend)
+  if (LOCAL_TOOLS.has(opts.toolName)) {
+    const t0 = Date.now()
+    try {
+      const { executeToolUnified } = await import('./tool-executor.js')
+      const result = await executeToolUnified(opts.toolName, opts.args, { call_id: opts.callId, fold: false })
+      return {
+        call_id: opts.callId,
+        status: result.error ? 'error' : 'success',
+        result: result.error ? null : result.result,
+        error_message: result.error ?? null,
+        error_code: result.error ? 'LOCAL_ERROR' : null,
+        duration_ms: Date.now() - t0,
+        trace_id: opts.traceId ?? null,
+        completed_at: new Date().toISOString(),
+      }
+    } catch (err) {
+      return {
+        call_id: opts.callId,
+        status: 'error',
+        result: null,
+        error_message: `Local execution failed: ${err instanceof Error ? err.message : String(err)}`,
+        error_code: 'LOCAL_ERROR',
+        duration_ms: Date.now() - t0,
+        trace_id: opts.traceId ?? null,
+        completed_at: new Date().toISOString(),
+      }
+    }
+  }
+
   return withMcpSpan(opts.toolName, opts.callId, async (span) => {
     const log = childLogger(opts.traceId ?? opts.callId)
     const t0 = Date.now()
