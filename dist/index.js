@@ -35243,31 +35243,76 @@ function stream2(event, data) {
   broadcastSSE("inventor", { event, ...data, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
 }
 async function retrieveCognition(query, topK) {
+  const items = [];
   try {
     const ragResponse = await dualChannelRAG(query, {
       maxResults: topK,
       maxHops: 2,
       forceChannels: ["graphrag", "srag"]
     });
-    return ragResponse.results.map((r, i) => ({
-      id: `cog-${i}`,
+    items.push(...ragResponse.results.map((r, i) => ({
+      id: `rag-${i}`,
       title: r.content.slice(0, 80),
       content: r.content,
       domain: [],
       source: r.source,
       score: r.score
-    }));
+    })));
   } catch (err) {
-    logger.warn({ error: String(err) }, "Inventor: cognition retrieval failed");
-    return [];
+    logger.warn({ error: String(err) }, "Inventor: RAG retrieval failed");
+  }
+  try {
+    const memResult = await callMcpTool({
+      toolName: "memory_retrieve",
+      args: {
+        agent_id: "inventor-analyzer",
+        query,
+        top_k: Math.min(topK, 5)
+      },
+      callId: `inventor-mem-retrieve-${Date.now()}`
+    });
+    const memories = Array.isArray(memResult.memories) ? memResult.memories : [];
+    items.push(...memories.map((m, i) => ({
+      id: `mem-${i}`,
+      title: String(m.key || "").slice(0, 80),
+      content: String(m.value || ""),
+      domain: [],
+      source: "memory",
+      score: Number(m.score ?? 0.5)
+    })));
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Inventor: memory retrieval failed (non-blocking)");
+  }
+  return items.sort((a, b) => b.score - a.score).slice(0, topK);
+}
+async function foldParentContext(parentNodes, task) {
+  if (parentNodes.length === 0) return "";
+  const rawContext = parentNodes.map(
+    (n) => `[Node ${n.id}] score=${n.score.toFixed(3)}
+analysis: ${n.analysis}
+motivation: ${n.motivation}
+artifact: ${n.artifact.slice(0, 500)}`
+  ).join("\n---\n");
+  if (rawContext.length < 2e3) return rawContext;
+  try {
+    const foldResult = await callCognitiveRaw("fold", {
+      prompt: `Compress the following parent solutions into a dense summary preserving: key scores, best approaches, identified weaknesses, and actionable patterns. Task: ${task}`,
+      context: { raw_context: rawContext, node_count: parentNodes.length },
+      agent_id: "inventor-folder"
+    }, 15e3);
+    const folded = String(foldResult.answer || foldResult.result || rawContext);
+    logger.info(
+      { original: rawContext.length, folded: folded.length, ratio: (folded.length / rawContext.length).toFixed(2) },
+      "Inventor: context folded via RLM"
+    );
+    return folded;
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Inventor: context fold failed, using raw");
+    return rawContext;
   }
 }
 async function runResearcher(task, parentNodes, cognitionItems, config2) {
-  const parentContext = parentNodes.map(
-    (n) => `[Node ${n.id}] score=${n.score.toFixed(3)}
-  analysis: ${n.analysis.slice(0, 200)}
-  artifact preview: ${n.artifact.slice(0, 300)}`
-  ).join("\n\n");
+  const parentContext = await foldParentContext(parentNodes, task);
   const cognitionContext = cognitionItems.map(
     (c) => `[${c.source}] ${c.title}
   ${c.content.slice(0, 200)}`
@@ -35499,20 +35544,44 @@ async function runStep(config2) {
   lastStepAt = (/* @__PURE__ */ new Date()).toISOString();
   await persistNodes(config2.experimentName);
   await persistState(config2.experimentName);
-  if (result.success && node.analysis.length > 20) {
+  if (node.analysis.length > 20) {
     try {
       await callMcpTool({
         toolName: "memory_store",
         args: {
           agent_id: "inventor-analyzer",
           key: `insight:${nodeId}`,
-          value: node.analysis,
-          metadata: { score: result.score, step: currentStep2, experiment: config2.experimentName }
+          value: `[${result.success ? "SUCCESS" : "FAIL"}:${result.score.toFixed(3)}] ${node.analysis}`,
+          metadata: {
+            score: result.score,
+            success: result.success,
+            step: currentStep2,
+            experiment: config2.experimentName,
+            parentId: parentId || "seed",
+            island: node.island
+          }
         },
         callId: `inventor-mem-${nodeId}`
       });
     } catch {
     }
+  }
+  try {
+    await callMcpTool({
+      toolName: "adaptive_rag_reward",
+      args: {
+        query: config2.taskDescription,
+        reward: result.score,
+        metadata: {
+          source: "inventor",
+          nodeId,
+          step: currentStep2,
+          experiment: config2.experimentName
+        }
+      },
+      callId: `inventor-rag-reward-${nodeId}`
+    });
+  } catch {
   }
   const stepResult = {
     stepNumber: currentStep2,
@@ -35587,10 +35656,23 @@ async function runInventor(config2, resume = false) {
     stream2("seed", { nodeId: seedNode.id, score: seedResult.score });
   }
   try {
+    const RAG_RETRAIN_INTERVAL = 5;
     for (let step = currentStep2; step < config2.pipeline.maxSteps; step++) {
       try {
         const result = await runStep(config2);
         results.push(result);
+        if (currentStep2 % RAG_RETRAIN_INTERVAL === 0) {
+          try {
+            await callMcpTool({
+              toolName: "adaptive_rag_retrain",
+              args: { source: "inventor", reason: `Inventor step ${currentStep2} periodic retrain` },
+              callId: `inventor-rag-retrain-${currentStep2}`
+            });
+            stream2("rag_retrain", { step: currentStep2 });
+            logger.info({ step: currentStep2 }, "Inventor: adaptive RAG retrained");
+          } catch {
+          }
+        }
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err);
         stream2("step_error", { step: currentStep2, error: lastError });

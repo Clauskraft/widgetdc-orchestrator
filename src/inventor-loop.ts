@@ -57,12 +57,24 @@ function stream(event: string, data: Record<string, unknown>): void {
   broadcastSSE('inventor', { event, ...data, timestamp: new Date().toISOString() })
 }
 
+// ─── RLM-First Tool Priority ────────────────────────────────────────────────
+// The Inventor ALWAYS prioritizes RLM Engine tools (reason, analyze, plan, fold),
+// Dual-channel RAG (graphrag + srag + cypher), and memory layers (memory_store,
+// memory_retrieve, adaptive_rag_reward/retrain) for close cognitive collaboration.
+
+const RLM_TOOLS = ['reason', 'analyze', 'plan', 'fold'] as const
+const MEMORY_TOOLS = ['memory_store', 'memory_retrieve', 'adaptive_rag_reward', 'adaptive_rag_retrain'] as const
+
 // ─── Cognition Retrieval (LEARN phase) ───────────────────────────────────────
+// Two-channel retrieval: (1) Dual RAG (graphrag + srag) + (2) Memory layer
 
 async function retrieveCognition(
   query: string,
   topK: number,
 ): Promise<CognitionItem[]> {
+  const items: CognitionItem[] = []
+
+  // Channel 1: Dual-channel RAG (graphrag + srag + cypher tri-channel)
   try {
     const ragResponse = await dualChannelRAG(query, {
       maxResults: topK,
@@ -70,17 +82,77 @@ async function retrieveCognition(
       forceChannels: ['graphrag', 'srag'],
     })
 
-    return ragResponse.results.map((r, i) => ({
-      id: `cog-${i}`,
+    items.push(...ragResponse.results.map((r, i) => ({
+      id: `rag-${i}`,
       title: r.content.slice(0, 80),
       content: r.content,
-      domain: [],
+      domain: [] as string[],
       source: r.source,
       score: r.score,
-    }))
+    })))
   } catch (err) {
-    logger.warn({ error: String(err) }, 'Inventor: cognition retrieval failed')
-    return []
+    logger.warn({ error: String(err) }, 'Inventor: RAG retrieval failed')
+  }
+
+  // Channel 2: Memory layer — retrieve prior inventor insights
+  try {
+    const memResult = await callMcpTool({
+      toolName: 'memory_retrieve',
+      args: {
+        agent_id: 'inventor-analyzer',
+        query,
+        top_k: Math.min(topK, 5),
+      },
+      callId: `inventor-mem-retrieve-${Date.now()}`,
+    }) as Record<string, unknown>
+
+    const memories = Array.isArray(memResult.memories) ? memResult.memories : []
+    items.push(...(memories as Array<Record<string, unknown>>).map((m, i) => ({
+      id: `mem-${i}`,
+      title: String(m.key || '').slice(0, 80),
+      content: String(m.value || ''),
+      domain: [] as string[],
+      source: 'memory' as const,
+      score: Number(m.score ?? 0.5),
+    })))
+  } catch (err) {
+    logger.warn({ error: String(err) }, 'Inventor: memory retrieval failed (non-blocking)')
+  }
+
+  // Sort by score, return top-K
+  return items.sort((a, b) => b.score - a.score).slice(0, topK)
+}
+
+// ─── Context Folding (RLM) ──────────────────────────────────────────────────
+// Uses RLM fold endpoint to compress parent context before feeding to Researcher
+
+async function foldParentContext(
+  parentNodes: InventorNode[],
+  task: string,
+): Promise<string> {
+  if (parentNodes.length === 0) return ''
+
+  const rawContext = parentNodes.map(n =>
+    `[Node ${n.id}] score=${n.score.toFixed(3)}\nanalysis: ${n.analysis}\nmotivation: ${n.motivation}\nartifact: ${n.artifact.slice(0, 500)}`
+  ).join('\n---\n')
+
+  // If context is small enough, skip folding
+  if (rawContext.length < 2000) return rawContext
+
+  try {
+    const foldResult = await callCognitiveRaw('fold', {
+      prompt: `Compress the following parent solutions into a dense summary preserving: key scores, best approaches, identified weaknesses, and actionable patterns. Task: ${task}`,
+      context: { raw_context: rawContext, node_count: parentNodes.length },
+      agent_id: 'inventor-folder',
+    }, 15000)
+
+    const folded = String(foldResult.answer || foldResult.result || rawContext)
+    logger.info({ original: rawContext.length, folded: folded.length, ratio: (folded.length / rawContext.length).toFixed(2) },
+      'Inventor: context folded via RLM')
+    return folded
+  } catch (err) {
+    logger.warn({ error: String(err) }, 'Inventor: context fold failed, using raw')
+    return rawContext
   }
 }
 
@@ -93,9 +165,8 @@ async function runResearcher(
   cognitionItems: CognitionItem[],
   config: InventorConfig,
 ): Promise<{ artifact: string; motivation: string }> {
-  const parentContext = parentNodes.map(n =>
-    `[Node ${n.id}] score=${n.score.toFixed(3)}\n  analysis: ${n.analysis.slice(0, 200)}\n  artifact preview: ${n.artifact.slice(0, 300)}`
-  ).join('\n\n')
+  // RLM-first: fold parent context via RLM Engine before synthesis
+  const parentContext = await foldParentContext(parentNodes, task)
 
   const cognitionContext = cognitionItems.map(c =>
     `[${c.source}] ${c.title}\n  ${c.content.slice(0, 200)}`
@@ -388,21 +459,46 @@ async function runStep(config: InventorConfig): Promise<InventorStepResult> {
   await persistNodes(config.experimentName)
   await persistState(config.experimentName)
 
-  // Store insight to cognition (via memory_store)
-  if (result.success && node.analysis.length > 20) {
+  // ── RLM Memory Layer: always store insights (not just success) ──
+  if (node.analysis.length > 20) {
     try {
       await callMcpTool({
         toolName: 'memory_store',
         args: {
           agent_id: 'inventor-analyzer',
           key: `insight:${nodeId}`,
-          value: node.analysis,
-          metadata: { score: result.score, step: currentStep, experiment: config.experimentName },
+          value: `[${result.success ? 'SUCCESS' : 'FAIL'}:${result.score.toFixed(3)}] ${node.analysis}`,
+          metadata: {
+            score: result.score,
+            success: result.success,
+            step: currentStep,
+            experiment: config.experimentName,
+            parentId: parentId || 'seed',
+            island: node.island,
+          },
         },
         callId: `inventor-mem-${nodeId}`,
       })
     } catch { /* non-blocking */ }
   }
+
+  // ── RAG Feedback Loop: reward adaptive RAG with trial outcome ──
+  try {
+    await callMcpTool({
+      toolName: 'adaptive_rag_reward',
+      args: {
+        query: config.taskDescription,
+        reward: result.score,
+        metadata: {
+          source: 'inventor',
+          nodeId,
+          step: currentStep,
+          experiment: config.experimentName,
+        },
+      },
+      callId: `inventor-rag-reward-${nodeId}`,
+    })
+  } catch { /* non-blocking */ }
 
   const stepResult: InventorStepResult = {
     stepNumber: currentStep,
@@ -496,10 +592,24 @@ export async function runInventor(
 
   try {
     // Run evolution steps
+    const RAG_RETRAIN_INTERVAL = 5 // Retrain adaptive RAG every 5 steps
     for (let step = currentStep; step < config.pipeline.maxSteps; step++) {
       try {
         const result = await runStep(config)
         results.push(result)
+
+        // Periodic RAG retrain: keep adaptive RAG weights learning from inventor trials
+        if (currentStep % RAG_RETRAIN_INTERVAL === 0) {
+          try {
+            await callMcpTool({
+              toolName: 'adaptive_rag_retrain',
+              args: { source: 'inventor', reason: `Inventor step ${currentStep} periodic retrain` },
+              callId: `inventor-rag-retrain-${currentStep}`,
+            })
+            stream('rag_retrain', { step: currentStep })
+            logger.info({ step: currentStep }, 'Inventor: adaptive RAG retrained')
+          } catch { /* non-blocking */ }
+        }
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err)
         stream('step_error', { step: currentStep, error: lastError })
