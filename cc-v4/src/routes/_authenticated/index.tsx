@@ -19,11 +19,11 @@ interface AgentEntry {
 }
 
 interface ChainEntry {
-  id: string
+  execution_id: string
   mode: string
   status: string
-  startedAt: string
-  completedAt?: string
+  started_at: string
+  completed_at?: string
 }
 
 interface AdoptionTrend {
@@ -262,19 +262,19 @@ function DashboardPage() {
           <CardContent>
             <div className="space-y-2">
               {data!.chains.slice(0, 8).map((c) => (
-                <div key={c.id} className="flex items-center justify-between text-sm border rounded-md px-3 py-2">
+                <div key={c.execution_id} className="flex items-center justify-between text-sm border rounded-md px-3 py-2">
                   <div className="flex items-center gap-2">
                     <Badge variant="outline" className="text-xs font-mono capitalize" style={{ borderColor: CHAIN_COLORS[c.mode] ?? '#6366f1', color: CHAIN_COLORS[c.mode] ?? '#6366f1' }}>
                       {c.mode}
                     </Badge>
-                    <span className="font-mono text-xs text-muted-foreground">{c.id.slice(0, 12)}…</span>
+                    <span className="font-mono text-xs text-muted-foreground">{c.execution_id.slice(0, 12)}…</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <Badge variant={c.status === 'completed' ? 'default' : c.status === 'running' ? 'secondary' : 'destructive'} className="text-xs">
                       {c.status}
                     </Badge>
                     <span className="text-xs text-muted-foreground">
-                      {new Date(c.startedAt).toLocaleTimeString()}
+                      {new Date(c.started_at).toLocaleTimeString()}
                     </span>
                   </div>
                 </div>
