@@ -268,24 +268,39 @@ async function runEngineer(
   const t0 = Date.now()
 
   try {
-    // Use critique_refine to evaluate the artifact quality
+    // Use judge_response (PRISM scorer: 0-10 per dimension + aggregate).
+    // critique_refine is a generate→critique→revise pipeline, NOT a scorer —
+    // it has no numeric score field; old code defaulted to 50/100=0.5 for every solution.
     const result = await callMcpTool({
-      toolName: 'critique_refine',
+      toolName: 'judge_response',
       args: {
-        content: node.artifact,
-        criteria: `Evaluate this solution for: ${config.taskDescription}. Score 0-100 on: correctness, efficiency, elegance, completeness.`,
-        mode: 'evaluate',
+        query: `Evaluate this solution for the task: ${config.taskDescription.slice(0, 400)}`,
+        response: node.artifact.slice(0, 3000),
+        context: `Score for evolutionary optimization fitness. Reward: correct approach, complete implementation, efficient solution, novelty vs prior attempts.`,
       },
       callId: `inventor-eng-${node.id}`,
     })
 
     const resultObj = (typeof result === 'object' && result !== null) ? result as Record<string, unknown> : {}
-    const score = Number(resultObj.score ?? resultObj.overall_score ?? 50) / 100
+    // PRISM shape: { aggregate: 0-10, scores: { precision, reasoning, information, safety, methodology } }
+    const prismScores = (resultObj.scores && typeof resultObj.scores === 'object')
+      ? resultObj.scores as Record<string, number>
+      : {}
+    const rawAggregate = Number(
+      resultObj.aggregate ?? resultObj.overall ?? resultObj.overall_score ?? resultObj.score ??
+      (Object.keys(prismScores).length > 0
+        ? Object.values(prismScores).reduce((a: number, b: number) => a + b, 0) / Object.values(prismScores).length
+        : null) ??
+      5  // fallback to 5/10 = 0.5 only when no PRISM data at all
+    )
+    // Normalise to 0-1 (PRISM uses 0-10 scale)
+    const score = Math.min(1, Math.max(0, rawAggregate > 1 ? rawAggregate / 10 : rawAggregate))
     const metrics: Record<string, number> = {
-      correctness: Number(resultObj.correctness ?? 0.5),
-      efficiency: Number(resultObj.efficiency ?? 0.5),
-      elegance: Number(resultObj.elegance ?? 0.5),
-      completeness: Number(resultObj.completeness ?? 0.5),
+      precision: Number(prismScores.precision ?? score),
+      reasoning: Number(prismScores.reasoning ?? score),
+      information: Number(prismScores.information ?? score),
+      safety: Number(prismScores.safety ?? score),
+      methodology: Number(prismScores.methodology ?? score),
     }
 
     return {

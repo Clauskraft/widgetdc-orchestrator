@@ -21106,21 +21106,27 @@ async function runEngineer(node, config2) {
   const t0 = Date.now();
   try {
     const result = await callMcpTool({
-      toolName: "critique_refine",
+      toolName: "judge_response",
       args: {
-        content: node.artifact,
-        criteria: `Evaluate this solution for: ${config2.taskDescription}. Score 0-100 on: correctness, efficiency, elegance, completeness.`,
-        mode: "evaluate"
+        query: `Evaluate this solution for the task: ${config2.taskDescription.slice(0, 400)}`,
+        response: node.artifact.slice(0, 3e3),
+        context: `Score for evolutionary optimization fitness. Reward: correct approach, complete implementation, efficient solution, novelty vs prior attempts.`
       },
       callId: `inventor-eng-${node.id}`
     });
     const resultObj = typeof result === "object" && result !== null ? result : {};
-    const score = Number(resultObj.score ?? resultObj.overall_score ?? 50) / 100;
+    const prismScores = resultObj.scores && typeof resultObj.scores === "object" ? resultObj.scores : {};
+    const rawAggregate = Number(
+      resultObj.aggregate ?? resultObj.overall ?? resultObj.overall_score ?? resultObj.score ?? (Object.keys(prismScores).length > 0 ? Object.values(prismScores).reduce((a, b) => a + b, 0) / Object.values(prismScores).length : null) ?? 5
+      // fallback to 5/10 = 0.5 only when no PRISM data at all
+    );
+    const score = Math.min(1, Math.max(0, rawAggregate > 1 ? rawAggregate / 10 : rawAggregate));
     const metrics2 = {
-      correctness: Number(resultObj.correctness ?? 0.5),
-      efficiency: Number(resultObj.efficiency ?? 0.5),
-      elegance: Number(resultObj.elegance ?? 0.5),
-      completeness: Number(resultObj.completeness ?? 0.5)
+      precision: Number(prismScores.precision ?? score),
+      reasoning: Number(prismScores.reasoning ?? score),
+      information: Number(prismScores.information ?? score),
+      safety: Number(prismScores.safety ?? score),
+      methodology: Number(prismScores.methodology ?? score)
     };
     return {
       nodeId: node.id,
@@ -39007,19 +39013,41 @@ async function loadBenchmarkRuns() {
     if (!raw) return;
     const saved = JSON.parse(raw);
     let stuckCount = 0;
+    const pendingToRequeue = [];
     for (const run of saved) {
-      if (run.status === "running" || run.status === "pending") {
+      if (run.status === "running") {
         run.status = "failed";
-        run.error = `Process restarted while run was ${run.status} (benchmark-runner restart recovery)`;
+        run.error = "Process restarted while run was in progress (benchmark-runner restart recovery)";
         stuckCount++;
       }
+      if (run.status === "pending") pendingToRequeue.push(run);
       runs.set(run.runId, run);
     }
     if (stuckCount > 0) {
       await persist2();
-      logger.warn({ stuckCount }, "[Benchmark] Marked stuck running/pending\u2192failed on boot (restart recovery)");
+      logger.warn({ stuckCount }, "[Benchmark] Marked stuck running\u2192failed on boot (restart recovery)");
     }
-    logger.info({ count: saved.length }, "[Benchmark] Hydrated runs from Redis");
+    logger.info({ count: saved.length, requeue: pendingToRequeue.length }, "[Benchmark] Hydrated runs from Redis");
+    if (pendingToRequeue.length > 0) {
+      for (const run of pendingToRequeue) {
+        const task = getBenchmarkTask(run.taskId);
+        if (!task) continue;
+        const inventorConfig = {
+          experimentName: run.inventorExperimentName,
+          taskDescription: `${task.researcherPrompt}
+
+BENCHMARK: ${task.id} | STRATEGY: ${run.strategy} | RUN: ${run.runId}`,
+          initialArtifact: task.initialArtifact,
+          sampling: buildSamplingConfig(run.strategy),
+          cognition: { topK: 5, threshold: 0.25 },
+          pipeline: { maxSteps: run.maxRounds, maxArtifactLength: 6e3, engineerTimeoutMs: 9e4, numWorkers: 1 },
+          chainMode: "sequential"
+        };
+        launchRunWhenIdle(run, inventorConfig).catch(() => {
+        });
+      }
+      logger.info({ count: pendingToRequeue.length }, "[Benchmark] Re-queued pending runs after restart");
+    }
   } catch {
   }
 }
