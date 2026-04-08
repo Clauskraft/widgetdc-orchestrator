@@ -81,7 +81,7 @@ const REDIS_PREFIX = 'pheromone:'
 const REDIS_STATE_KEY = 'pheromone:state'
 const REDIS_INDEX_KEY = 'pheromone:index' // sorted set by strength
 const DEFAULT_TTL = 3600 // 1 hour default
-const MAX_PHEROMONES = 500
+const MAX_PHEROMONES = 2000
 const PERSIST_THRESHOLD = 0.7 // persist to Neo4j if strength > this
 const AMPLIFICATION_MULTIPLIER = 1.5
 const DECAY_FACTOR = 0.85 // 15% per decay cycle
@@ -140,6 +140,12 @@ export async function deposit(
 
   state.totalDeposits++
   state.activePheromones++
+
+  // Active cross-pillar amplification: check if multiple pheromone types
+  // agree on this domain — if so, amplify immediately (don't wait for decay cron)
+  if (type !== 'amplification') { // avoid recursive amplification
+    tryActiveAmplification(domain).catch(() => {}) // fire-and-forget
+  }
 
   broadcastSSE('pheromone', {
     event: 'deposit',
@@ -343,6 +349,28 @@ export async function amplify(
 }
 
 /**
+ * Active cross-pillar amplification — triggered on deposit when multiple
+ * pheromone types agree on the same domain, without waiting for decay cron.
+ */
+async function tryActiveAmplification(domain: string): Promise<void> {
+  const existing = await sense({ domain, limit: 20, minStrength: 0.3 })
+  const types = new Set(existing.map(p => p.type))
+  // Need at least 2 different pheromone types agreeing on this domain
+  if (types.size >= 2 && !types.has('amplification')) {
+    // Pick strongest from each type
+    const byType = new Map<PheromoneType, Pheromone>()
+    for (const p of existing) {
+      const current = byType.get(p.type)
+      if (!current || p.strength > current.strength) byType.set(p.type, p)
+    }
+    const contributors = [...byType.values()]
+    if (contributors.length >= 2) {
+      await amplify(domain, contributors, `Cross-pillar: ${[...types].join('+')} on ${domain}`)
+    }
+  }
+}
+
+/**
  * Persist strong/hot trails to Neo4j for long-term knowledge.
  * Called by cron periodically (e.g. every hour).
  */
@@ -375,7 +403,18 @@ export async function persistToGraph(): Promise<number> {
         },
         callId: `ph-persist-${p.id}`,
       })
-      persisted++
+      // Verify persistence with read-back
+      try {
+        const verify = await callMcpTool({
+          toolName: 'memory_retrieve',
+          args: { agent_id: 'pheromone-layer', key: `trail:${p.domain}:${p.id}` },
+          callId: `ph-verify-${p.id}`,
+        })
+        if (verify) persisted++
+        else logger.warn({ id: p.id }, 'Pheromone persist verification failed')
+      } catch {
+        logger.warn({ id: p.id }, 'Pheromone persist verification error')
+      }
     } catch { /* non-blocking */ }
   }
 

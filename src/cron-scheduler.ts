@@ -77,6 +77,17 @@ export async function runCronJob(jobId: string): Promise<void> {
     return
   }
 
+  // Redis-based mutex to prevent overlapping cron runs
+  const redis = getRedis()
+  const lockKey = `cron:lock:${jobId}`
+  if (redis) {
+    const acquired = await redis.set(lockKey, Date.now().toString(), 'NX', 'EX', 300) // 5min max lock
+    if (!acquired) {
+      logger.warn({ id: jobId }, 'Cron job skipped — previous run still active')
+      return
+    }
+  }
+
   logger.info({ id: job.id, name: job.name }, 'Cron job triggered')
 
   broadcastMessage({
@@ -662,6 +673,9 @@ export async function runCronJob(jobId: string): Promise<void> {
     job.run_count++
     persistCronJobs()
     logger.error({ id: job.id, err: String(err) }, 'Cron job failed')
+  } finally {
+    // Release cron overlap lock
+    if (redis) await redis.del(lockKey).catch(() => {})
   }
 }
 

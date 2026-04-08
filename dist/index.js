@@ -9464,469 +9464,6 @@ var init_mcp_caller = __esm({
   }
 });
 
-// src/cognitive-proxy.ts
-function isRlmAvailable() {
-  return config.rlmUrl.length > 0;
-}
-async function callCognitive(action, params, timeoutMs) {
-  if (params.llm_provider) {
-    init_llm_proxy();
-    var _sysP = "You are a WidgeTDC platform agent (" + (params.agent_id || "unknown") + "). Action: " + action + ". Produce concrete, actionable output.";
-    var _r = await chatLLM({ provider: params.llm_provider, messages: [{ role: "system", content: _sysP }, { role: "user", content: params.prompt }], model: params.llm_model, max_tokens: 4e3, temperature: 0.3 });
-    logger.info({ action, provider: params.llm_provider, model: _r.model, agent: params.agent_id }, "Cognitive LLM-direct bypass");
-    return _r.content;
-  }
-  if (!config.rlmUrl) {
-    throw new Error("RLM Engine not configured (set RLM_URL)");
-  }
-  const path3 = COGNITIVE_ROUTES[action];
-  if (!path3) {
-    throw new Error(`Unknown cognitive action: ${action}. Valid: ${Object.keys(COGNITIVE_ROUTES).join(", ")}`);
-  }
-  const url = `${config.rlmUrl}${path3}`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs ?? 12e4);
-  try {
-    logger.debug({ action, url, agent: params.agent_id }, "Cognitive proxy call");
-    const p = params;
-    let body;
-    if (action === "analyze") {
-      body = {
-        task: p.task || params.prompt,
-        context: typeof p.context === "string" ? p.context : p.context || params.prompt,
-        analysis_dimensions: p.analysis_dimensions || ["general"],
-        agent_id: params.agent_id
-      };
-    } else if (action === "reason") {
-      body = {
-        task: p.task || params.prompt,
-        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
-        agent_id: params.agent_id,
-        depth: params.depth ?? 0
-      };
-    } else if (action === "plan") {
-      body = {
-        task: p.task || params.prompt,
-        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
-        constraints: p.constraints || [],
-        agent_id: params.agent_id
-      };
-    } else if (action === "fold") {
-      body = {
-        task: p.task || params.prompt,
-        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
-        agent_id: params.agent_id
-      };
-    } else {
-      body = {
-        prompt: params.prompt,
-        task: p.task || params.prompt,
-        context: p.context || params.prompt,
-        agent_id: params.agent_id,
-        depth: params.depth ?? 0,
-        mode: params.mode ?? "standard"
-      };
-    }
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal
-    });
-    clearTimeout(timer);
-    if (!res.ok) {
-      const errText = await res.text().catch(() => `HTTP ${res.status}`);
-      throw new Error(`RLM ${action} failed: ${errText}`);
-    }
-    const data = await res.json();
-    return data.result ?? data.answer ?? data.reasoning ?? data.plan ?? data;
-  } catch (err) {
-    clearTimeout(timer);
-    if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(`RLM ${action} timed out after ${timeoutMs ?? 12e4}ms`);
-    }
-    throw err;
-  }
-}
-async function callCognitiveRaw(action, params, timeoutMs) {
-  if (params.llm_provider) {
-    init_llm_proxy();
-    var _sysP2 = "You are a WidgeTDC platform agent (" + (params.agent_id || "unknown") + "). Action: " + action + ". Produce concrete, actionable output.";
-    var _r2 = await chatLLM({ provider: params.llm_provider, messages: [{ role: "system", content: _sysP2 }, { role: "user", content: params.prompt }], model: params.llm_model, max_tokens: 4e3, temperature: 0.3 });
-    logger.info({ action, provider: params.llm_provider, model: _r2.model, agent: params.agent_id }, "CognitiveRaw LLM-direct bypass");
-    return { result: _r2.content, answer: _r2.content, routing: { provider: _r2.provider, model: _r2.model, domain: action, latency_ms: _r2.duration_ms, cost: 0 }, quality: { overall_score: 0.7 } };
-  }
-  if (!config.rlmUrl) return null;
-  const path3 = COGNITIVE_ROUTES[action];
-  if (!path3) {
-    throw new Error(`Unknown cognitive action: ${action}. Valid: ${Object.keys(COGNITIVE_ROUTES).join(", ")}`);
-  }
-  const url = `${config.rlmUrl}${path3}`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs ?? 12e4);
-  try {
-    const p = params;
-    let body;
-    if (action === "analyze") {
-      body = {
-        task: p.task || params.prompt,
-        context: typeof p.context === "string" ? p.context : p.context || params.prompt,
-        analysis_dimensions: p.analysis_dimensions || ["general"],
-        constraints: p.constraints || [],
-        agent_id: params.agent_id
-      };
-    } else if (action === "reason") {
-      body = {
-        task: p.task || params.prompt,
-        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
-        agent_id: params.agent_id,
-        depth: params.depth ?? 0
-      };
-    } else if (action === "plan") {
-      body = {
-        task: p.task || params.prompt,
-        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
-        constraints: p.constraints || [],
-        agent_id: params.agent_id
-      };
-    } else if (action === "fold") {
-      body = {
-        task: p.task || params.prompt,
-        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
-        agent_id: params.agent_id
-      };
-    } else {
-      body = {
-        prompt: params.prompt,
-        task: p.task || params.prompt,
-        context: p.context || params.prompt,
-        agent_id: params.agent_id,
-        depth: params.depth ?? 0,
-        mode: params.mode ?? "standard"
-      };
-    }
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal
-    });
-    clearTimeout(timer);
-    if (!res.ok) {
-      logger.warn({ action, status: res.status }, "callCognitiveRaw: non-OK");
-      return null;
-    }
-    return await res.json();
-  } catch (err) {
-    clearTimeout(timer);
-    if (err instanceof Error && err.name === "AbortError") {
-      logger.warn({ action, timeoutMs }, "callCognitiveRaw: timeout");
-      return null;
-    }
-    logger.debug({ action, error: String(err) }, "callCognitiveRaw: failed");
-    return null;
-  }
-}
-async function getRlmHealth() {
-  if (!config.rlmUrl) return null;
-  try {
-    const res = await fetch(`${config.rlmUrl}/health`, { signal: AbortSignal.timeout(5e3) });
-    if (!res.ok) return { status: "unhealthy", http_status: res.status };
-    return await res.json();
-  } catch {
-    return { status: "unreachable" };
-  }
-}
-var COGNITIVE_ROUTES;
-var init_cognitive_proxy = __esm({
-  "src/cognitive-proxy.ts"() {
-    "use strict";
-    init_config();
-    init_logger();
-    COGNITIVE_ROUTES = {
-      reason: "/reason",
-      analyze: "/cognitive/analyze",
-      plan: "/cognitive/plan",
-      learn: "/cognitive/learn",
-      fold: "/cognitive/fold",
-      enrich: "/cognitive/enrich"
-    };
-  }
-});
-
-// src/hierarchical-intelligence.ts
-var hierarchical_intelligence_exports = {};
-__export(hierarchical_intelligence_exports, {
-  buildCommunitySummaries: () => buildCommunitySummaries,
-  searchCommunitySummaries: () => searchCommunitySummaries
-});
-import { v4 as uuid } from "uuid";
-async function buildCommunitySummaries() {
-  const t0 = Date.now();
-  logger.info("Hierarchical intelligence: building community summaries");
-  let communities;
-  let method;
-  try {
-    communities = await runLeidenCommunities();
-    method = "gds-leiden";
-  } catch (err) {
-    logger.warn({ error: String(err) }, "GDS Leiden failed \u2014 using Cypher fallback");
-    communities = await runCypherClustering();
-    method = "cypher-fallback";
-  }
-  if (communities.length === 0) {
-    logger.info("No communities found \u2014 graph may be too sparse");
-    return { communities_created: 0, summaries_generated: 0, relationships_created: 0, levels: 0, duration_ms: Date.now() - t0, method };
-  }
-  let summariesGenerated = 0;
-  let relsCreated = 0;
-  const BATCH = 5;
-  for (let i = 0; i < communities.length; i += BATCH) {
-    const batch = communities.slice(i, i + BATCH);
-    const results = await Promise.allSettled(
-      batch.map((c) => createCommunitySummary(c))
-    );
-    for (const r of results) {
-      if (r.status === "fulfilled") {
-        summariesGenerated += r.value.summary ? 1 : 0;
-        relsCreated += r.value.rels_created;
-      }
-    }
-  }
-  try {
-    await callMcpTool({
-      toolName: "graph.write_cypher",
-      args: {
-        query: `MATCH (s:CommunitySummary) WHERE s.updatedAt < datetime() - duration('P30D') DETACH DELETE s`,
-        _force: true
-      },
-      callId: uuid(),
-      timeoutMs: 1e4
-    });
-  } catch {
-  }
-  const result = {
-    communities_created: communities.length,
-    summaries_generated: summariesGenerated,
-    relationships_created: relsCreated,
-    levels: 1,
-    // Single level for MVP; multi-level in future
-    duration_ms: Date.now() - t0,
-    method
-  };
-  logger.info(result, "Hierarchical intelligence: complete");
-  return result;
-}
-async function runLeidenCommunities() {
-  await callMcpTool({
-    toolName: "graph.write_cypher",
-    args: {
-      query: `CALL gds.graph.project('community-detect', '*', '*') YIELD graphName RETURN graphName`,
-      _force: true
-    },
-    callId: uuid(),
-    timeoutMs: 3e4
-  });
-  const leidenResult = await callMcpTool({
-    toolName: "graph.write_cypher",
-    args: {
-      query: `CALL gds.leiden.write('community-detect', { writeProperty: 'communityId' })
-YIELD communityCount, modularity
-RETURN communityCount, modularity`,
-      _force: true
-    },
-    callId: uuid(),
-    timeoutMs: 6e4
-  });
-  await callMcpTool({
-    toolName: "graph.write_cypher",
-    args: {
-      query: `CALL gds.graph.drop('community-detect') YIELD graphName RETURN graphName`,
-      _force: true
-    },
-    callId: uuid(),
-    timeoutMs: 1e4
-  }).catch(() => {
-  });
-  return await collectCommunityMembers("communityId");
-}
-async function runCypherClustering() {
-  const result = await callMcpTool({
-    toolName: "graph.read_cypher",
-    args: {
-      query: `MATCH (n) WHERE n.domain IS NOT NULL
-WITH n.domain AS domain, collect({name: coalesce(n.title, n.name, n.filename, ''), description: substring(coalesce(n.description, n.content, ''), 0, 200), type: labels(n)[0]}) AS members, count(*) AS cnt
-WHERE cnt >= 5
-RETURN domain, members[..20] AS members, cnt
-ORDER BY cnt DESC LIMIT 30`
-    },
-    callId: uuid(),
-    timeoutMs: 15e3
-  });
-  if (result.status !== "success") return [];
-  const rows = result.result?.results ?? result.result;
-  if (!Array.isArray(rows)) return [];
-  return rows.map((r, i) => ({
-    community_id: i,
-    member_count: typeof r.cnt === "object" ? r.cnt.low : Number(r.cnt) || 0,
-    members: Array.isArray(r.members) ? r.members : [],
-    domain: String(r.domain ?? "general")
-  }));
-}
-async function collectCommunityMembers(propertyName) {
-  if (!SAFE_COMMUNITY_PROPS.has(propertyName)) {
-    logger.warn({ propertyName }, "Rejected unsafe community property name");
-    return [];
-  }
-  const result = await callMcpTool({
-    toolName: "graph.read_cypher",
-    args: {
-      query: `MATCH (n) WHERE n.${propertyName} IS NOT NULL
-WITH n.${propertyName} AS cid, collect({name: coalesce(n.title, n.name, n.filename, ''), description: substring(coalesce(n.description, n.content, ''), 0, 200), type: labels(n)[0]}) AS members, count(*) AS cnt
-WHERE cnt >= 5
-RETURN cid, members[..20] AS members, cnt, head(members).domain AS domain
-ORDER BY cnt DESC LIMIT 50`
-    },
-    callId: uuid(),
-    timeoutMs: 15e3
-  });
-  if (result.status !== "success") return [];
-  const rows = result.result?.results ?? result.result;
-  if (!Array.isArray(rows)) return [];
-  return rows.map((r) => ({
-    community_id: typeof r.cid === "object" ? r.cid.low : Number(r.cid) || 0,
-    member_count: typeof r.cnt === "object" ? r.cnt.low : Number(r.cnt) || 0,
-    members: Array.isArray(r.members) ? r.members : [],
-    domain: String(r.domain ?? "general")
-  }));
-}
-async function createCommunitySummary(community) {
-  const memberList = community.members.filter((m) => m.name).map((m) => `- ${m.name} (${m.type}): ${m.description || "no description"}`).join("\n");
-  if (!memberList) return { summary: null, rels_created: 0 };
-  let summary = null;
-  try {
-    const result = await callCognitive("analyze", {
-      prompt: `Summarize this knowledge graph community in 2-3 sentences. Describe: what theme connects these entities, what they collectively represent, and their significance for consulting.
-
-COMMUNITY (${community.member_count} members, domain: ${community.domain}):
-${memberList}
-
-Write a concise executive summary (max 100 words).`,
-      context: { community_id: community.community_id, domain: community.domain },
-      agent_id: "hierarchical-intelligence"
-    }, 2e4);
-    summary = String(result ?? "").trim();
-    if (summary.length < 10) summary = null;
-  } catch {
-    logger.debug({ community_id: community.community_id }, "Community summary generation failed");
-    return { summary: null, rels_created: 0 };
-  }
-  if (!summary) return { summary: null, rels_created: 0 };
-  const communityNodeId = `community-${community.community_id}-${community.domain}`;
-  try {
-    await callMcpTool({
-      toolName: "graph.write_cypher",
-      args: {
-        query: `MERGE (c:CommunitySummary {id: $id})
-SET c.name = $name, c.summary = $summary, c.domain = $domain,
-    c.member_count = $memberCount, c.level = 1, c.updatedAt = datetime()`,
-        params: {
-          id: communityNodeId,
-          name: `${community.domain} Community (${community.member_count} members)`,
-          summary,
-          domain: community.domain,
-          memberCount: community.member_count
-        },
-        _force: true
-        // Infrastructure write
-      },
-      callId: uuid(),
-      timeoutMs: 1e4
-    });
-  } catch (err) {
-    logger.debug({ error: String(err) }, "CommunitySummary MERGE failed");
-    return { summary, rels_created: 0 };
-  }
-  let relsCreated = 0;
-  const memberNames = community.members.filter((m) => m.name).map((m) => m.name).slice(0, 20);
-  if (memberNames.length > 0) {
-    try {
-      const result = await callMcpTool({
-        toolName: "graph.write_cypher",
-        args: {
-          query: `MATCH (c:CommunitySummary {id: $communityId})
-UNWIND $names AS memberName
-MATCH (m) WHERE coalesce(m.title, m.name) = memberName
-MERGE (m)-[:MEMBER_OF]->(c)
-RETURN count(*) AS rels`,
-          params: { communityId: communityNodeId, names: memberNames },
-          _force: true
-        },
-        callId: uuid(),
-        timeoutMs: 1e4
-      });
-      if (result.status === "success") {
-        const rows = result.result?.results ?? result.result;
-        if (Array.isArray(rows) && rows[0]) {
-          relsCreated = typeof rows[0].rels === "object" ? rows[0].rels.low : Number(rows[0].rels) || 0;
-        }
-      }
-    } catch {
-    }
-  }
-  return { summary, rels_created: relsCreated };
-}
-async function searchCommunitySummaries(query, maxResults = 5) {
-  try {
-    const result = await callMcpTool({
-      toolName: "graph.read_cypher",
-      args: {
-        query: `MATCH (c:CommunitySummary)
-WHERE toLower(c.summary) CONTAINS toLower($keyword)
-   OR toLower(c.domain) CONTAINS toLower($keyword)
-   OR toLower(c.name) CONTAINS toLower($keyword)
-RETURN c.id AS id, c.name AS name, c.summary AS summary, c.domain AS domain, c.member_count AS members
-ORDER BY c.member_count DESC
-LIMIT $limit`,
-        params: {
-          keyword: query.split(/\s+/).filter((w) => w.length >= 3).slice(0, 3).join(" ").slice(0, 80),
-          limit: maxResults
-        }
-      },
-      callId: uuid(),
-      timeoutMs: 1e4
-    });
-    if (result.status !== "success") return [];
-    const rows = result.result?.results ?? result.result;
-    if (!Array.isArray(rows)) return [];
-    return rows.map((r) => ({
-      source: "community",
-      content: `[Community: ${r.name}] ${r.summary}`,
-      score: 0.75,
-      // Community summaries are structurally relevant
-      metadata: { id: r.id, domain: r.domain, members: r.members }
-    }));
-  } catch {
-    return [];
-  }
-}
-var SAFE_COMMUNITY_PROPS;
-var init_hierarchical_intelligence = __esm({
-  "src/hierarchical-intelligence.ts"() {
-    "use strict";
-    init_mcp_caller();
-    init_cognitive_proxy();
-    init_logger();
-    SAFE_COMMUNITY_PROPS = /* @__PURE__ */ new Set(["communityId", "communityId2", "leiden_community", "louvain_community"]);
-  }
-});
-
 // ../widgetdc-contracts/dist/llm/LlmMatrix.js
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -10463,6 +10000,492 @@ var init_llm_proxy = __esm({
       inception: "Mercury",
       local: "Local"
     };
+  }
+});
+
+// src/cognitive-proxy.ts
+function isRlmAvailable() {
+  return config.rlmUrl.length > 0;
+}
+async function callCognitive(action, params, timeoutMs) {
+  if (params.llm_provider) {
+    const { chatLLM: chatLLM2 } = await Promise.resolve().then(() => (init_llm_proxy(), llm_proxy_exports));
+    const systemPrompt = `You are a WidgeTDC platform agent (${params.agent_id ?? "unknown"}). Action: ${action}. Produce concrete, actionable output.`;
+    const result = await chatLLM2({
+      provider: params.llm_provider,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: params.prompt }
+      ],
+      model: params.llm_model,
+      max_tokens: 4e3,
+      temperature: 0.3
+    });
+    logger.info({ action, provider: params.llm_provider, model: result.model, agent: params.agent_id }, "Cognitive LLM-direct bypass");
+    return result.content;
+  }
+  if (!config.rlmUrl) {
+    throw new Error("RLM Engine not configured (set RLM_URL)");
+  }
+  const path3 = COGNITIVE_ROUTES[action];
+  if (!path3) {
+    throw new Error(`Unknown cognitive action: ${action}. Valid: ${Object.keys(COGNITIVE_ROUTES).join(", ")}`);
+  }
+  const url = `${config.rlmUrl}${path3}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs ?? 12e4);
+  try {
+    logger.debug({ action, url, agent: params.agent_id }, "Cognitive proxy call");
+    const p = params;
+    let body;
+    if (action === "analyze") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "string" ? p.context : p.context || params.prompt,
+        analysis_dimensions: p.analysis_dimensions || ["general"],
+        agent_id: params.agent_id
+      };
+    } else if (action === "reason") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
+        agent_id: params.agent_id,
+        depth: params.depth ?? 0
+      };
+    } else if (action === "plan") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
+        constraints: p.constraints || [],
+        agent_id: params.agent_id
+      };
+    } else if (action === "fold") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
+        agent_id: params.agent_id
+      };
+    } else {
+      body = {
+        prompt: params.prompt,
+        task: p.task || params.prompt,
+        context: p.context || params.prompt,
+        agent_id: params.agent_id,
+        depth: params.depth ?? 0,
+        mode: params.mode ?? "standard"
+      };
+    }
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    clearTimeout(timer);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => `HTTP ${res.status}`);
+      throw new Error(`RLM ${action} failed: ${errText}`);
+    }
+    const data = await res.json();
+    return data.result ?? data.answer ?? data.reasoning ?? data.plan ?? data;
+  } catch (err) {
+    clearTimeout(timer);
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`RLM ${action} timed out after ${timeoutMs ?? 12e4}ms`);
+    }
+    throw err;
+  }
+}
+async function callCognitiveRaw(action, params, timeoutMs) {
+  if (params.llm_provider) {
+    const { chatLLM: chatLLM2 } = await Promise.resolve().then(() => (init_llm_proxy(), llm_proxy_exports));
+    const systemPrompt = `You are a WidgeTDC platform agent (${params.agent_id ?? "unknown"}). Action: ${action}. Produce concrete, actionable output.`;
+    const result = await chatLLM2({
+      provider: params.llm_provider,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: params.prompt }
+      ],
+      model: params.llm_model,
+      max_tokens: 4e3,
+      temperature: 0.3
+    });
+    logger.info({ action, provider: params.llm_provider, model: result.model, agent: params.agent_id }, "CognitiveRaw LLM-direct bypass");
+    return {
+      result: result.content,
+      answer: result.content,
+      routing: { provider: result.provider, model: result.model, domain: action, latency_ms: result.duration_ms, cost: 0 },
+      quality: { overall_score: 0.7 }
+    };
+  }
+  if (!config.rlmUrl) return null;
+  const path3 = COGNITIVE_ROUTES[action];
+  if (!path3) {
+    throw new Error(`Unknown cognitive action: ${action}. Valid: ${Object.keys(COGNITIVE_ROUTES).join(", ")}`);
+  }
+  const url = `${config.rlmUrl}${path3}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs ?? 12e4);
+  try {
+    const p = params;
+    let body;
+    if (action === "analyze") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "string" ? p.context : p.context || params.prompt,
+        analysis_dimensions: p.analysis_dimensions || ["general"],
+        constraints: p.constraints || [],
+        agent_id: params.agent_id
+      };
+    } else if (action === "reason") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
+        agent_id: params.agent_id,
+        depth: params.depth ?? 0
+      };
+    } else if (action === "plan") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
+        constraints: p.constraints || [],
+        agent_id: params.agent_id
+      };
+    } else if (action === "fold") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
+        agent_id: params.agent_id
+      };
+    } else {
+      body = {
+        prompt: params.prompt,
+        task: p.task || params.prompt,
+        context: p.context || params.prompt,
+        agent_id: params.agent_id,
+        depth: params.depth ?? 0,
+        mode: params.mode ?? "standard"
+      };
+    }
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    clearTimeout(timer);
+    if (!res.ok) {
+      logger.warn({ action, status: res.status }, "callCognitiveRaw: non-OK");
+      return null;
+    }
+    return await res.json();
+  } catch (err) {
+    clearTimeout(timer);
+    if (err instanceof Error && err.name === "AbortError") {
+      logger.warn({ action, timeoutMs }, "callCognitiveRaw: timeout");
+      return null;
+    }
+    logger.debug({ action, error: String(err) }, "callCognitiveRaw: failed");
+    return null;
+  }
+}
+async function getRlmHealth() {
+  if (!config.rlmUrl) return null;
+  try {
+    const res = await fetch(`${config.rlmUrl}/health`, { signal: AbortSignal.timeout(5e3) });
+    if (!res.ok) return { status: "unhealthy", http_status: res.status };
+    return await res.json();
+  } catch {
+    return { status: "unreachable" };
+  }
+}
+var COGNITIVE_ROUTES;
+var init_cognitive_proxy = __esm({
+  "src/cognitive-proxy.ts"() {
+    "use strict";
+    init_config();
+    init_logger();
+    COGNITIVE_ROUTES = {
+      reason: "/reason",
+      analyze: "/cognitive/analyze",
+      plan: "/cognitive/plan",
+      learn: "/cognitive/learn",
+      fold: "/cognitive/fold",
+      enrich: "/cognitive/enrich"
+    };
+  }
+});
+
+// src/hierarchical-intelligence.ts
+var hierarchical_intelligence_exports = {};
+__export(hierarchical_intelligence_exports, {
+  buildCommunitySummaries: () => buildCommunitySummaries,
+  searchCommunitySummaries: () => searchCommunitySummaries
+});
+import { v4 as uuid } from "uuid";
+async function buildCommunitySummaries() {
+  const t0 = Date.now();
+  logger.info("Hierarchical intelligence: building community summaries");
+  let communities;
+  let method;
+  try {
+    communities = await runLeidenCommunities();
+    method = "gds-leiden";
+  } catch (err) {
+    logger.warn({ error: String(err) }, "GDS Leiden failed \u2014 using Cypher fallback");
+    communities = await runCypherClustering();
+    method = "cypher-fallback";
+  }
+  if (communities.length === 0) {
+    logger.info("No communities found \u2014 graph may be too sparse");
+    return { communities_created: 0, summaries_generated: 0, relationships_created: 0, levels: 0, duration_ms: Date.now() - t0, method };
+  }
+  let summariesGenerated = 0;
+  let relsCreated = 0;
+  const BATCH = 5;
+  for (let i = 0; i < communities.length; i += BATCH) {
+    const batch = communities.slice(i, i + BATCH);
+    const results = await Promise.allSettled(
+      batch.map((c) => createCommunitySummary(c))
+    );
+    for (const r of results) {
+      if (r.status === "fulfilled") {
+        summariesGenerated += r.value.summary ? 1 : 0;
+        relsCreated += r.value.rels_created;
+      }
+    }
+  }
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MATCH (s:CommunitySummary) WHERE s.updatedAt < datetime() - duration('P30D') DETACH DELETE s`,
+        _force: true
+      },
+      callId: uuid(),
+      timeoutMs: 1e4
+    });
+  } catch {
+  }
+  const result = {
+    communities_created: communities.length,
+    summaries_generated: summariesGenerated,
+    relationships_created: relsCreated,
+    levels: 1,
+    // Single level for MVP; multi-level in future
+    duration_ms: Date.now() - t0,
+    method
+  };
+  logger.info(result, "Hierarchical intelligence: complete");
+  return result;
+}
+async function runLeidenCommunities() {
+  await callMcpTool({
+    toolName: "graph.write_cypher",
+    args: {
+      query: `CALL gds.graph.project('community-detect', '*', '*') YIELD graphName RETURN graphName`,
+      _force: true
+    },
+    callId: uuid(),
+    timeoutMs: 3e4
+  });
+  const leidenResult = await callMcpTool({
+    toolName: "graph.write_cypher",
+    args: {
+      query: `CALL gds.leiden.write('community-detect', { writeProperty: 'communityId' })
+YIELD communityCount, modularity
+RETURN communityCount, modularity`,
+      _force: true
+    },
+    callId: uuid(),
+    timeoutMs: 6e4
+  });
+  await callMcpTool({
+    toolName: "graph.write_cypher",
+    args: {
+      query: `CALL gds.graph.drop('community-detect') YIELD graphName RETURN graphName`,
+      _force: true
+    },
+    callId: uuid(),
+    timeoutMs: 1e4
+  }).catch(() => {
+  });
+  return await collectCommunityMembers("communityId");
+}
+async function runCypherClustering() {
+  const result = await callMcpTool({
+    toolName: "graph.read_cypher",
+    args: {
+      query: `MATCH (n) WHERE n.domain IS NOT NULL
+WITH n.domain AS domain, collect({name: coalesce(n.title, n.name, n.filename, ''), description: substring(coalesce(n.description, n.content, ''), 0, 200), type: labels(n)[0]}) AS members, count(*) AS cnt
+WHERE cnt >= 5
+RETURN domain, members[..20] AS members, cnt
+ORDER BY cnt DESC LIMIT 30`
+    },
+    callId: uuid(),
+    timeoutMs: 15e3
+  });
+  if (result.status !== "success") return [];
+  const rows = result.result?.results ?? result.result;
+  if (!Array.isArray(rows)) return [];
+  return rows.map((r, i) => ({
+    community_id: i,
+    member_count: typeof r.cnt === "object" ? r.cnt.low : Number(r.cnt) || 0,
+    members: Array.isArray(r.members) ? r.members : [],
+    domain: String(r.domain ?? "general")
+  }));
+}
+async function collectCommunityMembers(propertyName) {
+  if (!SAFE_COMMUNITY_PROPS.has(propertyName)) {
+    logger.warn({ propertyName }, "Rejected unsafe community property name");
+    return [];
+  }
+  const result = await callMcpTool({
+    toolName: "graph.read_cypher",
+    args: {
+      query: `MATCH (n) WHERE n.${propertyName} IS NOT NULL
+WITH n.${propertyName} AS cid, collect({name: coalesce(n.title, n.name, n.filename, ''), description: substring(coalesce(n.description, n.content, ''), 0, 200), type: labels(n)[0]}) AS members, count(*) AS cnt
+WHERE cnt >= 5
+RETURN cid, members[..20] AS members, cnt, head(members).domain AS domain
+ORDER BY cnt DESC LIMIT 50`
+    },
+    callId: uuid(),
+    timeoutMs: 15e3
+  });
+  if (result.status !== "success") return [];
+  const rows = result.result?.results ?? result.result;
+  if (!Array.isArray(rows)) return [];
+  return rows.map((r) => ({
+    community_id: typeof r.cid === "object" ? r.cid.low : Number(r.cid) || 0,
+    member_count: typeof r.cnt === "object" ? r.cnt.low : Number(r.cnt) || 0,
+    members: Array.isArray(r.members) ? r.members : [],
+    domain: String(r.domain ?? "general")
+  }));
+}
+async function createCommunitySummary(community) {
+  const memberList = community.members.filter((m) => m.name).map((m) => `- ${m.name} (${m.type}): ${m.description || "no description"}`).join("\n");
+  if (!memberList) return { summary: null, rels_created: 0 };
+  let summary = null;
+  try {
+    const result = await callCognitive("analyze", {
+      prompt: `Summarize this knowledge graph community in 2-3 sentences. Describe: what theme connects these entities, what they collectively represent, and their significance for consulting.
+
+COMMUNITY (${community.member_count} members, domain: ${community.domain}):
+${memberList}
+
+Write a concise executive summary (max 100 words).`,
+      context: { community_id: community.community_id, domain: community.domain },
+      agent_id: "hierarchical-intelligence"
+    }, 2e4);
+    summary = String(result ?? "").trim();
+    if (summary.length < 10) summary = null;
+  } catch {
+    logger.debug({ community_id: community.community_id }, "Community summary generation failed");
+    return { summary: null, rels_created: 0 };
+  }
+  if (!summary) return { summary: null, rels_created: 0 };
+  const communityNodeId = `community-${community.community_id}-${community.domain}`;
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (c:CommunitySummary {id: $id})
+SET c.name = $name, c.summary = $summary, c.domain = $domain,
+    c.member_count = $memberCount, c.level = 1, c.updatedAt = datetime()`,
+        params: {
+          id: communityNodeId,
+          name: `${community.domain} Community (${community.member_count} members)`,
+          summary,
+          domain: community.domain,
+          memberCount: community.member_count
+        },
+        _force: true
+        // Infrastructure write
+      },
+      callId: uuid(),
+      timeoutMs: 1e4
+    });
+  } catch (err) {
+    logger.debug({ error: String(err) }, "CommunitySummary MERGE failed");
+    return { summary, rels_created: 0 };
+  }
+  let relsCreated = 0;
+  const memberNames = community.members.filter((m) => m.name).map((m) => m.name).slice(0, 20);
+  if (memberNames.length > 0) {
+    try {
+      const result = await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `MATCH (c:CommunitySummary {id: $communityId})
+UNWIND $names AS memberName
+MATCH (m) WHERE coalesce(m.title, m.name) = memberName
+MERGE (m)-[:MEMBER_OF]->(c)
+RETURN count(*) AS rels`,
+          params: { communityId: communityNodeId, names: memberNames },
+          _force: true
+        },
+        callId: uuid(),
+        timeoutMs: 1e4
+      });
+      if (result.status === "success") {
+        const rows = result.result?.results ?? result.result;
+        if (Array.isArray(rows) && rows[0]) {
+          relsCreated = typeof rows[0].rels === "object" ? rows[0].rels.low : Number(rows[0].rels) || 0;
+        }
+      }
+    } catch {
+    }
+  }
+  return { summary, rels_created: relsCreated };
+}
+async function searchCommunitySummaries(query, maxResults = 5) {
+  try {
+    const result = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: `MATCH (c:CommunitySummary)
+WHERE toLower(c.summary) CONTAINS toLower($keyword)
+   OR toLower(c.domain) CONTAINS toLower($keyword)
+   OR toLower(c.name) CONTAINS toLower($keyword)
+RETURN c.id AS id, c.name AS name, c.summary AS summary, c.domain AS domain, c.member_count AS members
+ORDER BY c.member_count DESC
+LIMIT $limit`,
+        params: {
+          keyword: query.split(/\s+/).filter((w) => w.length >= 3).slice(0, 3).join(" ").slice(0, 80),
+          limit: maxResults
+        }
+      },
+      callId: uuid(),
+      timeoutMs: 1e4
+    });
+    if (result.status !== "success") return [];
+    const rows = result.result?.results ?? result.result;
+    if (!Array.isArray(rows)) return [];
+    return rows.map((r) => ({
+      source: "community",
+      content: `[Community: ${r.name}] ${r.summary}`,
+      score: 0.75,
+      // Community summaries are structurally relevant
+      metadata: { id: r.id, domain: r.domain, members: r.members }
+    }));
+  } catch {
+    return [];
+  }
+}
+var SAFE_COMMUNITY_PROPS;
+var init_hierarchical_intelligence = __esm({
+  "src/hierarchical-intelligence.ts"() {
+    "use strict";
+    init_mcp_caller();
+    init_cognitive_proxy();
+    init_logger();
+    SAFE_COMMUNITY_PROPS = /* @__PURE__ */ new Set(["communityId", "communityId2", "leiden_community", "louvain_community"]);
   }
 });
 
@@ -11316,6 +11339,25 @@ var init_routing_engine = __esm({
 });
 
 // src/pheromone-layer.ts
+var pheromone_layer_exports = {};
+__export(pheromone_layer_exports, {
+  amplify: () => amplify,
+  deposit: () => deposit,
+  getHeatmap: () => getHeatmap,
+  getPheromoneState: () => getPheromoneState,
+  getTrailSummary: () => getTrailSummary,
+  initPheromoneLayer: () => initPheromoneLayer,
+  onAnomaly: () => onAnomaly,
+  onChainStepFailure: () => onChainStepFailure,
+  onChainStepSuccess: () => onChainStepSuccess,
+  onExternalSignal: () => onExternalSignal,
+  onInventorTrial: () => onInventorTrial,
+  persistToGraph: () => persistToGraph,
+  reinforce: () => reinforce,
+  runDecayCycle: () => runDecayCycle,
+  runPheromoneCron: () => runPheromoneCron,
+  sense: () => sense
+});
 import { v4 as uuid5 } from "uuid";
 async function deposit(agentId, type, domain, strength, label, metrics2 = {}, tags = [], ttlSeconds = DEFAULT_TTL) {
   const pheromone = {
@@ -11341,6 +11383,10 @@ async function deposit(agentId, type, domain, strength, label, metrics2 = {}, ta
   }
   state.totalDeposits++;
   state.activePheromones++;
+  if (type !== "amplification") {
+    tryActiveAmplification(domain).catch(() => {
+    });
+  }
   broadcastSSE("pheromone", {
     event: "deposit",
     pheromone: { id: pheromone.id, type, domain, strength: pheromone.strength, agentId }
@@ -11499,6 +11545,21 @@ async function amplify(domain, contributingPheromones, label) {
   }
   return amplified;
 }
+async function tryActiveAmplification(domain) {
+  const existing = await sense({ domain, limit: 20, minStrength: 0.3 });
+  const types = new Set(existing.map((p) => p.type));
+  if (types.size >= 2 && !types.has("amplification")) {
+    const byType = /* @__PURE__ */ new Map();
+    for (const p of existing) {
+      const current = byType.get(p.type);
+      if (!current || p.strength > current.strength) byType.set(p.type, p);
+    }
+    const contributors = [...byType.values()];
+    if (contributors.length >= 2) {
+      await amplify(domain, contributors, `Cross-pillar: ${[...types].join("+")} on ${domain}`);
+    }
+  }
+}
 async function persistToGraph() {
   const strong = await sense({ minStrength: PERSIST_THRESHOLD, limit: 50 });
   let persisted = 0;
@@ -11527,7 +11588,17 @@ async function persistToGraph() {
         },
         callId: `ph-persist-${p.id}`
       });
-      persisted++;
+      try {
+        const verify2 = await callMcpTool({
+          toolName: "memory_retrieve",
+          args: { agent_id: "pheromone-layer", key: `trail:${p.domain}:${p.id}` },
+          callId: `ph-verify-${p.id}`
+        });
+        if (verify2) persisted++;
+        else logger.warn({ id: p.id }, "Pheromone persist verification failed");
+      } catch {
+        logger.warn({ id: p.id }, "Pheromone persist verification error");
+      }
     } catch {
     }
   }
@@ -11751,6 +11822,18 @@ var init_pheromone_layer = __esm({
 });
 
 // src/peer-eval.ts
+var peer_eval_exports = {};
+__export(peer_eval_exports, {
+  getAllFleetLearnings: () => getAllFleetLearnings,
+  getFleetLearning: () => getFleetLearning,
+  getPeerEvalState: () => getPeerEvalState,
+  getRecentEvals: () => getRecentEvals,
+  getWhatWorks: () => getWhatWorks,
+  hookIntoExecution: () => hookIntoExecution,
+  initPeerEval: () => initPeerEval,
+  isFleetReliable: () => isFleetReliable,
+  runFleetAnalysis: () => runFleetAnalysis
+});
 import { v4 as uuid6 } from "uuid";
 async function hookIntoExecution(agentId, taskId, context) {
   const t0 = Date.now();
@@ -11878,7 +11961,8 @@ function updateFleetLearning(eval_) {
       bestAgent: null,
       bestScore: 0,
       bestPractices: [],
-      lastUpdated: (/* @__PURE__ */ new Date()).toISOString()
+      lastUpdated: (/* @__PURE__ */ new Date()).toISOString(),
+      reliable: false
     };
     state2.fleetLearnings.set(eval_.taskType, learning);
   }
@@ -11892,6 +11976,7 @@ function updateFleetLearning(eval_) {
     learning.bestScore = eval_.selfScore;
     learning.bestAgent = eval_.agentId;
   }
+  learning.reliable = learning.totalEvals >= 20;
 }
 async function broadcastBestPractice(eval_) {
   const insightText = eval_.insights.length > 0 ? eval_.insights.join("; ") : `Agent ${eval_.agentId} scored ${(eval_.selfScore * 100).toFixed(1)}% on ${eval_.taskType} (novelty: ${(eval_.novelty * 100).toFixed(0)}%)`;
@@ -11947,6 +12032,10 @@ function getFleetLearning(taskType) {
     ...learning,
     bestPractices: [...learning.bestPractices]
   };
+}
+function isFleetReliable(taskType) {
+  const learning = state2.fleetLearnings.get(taskType);
+  return learning?.reliable ?? false;
 }
 function getAllFleetLearnings() {
   return [...state2.fleetLearnings.values()].map((l) => ({
@@ -12518,6 +12607,12 @@ var init_chain_engine = __esm({
       "artifact"
     ];
     executions = /* @__PURE__ */ new Map();
+    setInterval(() => {
+      const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1e3).toISOString();
+      for (const [id, exec] of executions) {
+        if (exec.started_at < cutoff) executions.delete(id);
+      }
+    }, 30 * 60 * 1e3);
     FUNNEL_REDIS_PREFIX = "orchestrator:funnel:";
   }
 });
@@ -13701,6 +13796,7 @@ var init_tool_registry = __esm({
         timeoutMs: 1e4,
         outputDescription: "Array of discovered issues with cycle context and timestamps"
       }),
+      // ── Pheromone Layer (Stigmergic Communication) ────────────────────────────
       defineTool({
         name: "pheromone_status",
         namespace: "pheromone",
@@ -13747,6 +13843,7 @@ var init_tool_registry = __esm({
         timeoutMs: 5e3,
         outputDescription: "Domain-by-type heatmap with counts and average strengths"
       }),
+      // ── PeerEval Fleet Learning ───────────────────────────────────────────────
       defineTool({
         name: "peer_eval_status",
         namespace: "peereval",
@@ -21943,13 +22040,14 @@ ${lines.join("\n")}`;
         return `HyperAgent auto-memory failed: ${err instanceof Error ? err.message : String(err)}`;
       }
     }
+    // ── Pheromone Layer MCP Tools ──────────────────────────────────────────
     case "pheromone_status": {
-      init_pheromone_layer();
-      return JSON.stringify(getPheromoneState());
+      const { getPheromoneState: getPheromoneState2 } = await Promise.resolve().then(() => (init_pheromone_layer(), pheromone_layer_exports));
+      return JSON.stringify(getPheromoneState2());
     }
     case "pheromone_sense": {
-      init_pheromone_layer();
-      const pheromones = await sense({
+      const { sense: sense2 } = await Promise.resolve().then(() => (init_pheromone_layer(), pheromone_layer_exports));
+      const pheromones = await sense2({
         domain: args.domain,
         type: args.type,
         tags: args.tags,
@@ -21957,14 +22055,21 @@ ${lines.join("\n")}`;
         limit: typeof args.limit === "number" ? args.limit : void 0
       });
       return JSON.stringify(pheromones.map((p) => ({
-        id: p.id, type: p.type, domain: p.domain, strength: p.strength,
-        agentId: p.agentId, label: p.label, tags: p.tags, metrics: p.metrics,
-        depositedAt: p.depositedAt, reinforcements: p.reinforcements
+        id: p.id,
+        type: p.type,
+        domain: p.domain,
+        strength: p.strength,
+        agentId: p.agentId,
+        label: p.label,
+        tags: p.tags,
+        metrics: p.metrics,
+        depositedAt: p.depositedAt,
+        reinforcements: p.reinforcements
       })));
     }
     case "pheromone_deposit": {
-      init_pheromone_layer();
-      const pheromone = await deposit(
+      const { deposit: deposit3 } = await Promise.resolve().then(() => (init_pheromone_layer(), pheromone_layer_exports));
+      const pheromone = await deposit3(
         args.source ?? "mcp-tool",
         args.type,
         args.domain,
@@ -21976,37 +22081,39 @@ ${lines.join("\n")}`;
       return JSON.stringify({ deposited: true, id: pheromone.id, type: pheromone.type, strength: pheromone.strength, domain: pheromone.domain });
     }
     case "pheromone_heatmap": {
-      init_pheromone_layer();
-      const heatmap = await getHeatmap();
+      const { getHeatmap: getHeatmap2 } = await Promise.resolve().then(() => (init_pheromone_layer(), pheromone_layer_exports));
+      const heatmap = await getHeatmap2();
       return JSON.stringify(heatmap);
     }
+    // ── PeerEval Fleet Learning MCP Tools ────────────────────────────────────
     case "peer_eval_status": {
-      init_peer_eval();
-      return JSON.stringify(getPeerEvalState());
+      const { getPeerEvalState: getPeerEvalState2 } = await Promise.resolve().then(() => (init_peer_eval(), peer_eval_exports));
+      return JSON.stringify(getPeerEvalState2());
     }
     case "peer_eval_fleet": {
-      init_peer_eval();
       const taskType = args.task_type;
       if (taskType) {
-        const learning = getFleetLearning(taskType);
-        const whatWorks = await getWhatWorks(taskType);
+        const { getFleetLearning: getFleetLearning2, getWhatWorks: getWhatWorks2 } = await Promise.resolve().then(() => (init_peer_eval(), peer_eval_exports));
+        const learning = getFleetLearning2(taskType);
+        const whatWorks = await getWhatWorks2(taskType);
         return JSON.stringify({ taskType, learning, whatWorks });
       } else {
-        return JSON.stringify(getAllFleetLearnings());
+        const { getAllFleetLearnings: getAllFleetLearnings2 } = await Promise.resolve().then(() => (init_peer_eval(), peer_eval_exports));
+        return JSON.stringify(getAllFleetLearnings2());
       }
     }
     case "peer_eval_evaluate": {
-      init_peer_eval();
-      const report = await hookIntoExecution(
+      const { hookIntoExecution: hookIntoExecution2 } = await Promise.resolve().then(() => (init_peer_eval(), peer_eval_exports));
+      const report = await hookIntoExecution2(
         args.agent_id,
-        args.task_id ?? uuid5(),
+        args.task_id ?? uuid24(),
         args.context ?? "Manual evaluation via MCP tool"
       );
       return JSON.stringify(report);
     }
     case "peer_eval_analyze": {
-      init_peer_eval();
-      const analysis = await runFleetAnalysis();
+      const { runFleetAnalysis: runFleetAnalysis2 } = await Promise.resolve().then(() => (init_peer_eval(), peer_eval_exports));
+      const analysis = await runFleetAnalysis2();
       return analysis ?? "Fleet analysis returned no results (requires RLM + sufficient eval data)";
     }
     case "hyperagent_auto_issues": {
@@ -29329,6 +29436,15 @@ async function runCronJob(jobId) {
     logger.warn({ id: jobId }, "Cron job not found");
     return;
   }
+  const redis2 = getRedis();
+  const lockKey = `cron:lock:${jobId}`;
+  if (redis2) {
+    const acquired = await redis2.set(lockKey, Date.now().toString(), "NX", "EX", 300);
+    if (!acquired) {
+      logger.warn({ id: jobId }, "Cron job skipped \u2014 previous run still active");
+      return;
+    }
+  }
   logger.info({ id: job.id, name: job.name }, "Cron job triggered");
   broadcastMessage({
     from: "Orchestrator",
@@ -29366,10 +29482,10 @@ async function runCronJob(jobId) {
     }
     if (job.id === "adoption-weekly-digest") {
       try {
-        const redis2 = getRedis();
-        if (redis2) {
+        const redis3 = getRedis();
+        if (redis3) {
           const weekAgo = Date.now() - 7 * 864e5;
-          const raw = await redis2.zrangebyscore("orchestrator:adoption-trends", weekAgo, "+inf");
+          const raw = await redis3.zrangebyscore("orchestrator:adoption-trends", weekAgo, "+inf");
           const snapshots = raw.map((r) => JSON.parse(r));
           if (snapshots.length > 0) {
             const sum = (fn) => snapshots.reduce((a, s) => a + fn(s), 0);
@@ -29820,11 +29936,11 @@ async function runCronJob(jobId) {
         gap_analysis: result.results[1]?.output ?? null,
         emerging_clusters: result.results[2]?.output ?? null
       };
-      const redis2 = getRedis();
-      if (redis2) {
-        await redis2.set("orchestrator:knowledge-feed", JSON.stringify(feed), "EX", 86400);
+      const redis3 = getRedis();
+      if (redis3) {
+        await redis3.set("orchestrator:knowledge-feed", JSON.stringify(feed), "EX", 86400);
         const briefing = buildKnowledgeBriefing(feed);
-        await redis2.set("orchestrator:knowledge-briefing-prompt", briefing, "EX", 86400);
+        await redis3.set("orchestrator:knowledge-briefing-prompt", briefing, "EX", 86400);
         logger.info("Knowledge briefing prompt cached for Open WebUI");
       }
       broadcastSSE("knowledge-feed", feed);
@@ -29836,6 +29952,9 @@ async function runCronJob(jobId) {
     job.run_count++;
     persistCronJobs();
     logger.error({ id: job.id, err: String(err) }, "Cron job failed");
+  } finally {
+    if (redis2) await redis2.del(lockKey).catch(() => {
+    });
   }
 }
 function setCronJobEnabled(jobId, enabled) {
@@ -34271,6 +34390,9 @@ var AGENT_SEEDS = [
     allowed_tool_namespaces: ["analyst", "report", "*"]
   },
   // ─── Orchestrator Inventor ─────────────────────────────────────────────
+  // ASI-Evolve-inspired closed-loop evolution engine. Runs LEARN→DESIGN→
+  // EXPERIMENT→ANALYZE cycles with UCB1/Island sampling. Deposits pheromones,
+  // triggers PeerEval, and feeds adaptive RAG rewards.
   {
     agent_id: "orchestrator_inventor",
     display_name: "Orchestrator Inventor",
@@ -34278,17 +34400,36 @@ var AGENT_SEEDS = [
     version: "1.0",
     status: "online",
     capabilities: [
-      "evolution_loop", "trial_design", "trial_execution",
-      "ucb1_sampling", "island_sampling", "rlm_reasoning",
-      "pheromone_deposit", "peer_eval", "adaptive_rag_reward",
-      "frontend_evaluation", "architecture_evolution"
+      "evolution_loop",
+      "trial_design",
+      "trial_execution",
+      "ucb1_sampling",
+      "island_sampling",
+      "rlm_reasoning",
+      "pheromone_deposit",
+      "peer_eval",
+      "adaptive_rag_reward",
+      "frontend_evaluation",
+      "architecture_evolution"
     ],
     allowed_tool_namespaces: [
-      "inventor", "evolution", "cognitive", "knowledge",
-      "pheromone", "peereval", "graph", "memory", "chains", "rlm", "*"
+      "inventor",
+      "evolution",
+      "cognitive",
+      "knowledge",
+      "pheromone",
+      "peereval",
+      "graph",
+      "memory",
+      "chains",
+      "rlm",
+      "*"
     ]
   },
   // ─── HyperAgent Autonomous Executor ────────────────────────────────────
+  // Maintained ONLY in widgetdc-orchestrator. Callable from ALL repos via MCP.
+  // Drives 72-target registry through graduated autonomy phases with
+  // persistent cross-repo memory (Redis + Neo4j Lesson nodes).
   {
     agent_id: "hyperagent-auto",
     display_name: "HyperAgent Autonomous Executor",
@@ -36729,8 +36870,14 @@ var UCB1Sampler = class {
   algorithm = "ucb1";
   c;
   totalVisits = 0;
+  pheromoneBias = /* @__PURE__ */ new Map();
+  alpha = 0.3;
+  // pheromone influence weight
   constructor(c = 1.414) {
     this.c = c;
+  }
+  setPheromoneSignals(signals) {
+    this.pheromoneBias = signals;
   }
   sample(nodes2, n) {
     if (nodes2.length === 0) return [];
@@ -36741,7 +36888,8 @@ var UCB1Sampler = class {
     const scored = nodes2.map((node) => {
       const normalizedScore = (node.score - minScore) / scoreRange;
       const exploration = node.visitCount === 0 ? Infinity : this.c * Math.sqrt(Math.log(Math.max(this.totalVisits, 1)) / node.visitCount);
-      return { node, ucb1: normalizedScore + exploration };
+      const pheromoneBoost = this.pheromoneBias.get(node.id) ?? 0;
+      return { node, ucb1: normalizedScore + exploration + this.alpha * pheromoneBoost };
     });
     scored.sort((a, b) => b.ucb1 - a.ucb1);
     const selected = scored.slice(0, n).map((s) => s.node);

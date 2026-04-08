@@ -68,6 +68,7 @@ interface FleetLearning {
   bestScore: number
   bestPractices: BestPractice[]
   lastUpdated: string
+  reliable: boolean  // true when totalEvals >= 20 (enough data for EMA stability)
 }
 
 interface BestPractice {
@@ -275,6 +276,7 @@ function updateFleetLearning(eval_: EvalReport): void {
       bestScore: 0,
       bestPractices: [],
       lastUpdated: new Date().toISOString(),
+      reliable: false,
     }
     state.fleetLearnings.set(eval_.taskType, learning)
   }
@@ -291,6 +293,8 @@ function updateFleetLearning(eval_: EvalReport): void {
     learning.bestScore = eval_.selfScore
     learning.bestAgent = eval_.agentId
   }
+
+  learning.reliable = learning.totalEvals >= 20
 }
 
 // ─── Best Practice Broadcasting ─────────────────────────────────────────────
@@ -361,6 +365,15 @@ export function getFleetLearning(taskType: string): FleetLearning | null {
     ...learning,
     bestPractices: [...learning.bestPractices],
   }
+}
+
+/**
+ * Check if fleet learning data for a task type is reliable (>= 20 evals).
+ * Used by routing engine to avoid premature optimization on sparse data.
+ */
+export function isFleetReliable(taskType: string): boolean {
+  const learning = state.fleetLearnings.get(taskType)
+  return learning?.reliable ?? false
 }
 
 /**

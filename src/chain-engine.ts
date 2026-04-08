@@ -105,6 +105,14 @@ interface StepResult {
 
 const executions = new Map<string, ChainExecution>()
 
+// Prune executions older than 24h every 30 minutes
+setInterval(() => {
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+  for (const [id, exec] of executions) {
+    if (exec.started_at < cutoff) executions.delete(id)
+  }
+}, 30 * 60 * 1000)
+
 function persistExecution(exec: ChainExecution): void {
   executions.set(exec.execution_id, exec)
   const redis = getRedis()

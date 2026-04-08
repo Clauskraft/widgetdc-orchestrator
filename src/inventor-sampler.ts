@@ -18,6 +18,7 @@ export interface Sampler {
   onNodeAdded(node: InventorNode): void
   getState(): Record<string, unknown>
   loadState(state: Record<string, unknown>): void
+  setPheromoneSignals?(signals: Map<string, number>): void
 }
 
 // ─── UCB1 Sampler ────────────────────────────────────────────────────────────
@@ -28,9 +29,15 @@ export class UCB1Sampler implements Sampler {
   algorithm: SamplingAlgorithm = 'ucb1'
   private c: number
   private totalVisits = 0
+  private pheromoneBias: Map<string, number> = new Map()
+  private alpha = 0.3 // pheromone influence weight
 
   constructor(c = 1.414) {
     this.c = c
+  }
+
+  setPheromoneSignals(signals: Map<string, number>): void {
+    this.pheromoneBias = signals
   }
 
   sample(nodes: InventorNode[], n: number): InventorNode[] {
@@ -41,13 +48,14 @@ export class UCB1Sampler implements Sampler {
     const maxScore = Math.max(...nodes.map(nd => nd.score))
     const scoreRange = maxScore - minScore || 1
 
-    // Calculate UCB1 value for each node
+    // Calculate UCB1 value for each node, with optional pheromone bias
     const scored = nodes.map(node => {
       const normalizedScore = (node.score - minScore) / scoreRange
       const exploration = node.visitCount === 0
         ? Infinity
         : this.c * Math.sqrt(Math.log(Math.max(this.totalVisits, 1)) / node.visitCount)
-      return { node, ucb1: normalizedScore + exploration }
+      const pheromoneBoost = this.pheromoneBias.get(node.id) ?? 0
+      return { node, ucb1: normalizedScore + exploration + this.alpha * pheromoneBoost }
     })
 
     // Sort by UCB1 descending, take top-n
