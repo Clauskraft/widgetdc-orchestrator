@@ -1277,6 +1277,48 @@ Run RLM-powered fleet analysis — identifies underperformers, top strategies, a
 
 ---
 
+### `inventor_run`
+**Namespace:** inventor | **Timeout:** 30s | **Handler:** orchestrator
+
+Start or resume an Inventor evolution experiment. Fire-and-forget — poll inventor_status for progress. Supports UCB1, greedy, random, or island (MAP-Elites) sampling.
+
+**Required:** `experiment_name`, `task_description`
+**Optional:** `initial_artifact`, `sampling_algorithm`, `sample_n`, `max_steps`, `chain_mode`, `resume`
+
+---
+
+### `inventor_status`
+**Namespace:** inventor | **Timeout:** 5s | **Handler:** orchestrator
+
+Get current Inventor experiment status: running state, current step, total steps, nodes created, best score, best node ID, sampling algorithm, and last error if any.
+
+---
+
+### `inventor_nodes`
+**Namespace:** inventor | **Timeout:** 5s | **Handler:** orchestrator
+
+List all Inventor trial nodes from current or last experiment. Sortable by score or creation time.
+
+**Optional:** `sort` (score|created), `limit`, `offset`
+
+---
+
+### `inventor_node`
+**Namespace:** inventor | **Timeout:** 5s | **Handler:** orchestrator
+
+Get a specific Inventor trial node by ID. Returns full artifact, score, metrics, analysis, motivation, parent lineage.
+
+**Required:** `node_id`
+
+---
+
+### `inventor_best`
+**Namespace:** inventor | **Timeout:** 5s | **Handler:** orchestrator
+
+Get the best-scoring Inventor trial node from the current or last experiment. Returns the winning solution with full artifact and metadata.
+
+---
+
 ## Adding a New Tool
 
 All protocols (REST, OpenAI, MCP) compile automatically from a single entry in `src/tool-registry.ts`:

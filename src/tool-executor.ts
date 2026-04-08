@@ -1760,6 +1760,86 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    // ── Inventor (ASI-Evolve MCP Tools — LIN-XXX) ────────────────────────
+
+    case 'inventor_run': {
+      const { runInventor, getInventorStatus: getStatus } = await import('./inventor-loop.js')
+      const status = getStatus()
+      if (status.isRunning) {
+        return JSON.stringify({
+          success: false,
+          error: `Experiment '${status.experimentName}' already running (step ${status.currentStep}/${status.totalSteps})`,
+        })
+      }
+      const config = {
+        experimentName: args.experiment_name as string,
+        taskDescription: args.task_description as string,
+        initialArtifact: args.initial_artifact as string | undefined,
+        sampling: {
+          algorithm: (args.sampling_algorithm as any) ?? 'ucb1',
+          sampleN: (args.sample_n as number) ?? 3,
+          ucb1C: 1.414,
+          islands: { count: 5, migrationInterval: 10, migrationRate: 0.1 },
+        },
+        cognition: { topK: 5, threshold: 0.3 },
+        pipeline: {
+          maxSteps: (args.max_steps as number) ?? 20,
+          maxArtifactLength: 8000,
+          engineerTimeoutMs: 120000,
+          numWorkers: 1,
+        },
+        chainMode: (args.chain_mode as string) ?? 'sequential',
+      }
+      // Fire-and-forget — caller polls inventor_status
+      runInventor(config, (args.resume as boolean) ?? false).catch(err => {
+        logger.error({ err: String(err), experiment: config.experimentName }, 'Inventor run failed')
+      })
+      return JSON.stringify({
+        success: true,
+        experiment: config.experimentName,
+        maxSteps: config.pipeline.maxSteps,
+        sampling: config.sampling.algorithm,
+        message: `Inventor experiment '${config.experimentName}' started. Poll inventor_status for progress.`,
+      })
+    }
+
+    case 'inventor_status': {
+      const { getInventorStatus: getStatus } = await import('./inventor-loop.js')
+      return JSON.stringify(getStatus())
+    }
+
+    case 'inventor_nodes': {
+      const { getInventorNodes } = await import('./inventor-loop.js')
+      const sort = (args.sort as string) ?? 'score'
+      const limit = Math.min((args.limit as number) ?? 50, 200)
+      const offset = (args.offset as number) ?? 0
+      let nodes = getInventorNodes()
+      if (sort === 'created') {
+        nodes = [...nodes].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      } else {
+        nodes = [...nodes].sort((a, b) => b.score - a.score)
+      }
+      const total = nodes.length
+      const paged = nodes.slice(offset, offset + limit)
+      return JSON.stringify({ nodes: paged, total, limit, offset })
+    }
+
+    case 'inventor_node': {
+      const { getInventorNode } = await import('./inventor-loop.js')
+      const nodeId = args.node_id as string
+      if (!nodeId) return 'Error: node_id is required'
+      const node = getInventorNode(nodeId)
+      if (!node) return `Node '${nodeId}' not found`
+      return JSON.stringify(node)
+    }
+
+    case 'inventor_best': {
+      const { getBestNode } = await import('./inventor-loop.js')
+      const best = getBestNode()
+      if (!best) return 'No nodes yet — run an experiment first with inventor_run'
+      return JSON.stringify(best)
+    }
+
     default: {
       // Check forged tools before giving up
       try {

@@ -17,7 +17,7 @@ import { z } from 'zod'
 export type ToolCategory =
   | 'knowledge' | 'graph' | 'cognitive' | 'chains' | 'agents'
   | 'assembly' | 'decisions' | 'adoption' | 'linear' | 'compliance'
-  | 'llm' | 'monitor' | 'mcp' | 'engagement' | 'memory'
+  | 'llm' | 'monitor' | 'mcp' | 'engagement' | 'memory' | 'inventor'
 
 export interface CanonicalTool {
   name: string
@@ -1012,6 +1012,68 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     input: z.object({}),
     timeoutMs: 45000,
     outputDescription: 'Strategic fleet analysis with patterns, underperformers, and recommended changes',
+  }),
+
+  // ── Inventor (ASI-Evolve Closed-Loop Evolution Engine) ──────────────────
+
+  defineTool({
+    name: 'inventor_run',
+    namespace: 'inventor',
+    description: 'Start or resume an Inventor evolution experiment. Fire-and-forget — poll inventor_status for progress. Requires experiment name + task description. Supports UCB1, greedy, random, or island (MAP-Elites) sampling.',
+    input: z.object({
+      experiment_name: z.string().describe('Unique experiment identifier (used for Redis/Neo4j namespacing)'),
+      task_description: z.string().describe('Problem description to evolve solutions for'),
+      initial_artifact: z.string().optional().describe('Optional seed solution to start from'),
+      sampling_algorithm: z.enum(['ucb1', 'greedy', 'random', 'island']).optional().describe('Sampling strategy (default: ucb1)'),
+      sample_n: z.number().optional().describe('Number of parent nodes to sample per step (default: 3)'),
+      max_steps: z.number().optional().describe('Maximum evolution steps (default: 20)'),
+      chain_mode: z.enum(['sequential', 'parallel', 'debate']).optional().describe('Chain execution mode (default: sequential)'),
+      resume: z.boolean().optional().describe('Resume a paused experiment (default: false)'),
+    }),
+    timeoutMs: 30000,
+    outputDescription: 'Experiment start confirmation with poll URL',
+  }),
+
+  defineTool({
+    name: 'inventor_status',
+    namespace: 'inventor',
+    description: 'Get current Inventor experiment status: running state, current step, total steps, nodes created, best score, best node ID, sampling algorithm, and last error if any.',
+    input: z.object({}),
+    timeoutMs: 5000,
+    outputDescription: 'InventorStatus with isRunning, currentStep, totalSteps, nodesCreated, bestScore, bestNodeId',
+  }),
+
+  defineTool({
+    name: 'inventor_nodes',
+    namespace: 'inventor',
+    description: 'List all Inventor trial nodes from current or last experiment. Sortable by score or creation time. Each node has: artifact, score, metrics, analysis, motivation, parent lineage.',
+    input: z.object({
+      sort: z.enum(['score', 'created']).optional().describe('Sort order (default: score)'),
+      limit: z.number().optional().describe('Max nodes to return (default: 50, max: 200)'),
+      offset: z.number().optional().describe('Pagination offset (default: 0)'),
+    }),
+    timeoutMs: 5000,
+    outputDescription: 'Paginated array of InventorNodes sorted by score or creation time',
+  }),
+
+  defineTool({
+    name: 'inventor_node',
+    namespace: 'inventor',
+    description: 'Get a specific Inventor trial node by ID. Returns full artifact, score, metrics, analysis, motivation, parent ID, island, visit count, and timestamps.',
+    input: z.object({
+      node_id: z.string().describe('The trial node ID to retrieve'),
+    }),
+    timeoutMs: 5000,
+    outputDescription: 'Complete InventorNode with artifact and all metadata',
+  }),
+
+  defineTool({
+    name: 'inventor_best',
+    namespace: 'inventor',
+    description: 'Get the best-scoring Inventor trial node from the current or last experiment. Returns the winning solution with full artifact, score breakdown, and evolution lineage.',
+    input: z.object({}),
+    timeoutMs: 5000,
+    outputDescription: 'Best InventorNode with highest score, full artifact and metadata',
   }),
 ]
 

@@ -1376,6 +1376,41 @@ await test('150. POST /api/tools/peer_eval_analyze responds', async () => {
   assert(r.body?.data?.tool_name === 'peer_eval_analyze', `wrong tool_name`)
 })
 
+// ── 151. inventor_run — MCP tool exists ──
+await test('151. POST /api/tools/inventor_run responds', async () => {
+  const r = await api('/api/tools/inventor_run', { method: 'POST', body: JSON.stringify({ experiment_name: 'e2e-test', task_description: 'E2E test run' }) })
+  assert(r.status !== 404, `inventor_run not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'inventor_run', `wrong tool_name`)
+})
+
+// ── 152. inventor_status — MCP tool exists ──
+await test('152. POST /api/tools/inventor_status responds', async () => {
+  const r = await api('/api/tools/inventor_status', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `inventor_status not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'inventor_status', `wrong tool_name`)
+})
+
+// ── 153. inventor_nodes — MCP tool exists ──
+await test('153. POST /api/tools/inventor_nodes responds', async () => {
+  const r = await api('/api/tools/inventor_nodes', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `inventor_nodes not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'inventor_nodes', `wrong tool_name`)
+})
+
+// ── 154. inventor_node — MCP tool exists ──
+await test('154. POST /api/tools/inventor_node responds', async () => {
+  const r = await api('/api/tools/inventor_node', { method: 'POST', body: JSON.stringify({ node_id: 'nonexistent' }) })
+  assert(r.status !== 404, `inventor_node not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'inventor_node', `wrong tool_name`)
+})
+
+// ── 155. inventor_best — MCP tool exists ──
+await test('155. POST /api/tools/inventor_best responds', async () => {
+  const r = await api('/api/tools/inventor_best', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `inventor_best not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'inventor_best', `wrong tool_name`)
+})
+
 // ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped
