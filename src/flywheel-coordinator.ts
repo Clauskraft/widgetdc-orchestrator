@@ -17,6 +17,7 @@
  */
 
 import { logger } from './logger.js'
+import { getRedis } from './redis.js'
 import { getCostSummary, getAllCostProfiles } from './cost-optimizer.js'
 import { getAllFleetLearnings, getPeerEvalState } from './peer-eval.js'
 import { computeTelemetry } from './adoption-telemetry.js'
@@ -37,11 +38,30 @@ export interface FlywheelReport {
   weeklyDelta: number          // change vs last week (0 if first run)
 }
 
-// ─── In-memory last report (for delta calculation) ───────────────────────────
+// ─── Last report: persisted to Redis for cross-deploy delta calculation ──────
+const FLYWHEEL_REDIS_KEY = 'flywheel:last-report'
 let lastReport: FlywheelReport | null = null
+
+async function loadLastReport(): Promise<void> {
+  const redis = getRedis()
+  if (!redis || lastReport) return
+  try {
+    const raw = await redis.get(FLYWHEEL_REDIS_KEY)
+    if (raw) lastReport = JSON.parse(raw) as FlywheelReport
+  } catch { /* */ }
+}
+
+async function saveLastReport(report: FlywheelReport): Promise<void> {
+  const redis = getRedis()
+  if (!redis) return
+  try {
+    await redis.set(FLYWHEEL_REDIS_KEY, JSON.stringify(report), 'EX', 691200) // 8 days TTL
+  } catch { /* */ }
+}
 
 export async function runWeeklySync(): Promise<FlywheelReport> {
   logger.info('[Flywheel] Starting weekly sync')
+  await loadLastReport()
   const pillars: PillarScore[] = await Promise.all([
     scoreCostEfficiency(),
     scoreFleetIntelligence(),
@@ -68,6 +88,7 @@ export async function runWeeklySync(): Promise<FlywheelReport> {
   }
 
   lastReport = report
+  await saveLastReport(report)
   logger.info({ compound: report.compoundScore, delta: report.weeklyDelta }, '[Flywheel] Weekly sync complete')
   return report
 }

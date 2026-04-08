@@ -12,6 +12,18 @@ import { callMcpTool } from './mcp-caller.js'
 import { logger } from './logger.js'
 import { broadcastSSE } from './sse.js'
 
+// ─── Sanitization (strip sensitive data from error messages before persistence)
+function sanitizeErrorMessage(msg: string): string {
+  return msg
+    .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]')
+    .replace(/api[_-]?key[=:]\s*\S+/gi, 'api_key=[REDACTED]')
+    .replace(/password[=:]\s*\S+/gi, 'password=[REDACTED]')
+    .replace(/token[=:]\s*\S+/gi, 'token=[REDACTED]')
+    .replace(/https?:\/\/[^\s"']+[?&][^\s"']*/g, (url) => {
+      try { const u = new URL(url); u.search = '[REDACTED]'; return u.toString() } catch { return url }
+    })
+}
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type FailureCategory = 'timeout' | '502' | 'auth' | 'validation' | 'mcp_error' | 'unknown'
@@ -105,7 +117,7 @@ export async function harvestFailures(windowHours = 24): Promise<FailureEvent[]>
             execution_id: execId,
             chain_name: exec.name,
             category: categorizeFailure(errorMsg),
-            error_message: errorMsg.slice(0, 500),
+            error_message: sanitizeErrorMessage(errorMsg).slice(0, 500),
             affected_tool: failedSteps[0]?.action ?? null,
             affected_agent: failedSteps[0]?.agent_id ?? null,
             timestamp: exec.started_at,

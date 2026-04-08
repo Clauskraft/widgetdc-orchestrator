@@ -68,7 +68,7 @@ inventorRouter.post('/run', async (req: Request, res: Response) => {
       threshold: config.cognition?.threshold ?? 0.3,
     },
     pipeline: {
-      maxSteps: config.pipeline?.maxSteps ?? 20,
+      maxSteps: Math.min(config.pipeline?.maxSteps ?? 20, 100),
       maxArtifactLength: config.pipeline?.maxArtifactLength ?? 8000,
       engineerTimeoutMs: config.pipeline?.engineerTimeoutMs ?? 120000,
       numWorkers: config.pipeline?.numWorkers ?? 1,

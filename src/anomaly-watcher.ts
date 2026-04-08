@@ -651,7 +651,7 @@ async function persistState(): Promise<void> {
   const redis = getRedis()
   if (!redis) return
   try {
-    await redis.set(REDIS_KEY, JSON.stringify(state))
+    await redis.set(REDIS_KEY, JSON.stringify({ ...state, _schemaVersion: 1 }), 'EX', 86400)
   } catch { /* */ }
 }
 
@@ -661,7 +661,11 @@ async function loadState(): Promise<void> {
   try {
     const raw = await redis.get(REDIS_KEY)
     if (raw) {
-      const loaded = JSON.parse(raw) as WatcherState
+      const loaded = JSON.parse(raw) as WatcherState & { _schemaVersion?: number }
+      if (loaded._schemaVersion !== 1) {
+        logger.warn('Anomaly-watcher: schema version mismatch, using defaults')
+        return
+      }
       state = { ...state, ...loaded }
       logger.info({ totalScans: state.totalScans, patterns: state.patterns.length },
         'Anomaly-watcher: restored state from Redis')

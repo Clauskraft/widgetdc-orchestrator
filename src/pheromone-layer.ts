@@ -139,6 +139,7 @@ export async function deposit(
   }
 
   state.totalDeposits++
+  // activePheromones derived from Redis zcard in persistState — increment as best-effort estimate
   state.activePheromones++
 
   // Active cross-pillar amplification: check if multiple pheromone types
@@ -259,6 +260,12 @@ export async function runDecayCycle(): Promise<{ decayed: number; evaporated: nu
   const redis = getRedis()
   if (!redis) return { decayed: 0, evaporated: 0 }
 
+  // Prevent overlapping decay cycles (manual trigger + cron)
+  const LOCK_KEY = `${REDIS_PREFIX}decay-lock`
+  const locked = await redis.set(LOCK_KEY, '1', 'EX', 60, 'NX')
+  if (!locked) return { decayed: 0, evaporated: 0 }
+
+  try {
   const allIds = await redis.zrangebyscore(REDIS_INDEX_KEY, '0', '+inf')
   let decayed = 0
   let evaporated = 0
@@ -301,6 +308,9 @@ export async function runDecayCycle(): Promise<{ decayed: number; evaporated: nu
 
   logger.info({ decayed, evaporated, remaining: state.activePheromones }, 'Pheromone decay cycle')
   return { decayed, evaporated }
+  } finally {
+    await redis.del(LOCK_KEY).catch(() => {})
+  }
 }
 
 /**
@@ -471,9 +481,14 @@ export async function getHeatmap(): Promise<TrailSummary[]> {
   const redis = getRedis()
   if (!redis) return []
 
-  // Discover all domain indexes
-  const keys = await redis.keys(`${REDIS_PREFIX}domain:*`)
-  const domains = keys.map(k => k.replace(`${REDIS_PREFIX}domain:`, ''))
+  // Discover all domain indexes via SCAN (not KEYS — O(N) blocking on shared Redis)
+  const domains: string[] = []
+  let cursor = '0'
+  do {
+    const [next, found] = await redis.scan(cursor, 'MATCH', `${REDIS_PREFIX}domain:*`, 'COUNT', '50')
+    cursor = next
+    for (const k of found) domains.push(k.replace(`${REDIS_PREFIX}domain:`, ''))
+  } while (cursor !== '0' && domains.length < 50)
 
   const summaries: TrailSummary[] = []
   for (const domain of domains.slice(0, 20)) {

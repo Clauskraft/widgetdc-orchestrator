@@ -116,7 +116,10 @@ async function extractAndMerge(answer: string, query: string): Promise<void> {
   for (const entity of entities) {
     if (!entity.name || entity.name.length < 3) continue
     try {
-      const safeLabel = (entity.type ?? 'Knowledge').replace(/[^A-Za-z0-9_]/g, '_').slice(0, 64)
+      const ALLOWED_LABELS = new Set(['Knowledge', 'Concept', 'Entity', 'Tool', 'Agent', 'Decision', 'Strategy', 'Process', 'Technology', 'Organization', 'Person', 'Metric'])
+      let safeLabel = (entity.type ?? 'Knowledge').replace(/[^A-Za-z0-9_]/g, '_').slice(0, 64)
+      if (/^[0-9]/.test(safeLabel)) safeLabel = 'E_' + safeLabel
+      if (!ALLOWED_LABELS.has(safeLabel)) safeLabel = 'Knowledge'
       await callMcpTool({
         toolName: 'graph.write_cypher',
         args: {

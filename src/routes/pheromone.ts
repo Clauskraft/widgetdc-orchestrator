@@ -69,7 +69,18 @@ pheromoneRouter.post('/deposit', async (req: Request, res: Response) => {
       res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Required: source, domain, label, strength', status_code: 400 } })
       return
     }
-    await onExternalSignal(source, domain, label, strength, metrics ?? {})
+    // Input bounds: strength 0-1, string lengths capped, metrics depth limited
+    const clampedStrength = Math.max(0, Math.min(1, Number(strength) || 0))
+    const safeSource = String(source).slice(0, 128)
+    const safeDomain = String(domain).slice(0, 128)
+    const safeLabel = String(label).slice(0, 256)
+    const safeMetrics: Record<string, number> = {}
+    if (metrics && typeof metrics === 'object') {
+      for (const [k, v] of Object.entries(metrics).slice(0, 20)) {
+        safeMetrics[String(k).slice(0, 64)] = Number(v) || 0
+      }
+    }
+    await onExternalSignal(safeSource, safeDomain, safeLabel, clampedStrength, safeMetrics)
     res.json({ success: true, message: 'External pheromone deposited' })
   } catch (err) {
     res.status(500).json({ success: false, error: { code: 'DEPOSIT_FAILED', message: String(err), status_code: 500 } })
