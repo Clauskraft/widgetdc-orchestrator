@@ -1,10 +1,16 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useQuery } from '@tanstack/react-query'
-import { apiGet } from '@/lib/api-client'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useState } from 'react'
+import { apiGet, apiPost } from '@/lib/api-client'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { PlusCircle, RefreshCw } from 'lucide-react'
 
 interface PheromoneStatus {
   success: boolean
@@ -51,6 +57,40 @@ interface HeatmapResponse {
 }
 
 function PheromonePage() {
+  const queryClient = useQueryClient()
+  const [depositType, setDepositType] = useState<string>('attraction')
+  const [depositDomain, setDepositDomain] = useState('')
+  const [depositMessage, setDepositMessage] = useState('')
+  const [depositStrength, setDepositStrength] = useState('0.8')
+  const [depositing, setDepositing] = useState(false)
+  const [depositResult, setDepositResult] = useState<string | null>(null)
+
+  async function deposit() {
+    if (!depositDomain.trim() || !depositMessage.trim() || depositing) return
+    setDepositing(true)
+    setDepositResult(null)
+    try {
+      await apiPost('/api/pheromone/deposit', {
+        type: depositType,
+        domain: depositDomain.trim(),
+        message: depositMessage.trim(),
+        strength: parseFloat(depositStrength) || 0.8,
+        depositor: 'command-center',
+        tags: ['cc-deposit'],
+      })
+      setDepositResult('ok')
+      setDepositMessage('')
+      await queryClient.invalidateQueries({ queryKey: ['pheromone-status'] })
+      await queryClient.invalidateQueries({ queryKey: ['pheromone-sense'] })
+      await queryClient.invalidateQueries({ queryKey: ['pheromone-heatmap'] })
+    } catch (err: any) {
+      setDepositResult(`error: ${err?.response?.data?.error ?? err?.message}`)
+    } finally {
+      setDepositing(false)
+      setTimeout(() => setDepositResult(null), 5000)
+    }
+  }
+
   const { data: status, isLoading: statusLoading, error: statusError } = useQuery<PheromoneStatus>({
     queryKey: ['pheromone-status'],
     queryFn: () => apiGet('/api/pheromone/status'),
@@ -164,6 +204,75 @@ function PheromonePage() {
               No active pheromone domains. Signals may have decayed.
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      {/* Deposit Console */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <PlusCircle className="h-4 w-4" />
+            Deposit Signal
+          </CardTitle>
+          <CardDescription>Manually deposit a pheromone signal into the substrate</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Type</label>
+              <Select value={depositType} onValueChange={setDepositType}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {['attraction', 'repellent', 'trail', 'external', 'amplification'].map(t => (
+                    <SelectItem key={t} value={t}>{t}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Domain</label>
+              <Input
+                placeholder="e.g. graph, rag, chain"
+                value={depositDomain}
+                onChange={e => setDepositDomain(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Strength (0–1)</label>
+              <Input
+                type="number"
+                min="0"
+                max="1"
+                step="0.1"
+                value={depositStrength}
+                onChange={e => setDepositStrength(e.target.value)}
+              />
+            </div>
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Message</label>
+            <Textarea
+              placeholder="Signal message…"
+              value={depositMessage}
+              onChange={e => setDepositMessage(e.target.value)}
+              rows={2}
+              className="resize-none"
+            />
+          </div>
+          <div className="flex items-center gap-3">
+            <Button onClick={deposit} disabled={depositing || !depositDomain.trim() || !depositMessage.trim()}
+              size="sm" className="flex items-center gap-2">
+              {depositing ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <PlusCircle className="h-3.5 w-3.5" />}
+              {depositing ? 'Depositing…' : 'Deposit'}
+            </Button>
+            {depositResult && (
+              <span className={`text-xs ${depositResult === 'ok' ? 'text-green-600' : 'text-red-500'}`}>
+                {depositResult === 'ok' ? '✓ Deposited successfully' : depositResult}
+              </span>
+            )}
+          </div>
         </CardContent>
       </Card>
 

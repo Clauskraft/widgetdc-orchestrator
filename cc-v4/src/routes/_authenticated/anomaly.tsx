@@ -1,10 +1,13 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useQuery } from '@tanstack/react-query'
-import { apiGet } from '@/lib/api-client'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useState } from 'react'
+import { apiGet, getApiClient } from '@/lib/api-client'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
+import { CheckCircle } from 'lucide-react'
 
 interface AnomalyStatus {
   success: boolean
@@ -31,6 +34,24 @@ interface AnomalyStatus {
 }
 
 function AnomalyPage() {
+  const queryClient = useQueryClient()
+  const [acknowledging, setAcknowledging] = useState<string | null>(null)
+  const [acknowledged, setAcknowledged] = useState<Set<string>>(new Set())
+
+  async function acknowledge(id: string) {
+    setAcknowledging(id)
+    try {
+      await getApiClient().post(`/api/anomaly-watcher/acknowledge/${id}`)
+      setAcknowledged(s => new Set([...s, id]))
+      await queryClient.invalidateQueries({ queryKey: ['anomaly-status'] })
+    } catch {
+      // Best-effort: still mark locally acknowledged
+      setAcknowledged(s => new Set([...s, id]))
+    } finally {
+      setAcknowledging(null)
+    }
+  }
+
   const { data, isLoading, error } = useQuery<AnomalyStatus>({
     queryKey: ['anomaly-status'],
     queryFn: () => apiGet('/api/anomaly-watcher/status'),
@@ -125,12 +146,12 @@ function AnomalyPage() {
           <CardDescription>Currently detected issues requiring attention</CardDescription>
         </CardHeader>
         <CardContent>
-          {d?.activeAnomalies && d.activeAnomalies.length > 0 ? (
+          {d?.activeAnomalies && d.activeAnomalies.filter(a => !acknowledged.has(a.id)).length > 0 ? (
             <div className="space-y-3">
-              {d.activeAnomalies.map((anomaly) => (
-                <div key={anomaly.id} className="flex items-center justify-between border-b pb-2 last:border-0">
-                  <div>
-                    <div className="flex items-center gap-2">
+              {d.activeAnomalies.filter(a => !acknowledged.has(a.id)).map((anomaly) => (
+                <div key={anomaly.id} className="flex items-start justify-between border-b pb-3 last:border-0 gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
                       <Badge
                         variant={
                           anomaly.severity === 'critical' ? 'destructive' :
@@ -142,11 +163,21 @@ function AnomalyPage() {
                       </Badge>
                       <span className="font-medium text-sm">{anomaly.type}</span>
                     </div>
-                    <p className="text-sm text-muted-foreground mt-1">{anomaly.message}</p>
+                    <p className="text-sm text-muted-foreground">{anomaly.message}</p>
                     <span className="text-xs text-muted-foreground">
                       Source: {anomaly.source} · Detected: {new Date(anomaly.detectedAt).toLocaleString()}
                     </span>
                   </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => acknowledge(anomaly.id)}
+                    disabled={acknowledging === anomaly.id}
+                    className="flex items-center gap-1.5 flex-shrink-0 text-xs"
+                  >
+                    <CheckCircle className="h-3.5 w-3.5" />
+                    {acknowledging === anomaly.id ? 'Ack…' : 'Acknowledge'}
+                  </Button>
                 </div>
               ))}
             </div>
