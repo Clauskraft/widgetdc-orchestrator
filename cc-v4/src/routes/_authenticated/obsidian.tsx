@@ -12,9 +12,12 @@ import { RefreshCw, Search as SearchIcon } from 'lucide-react'
 
 interface ObsidianStatus {
   connected: boolean
+  mode?: 'live' | 'github'
   error?: string
   setup?: string
   versions?: Record<string, string>
+  vault_name?: string
+  repo?: string
 }
 
 interface VaultEntry {
@@ -115,26 +118,37 @@ function ObsidianPage() {
         <Alert>
           <AlertTitle>Obsidian not connected</AlertTitle>
           <AlertDescription className="mt-2">
-            <p className="mb-2">{status?.error ?? 'OBSIDIAN_API_URL is not configured.'}</p>
-            {status?.setup && <p className="font-mono text-xs bg-muted p-2 rounded">{status.setup}</p>}
+            <p className="mb-2">{status?.error ?? 'No vault mode configured.'}</p>
           </AlertDescription>
         </Alert>
         <Card>
           <CardHeader>
-            <CardTitle>Setup Instructions</CardTitle>
+            <CardTitle>Setup — choose a mode</CardTitle>
             <CardDescription>Connect your Obsidian vault to the Command Center</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-4 text-sm">
-            <ol className="list-decimal list-inside space-y-2 text-muted-foreground">
-              <li>Install the <strong className="text-foreground">Local REST API</strong> community plugin in Obsidian</li>
-              <li>Enable the plugin — copy the API key from plugin settings</li>
-              <li>Set <code className="bg-muted px-1 rounded font-mono text-xs">OBSIDIAN_API_URL=http://localhost:27123</code> in Railway env vars</li>
-              <li>Set <code className="bg-muted px-1 rounded font-mono text-xs">OBSIDIAN_API_TOKEN=your-api-key</code> in Railway env vars</li>
-              <li>For remote (Railway → local): use ngrok or Cloudflare Tunnel to expose port 27123</li>
-            </ol>
-            <div className="bg-muted rounded p-3 font-mono text-xs space-y-1">
-              <div>OBSIDIAN_API_URL=https://your-tunnel.ngrok.io</div>
-              <div>OBSIDIAN_API_TOKEN=your-obsidian-api-key</div>
+          <CardContent className="space-y-6 text-sm">
+            <div>
+              <p className="font-semibold mb-2">Option A — GitHub mode (recommended, no Obsidian required)</p>
+              <ol className="list-decimal list-inside space-y-1 text-muted-foreground mb-3">
+                <li>Create a GitHub Personal Access Token with <strong className="text-foreground">repo</strong> scope</li>
+                <li>Set it in Railway env vars:</li>
+              </ol>
+              <div className="bg-muted rounded p-3 font-mono text-xs space-y-1">
+                <div>GITHUB_TOKEN=ghp_your-token-here</div>
+                <div className="text-muted-foreground"># Optional: OBSIDIAN_GITHUB_REPO=Clauskraft/Obsidian-Vault</div>
+              </div>
+            </div>
+            <div>
+              <p className="font-semibold mb-2">Option B — Live mode (requires Obsidian running + tunnel)</p>
+              <ol className="list-decimal list-inside space-y-1 text-muted-foreground mb-3">
+                <li>Install <strong className="text-foreground">Local REST API</strong> plugin in Obsidian + copy API key</li>
+                <li>Expose port 27123 via ngrok or Cloudflare Tunnel</li>
+                <li>Set in Railway env vars:</li>
+              </ol>
+              <div className="bg-muted rounded p-3 font-mono text-xs space-y-1">
+                <div>OBSIDIAN_API_URL=https://your-tunnel.ngrok.io</div>
+                <div>OBSIDIAN_API_TOKEN=your-obsidian-api-key</div>
+              </div>
             </div>
           </CardContent>
         </Card>
@@ -166,7 +180,9 @@ function ObsidianPage() {
             <RefreshCw className="h-4 w-4 mr-1" />
             Refresh
           </Button>
-          <Badge className="bg-green-600 text-white">Connected</Badge>
+          <Badge className="bg-green-600 text-white">
+            {status?.mode === 'github' ? 'GitHub mode' : 'Live'}
+          </Badge>
         </div>
       </div>
 

@@ -121,7 +121,11 @@ var init_config = __esm({
       ipDenyList: optional("IP_DENY_LIST", ""),
       // Obsidian REST API (LIN-652) — set to http://localhost:27123 or a tunnel URL
       obsidianUrl: optional("OBSIDIAN_API_URL", ""),
-      obsidianToken: optional("OBSIDIAN_API_TOKEN", "")
+      obsidianToken: optional("OBSIDIAN_API_TOKEN", ""),
+      // GitHub token for Obsidian vault fallback (private repo access)
+      // When OBSIDIAN_API_URL is not set, reads vault directly from GitHub API
+      githubToken: optional("GITHUB_TOKEN", ""),
+      obsidianGithubRepo: optional("OBSIDIAN_GITHUB_REPO", "Clauskraft/Obsidian-Vault")
     };
   }
 });
@@ -201,10 +205,10 @@ var init_sse = __esm({
 // src/redis.ts
 import Redis from "ioredis";
 function getRedis() {
-  return redis;
+  return redis2;
 }
 function isRedisEnabled() {
-  return redis !== null;
+  return redis2 !== null;
 }
 async function initRedis() {
   if (!redisUrl) {
@@ -212,7 +216,7 @@ async function initRedis() {
     return;
   }
   try {
-    redis = new Redis(redisUrl, {
+    redis2 = new Redis(redisUrl, {
       maxRetriesPerRequest: 3,
       retryStrategy(times) {
         if (times > 5) return null;
@@ -220,20 +224,20 @@ async function initRedis() {
       },
       lazyConnect: true
     });
-    await redis.connect();
+    await redis2.connect();
     logger.info("Redis connected \u2014 agent registry persistence enabled");
   } catch (err) {
     logger.warn({ err: String(err) }, "Redis connection failed \u2014 falling back to in-memory only");
-    redis = null;
+    redis2 = null;
   }
 }
-var redisUrl, redis;
+var redisUrl, redis2;
 var init_redis = __esm({
   "src/redis.ts"() {
     "use strict";
     init_logger();
     redisUrl = process.env["REDIS_URL"] ?? "";
-    redis = null;
+    redis2 = null;
   }
 });
 
@@ -246,11 +250,11 @@ async function storeMessage(msg) {
   if (memoryMessages.length > MAX_MESSAGES) memoryMessages = memoryMessages.slice(0, MAX_MESSAGES);
   try {
     if (isRedisEnabled()) {
-      const redis2 = getRedis();
-      if (redis2) {
-        await redis2.lpush(REDIS_KEY, JSON.stringify(msg));
-        await redis2.ltrim(REDIS_KEY, 0, MAX_MESSAGES - 1);
-        await redis2.expire(REDIS_KEY, TTL_SECONDS);
+      const redis3 = getRedis();
+      if (redis3) {
+        await redis3.lpush(REDIS_KEY, JSON.stringify(msg));
+        await redis3.ltrim(REDIS_KEY, 0, MAX_MESSAGES - 1);
+        await redis3.expire(REDIS_KEY, TTL_SECONDS);
         if (msg.thread_id) {
           const threadMeta = JSON.stringify({
             thread_id: msg.thread_id,
@@ -258,7 +262,7 @@ async function storeMessage(msg) {
             reply_count: 0
             // incremented separately
           });
-          await redis2.hset(REDIS_THREADS_KEY, msg.thread_id, threadMeta);
+          await redis3.hset(REDIS_THREADS_KEY, msg.thread_id, threadMeta);
         }
       }
     }
@@ -270,9 +274,9 @@ async function getHistory(limit = 100, offset = 0, target) {
   let messages = [];
   try {
     if (isRedisEnabled()) {
-      const redis2 = getRedis();
-      if (redis2) {
-        const raw = await redis2.lrange(REDIS_KEY, offset, offset + limit * 2 - 1);
+      const redis3 = getRedis();
+      if (redis3) {
+        const raw = await redis3.lrange(REDIS_KEY, offset, offset + limit * 2 - 1);
         messages = raw.map((r) => JSON.parse(r));
       }
     }
@@ -301,10 +305,10 @@ async function searchMessages(query, limit = 50) {
 async function togglePin(messageId, pin) {
   try {
     if (isRedisEnabled()) {
-      const redis2 = getRedis();
-      if (redis2) {
-        if (pin) await redis2.sadd(REDIS_PINS_KEY, messageId);
-        else await redis2.srem(REDIS_PINS_KEY, messageId);
+      const redis3 = getRedis();
+      if (redis3) {
+        if (pin) await redis3.sadd(REDIS_PINS_KEY, messageId);
+        else await redis3.srem(REDIS_PINS_KEY, messageId);
       }
     }
   } catch {
@@ -316,8 +320,8 @@ async function getPinnedMessages() {
   let pinnedIds = [];
   try {
     if (isRedisEnabled()) {
-      const redis2 = getRedis();
-      if (redis2) pinnedIds = await redis2.smembers(REDIS_PINS_KEY);
+      const redis3 = getRedis();
+      if (redis3) pinnedIds = await redis3.smembers(REDIS_PINS_KEY);
     }
   } catch {
   }
@@ -330,9 +334,9 @@ async function getPinnedMessages() {
 async function hydrateMessages() {
   try {
     if (isRedisEnabled()) {
-      const redis2 = getRedis();
-      if (redis2) {
-        const raw = await redis2.lrange(REDIS_KEY, 0, MAX_MESSAGES - 1);
+      const redis3 = getRedis();
+      if (redis3) {
+        const raw = await redis3.lrange(REDIS_KEY, 0, MAX_MESSAGES - 1);
         memoryMessages = raw.map((r) => JSON.parse(r));
         logger.info({ count: memoryMessages.length }, "Chat history hydrated from Redis");
       }
@@ -557,21 +561,21 @@ var init_chat_broadcaster = __esm({
 
 // src/agents/agent-registry.ts
 function persistToRedis(agentId, entry) {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   const serialised = JSON.stringify({
     handshake: entry.handshake,
     registeredAt: entry.registeredAt.toISOString(),
     lastSeenAt: entry.lastSeenAt.toISOString()
   });
-  redis2.hset(REDIS_KEY2, agentId, serialised).catch((err) => {
+  redis3.hset(REDIS_KEY2, agentId, serialised).catch((err) => {
     logger.warn({ err: String(err), agent_id: agentId }, "Redis persist failed");
   });
 }
 function removeFromRedis(agentId) {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  redis2.hdel(REDIS_KEY2, agentId).catch(() => {
+  const redis3 = getRedis();
+  if (!redis3) return;
+  redis3.hdel(REDIS_KEY2, agentId).catch(() => {
   });
 }
 var REDIS_KEY2, registry, AgentRegistry;
@@ -585,10 +589,10 @@ var init_agent_registry = __esm({
     AgentRegistry = {
       /** Hydrate registry from Redis on startup */
       async hydrate() {
-        const redis2 = getRedis();
-        if (!redis2) return;
+        const redis3 = getRedis();
+        if (!redis3) return;
         try {
-          const all = await redis2.hgetall(REDIS_KEY2);
+          const all = await redis3.hgetall(REDIS_KEY2);
           let count = 0;
           for (const [agentId, json] of Object.entries(all)) {
             try {
@@ -686,8 +690,8 @@ var init_agent_registry = __esm({
       async purgeAll() {
         const count = registry.size;
         registry.clear();
-        const redis2 = getRedis();
-        if (redis2) await redis2.del(REDIS_KEY2).catch(() => {
+        const redis3 = getRedis();
+        if (redis3) await redis3.del(REDIS_KEY2).catch(() => {
         });
         return count;
       },
@@ -10240,8 +10244,8 @@ SET n.updatedAt = datetime()`,
   }
 }
 async function hookQualitySignal(query, strategy, channels, resultCount, confidenceAvg) {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   try {
     const signal = JSON.stringify({
       query: query.slice(0, 200),
@@ -10251,8 +10255,8 @@ async function hookQualitySignal(query, strategy, channels, resultCount, confide
       confidence: confidenceAvg,
       timestamp: Date.now()
     });
-    await redis2.lpush("orchestrator:rag-quality-signals", signal);
-    await redis2.ltrim("orchestrator:rag-quality-signals", 0, 9999);
+    await redis3.lpush("orchestrator:rag-quality-signals", signal);
+    await redis3.ltrim("orchestrator:rag-quality-signals", 0, 9999);
   } catch {
   }
 }
@@ -10320,11 +10324,11 @@ __export(adaptive_rag_exports, {
 async function getAdaptiveWeights() {
   const now = Date.now();
   if (now - weightsCacheTime < CACHE_TTL_MS) return cachedWeights;
-  const redis2 = getRedis();
-  if (!redis2) return cachedWeights;
+  const redis3 = getRedis();
+  if (!redis3) return cachedWeights;
   try {
     const raw = await Promise.race([
-      redis2.get(REDIS_WEIGHTS_KEY),
+      redis3.get(REDIS_WEIGHTS_KEY),
       new Promise((r) => setTimeout(() => r(null), 200))
     ]);
     if (raw) {
@@ -10336,11 +10340,11 @@ async function getAdaptiveWeights() {
   return cachedWeights;
 }
 async function analyzeOutcomes(windowHours = 168) {
-  const redis2 = getRedis();
-  if (!redis2) return [];
+  const redis3 = getRedis();
+  if (!redis3) return [];
   try {
     const cutoff = Date.now() - windowHours * 36e5;
-    const raw = await redis2.lrange(REDIS_OUTCOMES_KEY, 0, 9999);
+    const raw = await redis3.lrange(REDIS_OUTCOMES_KEY, 0, 9999);
     const outcomes = raw.map((r) => {
       try {
         return JSON.parse(r);
@@ -10408,10 +10412,10 @@ async function retrainRoutingWeights() {
   }
   newWeights.updated_at = (/* @__PURE__ */ new Date()).toISOString();
   newWeights.training_samples = stats.reduce((s, st) => s + st.total_queries, 0);
-  const redis2 = getRedis();
-  if (redis2) {
+  const redis3 = getRedis();
+  if (redis3) {
     try {
-      await redis2.set(REDIS_WEIGHTS_KEY, JSON.stringify(newWeights));
+      await redis3.set(REDIS_WEIGHTS_KEY, JSON.stringify(newWeights));
     } catch {
     }
   }
@@ -11000,6 +11004,36 @@ __export(pheromone_layer_exports, {
 });
 import { v4 as uuid5 } from "uuid";
 async function deposit(agentId, type, domain, strength, label, metrics2 = {}, tags = [], ttlSeconds = DEFAULT_TTL) {
+  const dedupKey = `${REDIS_PREFIX}dedup:${domain}:${type}:${label}`;
+  const redis3 = getRedis();
+  if (redis3) {
+    try {
+      const existingId = await redis3.get(`${dedupKey}:id`);
+      if (existingId) {
+        const existingData = await redis3.get(`${REDIS_PREFIX}${existingId}`);
+        if (existingData) {
+          const existing = JSON.parse(existingData);
+          const ageMs = Date.now() - new Date(existing.depositedAt).getTime();
+          if (ageMs < 3e5) {
+            const newStrength = Math.min(1, (existing.strength + strength) / 2);
+            existing.strength = newStrength;
+            existing.reinforcements++;
+            existing.metrics = { ...existing.metrics, ...metrics2 };
+            await redis3.set(`${REDIS_PREFIX}${existingId}`, JSON.stringify(existing), "EX", existing.ttlSeconds);
+            await redis3.zadd(REDIS_INDEX_KEY, newStrength, existingId);
+            await redis3.set(`${dedupKey}:id`, existingId, "EX", 300);
+            state.totalDeposits++;
+            logger.debug(
+              { id: existingId, type, domain, strength: newStrength, action: "reinforced_dedup" },
+              "Pheromone deduplicated \u2014 reinforced existing"
+            );
+            return existing;
+          }
+        }
+      }
+    } catch {
+    }
+  }
   const pheromone = {
     id: `ph-${uuid5().slice(0, 12)}`,
     type,
@@ -11013,13 +11047,14 @@ async function deposit(agentId, type, domain, strength, label, metrics2 = {}, ta
     ttlSeconds,
     reinforcements: 0
   };
-  const redis2 = getRedis();
-  if (redis2) {
+  if (redis3) {
     const key = `${REDIS_PREFIX}${pheromone.id}`;
-    await redis2.set(key, JSON.stringify(pheromone), "EX", ttlSeconds);
-    await redis2.zadd(REDIS_INDEX_KEY, pheromone.strength, pheromone.id);
-    await redis2.zadd(`${REDIS_PREFIX}domain:${domain}`, pheromone.strength, pheromone.id);
-    await redis2.zadd(`${REDIS_PREFIX}type:${type}`, pheromone.strength, pheromone.id);
+    await redis3.set(key, JSON.stringify(pheromone), "EX", ttlSeconds);
+    await redis3.zadd(REDIS_INDEX_KEY, pheromone.strength, pheromone.id);
+    await redis3.zadd(`${REDIS_PREFIX}domain:${domain}`, pheromone.strength, pheromone.id);
+    await redis3.zadd(`${REDIS_PREFIX}type:${type}`, pheromone.strength, pheromone.id);
+    const dedupKey2 = `${REDIS_PREFIX}dedup:${domain}:${type}:${label}`;
+    await redis3.set(`${dedupKey2}:id`, pheromone.id, "EX", 300);
   }
   state.totalDeposits++;
   state.activePheromones++;
@@ -11038,13 +11073,13 @@ async function deposit(agentId, type, domain, strength, label, metrics2 = {}, ta
   return pheromone;
 }
 async function sense(query) {
-  const redis2 = getRedis();
-  if (!redis2) return [];
+  const redis3 = getRedis();
+  if (!redis3) return [];
   const limit = query.limit ?? 20;
   const minStrength = query.minStrength ?? 0.1;
   let candidateIds;
   if (query.domain) {
-    candidateIds = await redis2.zrevrangebyscore(
+    candidateIds = await redis3.zrevrangebyscore(
       `${REDIS_PREFIX}domain:${query.domain}`,
       "+inf",
       String(minStrength),
@@ -11053,7 +11088,7 @@ async function sense(query) {
       String(limit * 2)
     );
   } else if (query.type) {
-    candidateIds = await redis2.zrevrangebyscore(
+    candidateIds = await redis3.zrevrangebyscore(
       `${REDIS_PREFIX}type:${query.type}`,
       "+inf",
       String(minStrength),
@@ -11062,7 +11097,7 @@ async function sense(query) {
       String(limit * 2)
     );
   } else {
-    candidateIds = await redis2.zrevrangebyscore(
+    candidateIds = await redis3.zrevrangebyscore(
       REDIS_INDEX_KEY,
       "+inf",
       String(minStrength),
@@ -11072,7 +11107,7 @@ async function sense(query) {
     );
   }
   if (candidateIds.length === 0) return [];
-  const pipeline = redis2.pipeline();
+  const pipeline = redis3.pipeline();
   for (const id of candidateIds) {
     pipeline.get(`${REDIS_PREFIX}${id}`);
   }
@@ -11094,10 +11129,10 @@ async function sense(query) {
   return pheromones.slice(0, limit);
 }
 async function reinforce(pheromoneId, boostFactor = 0.2) {
-  const redis2 = getRedis();
-  if (!redis2) return false;
+  const redis3 = getRedis();
+  if (!redis3) return false;
   const key = `${REDIS_PREFIX}${pheromoneId}`;
-  const raw = await redis2.get(key);
+  const raw = await redis3.get(key);
   if (!raw) return false;
   try {
     const p = JSON.parse(raw);
@@ -11105,10 +11140,10 @@ async function reinforce(pheromoneId, boostFactor = 0.2) {
     p.reinforcements++;
     const newTtl = Math.min(p.ttlSeconds * 1.5, 86400);
     p.ttlSeconds = newTtl;
-    await redis2.set(key, JSON.stringify(p), "EX", Math.round(newTtl));
-    await redis2.zadd(REDIS_INDEX_KEY, p.strength, pheromoneId);
+    await redis3.set(key, JSON.stringify(p), "EX", Math.round(newTtl));
+    await redis3.zadd(REDIS_INDEX_KEY, p.strength, pheromoneId);
     if (p.type === "trail" || p.type === "attraction") {
-      await redis2.zadd(`${REDIS_PREFIX}domain:${p.domain}`, p.strength, pheromoneId);
+      await redis3.zadd(`${REDIS_PREFIX}domain:${p.domain}`, p.strength, pheromoneId);
     }
     state.totalAmplifications++;
     return true;
@@ -11117,20 +11152,20 @@ async function reinforce(pheromoneId, boostFactor = 0.2) {
   }
 }
 async function runDecayCycle() {
-  const redis2 = getRedis();
-  if (!redis2) return { decayed: 0, evaporated: 0 };
+  const redis3 = getRedis();
+  if (!redis3) return { decayed: 0, evaporated: 0 };
   const LOCK_KEY = `${REDIS_PREFIX}decay-lock`;
-  const locked = await redis2.set(LOCK_KEY, "1", "EX", 60, "NX");
+  const locked = await redis3.set(LOCK_KEY, "1", "EX", 60, "NX");
   if (!locked) return { decayed: 0, evaporated: 0 };
   try {
-    const allIds = await redis2.zrangebyscore(REDIS_INDEX_KEY, "0", "+inf");
+    const allIds = await redis3.zrangebyscore(REDIS_INDEX_KEY, "0", "+inf");
     let decayed = 0;
     let evaporated = 0;
     for (const id of allIds) {
       const key = `${REDIS_PREFIX}${id}`;
-      const raw = await redis2.get(key);
+      const raw = await redis3.get(key);
       if (!raw) {
-        await redis2.zrem(REDIS_INDEX_KEY, id);
+        await redis3.zrem(REDIS_INDEX_KEY, id);
         evaporated++;
         continue;
       }
@@ -11138,18 +11173,18 @@ async function runDecayCycle() {
         const p = JSON.parse(raw);
         p.strength *= DECAY_FACTOR;
         if (p.strength < 0.05) {
-          await redis2.del(key);
-          await redis2.zrem(REDIS_INDEX_KEY, id);
-          await redis2.zrem(`${REDIS_PREFIX}domain:${p.domain}`, id);
-          await redis2.zrem(`${REDIS_PREFIX}type:${p.type}`, id);
+          await redis3.del(key);
+          await redis3.zrem(REDIS_INDEX_KEY, id);
+          await redis3.zrem(`${REDIS_PREFIX}domain:${p.domain}`, id);
+          await redis3.zrem(`${REDIS_PREFIX}type:${p.type}`, id);
           evaporated++;
         } else {
-          await redis2.set(key, JSON.stringify(p), "KEEPTTL");
-          await redis2.zadd(REDIS_INDEX_KEY, p.strength, id);
+          await redis3.set(key, JSON.stringify(p), "KEEPTTL");
+          await redis3.zadd(REDIS_INDEX_KEY, p.strength, id);
           decayed++;
         }
       } catch {
-        await redis2.zrem(REDIS_INDEX_KEY, id);
+        await redis3.zrem(REDIS_INDEX_KEY, id);
         evaporated++;
       }
     }
@@ -11159,7 +11194,7 @@ async function runDecayCycle() {
     logger.info({ decayed, evaporated, remaining: state.activePheromones }, "Pheromone decay cycle");
     return { decayed, evaporated };
   } finally {
-    await redis2.del(LOCK_KEY).catch(() => {
+    await redis3.del(LOCK_KEY).catch(() => {
     });
   }
 }
@@ -11280,12 +11315,12 @@ async function getTrailSummary(domain) {
   };
 }
 async function getHeatmap() {
-  const redis2 = getRedis();
-  if (!redis2) return [];
+  const redis3 = getRedis();
+  if (!redis3) return [];
   const domains = [];
   let cursor = "0";
   do {
-    const [next, found] = await redis2.scan(cursor, "MATCH", `${REDIS_PREFIX}domain:*`, "COUNT", "50");
+    const [next, found] = await redis3.scan(cursor, "MATCH", `${REDIS_PREFIX}domain:*`, "COUNT", "50");
     cursor = next;
     for (const k of found) domains.push(k.replace(`${REDIS_PREFIX}domain:`, ""));
   } while (cursor !== "0" && domains.length < 50);
@@ -11383,20 +11418,20 @@ function getPheromoneState() {
   return { ...state };
 }
 async function persistPheromoneState() {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   try {
-    const count = await redis2.zcard(REDIS_INDEX_KEY);
+    const count = await redis3.zcard(REDIS_INDEX_KEY);
     state.activePheromones = count;
-    await redis2.set(REDIS_STATE_KEY, JSON.stringify(state));
+    await redis3.set(REDIS_STATE_KEY, JSON.stringify(state));
   } catch {
   }
 }
 async function loadPheromoneState() {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   try {
-    const raw = await redis2.get(REDIS_STATE_KEY);
+    const raw = await redis3.get(REDIS_STATE_KEY);
     if (raw) {
       state = { ...state, ...JSON.parse(raw) };
       logger.info(
@@ -11407,45 +11442,28 @@ async function loadPheromoneState() {
   } catch {
   }
 }
+async function initPheromoneLayer() {
+  await loadPheromoneState();
+  logger.info("Pheromone layer initialised");
+}
 async function runPheromoneCron() {
   const { decayed, evaporated } = await runDecayCycle();
   const persisted = await persistToGraph();
+  await persistPheromoneState();
   let amplified = 0;
   try {
     const heatmap = await getHeatmap();
-    for (const trail of heatmap) {
-      if (trail.pheromoneCount >= 3 && trail.avgStrength >= 0.5) {
-        const pheromonesInDomain = await sense({ domain: trail.domain, minStrength: 0.4, limit: 5 });
-        const uniqueTypes = new Set(pheromonesInDomain.map((p) => p.type));
-        if (uniqueTypes.size >= 2) {
-          await amplify(
-            trail.domain,
-            pheromonesInDomain,
-            `Cross-pillar convergence in ${trail.domain}: ${[...uniqueTypes].join("+")}`
-          );
-          amplified++;
-        }
+    const topDomain = heatmap[0]?.domain;
+    if (topDomain) {
+      const topTrails = await sense({ domain: topDomain, minStrength: 0.6, limit: 5 });
+      for (const trail of topTrails) {
+        const ok = await reinforce(trail.id, 0.1);
+        if (ok) amplified++;
       }
     }
   } catch {
   }
-  await persistPheromoneState();
-  broadcastSSE("pheromone", {
-    event: "cron_complete",
-    decayed,
-    evaporated,
-    persisted,
-    amplified,
-    activePheromones: state.activePheromones
-  });
   return { decayed, evaporated, persisted, amplified };
-}
-async function initPheromoneLayer() {
-  await loadPheromoneState();
-  logger.info(
-    { totalDeposits: state.totalDeposits, activePheromones: state.activePheromones },
-    "Pheromone layer initialized"
-  );
 }
 var REDIS_PREFIX, REDIS_STATE_KEY, REDIS_INDEX_KEY, DEFAULT_TTL, PERSIST_THRESHOLD, AMPLIFICATION_MULTIPLIER, DECAY_FACTOR, state;
 var init_pheromone_layer = __esm({
@@ -11576,10 +11594,10 @@ async function hookIntoExecution(agentId, taskId, context) {
   if (evalReport.selfScore >= BROADCAST_THRESHOLD && evalReport.novelty >= NOVELTY_THRESHOLD) {
     await broadcastBestPractice(evalReport);
   }
-  const redis2 = getRedis();
-  if (redis2) {
-    await redis2.zadd(`${REDIS_PREFIX2}recent`, Date.now(), JSON.stringify(evalReport));
-    await redis2.zremrangebyrank(`${REDIS_PREFIX2}recent`, 0, -201);
+  const redis3 = getRedis();
+  if (redis3) {
+    await redis3.zadd(`${REDIS_PREFIX2}recent`, Date.now(), JSON.stringify(evalReport));
+    await redis3.zremrangebyrank(`${REDIS_PREFIX2}recent`, 0, -201);
   }
   state2.totalEvals++;
   state2.lastEvalAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -11709,9 +11727,9 @@ async function getWhatWorks(taskType) {
   };
 }
 async function getRecentEvals(limit = 20) {
-  const redis2 = getRedis();
-  if (!redis2) return [];
-  const raw = await redis2.zrevrange(`${REDIS_PREFIX2}recent`, 0, limit - 1);
+  const redis3 = getRedis();
+  if (!redis3) return [];
+  const raw = await redis3.zrevrange(`${REDIS_PREFIX2}recent`, 0, limit - 1);
   return raw.map((r) => {
     try {
       return JSON.parse(r);
@@ -11778,10 +11796,10 @@ function getPeerEvalState() {
   };
 }
 async function loadState() {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   try {
-    const raw = await redis2.get(REDIS_STATE_KEY2);
+    const raw = await redis3.get(REDIS_STATE_KEY2);
     if (raw) {
       const loaded = JSON.parse(raw);
       state2 = {
@@ -12876,11 +12894,11 @@ function isoWeek() {
   return `${d.getUTCFullYear()}${String(week).padStart(2, "0")}`;
 }
 function recordToolCall(toolName) {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   const windowKey = `orchestrator:telemetry:window:${isoWeek()}`;
   const now = (/* @__PURE__ */ new Date()).toISOString();
-  redis2.pipeline().zincrby(KEY_CALLS, 1, toolName).zincrby(windowKey, 1, toolName).expire(windowKey, WINDOW_TTL).hset(KEY_LAST, toolName, now).exec().catch((err) => {
+  redis3.pipeline().zincrby(KEY_CALLS, 1, toolName).zincrby(windowKey, 1, toolName).expire(windowKey, WINDOW_TTL).hset(KEY_LAST, toolName, now).exec().catch((err) => {
     const nowMs = Date.now();
     const last = lastErrorLog.get(toolName) ?? 0;
     if (nowMs - last > ERROR_THROTTLE_MS) {
@@ -12890,7 +12908,7 @@ function recordToolCall(toolName) {
   });
 }
 async function computeTelemetry() {
-  const redis2 = getRedis();
+  const redis3 = getRedis();
   const allTools = TOOL_REGISTRY.map((t) => t.name);
   const now = Date.now();
   const empty = (tool) => ({
@@ -12902,15 +12920,15 @@ async function computeTelemetry() {
     stale: false,
     advanced: ADVANCED_TOOLS.has(tool)
   });
-  if (!redis2) {
+  if (!redis3) {
     const tools2 = allTools.map(empty);
     return buildSummary(tools2);
   }
   const windowKey = `orchestrator:telemetry:window:${isoWeek()}`;
   const [lifetimeRaw, weeklyRaw, lastRaw] = await Promise.all([
-    redis2.zrange(KEY_CALLS, 0, -1, "WITHSCORES"),
-    redis2.zrange(windowKey, 0, -1, "WITHSCORES"),
-    redis2.hgetall(KEY_LAST)
+    redis3.zrange(KEY_CALLS, 0, -1, "WITHSCORES"),
+    redis3.zrange(windowKey, 0, -1, "WITHSCORES"),
+    redis3.hgetall(KEY_LAST)
   ]);
   const parseZSet = (raw) => {
     const m = /* @__PURE__ */ new Map();
@@ -13016,8 +13034,8 @@ function categorizeFailure(error) {
   return "unknown";
 }
 async function harvestFailures(windowHours = 24) {
-  const redis2 = getRedis();
-  if (!redis2) {
+  const redis3 = getRedis();
+  if (!redis3) {
     logger.warn("Failure harvester: Redis not available");
     return [];
   }
@@ -13026,7 +13044,7 @@ async function harvestFailures(windowHours = 24) {
   try {
     let cursor = "0";
     do {
-      const [nextCursor, fields] = await redis2.hscan("orchestrator:chains", cursor, "COUNT", 200);
+      const [nextCursor, fields] = await redis3.hscan("orchestrator:chains", cursor, "COUNT", 200);
       cursor = nextCursor;
       for (let i = 0; i < fields.length; i += 2) {
         const execId = fields[i];
@@ -13158,9 +13176,9 @@ async function runFailureHarvest(windowHours = 24) {
   const events = await harvestFailures(windowHours);
   const persisted = await persistToGraph2(events);
   const summary = buildFailureSummary(events, windowHours);
-  const redis2 = getRedis();
-  if (redis2) {
-    await redis2.set("orchestrator:failure-summary", JSON.stringify(summary), "EX", 3600).catch(() => {
+  const redis3 = getRedis();
+  if (redis3) {
+    await redis3.set("orchestrator:failure-summary", JSON.stringify(summary), "EX", 3600).catch(() => {
     });
   }
   broadcastSSE("failure-harvest", summary);
@@ -13256,10 +13274,10 @@ function schedulePersist() {
   }, 5e3);
 }
 async function persistToRedis2() {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   try {
-    const pipeline = redis2.multi();
+    const pipeline = redis3.multi();
     for (const [key, profile] of profiles.entries()) {
       pipeline.set(`${REDIS_PREFIX3}profile:${key}`, JSON.stringify(profile), { EX: 30 * 24 * 3600 });
     }
@@ -13294,11 +13312,11 @@ __export(chain_engine_exports, {
 import { v4 as uuid8 } from "uuid";
 function persistExecution(exec) {
   executions.set(exec.execution_id, exec);
-  const redis2 = getRedis();
-  if (redis2) {
-    redis2.hset("orchestrator:chains", exec.execution_id, JSON.stringify(exec)).catch(() => {
+  const redis3 = getRedis();
+  if (redis3) {
+    redis3.hset("orchestrator:chains", exec.execution_id, JSON.stringify(exec)).catch(() => {
     });
-    redis2.expire("orchestrator:chains", 86400).catch(() => {
+    redis3.expire("orchestrator:chains", 86400).catch(() => {
     });
   }
 }
@@ -13493,9 +13511,9 @@ async function runAdaptive(steps, query, judgeAgent, confidenceThreshold = 0.6) 
   return { results, chosen_topology: topology };
 }
 async function persistFunnelState(state4) {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  await redis2.set(
+  const redis3 = getRedis();
+  if (!redis3) return;
+  await redis3.set(
     `${FUNNEL_REDIS_PREFIX}${state4.execution_id}`,
     JSON.stringify(state4),
     "EX",
@@ -13505,10 +13523,10 @@ async function persistFunnelState(state4) {
   });
 }
 async function loadFunnelState(executionId) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
+  const redis3 = getRedis();
+  if (!redis3) return null;
   try {
-    const raw = await redis2.get(`${FUNNEL_REDIS_PREFIX}${executionId}`);
+    const raw = await redis3.get(`${FUNNEL_REDIS_PREFIX}${executionId}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -14074,10 +14092,10 @@ __export(document_intelligence_exports, {
 });
 import { v4 as uuid10 } from "uuid";
 async function persistResult(result) {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   try {
-    await redis2.set(`${REDIS_PREFIX4}${result.$id}`, JSON.stringify(result), "EX", 604800);
+    await redis3.set(`${REDIS_PREFIX4}${result.$id}`, JSON.stringify(result), "EX", 604800);
   } catch {
   }
 }
@@ -14779,20 +14797,20 @@ async function persist(d) {
     const oldest = Array.from(deliverableCache.entries()).sort((a, b) => a[1].created_at.localeCompare(b[1].created_at));
     oldest.slice(0, toEvict).forEach(([key]) => deliverableCache.delete(key));
   }
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   try {
-    await redis2.set(`${REDIS_PREFIX5}${d.$id}`, JSON.stringify(d), "EX", TTL_SECONDS2);
-    await redis2.sadd(REDIS_INDEX2, d.$id);
+    await redis3.set(`${REDIS_PREFIX5}${d.$id}`, JSON.stringify(d), "EX", TTL_SECONDS2);
+    await redis3.sadd(REDIS_INDEX2, d.$id);
   } catch {
   }
 }
 async function getDeliverable(id) {
   if (deliverableCache.has(id)) return deliverableCache.get(id);
-  const redis2 = getRedis();
-  if (!redis2) return null;
+  const redis3 = getRedis();
+  if (!redis3) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX5}${id}`);
+    const raw = await redis3.get(`${REDIS_PREFIX5}${id}`);
     if (raw) {
       const d = JSON.parse(raw);
       deliverableCache.set(id, d);
@@ -14803,10 +14821,10 @@ async function getDeliverable(id) {
   return null;
 }
 async function listDeliverables(limit = 20) {
-  const redis2 = getRedis();
-  if (!redis2) return Array.from(deliverableCache.values()).slice(0, limit);
+  const redis3 = getRedis();
+  if (!redis3) return Array.from(deliverableCache.values()).slice(0, limit);
   try {
-    const ids = await redis2.smembers(REDIS_INDEX2);
+    const ids = await redis3.smembers(REDIS_INDEX2);
     const results = [];
     for (const id of ids.slice(0, limit)) {
       const d = await getDeliverable(id);
@@ -15552,15 +15570,15 @@ async function ingestDMARCResults(dmarcResults) {
   return { nodes_created: nodesCreated, errors };
 }
 async function persistScanResult(result) {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   const key = `orchestrator:osint:scan:${result.scan_id}`;
   const latestKey = "orchestrator:osint:latest";
   const TTL_30_DAYS = 30 * 24 * 60 * 60;
   try {
     const json = JSON.stringify(result);
-    await redis2.set(key, json, "EX", TTL_30_DAYS);
-    await redis2.set(latestKey, json, "EX", TTL_30_DAYS);
+    await redis3.set(key, json, "EX", TTL_30_DAYS);
+    await redis3.set(latestKey, json, "EX", TTL_30_DAYS);
     logger.info({ scan_id: result.scan_id }, "OSINT scan persisted to Redis");
   } catch (err) {
     logger.warn({ err: String(err) }, "Failed to persist OSINT scan to Redis");
@@ -15626,10 +15644,10 @@ async function runOsintScan(options) {
   return result;
 }
 async function getOsintStatus() {
-  const redis2 = getRedis();
-  if (!redis2) return null;
+  const redis3 = getRedis();
+  if (!redis3) return null;
   try {
-    const cached = await redis2.get("orchestrator:osint:latest");
+    const cached = await redis3.get("orchestrator:osint:latest");
     if (cached) {
       return JSON.parse(cached);
     }
@@ -15714,13 +15732,13 @@ __export(evolution_loop_exports, {
 });
 import { v4 as uuid15 } from "uuid";
 async function persistCycle(cycle) {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   try {
-    await redis2.set(`${REDIS_PREFIX6}${cycle.cycle_id}`, JSON.stringify(cycle), "EX", REDIS_TTL);
-    await redis2.lpush(REDIS_HISTORY_KEY, JSON.stringify(cycle));
-    await redis2.ltrim(REDIS_HISTORY_KEY, 0, 19);
-    await redis2.expire(REDIS_HISTORY_KEY, REDIS_TTL);
+    await redis3.set(`${REDIS_PREFIX6}${cycle.cycle_id}`, JSON.stringify(cycle), "EX", REDIS_TTL);
+    await redis3.lpush(REDIS_HISTORY_KEY, JSON.stringify(cycle));
+    await redis3.ltrim(REDIS_HISTORY_KEY, 0, 19);
+    await redis3.expire(REDIS_HISTORY_KEY, REDIS_TTL);
   } catch (err) {
     logger.warn({ err: String(err) }, "Failed to persist evolution cycle to Redis");
   }
@@ -16125,10 +16143,10 @@ function getEvolutionStatus() {
   };
 }
 async function getEvolutionHistory(limit = 10) {
-  const redis2 = getRedis();
-  if (!redis2) return lastCycle ? [lastCycle] : [];
+  const redis3 = getRedis();
+  if (!redis3) return lastCycle ? [lastCycle] : [];
   try {
-    const raw = await redis2.lrange(REDIS_HISTORY_KEY, 0, limit - 1);
+    const raw = await redis3.lrange(REDIS_HISTORY_KEY, 0, limit - 1);
     return raw.map((r) => JSON.parse(r));
   } catch {
     return lastCycle ? [lastCycle] : [];
@@ -16160,20 +16178,20 @@ function createBlackboard(taskId) {
   const prefix = `bb:${taskId}:`;
   const memStore = /* @__PURE__ */ new Map();
   async function redisGet(key) {
-    const redis2 = getRedis();
-    if (redis2) {
+    const redis3 = getRedis();
+    if (redis3) {
       try {
-        return await redis2.get(key);
+        return await redis3.get(key);
       } catch {
       }
     }
     return memStore.get(key) ?? null;
   }
   async function redisSet(key, value) {
-    const redis2 = getRedis();
-    if (redis2) {
+    const redis3 = getRedis();
+    if (redis3) {
       try {
-        await redis2.set(key, value, "EX", TTL_SECONDS3);
+        await redis3.set(key, value, "EX", TTL_SECONDS3);
         return;
       } catch {
       }
@@ -16181,10 +16199,10 @@ function createBlackboard(taskId) {
     memStore.set(key, value);
   }
   async function redisDel(key) {
-    const redis2 = getRedis();
-    if (redis2) {
+    const redis3 = getRedis();
+    if (redis3) {
       try {
-        await redis2.del(key);
+        await redis3.del(key);
       } catch {
       }
     }
@@ -16212,10 +16230,10 @@ function createBlackboard(taskId) {
       logger.debug({ taskId, slot, agent: agentId }, "Blackboard write");
     },
     async slots() {
-      const redis2 = getRedis();
-      if (redis2) {
+      const redis3 = getRedis();
+      if (redis3) {
         try {
-          const keys = await redis2.keys(`${prefix}*`);
+          const keys = await redis3.keys(`${prefix}*`);
           return keys.map((k) => k.replace(prefix, ""));
         } catch {
         }
@@ -16226,11 +16244,11 @@ function createBlackboard(taskId) {
       await redisDel(`${prefix}${slot}`);
     },
     async destroy() {
-      const redis2 = getRedis();
-      if (redis2) {
+      const redis3 = getRedis();
+      if (redis3) {
         try {
-          const keys = await redis2.keys(`${prefix}*`);
-          if (keys.length > 0) await redis2.del(...keys);
+          const keys = await redis3.keys(`${prefix}*`);
+          if (keys.length > 0) await redis3.del(...keys);
           return;
         } catch {
         }
@@ -16675,14 +16693,14 @@ function hasForgedTool(name) {
   return FORGED_TOOLS.has(name);
 }
 async function analyzeToolGaps(provider = "deepseek") {
-  const redis2 = getRedis();
+  const redis3 = getRedis();
   let failurePatterns = [];
-  if (redis2) {
+  if (redis3) {
     try {
-      const keys = await redis2.keys("orchestrator:audit:*");
+      const keys = await redis3.keys("orchestrator:audit:*");
       const recentKeys = keys.slice(-100);
       for (const key of recentKeys) {
-        const raw = await redis2.get(key);
+        const raw = await redis3.get(key);
         if (raw) {
           const entry = JSON.parse(raw);
           if (entry.action === "tool_call" && entry.status === "error") {
@@ -16766,10 +16784,10 @@ Handler type: ${handlerType}` }
     verified: false
   };
   FORGED_TOOLS.set(name, spec2);
-  const redis2 = getRedis();
-  if (redis2) {
+  const redis3 = getRedis();
+  if (redis3) {
     try {
-      await redis2.set(`${REDIS_PREFIX7}${name}`, JSON.stringify(spec2), "EX", 86400 * 30);
+      await redis3.set(`${REDIS_PREFIX7}${name}`, JSON.stringify(spec2), "EX", 86400 * 30);
     } catch {
     }
   }
@@ -16809,10 +16827,10 @@ async function verifyForgedTool(name) {
       spec2.verified = true;
     }
     spec2.verification_result = testResult;
-    const redis2 = getRedis();
-    if (redis2) {
+    const redis3 = getRedis();
+    if (redis3) {
       try {
-        await redis2.set(`${REDIS_PREFIX7}${name}`, JSON.stringify(spec2), "EX", 86400 * 30);
+        await redis3.set(`${REDIS_PREFIX7}${name}`, JSON.stringify(spec2), "EX", 86400 * 30);
       } catch {
       }
     }
@@ -16867,13 +16885,13 @@ async function executeForgedTool(name, args) {
   }
 }
 async function loadForgedTools() {
-  const redis2 = getRedis();
-  if (!redis2) return 0;
+  const redis3 = getRedis();
+  if (!redis3) return 0;
   try {
-    const keys = await redis2.keys(`${REDIS_PREFIX7}*`);
+    const keys = await redis3.keys(`${REDIS_PREFIX7}*`);
     let loaded = 0;
     for (const key of keys) {
-      const raw = await redis2.get(key);
+      const raw = await redis3.get(key);
       if (raw) {
         const spec2 = JSON.parse(raw);
         FORGED_TOOLS.set(spec2.name, spec2);
@@ -16915,11 +16933,11 @@ __export(engagement_engine_exports, {
 import { v4 as uuid18 } from "uuid";
 async function saveEngagement(e) {
   engagementCache.set(e.$id, e);
-  const redis2 = getRedis();
-  if (redis2) {
+  const redis3 = getRedis();
+  if (redis3) {
     try {
-      await redis2.set(`${REDIS_PREFIX8}${e.$id}`, JSON.stringify(e), "EX", TTL_SECONDS4);
-      await redis2.zadd(REDIS_INDEX3, Date.now(), e.$id);
+      await redis3.set(`${REDIS_PREFIX8}${e.$id}`, JSON.stringify(e), "EX", TTL_SECONDS4);
+      await redis3.zadd(REDIS_INDEX3, Date.now(), e.$id);
     } catch (err) {
       logger.warn({ error: String(err) }, "Engagement: Redis save failed");
     }
@@ -16928,10 +16946,10 @@ async function saveEngagement(e) {
 async function getEngagement(id) {
   const cached = engagementCache.get(id);
   if (cached) return cached;
-  const redis2 = getRedis();
-  if (!redis2) return null;
+  const redis3 = getRedis();
+  if (!redis3) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX8}${id}`);
+    const raw = await redis3.get(`${REDIS_PREFIX8}${id}`);
     if (!raw) return null;
     const e = JSON.parse(raw);
     engagementCache.set(id, e);
@@ -16941,10 +16959,10 @@ async function getEngagement(id) {
   }
 }
 async function listEngagements(limit = 20) {
-  const redis2 = getRedis();
-  if (!redis2) return Array.from(engagementCache.values()).slice(0, limit);
+  const redis3 = getRedis();
+  if (!redis3) return Array.from(engagementCache.values()).slice(0, limit);
   try {
-    const ids = await redis2.zrevrange(REDIS_INDEX3, 0, limit - 1);
+    const ids = await redis3.zrevrange(REDIS_INDEX3, 0, limit - 1);
     const out = [];
     for (const id of ids) {
       const e = await getEngagement(id);
@@ -17623,10 +17641,10 @@ Return ONLY JSON matching the schema, no prose.`;
     rlm_steps_executed: rlmStepsExecuted || void 0,
     plan_source: planSource
   };
-  const redis2 = getRedis();
-  if (redis2) {
+  const redis3 = getRedis();
+  if (redis3) {
     try {
-      await redis2.set(`${REDIS_PLAN_PREFIX}${engagementId}`, JSON.stringify(plan), "EX", TTL_SECONDS4);
+      await redis3.set(`${REDIS_PLAN_PREFIX}${engagementId}`, JSON.stringify(plan), "EX", TTL_SECONDS4);
     } catch {
     }
   }
@@ -17702,10 +17720,10 @@ async function recordOutcome(req) {
   engagement.status = "completed";
   engagement.updated_at = (/* @__PURE__ */ new Date()).toISOString();
   await saveEngagement(engagement);
-  const redis2 = getRedis();
-  if (redis2) {
+  const redis3 = getRedis();
+  if (redis3) {
     try {
-      await redis2.set(`${REDIS_PREFIX8}outcome:${req.engagement_id}`, JSON.stringify(outcome), "EX", TTL_SECONDS4);
+      await redis3.set(`${REDIS_PREFIX8}outcome:${req.engagement_id}`, JSON.stringify(outcome), "EX", TTL_SECONDS4);
     } catch {
     }
   }
@@ -17737,20 +17755,20 @@ function gradeToReward(grade) {
   }
 }
 async function getOutcome(engagementId) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
+  const redis3 = getRedis();
+  if (!redis3) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX8}outcome:${engagementId}`);
+    const raw = await redis3.get(`${REDIS_PREFIX8}outcome:${engagementId}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
 }
 async function getPlan(engagementId) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
+  const redis3 = getRedis();
+  if (!redis3) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PLAN_PREFIX}${engagementId}`);
+    const raw = await redis3.get(`${REDIS_PLAN_PREFIX}${engagementId}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -17806,7 +17824,7 @@ __export(working_memory_exports, {
   storeMemory: () => storeMemory
 });
 async function storeMemory(agentId, key, value, ttlSeconds = DEFAULT_TTL2) {
-  const redis2 = getRedis();
+  const redis3 = getRedis();
   const redisKey = `${PREFIX}${agentId}:${key}`;
   const entry = {
     key,
@@ -17815,9 +17833,9 @@ async function storeMemory(agentId, key, value, ttlSeconds = DEFAULT_TTL2) {
     created_at: (/* @__PURE__ */ new Date()).toISOString(),
     ttl_seconds: ttlSeconds
   };
-  if (redis2) {
+  if (redis3) {
     try {
-      await redis2.set(redisKey, JSON.stringify(entry), "EX", ttlSeconds);
+      await redis3.set(redisKey, JSON.stringify(entry), "EX", ttlSeconds);
     } catch (err) {
       logger.warn({ agentId, key, err: String(err) }, "Working memory store failed");
     }
@@ -17825,23 +17843,23 @@ async function storeMemory(agentId, key, value, ttlSeconds = DEFAULT_TTL2) {
   return entry;
 }
 async function retrieveMemory(agentId, key) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
+  const redis3 = getRedis();
+  if (!redis3) return null;
   try {
-    const raw = await redis2.get(`${PREFIX}${agentId}:${key}`);
+    const raw = await redis3.get(`${PREFIX}${agentId}:${key}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
 }
 async function listMemories(agentId) {
-  const redis2 = getRedis();
-  if (!redis2) return [];
+  const redis3 = getRedis();
+  if (!redis3) return [];
   try {
-    const keys = await redis2.keys(`${PREFIX}${agentId}:*`);
+    const keys = await redis3.keys(`${PREFIX}${agentId}:*`);
     const entries = [];
     for (const k of keys.slice(0, 100)) {
-      const raw = await redis2.get(k);
+      const raw = await redis3.get(k);
       if (raw) entries.push(JSON.parse(raw));
     }
     return entries.sort((a, b) => b.created_at.localeCompare(a.created_at));
@@ -17850,22 +17868,22 @@ async function listMemories(agentId) {
   }
 }
 async function deleteMemory(agentId, key) {
-  const redis2 = getRedis();
-  if (!redis2) return false;
+  const redis3 = getRedis();
+  if (!redis3) return false;
   try {
-    const result = await redis2.del(`${PREFIX}${agentId}:${key}`);
+    const result = await redis3.del(`${PREFIX}${agentId}:${key}`);
     return result > 0;
   } catch {
     return false;
   }
 }
 async function clearAgentMemory(agentId) {
-  const redis2 = getRedis();
-  if (!redis2) return 0;
+  const redis3 = getRedis();
+  if (!redis3) return 0;
   try {
-    const keys = await redis2.keys(`${PREFIX}${agentId}:*`);
+    const keys = await redis3.keys(`${PREFIX}${agentId}:*`);
     if (keys.length === 0) return 0;
-    return await redis2.del(...keys);
+    return await redis3.del(...keys);
   } catch {
     return 0;
   }
@@ -18054,11 +18072,11 @@ async function runCompetitiveCrawl() {
   }
   const persisted = await persistCapabilities(allCapabilities);
   const report = await analyzeGaps(allCapabilities);
-  const redis2 = getRedis();
-  if (redis2 && allCapabilities.length > 0) {
-    await redis2.set("orchestrator:competitive-report", JSON.stringify(report), "EX", 604800).catch(() => {
+  const redis3 = getRedis();
+  if (redis3 && allCapabilities.length > 0) {
+    await redis3.set("orchestrator:competitive-report", JSON.stringify(report), "EX", 604800).catch(() => {
     });
-  } else if (redis2 && allCapabilities.length === 0) {
+  } else if (redis3 && allCapabilities.length === 0) {
     logger.warn("Competitive crawl returned zero capabilities \u2014 not caching empty report");
   }
   broadcastSSE("competitive-report", report);
@@ -18198,11 +18216,11 @@ function isSessionCircuitOpen(sessionId) {
 }
 function persistPlan(plan) {
   plans.set(plan.planId, plan);
-  const redis2 = getRedis();
-  if (redis2) {
-    redis2.hset("orchestrator:hyperplans", plan.planId, JSON.stringify(plan)).catch(() => {
+  const redis3 = getRedis();
+  if (redis3) {
+    redis3.hset("orchestrator:hyperplans", plan.planId, JSON.stringify(plan)).catch(() => {
     });
-    redis2.expire("orchestrator:hyperplans", 86400).catch(() => {
+    redis3.expire("orchestrator:hyperplans", 86400).catch(() => {
     });
   }
 }
@@ -18305,9 +18323,9 @@ async function approvePlan(planId, approvedBy) {
     expiresAt: new Date(Date.now() + ttlSeconds * 1e3).toISOString(),
     scope: plan.profile.id
   };
-  const redis2 = getRedis();
-  if (redis2) {
-    await redis2.setex(`${APPROVAL_PREFIX}${planId}`, ttlSeconds, JSON.stringify(approval));
+  const redis3 = getRedis();
+  if (redis3) {
+    await redis3.setex(`${APPROVAL_PREFIX}${planId}`, ttlSeconds, JSON.stringify(approval));
   }
   plan.status = "approved";
   persistPlan(plan);
@@ -18324,9 +18342,9 @@ async function approvePlan(planId, approvedBy) {
 async function rejectPlan(planId, rejectedBy) {
   const plan = plans.get(planId);
   if (!plan) throw new Error(`Plan ${planId} not found`);
-  const redis2 = getRedis();
-  if (redis2) {
-    await redis2.del(`${APPROVAL_PREFIX}${planId}`);
+  const redis3 = getRedis();
+  if (redis3) {
+    await redis3.del(`${APPROVAL_PREFIX}${planId}`);
   }
   plan.status = "failed";
   persistPlan(plan);
@@ -18341,8 +18359,8 @@ async function rejectPlan(planId, rejectedBy) {
 }
 async function checkApproval(planId) {
   const t0 = Date.now();
-  const redis2 = getRedis();
-  if (!redis2) {
+  const redis3 = getRedis();
+  if (!redis3) {
     const plan = plans.get(planId);
     return plan?.status === "approved" ? {
       planId,
@@ -18352,11 +18370,11 @@ async function checkApproval(planId) {
       scope: plan.profile.id
     } : null;
   }
-  const raw = await redis2.get(`${APPROVAL_PREFIX}${planId}`);
+  const raw = await redis3.get(`${APPROVAL_PREFIX}${planId}`);
   if (!raw) return null;
   const approval = JSON.parse(raw);
   if (new Date(approval.expiresAt) < /* @__PURE__ */ new Date()) {
-    await redis2.del(`${APPROVAL_PREFIX}${planId}`);
+    await redis3.del(`${APPROVAL_PREFIX}${planId}`);
     logger.warn({ planId, latencyMs: Date.now() - t0 }, "HyperAgent: approval expired");
     return null;
   }
@@ -18632,10 +18650,10 @@ function rankTargets(targets, edgeScores) {
   return targets.filter((t) => t.status === "open").map((t) => ({ target: t, priority: computePriority(t, edgeScores) })).sort((a, b) => b.priority - a.priority).map((x) => x.target);
 }
 async function observeEdgeScores() {
-  const redis2 = getRedis();
-  if (redis2) {
+  const redis3 = getRedis();
+  if (redis3) {
     try {
-      const raw = await redis2.get(EDGE_SCORES_REDIS_KEY);
+      const raw = await redis3.get(EDGE_SCORES_REDIS_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed) && parsed.length >= 6) {
@@ -18667,7 +18685,7 @@ async function observeEdgeScores() {
         target: TARGET_EDGE_SCORE,
         gap: TARGET_EDGE_SCORE - Number(r.score)
       }));
-      if (redis2) await redis2.set(EDGE_SCORES_REDIS_KEY, JSON.stringify(scores)).catch(() => {
+      if (redis3) await redis3.set(EDGE_SCORES_REDIS_KEY, JSON.stringify(scores)).catch(() => {
       });
       return scores;
     }
@@ -18675,7 +18693,7 @@ async function observeEdgeScores() {
     logger.debug("HyperAgent-Auto: EdgeScore graph nodes not found, using defaults");
   }
   const defaults = DEFAULT_EDGE_SCORES.map((e) => ({ ...e }));
-  if (redis2) await redis2.set(EDGE_SCORES_REDIS_KEY, JSON.stringify(defaults)).catch(() => {
+  if (redis3) await redis3.set(EDGE_SCORES_REDIS_KEY, JSON.stringify(defaults)).catch(() => {
   });
   return defaults;
 }
@@ -18695,17 +18713,17 @@ async function updateEdgeScores(currentScores, closedTargets) {
       gap: Number((TARGET_EDGE_SCORE - newScore).toFixed(3))
     };
   });
-  const redis2 = getRedis();
-  if (redis2) {
-    await redis2.set(EDGE_SCORES_REDIS_KEY, JSON.stringify(updated)).catch(() => {
+  const redis3 = getRedis();
+  if (redis3) {
+    await redis3.set(EDGE_SCORES_REDIS_KEY, JSON.stringify(updated)).catch(() => {
     });
     logger.info({ deltas: deltaPerEdge }, "HyperAgent-Auto: edge scores updated in Redis");
   }
   return updated;
 }
 async function loadTargetRegistry() {
-  const redis2 = getRedis();
-  if (!redis2) {
+  const redis3 = getRedis();
+  if (!redis3) {
     logger.warn("HyperAgent-Auto: no Redis connection for target registry");
     return [];
   }
@@ -18722,7 +18740,7 @@ async function loadTargetRegistry() {
     ];
     const diagnostics = {};
     for (const key of keyPatterns) {
-      const raw = await redis2.get(key);
+      const raw = await redis3.get(key);
       if (!raw) {
         diagnostics[key] = "NOT_FOUND";
         continue;
@@ -19206,12 +19224,12 @@ ${approach.slice(0, 500)}
       fitnessDelta: fitnessDelta.toFixed(4),
       durationMs: result.durationMs
     });
-    const redis2 = getRedis();
-    if (redis2) {
-      await redis2.lpush("hyperagent:autonomous-cycles", JSON.stringify(result));
-      await redis2.ltrim("hyperagent:autonomous-cycles", 0, 99);
-      await redis2.set("hyperagent:autonomous-status", JSON.stringify(getAutonomousStatus()));
-      await redis2.expire("hyperagent:autonomous-status", 86400);
+    const redis3 = getRedis();
+    if (redis3) {
+      await redis3.lpush("hyperagent:autonomous-cycles", JSON.stringify(result));
+      await redis3.ltrim("hyperagent:autonomous-cycles", 0, 99);
+      await redis3.set("hyperagent:autonomous-status", JSON.stringify(getAutonomousStatus()));
+      await redis3.expire("hyperagent:autonomous-status", 86400);
     }
     await persistCrossRepoMemory("edges", "latest", edgesAfter, "orchestrator");
     await persistCrossRepoMemory("fitness", "weights", edgeWeights, "orchestrator");
@@ -19308,7 +19326,7 @@ function setPhase(phase) {
   stream("phase_set", { from: prev, to: phase, reason: "admin override" });
 }
 async function persistCrossRepoMemory(domain, key, value, callerRepo) {
-  const redis2 = getRedis();
+  const redis3 = getRedis();
   const entry = {
     domain,
     key,
@@ -19317,15 +19335,15 @@ async function persistCrossRepoMemory(domain, key, value, callerRepo) {
     stored_at: (/* @__PURE__ */ new Date()).toISOString(),
     agent_id: "hyperagent-auto"
   };
-  if (redis2) {
-    await redis2.set(
+  if (redis3) {
+    await redis3.set(
       `${MEMORY_PREFIX}:${domain}:${key}`,
       JSON.stringify(entry),
       "EX",
       MEMORY_TTL
     );
-    await redis2.sadd(`${MEMORY_PREFIX}:domains`, domain);
-    await redis2.sadd(`${MEMORY_PREFIX}:${domain}:keys`, key);
+    await redis3.sadd(`${MEMORY_PREFIX}:domains`, domain);
+    await redis3.sadd(`${MEMORY_PREFIX}:${domain}:keys`, key);
   }
   try {
     await callMcpTool({
@@ -19351,10 +19369,10 @@ async function persistCrossRepoMemory(domain, key, value, callerRepo) {
   }
 }
 async function readCrossRepoMemory(domain, key) {
-  const redis2 = getRedis();
+  const redis3 = getRedis();
   if (key) {
-    if (redis2) {
-      const raw = await redis2.get(`${MEMORY_PREFIX}:${domain}:${key}`);
+    if (redis3) {
+      const raw = await redis3.get(`${MEMORY_PREFIX}:${domain}:${key}`);
       if (raw) return JSON.parse(raw);
     }
     try {
@@ -19372,11 +19390,11 @@ async function readCrossRepoMemory(domain, key) {
       return null;
     }
   }
-  if (redis2) {
-    const keys = await redis2.smembers(`${MEMORY_PREFIX}:${domain}:keys`);
+  if (redis3) {
+    const keys = await redis3.smembers(`${MEMORY_PREFIX}:${domain}:keys`);
     const entries = [];
     for (const k of keys) {
-      const raw = await redis2.get(`${MEMORY_PREFIX}:${domain}:${k}`);
+      const raw = await redis3.get(`${MEMORY_PREFIX}:${domain}:${k}`);
       if (raw) entries.push(JSON.parse(raw));
     }
     return entries;
@@ -19384,9 +19402,9 @@ async function readCrossRepoMemory(domain, key) {
   return [];
 }
 async function listCrossRepoMemory() {
-  const redis2 = getRedis();
-  if (!redis2) return [];
-  return redis2.smembers(`${MEMORY_PREFIX}:domains`);
+  const redis3 = getRedis();
+  if (!redis3) return [];
+  return redis3.smembers(`${MEMORY_PREFIX}:domains`);
 }
 var CHAIN_MODE_MATRIX, W_EDGE_GAP, W_TARGET_GAP, W_DEPENDENCY, W_EFFORT, LEARNING_RATE, TARGET_EDGE_SCORE, PHASE_GATES, PHASE_POLICY, CYCLE_BATCH_SIZE, isRunning2, currentPhase, currentTarget, currentStep, totalCycles2, lastCycle2, edgeWeights, discoveredIssues, MAX_DISCOVERED_ISSUES, DEFAULT_EDGE_SCORES, EDGE_SCORES_REDIS_KEY, SCORE_PER_TARGET, MEMORY_PREFIX, MEMORY_TTL;
 var init_hyperagent_autonomous = __esm({
@@ -19664,7 +19682,7 @@ __export(inventor_loop_exports, {
   getInventorNode: () => getInventorNode,
   getInventorNodes: () => getInventorNodes,
   getInventorStatus: () => getInventorStatus,
-  getNodesByExperiment: () => getNodesByExperiment,
+  loadExperimentNodes: () => loadExperimentNodes,
   runInventor: () => runInventor,
   stopInventor: () => stopInventor
 });
@@ -19922,15 +19940,15 @@ Provide:
   }
 }
 async function persistNodes(experimentName) {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   const data = JSON.stringify([...nodes.values()]);
-  await redis2.set(nodeKey(experimentName), data).catch(() => {
+  await redis3.set(nodeKey(experimentName), data).catch(() => {
   });
 }
 async function persistState(experimentName) {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   const state4 = {
     currentStep: currentStep2,
     bestScore,
@@ -19939,24 +19957,24 @@ async function persistState(experimentName) {
     lastStepAt,
     lastError
   };
-  await redis2.set(stateKey(experimentName), JSON.stringify(state4)).catch(() => {
+  await redis3.set(stateKey(experimentName), JSON.stringify(state4)).catch(() => {
   });
   if (sampler) {
-    await redis2.set(samplerKey(experimentName), JSON.stringify(sampler.getState())).catch(() => {
+    await redis3.set(samplerKey(experimentName), JSON.stringify(sampler.getState())).catch(() => {
     });
   }
 }
 async function loadState2(experimentName) {
-  const redis2 = getRedis();
-  if (!redis2) return false;
+  const redis3 = getRedis();
+  if (!redis3) return false;
   try {
-    const nodesRaw = await redis2.get(nodeKey(experimentName));
+    const nodesRaw = await redis3.get(nodeKey(experimentName));
     if (nodesRaw) {
       const parsed = JSON.parse(nodesRaw);
       nodes.clear();
       for (const n of parsed) nodes.set(n.id, n);
     }
-    const stateRaw = await redis2.get(stateKey(experimentName));
+    const stateRaw = await redis3.get(stateKey(experimentName));
     if (stateRaw) {
       const state4 = JSON.parse(stateRaw);
       currentStep2 = state4.currentStep || 0;
@@ -19967,7 +19985,7 @@ async function loadState2(experimentName) {
       lastError = state4.lastError || null;
     }
     if (sampler) {
-      const samplerRaw = await redis2.get(samplerKey(experimentName));
+      const samplerRaw = await redis3.get(samplerKey(experimentName));
       if (samplerRaw) sampler.loadState(JSON.parse(samplerRaw));
     }
     return nodes.size > 0;
@@ -20098,10 +20116,15 @@ async function runStep(config2) {
 }
 async function runInventor(config2, resume = false) {
   if (isRunning3) throw new Error("Inventor already running");
+  if (!config2.experimentName || !config2.taskDescription) {
+    throw new Error("Inventor config must include experimentName and taskDescription");
+  }
   isRunning3 = true;
   currentConfig = config2;
   startedAt = (/* @__PURE__ */ new Date()).toISOString();
+  lastStepAt = null;
   lastError = null;
+  abortRequested = false;
   const results = [];
   sampler = createSampler({
     algorithm: config2.sampling.algorithm,
@@ -20187,8 +20210,8 @@ async function runInventor(config2, resume = false) {
     }
   } finally {
     try {
-      const redis2 = getRedis();
-      if (redis2) {
+      const redis3 = getRedis();
+      if (redis3) {
         const historyEntry = JSON.stringify({
           experimentName: currentConfig?.experimentName ?? "unnamed",
           taskDescription: currentConfig?.taskDescription ?? "",
@@ -20204,8 +20227,8 @@ async function runInventor(config2, resume = false) {
           completedAt: (/* @__PURE__ */ new Date()).toISOString(),
           aborted: abortRequested
         });
-        await redis2.lpush(historyKey(), historyEntry);
-        await redis2.ltrim(historyKey(), 0, 49);
+        await redis3.lpush(historyKey(), historyEntry);
+        await redis3.ltrim(historyKey(), 0, 49);
       }
     } catch (histErr) {
       logger.error({ error: histErr }, "Inventor: failed to persist history");
@@ -20254,28 +20277,40 @@ function getBestNode() {
   return bestNodeId ? nodes.get(bestNodeId) : void 0;
 }
 function stopInventor() {
-  if (!isRunning3) return { success: false, message: "No experiment is currently running" };
+  if (!isRunning3 || !currentConfig) {
+    isRunning3 = false;
+    currentConfig = null;
+    return { success: false, message: "No experiment is currently running" };
+  }
   abortRequested = true;
-  logger.info("Inventor: stop requested \u2014 will halt after current step completes");
-  return { success: true, message: `Stopping experiment "${currentConfig?.experimentName ?? ""}" after step ${currentStep2}` };
+  logger.info(
+    { experiment: currentConfig.experimentName, step: currentStep2 },
+    "Inventor: stop requested \u2014 will halt after current step completes"
+  );
+  return { success: true, message: `Stopping experiment "${currentConfig.experimentName}" after step ${currentStep2}` };
 }
-async function getNodesByExperiment(experimentName) {
-  const redis2 = getRedis();
-  if (!redis2) return [];
+async function getExperimentHistory(limit = 20) {
+  if (!redis) return [];
   try {
-    const raw = await redis2.get(nodeKey(experimentName));
-    if (!raw) return [];
-    return JSON.parse(raw);
+    const raw = await redis.lrange(historyKey(), 0, limit - 1);
+    return raw.map((entry) => {
+      try {
+        return JSON.parse(entry);
+      } catch {
+        return { raw: entry };
+      }
+    });
   } catch {
     return [];
   }
 }
-async function getExperimentHistory(limit = 20) {
-  const redis2 = getRedis();
-  if (!redis2) return [];
+async function loadExperimentNodes(experimentName) {
+  if (!redis) return [];
   try {
-    const entries = await redis2.lrange(historyKey(), 0, limit - 1);
-    return entries.map((e) => JSON.parse(e));
+    const raw = await redis.get(nodeKey(experimentName));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return parsed;
   } catch {
     return [];
   }
@@ -20326,8 +20361,8 @@ function getTokenSavings() {
   return { totalTokensSaved, totalFoldingCalls, avgSavingsPerFold: totalFoldingCalls > 0 ? Math.round(totalTokensSaved / totalFoldingCalls) : 0 };
 }
 async function saveFullToolOutput(content, toolName) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
+  const redis3 = getRedis();
+  if (!redis3) return null;
   const id = uuid23();
   try {
     const payload = JSON.stringify({
@@ -20339,7 +20374,7 @@ async function saveFullToolOutput(content, toolName) {
       created_at: (/* @__PURE__ */ new Date()).toISOString(),
       ttl_seconds: TOOL_OUTPUT_TTL_SECONDS
     });
-    await redis2.set(`${TOOL_OUTPUT_PREFIX}${id}`, payload, "EX", TOOL_OUTPUT_TTL_SECONDS);
+    await redis3.set(`${TOOL_OUTPUT_PREFIX}${id}`, payload, "EX", TOOL_OUTPUT_TTL_SECONDS);
     return id;
   } catch (err) {
     logger.debug({ error: String(err), tool: toolName }, "Tool output save failed (non-fatal)");
@@ -21555,10 +21590,10 @@ ${lines.join("\n")}`;
         const status = getAutonomousStatus3();
         const result = { ...status };
         if (args.include_history) {
-          const redis2 = getRedis();
-          if (redis2) {
+          const redis3 = getRedis();
+          if (redis3) {
             const limit = typeof args.history_limit === "number" ? Math.min(args.history_limit, 20) : 5;
-            const raw = await redis2.lrange("hyperagent:autonomous-cycles", 0, limit - 1);
+            const raw = await redis3.lrange("hyperagent:autonomous-cycles", 0, limit - 1);
             result.history = raw.map((r) => {
               try {
                 return JSON.parse(r);
@@ -21675,9 +21710,9 @@ ${lines.join("\n")}`;
     case "hyperagent_auto_issues": {
       try {
         const limit = typeof args.limit === "number" ? Math.min(args.limit, 200) : 50;
-        const redis2 = getRedis();
-        if (!redis2) return JSON.stringify({ issues: [], count: 0 });
-        const raw = await redis2.lrange("hyperagent:autonomous-cycles", 0, 99);
+        const redis3 = getRedis();
+        if (!redis3) return JSON.stringify({ issues: [], count: 0 });
+        const raw = await redis3.lrange("hyperagent:autonomous-cycles", 0, 99);
         const allIssues = [];
         for (const r of raw) {
           try {
@@ -21746,12 +21781,12 @@ ${lines.join("\n")}`;
       return JSON.stringify(getStatus());
     }
     case "inventor_nodes": {
-      const { getInventorNodes: getInventorNodes2, getNodesByExperiment: getNodesByExperiment2 } = await Promise.resolve().then(() => (init_inventor_loop(), inventor_loop_exports));
+      const { getInventorNodes: getInventorNodes2, getNodesByExperiment } = await Promise.resolve().then(() => (init_inventor_loop(), inventor_loop_exports));
       const sort = args.sort ?? "score";
       const limit = Math.min(args.limit ?? 50, 200);
       const offset = args.offset ?? 0;
       const experimentName = args.experiment_name;
-      let nodes2 = experimentName ? await getNodesByExperiment2(experimentName) : getInventorNodes2();
+      let nodes2 = experimentName ? await getNodesByExperiment(experimentName) : getInventorNodes2();
       if (sort === "created") {
         nodes2 = [...nodes2].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
       } else {
@@ -27116,10 +27151,10 @@ function buildCatalog() {
   };
 }
 toolsRouter.get("/catalog", async (_req, res) => {
-  const redis2 = getRedis();
-  if (redis2) {
+  const redis3 = getRedis();
+  if (redis3) {
     try {
-      const cached = await redis2.get(CATALOG_CACHE_KEY);
+      const cached = await redis3.get(CATALOG_CACHE_KEY);
       if (cached) {
         res.json(JSON.parse(cached));
         return;
@@ -27129,9 +27164,9 @@ toolsRouter.get("/catalog", async (_req, res) => {
     }
   }
   const catalog = buildCatalog();
-  if (redis2) {
+  if (redis3) {
     try {
-      await redis2.set(CATALOG_CACHE_KEY, JSON.stringify(catalog), "EX", CATALOG_TTL_SECONDS);
+      await redis3.set(CATALOG_CACHE_KEY, JSON.stringify(catalog), "EX", CATALOG_TTL_SECONDS);
     } catch (err) {
       logger.warn({ err: String(err) }, "Redis cache write failed for tool catalog");
     }
@@ -28556,10 +28591,10 @@ adoptionRouter.get("/telemetry", async (_req, res) => {
   }
 });
 adoptionRouter.get("/metrics", async (_req, res) => {
-  const redis2 = getRedis();
-  if (redis2) {
+  const redis3 = getRedis();
+  if (redis3) {
     try {
-      const cached = await redis2.get(REDIS_KEY3);
+      const cached = await redis3.get(REDIS_KEY3);
       if (cached) {
         res.json(JSON.parse(cached));
         return;
@@ -28572,9 +28607,9 @@ adoptionRouter.get("/metrics", async (_req, res) => {
     ...DEFAULT_METRICS,
     generated_at: (/* @__PURE__ */ new Date()).toISOString()
   };
-  if (redis2) {
+  if (redis3) {
     try {
-      await redis2.set(REDIS_KEY3, JSON.stringify(metrics2));
+      await redis3.set(REDIS_KEY3, JSON.stringify(metrics2));
     } catch (err) {
       logger.warn({ err: String(err) }, "Redis write failed for adoption metrics");
     }
@@ -28582,12 +28617,12 @@ adoptionRouter.get("/metrics", async (_req, res) => {
   res.json(metrics2);
 });
 adoptionRouter.put("/metrics", async (req, res) => {
-  const redis2 = getRedis();
+  const redis3 = getRedis();
   const body = req.body;
   let current = { ...DEFAULT_METRICS, generated_at: (/* @__PURE__ */ new Date()).toISOString() };
-  if (redis2) {
+  if (redis3) {
     try {
-      const cached = await redis2.get(REDIS_KEY3);
+      const cached = await redis3.get(REDIS_KEY3);
       if (cached) current = JSON.parse(cached);
     } catch (err) {
       logger.warn({ err: String(err) }, "Redis read failed during adoption metrics update");
@@ -28603,9 +28638,9 @@ adoptionRouter.put("/metrics", async (req, res) => {
   }
   current.features_pct = current.features_total > 0 ? Math.round(current.features_done / current.features_total * 1e3) / 10 : 0;
   current.generated_at = (/* @__PURE__ */ new Date()).toISOString();
-  if (redis2) {
+  if (redis3) {
     try {
-      await redis2.set(REDIS_KEY3, JSON.stringify(current));
+      await redis3.set(REDIS_KEY3, JSON.stringify(current));
     } catch (err) {
       logger.warn({ err: String(err) }, "Redis write failed for adoption metrics update");
       res.status(500).json({ success: false, error: "Failed to persist metrics" });
@@ -28615,7 +28650,7 @@ adoptionRouter.put("/metrics", async (req, res) => {
   res.json({ success: true, metrics: current });
 });
 async function captureAdoptionSnapshot() {
-  const redis2 = getRedis();
+  const redis3 = getRedis();
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
   const [conversationsResult, artifactsResult, toolCallsResult] = await Promise.allSettled([
     // Count conversations from last 24h via graph
@@ -28654,9 +28689,9 @@ async function captureAdoptionSnapshot() {
     return 0;
   };
   let current = { ...DEFAULT_METRICS, generated_at: (/* @__PURE__ */ new Date()).toISOString() };
-  if (redis2) {
+  if (redis3) {
     try {
-      const cached = await redis2.get(REDIS_KEY3);
+      const cached = await redis3.get(REDIS_KEY3);
       if (cached) current = JSON.parse(cached);
     } catch {
     }
@@ -28664,9 +28699,9 @@ async function captureAdoptionSnapshot() {
   let pipelineExecs = 0;
   let chainExecs = 0;
   let uniqueAgents = 0;
-  if (redis2) {
+  if (redis3) {
     try {
-      const chainData = await redis2.hgetall("orchestrator:chains");
+      const chainData = await redis3.hgetall("orchestrator:chains");
       const oneDayAgo = Date.now() - 864e5;
       for (const val of Object.values(chainData)) {
         try {
@@ -28680,7 +28715,7 @@ async function captureAdoptionSnapshot() {
         } catch {
         }
       }
-      const agentData = await redis2.hgetall("orchestrator:agents");
+      const agentData = await redis3.hgetall("orchestrator:agents");
       const activeAgents = /* @__PURE__ */ new Set();
       for (const val of Object.values(agentData)) {
         try {
@@ -28708,13 +28743,13 @@ async function captureAdoptionSnapshot() {
     features_done: current.features_done,
     features_pct: current.features_pct
   };
-  if (redis2) {
+  if (redis3) {
     try {
       const score = new Date(today).getTime();
-      await redis2.zadd(REDIS_TRENDS_KEY, score, JSON.stringify(snapshot));
-      const totalEntries = await redis2.zcard(REDIS_TRENDS_KEY);
+      await redis3.zadd(REDIS_TRENDS_KEY, score, JSON.stringify(snapshot));
+      const totalEntries = await redis3.zcard(REDIS_TRENDS_KEY);
       if (totalEntries > 90) {
-        await redis2.zremrangebyrank(REDIS_TRENDS_KEY, 0, totalEntries - 91);
+        await redis3.zremrangebyrank(REDIS_TRENDS_KEY, 0, totalEntries - 91);
       }
       logger.info({ date: today, snapshot }, "Adoption snapshot captured");
     } catch (err) {
@@ -28768,15 +28803,15 @@ adoptionRouter.post("/snapshot", async (_req, res) => {
   }
 });
 adoptionRouter.get("/trends", async (req, res) => {
-  const redis2 = getRedis();
+  const redis3 = getRedis();
   const days = Math.min(parseInt(String(req.query.days ?? "30"), 10) || 30, 90);
-  if (!redis2) {
+  if (!redis3) {
     res.json({ success: true, data: { trends: [], days, source: "none" } });
     return;
   }
   try {
     const cutoff = Date.now() - days * 864e5;
-    const raw = await redis2.zrangebyscore(REDIS_TRENDS_KEY, cutoff, "+inf");
+    const raw = await redis3.zrangebyscore(REDIS_TRENDS_KEY, cutoff, "+inf");
     const trends = raw.map((r) => JSON.parse(r));
     res.json({ success: true, data: { trends, days, total: trends.length } });
   } catch (err) {
@@ -28932,14 +28967,14 @@ async function runLooseEndScan() {
     summary,
     auto_fixed: 0
   };
-  const redis2 = getRedis();
-  if (redis2) {
+  const redis3 = getRedis();
+  if (redis3) {
     try {
-      await redis2.set(REDIS_KEY4, JSON.stringify(scanResult), "EX", 86400);
-      await redis2.zadd(REDIS_HISTORY, Date.now(), JSON.stringify(scanResult));
-      const count = await redis2.zcard(REDIS_HISTORY);
+      await redis3.set(REDIS_KEY4, JSON.stringify(scanResult), "EX", 86400);
+      await redis3.zadd(REDIS_HISTORY, Date.now(), JSON.stringify(scanResult));
+      const count = await redis3.zcard(REDIS_HISTORY);
       if (count > 30) {
-        await redis2.zremrangebyrank(REDIS_HISTORY, 0, count - 31);
+        await redis3.zremrangebyrank(REDIS_HISTORY, 0, count - 31);
       }
     } catch (err) {
       logger.warn({ err: String(err) }, "Failed to persist loose-end scan");
@@ -28992,13 +29027,13 @@ looseEndsRouter.post("/scan", async (_req, res) => {
   }
 });
 looseEndsRouter.get("/", async (_req, res) => {
-  const redis2 = getRedis();
-  if (!redis2) {
+  const redis3 = getRedis();
+  if (!redis3) {
     res.json({ success: true, data: null, message: "No scan results available" });
     return;
   }
   try {
-    const raw = await redis2.get(REDIS_KEY4);
+    const raw = await redis3.get(REDIS_KEY4);
     if (!raw) {
       res.json({ success: true, data: null, message: "No scan has been run yet" });
       return;
@@ -29009,14 +29044,14 @@ looseEndsRouter.get("/", async (_req, res) => {
   }
 });
 looseEndsRouter.get("/history", async (req, res) => {
-  const redis2 = getRedis();
+  const redis3 = getRedis();
   const limit = Math.min(parseInt(String(req.query.limit ?? "10")), 30);
-  if (!redis2) {
+  if (!redis3) {
     res.json({ success: true, data: { scans: [], total: 0 } });
     return;
   }
   try {
-    const raw = await redis2.zrevrange(REDIS_HISTORY, 0, limit - 1);
+    const raw = await redis3.zrevrange(REDIS_HISTORY, 0, limit - 1);
     const scans = raw.map((r) => {
       const parsed = JSON.parse(r);
       return {
@@ -29076,9 +29111,9 @@ async function probeHealth() {
   }
   let redisReachable = false;
   try {
-    const redis2 = getRedis();
-    if (redis2) {
-      await redis2.ping();
+    const redis3 = getRedis();
+    if (redis3) {
+      await redis3.ping();
       redisReachable = true;
     }
   } catch {
@@ -29539,18 +29574,18 @@ async function runAnomalyScan() {
   return { anomalies: [], health, analysis: "", patterns: state3.patterns };
 }
 async function persistState2() {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   try {
-    await redis2.set(REDIS_KEY5, JSON.stringify({ ...state3, _schemaVersion: 1 }), "EX", 86400);
+    await redis3.set(REDIS_KEY5, JSON.stringify({ ...state3, _schemaVersion: 1 }), "EX", 86400);
   } catch {
   }
 }
 async function loadState3() {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   try {
-    const raw = await redis2.get(REDIS_KEY5);
+    const raw = await redis3.get(REDIS_KEY5);
     if (raw) {
       const loaded = JSON.parse(raw);
       if (loaded._schemaVersion !== 1) {
@@ -29596,19 +29631,19 @@ init_adoption_telemetry();
 var FLYWHEEL_REDIS_KEY = "flywheel:last-report";
 var lastReport = null;
 async function loadLastReport() {
-  const redis2 = getRedis();
-  if (!redis2 || lastReport) return;
+  const redis3 = getRedis();
+  if (!redis3 || lastReport) return;
   try {
-    const raw = await redis2.get(FLYWHEEL_REDIS_KEY);
+    const raw = await redis3.get(FLYWHEEL_REDIS_KEY);
     if (raw) lastReport = JSON.parse(raw);
   } catch {
   }
 }
 async function saveLastReport(report) {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   try {
-    await redis2.set(FLYWHEEL_REDIS_KEY, JSON.stringify(report), "EX", 691200);
+    await redis3.set(FLYWHEEL_REDIS_KEY, JSON.stringify(report), "EX", 691200);
   } catch {
   }
 }
@@ -29626,11 +29661,13 @@ async function runWeeklySync() {
     pillars.reduce((product, p) => product * Math.max(0.01, p.score), 1),
     1 / pillars.length
   );
+  const nearZeroCount = pillars.filter((p) => p.score < 0.1).length;
+  const finalCompound = nearZeroCount >= 2 ? compound * 0.5 : compound;
   const optimizations = identifyOptimizations(pillars);
   const delta = lastReport ? compound - lastReport.compoundScore : 0;
   const report = {
     generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    compoundScore: parseFloat(compound.toFixed(4)),
+    compoundScore: parseFloat(finalCompound.toFixed(4)),
     pillars,
     nextOptimizations: optimizations.slice(0, 5),
     weeklyDelta: parseFloat(delta.toFixed(4))
@@ -29766,19 +29803,50 @@ async function scorePlatformHealth() {
     const cb = getCircuitBreakerStats?.() ?? null;
     const circuitOpen = cb?.open === true;
     const failures = cb?.failures ?? 0;
-    const score = circuitOpen ? 0.2 : Math.max(0, 1 - failures * 0.05);
+    const redis3 = getRedis();
+    let chainSuccessRate = 0.5;
+    let totalChains = 0;
+    let failedChains = 0;
+    if (redis3) {
+      try {
+        const keys = await redis3.keys("orchestrator:chain:*");
+        totalChains = keys.length;
+        let completedCount2 = 0;
+        for (const key of keys.slice(0, 100)) {
+          const raw = await redis3.get(key);
+          if (raw) {
+            try {
+              const data = JSON.parse(raw);
+              if (data.status === "completed") completedCount2++;
+              if (data.status === "failed") failedChains++;
+            } catch {
+            }
+          }
+        }
+        if (totalChains > 0) {
+          chainSuccessRate = completedCount2 / Math.min(totalChains, 100);
+        }
+      } catch {
+      }
+    }
+    const circuitScore = circuitOpen ? 0 : Math.max(0, 1 - failures * 0.05);
+    const score = 0.6 * chainSuccessRate + 0.4 * circuitScore;
+    const isLying = chainSuccessRate < 0.3 && circuitScore > 0.8;
+    const headline = isLying ? `\u26A0 ${failedChains} of ${totalChains} chains failed \u2014 circuit breaker silent` : circuitOpen ? `\u26A0 Circuit breaker OPEN` : `${Math.round(chainSuccessRate * 100)}% chain success rate`;
     return {
       name: "Platform Health",
       score: parseFloat(Math.min(1, score).toFixed(3)),
-      trend: circuitOpen ? "down" : failures > 0 ? "flat" : "up",
-      headline: circuitOpen ? "\u26A0 Circuit breaker OPEN" : `${failures} backend failures`,
+      trend: chainSuccessRate < 0.3 ? "down" : circuitOpen ? "down" : failures > 0 ? "flat" : "up",
+      headline,
       details: [
+        `Chain success rate: ${Math.round(chainSuccessRate * 100)}% (${completedCount}/${Math.min(totalChains, 100)})`,
         `Circuit breaker: ${circuitOpen ? "OPEN" : "closed"}`,
-        `Recent failures: ${failures}`
+        `Backend failures: ${failures}`,
+        `Failed chains: ${failedChains}`
       ]
     };
   } catch {
-    return { name: "Platform Health", score: 0.7, trend: "flat", headline: "Health data unavailable", details: [] };
+    return { name: "Platform Health", score: 0.5, trend: "flat", headline: "Health data unavailable", details: [] };
   }
 }
 function identifyOptimizations(pillars) {
@@ -29935,7 +30003,7 @@ function registerCronJob(job) {
   }
   const existing = cronTasks.get(job.id);
   if (existing) existing.stop();
-  const cronJob = { ...job, run_count: 0 };
+  const cronJob = { ...job, run_count: 0, consecutive_failures: 0 };
   jobs.set(job.id, cronJob);
   if (job.enabled) {
     const task = cron.schedule(job.schedule, async () => {
@@ -29952,10 +30020,10 @@ async function runCronJob(jobId) {
     logger.warn({ id: jobId }, "Cron job not found");
     return;
   }
-  const redis2 = getRedis();
+  const redis3 = getRedis();
   const lockKey = `cron:lock:${jobId}`;
-  if (redis2) {
-    const acquired = await redis2.set(lockKey, Date.now().toString(), "NX", "EX", 300);
+  if (redis3) {
+    const acquired = await redis3.set(lockKey, Date.now().toString(), "NX", "EX", 300);
     if (!acquired) {
       logger.warn({ id: jobId }, "Cron job skipped \u2014 previous run still active");
       return;
@@ -29998,10 +30066,10 @@ async function runCronJob(jobId) {
     }
     if (job.id === "adoption-weekly-digest") {
       try {
-        const redis3 = getRedis();
-        if (redis3) {
+        const redis4 = getRedis();
+        if (redis4) {
           const weekAgo = Date.now() - 7 * 864e5;
-          const raw = await redis3.zrangebyscore("orchestrator:adoption-trends", weekAgo, "+inf");
+          const raw = await redis4.zrangebyscore("orchestrator:adoption-trends", weekAgo, "+inf");
           const snapshots = raw.map((r) => JSON.parse(r));
           if (snapshots.length > 0) {
             const sum = (fn) => snapshots.reduce((a, s) => a + fn(s), 0);
@@ -30497,6 +30565,7 @@ async function runCronJob(jobId) {
     job.last_run = (/* @__PURE__ */ new Date()).toISOString();
     job.last_status = result.status;
     job.run_count++;
+    job.consecutive_failures = 0;
     persistCronJobs();
     if (job.id === "daily-knowledge-feed" && result.status === "completed") {
       const feed = {
@@ -30513,11 +30582,11 @@ async function runCronJob(jobId) {
         gap_analysis: result.results[1]?.output ?? null,
         emerging_clusters: result.results[2]?.output ?? null
       };
-      const redis3 = getRedis();
-      if (redis3) {
-        await redis3.set("orchestrator:knowledge-feed", JSON.stringify(feed), "EX", 86400);
+      const redis4 = getRedis();
+      if (redis4) {
+        await redis4.set("orchestrator:knowledge-feed", JSON.stringify(feed), "EX", 86400);
         const briefing = buildKnowledgeBriefing(feed);
-        await redis3.set("orchestrator:knowledge-briefing-prompt", briefing, "EX", 86400);
+        await redis4.set("orchestrator:knowledge-briefing-prompt", briefing, "EX", 86400);
         logger.info("Knowledge briefing prompt cached for Open WebUI");
       }
       broadcastSSE("knowledge-feed", feed);
@@ -30527,10 +30596,26 @@ async function runCronJob(jobId) {
     job.last_run = (/* @__PURE__ */ new Date()).toISOString();
     job.last_status = "failed";
     job.run_count++;
+    job.consecutive_failures = (job.consecutive_failures || 0) + 1;
+    if (job.consecutive_failures >= 3 && job.enabled) {
+      job.enabled = false;
+      const existing = cronTasks.get(job.id);
+      if (existing) existing.stop();
+      cronTasks.delete(job.id);
+      logger.error({ id: job.id, failures: job.consecutive_failures }, "CIRCUIT BREAKER: auto-disabled after 3 consecutive failures");
+      broadcastMessage({
+        from: "Orchestrator",
+        to: "All",
+        source: "orchestrator",
+        type: "Message",
+        message: `\u{1F534} CIRCUIT BREAKER: "${job.name}" auto-disabled after ${job.consecutive_failures} consecutive failures. Manual review required.`,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    }
     persistCronJobs();
-    logger.error({ id: job.id, err: String(err) }, "Cron job failed");
+    logger.error({ id: job.id, err: String(err), consecutive_failures: job.consecutive_failures }, "Cron job failed");
   } finally {
-    if (redis2) await redis2.del(lockKey).catch(() => {
+    if (redis3) await redis3.del(lockKey).catch(() => {
     });
   }
 }
@@ -30564,20 +30649,20 @@ function deleteCronJob(jobId) {
   return deleted;
 }
 function persistCronJobs() {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   const data = Array.from(jobs.values()).map((j) => ({
     ...j
     // Don't persist the chain's runtime state, just config
   }));
-  redis2.set(REDIS_CRON_KEY, JSON.stringify(data)).catch(() => {
+  redis3.set(REDIS_CRON_KEY, JSON.stringify(data)).catch(() => {
   });
 }
 async function hydrateCronJobs() {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   try {
-    const raw = await redis2.get(REDIS_CRON_KEY);
+    const raw = await redis3.get(REDIS_CRON_KEY);
     if (!raw) return;
     const savedJobs = JSON.parse(raw);
     for (const job of savedJobs) {
@@ -30761,7 +30846,7 @@ function registerDefaultLoops() {
     name: "Adoption Gate Drift Detection",
     schedule: "0 2 * * *",
     // Daily 02:00 UTC
-    enabled: true,
+    enabled: false,
     chain: {
       name: "Adoption Drift",
       mode: "sequential",
@@ -30827,7 +30912,7 @@ function registerDefaultLoops() {
     name: "CIA Guardian (Autonomous Remediation)",
     schedule: "2,12,22,32,42,52 * * * *",
     // Every 10 min, offset +2 from health-pulse
-    enabled: true,
+    enabled: false,
     chain: {
       name: "CIA Health Scan",
       mode: "sequential",
@@ -30847,7 +30932,7 @@ function registerDefaultLoops() {
     name: "Intelligence Watchtower (Multi-Domain)",
     schedule: "0 */4 * * *",
     // Every 4 hours
-    enabled: true,
+    enabled: false,
     chain: {
       name: "Dynamic Intelligence Pipeline",
       mode: "sequential",
@@ -31025,7 +31110,7 @@ function registerDefaultLoops() {
     id: "intel-knowledge-synthesis",
     name: "Intelligence: Knowledge Synthesis",
     schedule: "*/30 * * * *",
-    enabled: true,
+    enabled: false,
     chain: {
       name: "Knowledge Synthesis Pipeline",
       mode: "sequential",
@@ -31060,7 +31145,7 @@ function registerDefaultLoops() {
     id: "intel-graph-enrichment",
     name: "Intelligence: Graph Enrichment",
     schedule: "0 * * * *",
-    enabled: true,
+    enabled: false,
     chain: {
       name: "Graph Enrichment Pipeline",
       mode: "sequential",
@@ -31090,7 +31175,7 @@ function registerDefaultLoops() {
     id: "intel-roma-observer",
     name: "Intelligence: ROMA Optimization Observer",
     schedule: "0 */4 * * *",
-    enabled: true,
+    enabled: false,
     chain: {
       name: "ROMA Observer Pipeline",
       mode: "sequential",
@@ -31114,7 +31199,7 @@ function registerDefaultLoops() {
     id: "intel-compliance-scan",
     name: "Intelligence: Compliance Scan",
     schedule: "0 */6 * * *",
-    enabled: true,
+    enabled: false,
     chain: {
       name: "Compliance Scan Pipeline",
       mode: "sequential",
@@ -31136,7 +31221,7 @@ function registerDefaultLoops() {
     id: "intel-harvest-cycle",
     name: "Intelligence: Knowledge Harvest",
     schedule: "0 */8 * * *",
-    enabled: true,
+    enabled: false,
     chain: {
       name: "Knowledge Harvest Pipeline",
       mode: "sequential",
@@ -31166,7 +31251,7 @@ function registerDefaultLoops() {
     id: "intel-metrics-snapshot",
     name: "Intelligence: Metrics Snapshot",
     schedule: "30 * * * *",
-    enabled: true,
+    enabled: false,
     chain: {
       name: "Metrics Snapshot Pipeline",
       mode: "sequential",
@@ -31191,7 +31276,7 @@ function registerDefaultLoops() {
     id: "daily-knowledge-feed",
     name: "Daily Knowledge Feed",
     schedule: "0 6 * * *",
-    enabled: true,
+    enabled: false,
     chain: {
       name: "Daily Knowledge Feed",
       mode: "sequential",
@@ -31261,7 +31346,7 @@ function registerDefaultLoops() {
     name: "Skill Forge (Composite Tool Generation)",
     schedule: "0 4 * * 0",
     // Sunday 04:00 UTC
-    enabled: true,
+    enabled: false,
     chain: {
       name: "Skill Forge",
       mode: "sequential",
@@ -31612,10 +31697,10 @@ var dashboardRouter = Router10();
 var CACHE_KEY = "orchestrator:dashboard-cache";
 var CACHE_TTL = 15;
 dashboardRouter.get("/data", async (_req, res) => {
-  const redis2 = getRedis();
-  if (redis2) {
+  const redis3 = getRedis();
+  if (redis3) {
     try {
-      const cached = await redis2.get(CACHE_KEY);
+      const cached = await redis3.get(CACHE_KEY);
       if (cached) {
         res.setHeader("X-Cache", "HIT");
         return res.json(JSON.parse(cached));
@@ -31651,10 +31736,10 @@ dashboardRouter.get("/data", async (_req, res) => {
     }
   }
   let adoptionTrends = [];
-  if (redis2) {
+  if (redis3) {
     try {
       const weekAgo = Date.now() - 7 * 864e5;
-      const raw = await redis2.zrangebyscore("orchestrator:adoption-trends", weekAgo, "+inf");
+      const raw = await redis3.zrangebyscore("orchestrator:adoption-trends", weekAgo, "+inf");
       adoptionTrends = raw.map((r) => JSON.parse(r));
     } catch {
     }
@@ -31679,10 +31764,10 @@ dashboardRouter.get("/data", async (_req, res) => {
     },
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   };
-  if (redis2) {
+  if (redis3) {
     try {
       const json = JSON.stringify(payload);
-      redis2.set(CACHE_KEY, json, "EX", CACHE_TTL).catch(() => {
+      redis3.set(CACHE_KEY, json, "EX", CACHE_TTL).catch(() => {
       });
     } catch {
     }
@@ -31800,11 +31885,11 @@ var memoryAudit = [];
 async function logAudit(entry) {
   try {
     if (isRedisEnabled()) {
-      const redis2 = getRedis();
-      if (redis2) {
-        await redis2.lpush(REDIS_KEY6, JSON.stringify(entry));
-        await redis2.ltrim(REDIS_KEY6, 0, MAX_ENTRIES - 1);
-        await redis2.expire(REDIS_KEY6, TTL_SECONDS5);
+      const redis3 = getRedis();
+      if (redis3) {
+        await redis3.lpush(REDIS_KEY6, JSON.stringify(entry));
+        await redis3.ltrim(REDIS_KEY6, 0, MAX_ENTRIES - 1);
+        await redis3.expire(REDIS_KEY6, TTL_SECONDS5);
         return;
       }
     }
@@ -31817,9 +31902,9 @@ async function logAudit(entry) {
 async function getAuditLog(limit = 100, offset = 0) {
   try {
     if (isRedisEnabled()) {
-      const redis2 = getRedis();
-      if (redis2) {
-        const raw = await redis2.lrange(REDIS_KEY6, offset, offset + limit - 1);
+      const redis3 = getRedis();
+      if (redis3) {
+        const raw = await redis3.lrange(REDIS_KEY6, offset, offset + limit - 1);
         return raw.map((r) => JSON.parse(r));
       }
     }
@@ -31901,8 +31986,8 @@ toolOutputRouter.get("/:id", async (req, res) => {
     });
     return;
   }
-  const redis2 = getRedis();
-  if (!redis2) {
+  const redis3 = getRedis();
+  if (!redis3) {
     res.status(503).json({
       success: false,
       error: { code: "REDIS_UNAVAILABLE", message: "Tool output store not available", status_code: 503 }
@@ -31910,7 +31995,7 @@ toolOutputRouter.get("/:id", async (req, res) => {
     return;
   }
   try {
-    const raw = await redis2.get(`${TOOL_OUTPUT_PREFIX2}${id}`);
+    const raw = await redis3.get(`${TOOL_OUTPUT_PREFIX2}${id}`);
     if (!raw) {
       res.status(404).json({
         success: false,
@@ -31919,7 +32004,7 @@ toolOutputRouter.get("/:id", async (req, res) => {
       return;
     }
     const parsed = JSON.parse(raw);
-    const ttl = await redis2.ttl(`${TOOL_OUTPUT_PREFIX2}${id}`);
+    const ttl = await redis3.ttl(`${TOOL_OUTPUT_PREFIX2}${id}`);
     res.json({
       success: true,
       data: {
@@ -31942,13 +32027,13 @@ toolOutputRouter.get("/:id/raw", async (req, res) => {
     res.status(400).json({ success: false, error: { code: "INVALID_ID", message: "UUID required", status_code: 400 } });
     return;
   }
-  const redis2 = getRedis();
-  if (!redis2) {
+  const redis3 = getRedis();
+  if (!redis3) {
     res.status(503).json({ success: false, error: { code: "REDIS_UNAVAILABLE", message: "Tool output store not available", status_code: 503 } });
     return;
   }
   try {
-    const raw = await redis2.get(`${TOOL_OUTPUT_PREFIX2}${id}`);
+    const raw = await redis3.get(`${TOOL_OUTPUT_PREFIX2}${id}`);
     if (!raw) {
       res.status(404).type("text/plain").send("Not found or expired");
       return;
@@ -32037,10 +32122,10 @@ knowledgeRouter.get("/cards", async (req, res) => {
   res.json({ cards: [], error: errorMsg, query: q, count: 0 });
 });
 knowledgeRouter.get("/feed", async (_req, res) => {
-  const redis2 = getRedis();
-  if (redis2) {
+  const redis3 = getRedis();
+  if (redis3) {
     try {
-      const cached = await redis2.get(FEED_CACHE_KEY);
+      const cached = await redis3.get(FEED_CACHE_KEY);
       if (cached) {
         res.json(JSON.parse(cached));
         return;
@@ -32093,9 +32178,9 @@ knowledgeRouter.get("/feed", async (_req, res) => {
   if (errors.length > 0) {
     feed.error = errors.join("; ");
   }
-  if (redis2) {
+  if (redis3) {
     try {
-      await redis2.set(FEED_CACHE_KEY, JSON.stringify(feed), "EX", FEED_TTL_SECONDS);
+      await redis3.set(FEED_CACHE_KEY, JSON.stringify(feed), "EX", FEED_TTL_SECONDS);
     } catch (err) {
       logger.warn({ err: String(err) }, "Redis cache write failed for knowledge feed");
     }
@@ -32103,13 +32188,13 @@ knowledgeRouter.get("/feed", async (_req, res) => {
   res.json(feed);
 });
 knowledgeRouter.get("/briefing", async (_req, res) => {
-  const redis2 = getRedis();
-  if (!redis2) {
+  const redis3 = getRedis();
+  if (!redis3) {
     res.status(503).json({ error: "Redis not available", briefing: null });
     return;
   }
   try {
-    const briefing = await redis2.get(BRIEFING_CACHE_KEY);
+    const briefing = await redis3.get(BRIEFING_CACHE_KEY);
     if (!briefing) {
       res.status(204).end();
       return;
@@ -32131,12 +32216,12 @@ var ARTIFACT_PREFIX = "orchestrator:artifact:";
 var ARTIFACT_INDEX = "orchestrator:artifacts:index";
 var TTL_SECONDS6 = 2592e3;
 async function storeArtifact(artifact) {
-  const redis2 = getRedis();
-  if (!redis2) return false;
+  const redis3 = getRedis();
+  if (!redis3) return false;
   const key = `${ARTIFACT_PREFIX}${artifact.$id}`;
   try {
-    await redis2.set(key, JSON.stringify(artifact), "EX", TTL_SECONDS6);
-    await redis2.sadd(ARTIFACT_INDEX, artifact.$id);
+    await redis3.set(key, JSON.stringify(artifact), "EX", TTL_SECONDS6);
+    await redis3.sadd(ARTIFACT_INDEX, artifact.$id);
     return true;
   } catch (err) {
     logger.warn({ err: String(err) }, "Redis store failed for artifact");
@@ -32144,10 +32229,10 @@ async function storeArtifact(artifact) {
   }
 }
 async function loadArtifact(id) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
+  const redis3 = getRedis();
+  if (!redis3) return null;
   try {
-    const raw = await redis2.get(`${ARTIFACT_PREFIX}${id}`);
+    const raw = await redis3.get(`${ARTIFACT_PREFIX}${id}`);
     return raw ? JSON.parse(raw) : null;
   } catch (err) {
     logger.warn({ err: String(err), id }, "Redis load failed for artifact");
@@ -32155,10 +32240,10 @@ async function loadArtifact(id) {
   }
 }
 async function listAllArtifactIds() {
-  const redis2 = getRedis();
-  if (!redis2) return [];
+  const redis3 = getRedis();
+  if (!redis3) return [];
   try {
-    return await redis2.smembers(ARTIFACT_INDEX);
+    return await redis3.smembers(ARTIFACT_INDEX);
   } catch (err) {
     logger.warn({ err: String(err) }, "Redis list failed for artifact index");
     return [];
@@ -32199,14 +32284,14 @@ artifactRouter.get("/", async (req, res) => {
   const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 200);
   const offset = Math.max(parseInt(req.query.offset) || 0, 0);
   const allIds = await listAllArtifactIds();
-  const redis2 = getRedis();
-  if (!redis2) {
+  const redis3 = getRedis();
+  if (!redis3) {
     res.json({ artifacts: [], total: 0, limit, offset });
     return;
   }
   const artifacts = [];
   try {
-    const pipeline = redis2.pipeline();
+    const pipeline = redis3.pipeline();
     for (const id of allIds) {
       pipeline.get(`${ARTIFACT_PREFIX}${id}`);
     }
@@ -32460,12 +32545,12 @@ var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
 var TTL_SECONDS7 = 2592e3;
 async function storeNotebook(notebook) {
-  const redis2 = getRedis();
-  if (!redis2) return false;
+  const redis3 = getRedis();
+  if (!redis3) return false;
   const key = `${NOTEBOOK_PREFIX}${notebook.$id}`;
   try {
-    await redis2.set(key, JSON.stringify(notebook), "EX", TTL_SECONDS7);
-    await redis2.sadd(NOTEBOOK_INDEX, notebook.$id);
+    await redis3.set(key, JSON.stringify(notebook), "EX", TTL_SECONDS7);
+    await redis3.sadd(NOTEBOOK_INDEX, notebook.$id);
     return true;
   } catch (err) {
     logger.warn({ err: String(err) }, "Redis store failed for notebook");
@@ -32473,10 +32558,10 @@ async function storeNotebook(notebook) {
   }
 }
 async function loadNotebook(id) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
+  const redis3 = getRedis();
+  if (!redis3) return null;
   try {
-    const raw = await redis2.get(`${NOTEBOOK_PREFIX}${id}`);
+    const raw = await redis3.get(`${NOTEBOOK_PREFIX}${id}`);
     return raw ? JSON.parse(raw) : null;
   } catch (err) {
     logger.warn({ err: String(err), id }, "Redis load failed for notebook");
@@ -32819,10 +32904,10 @@ async function fetchDrillChildren(level, label) {
   }));
 }
 async function saveDrillContext(sessionId, ctx) {
-  const redis2 = getRedis();
-  if (!redis2) return false;
+  const redis3 = getRedis();
+  if (!redis3) return false;
   try {
-    await redis2.set(`${DRILL_PREFIX}${sessionId}`, JSON.stringify(ctx), "EX", SESSION_TTL);
+    await redis3.set(`${DRILL_PREFIX}${sessionId}`, JSON.stringify(ctx), "EX", SESSION_TTL);
     return true;
   } catch (err) {
     logger.warn({ err: String(err) }, "Redis save failed for drill context");
@@ -32830,10 +32915,10 @@ async function saveDrillContext(sessionId, ctx) {
   }
 }
 async function loadDrillContext(sessionId) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
+  const redis3 = getRedis();
+  if (!redis3) return null;
   try {
-    const raw = await redis2.get(`${DRILL_PREFIX}${sessionId}`);
+    const raw = await redis3.get(`${DRILL_PREFIX}${sessionId}`);
     return raw ? JSON.parse(raw) : null;
   } catch (err) {
     logger.warn({ err: String(err) }, "Redis load failed for drill context");
@@ -33469,11 +33554,11 @@ var REDIS_PREFIX10 = "orchestrator:assembly:";
 var REDIS_INDEX4 = "orchestrator:assemblies:index";
 var TTL_SECONDS8 = 2592e3;
 async function storeAssembly(assembly) {
-  const redis2 = getRedis();
-  if (!redis2) return false;
+  const redis3 = getRedis();
+  if (!redis3) return false;
   try {
-    await redis2.set(`${REDIS_PREFIX10}${assembly.$id}`, JSON.stringify(assembly), "EX", TTL_SECONDS8);
-    await redis2.sadd(REDIS_INDEX4, assembly.$id);
+    await redis3.set(`${REDIS_PREFIX10}${assembly.$id}`, JSON.stringify(assembly), "EX", TTL_SECONDS8);
+    await redis3.sadd(REDIS_INDEX4, assembly.$id);
     return true;
   } catch (err) {
     logger.warn({ err: String(err) }, "Redis store failed for assembly");
@@ -33481,20 +33566,20 @@ async function storeAssembly(assembly) {
   }
 }
 async function loadAssembly(id) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
+  const redis3 = getRedis();
+  if (!redis3) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX10}${id}`);
+    const raw = await redis3.get(`${REDIS_PREFIX10}${id}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
 }
 async function listAllIds() {
-  const redis2 = getRedis();
-  if (!redis2) return [];
+  const redis3 = getRedis();
+  if (!redis3) return [];
   try {
-    return await redis2.smembers(REDIS_INDEX4);
+    return await redis3.smembers(REDIS_INDEX4);
   } catch {
     return [];
   }
@@ -33679,14 +33764,14 @@ assemblyRouter.get("/", async (req, res) => {
   const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "50")), 1), 200);
   const offset = Math.max(parseInt(String(req.query.offset ?? "0")), 0);
   const allIds = await listAllIds();
-  const redis2 = getRedis();
-  if (!redis2 || allIds.length === 0) {
+  const redis3 = getRedis();
+  if (!redis3 || allIds.length === 0) {
     res.json({ assemblies: [], total: 0, limit, offset });
     return;
   }
   const assemblies = [];
   try {
-    const pipeline = redis2.pipeline();
+    const pipeline = redis3.pipeline();
     for (const id of allIds) {
       pipeline.get(`${REDIS_PREFIX10}${id}`);
     }
@@ -33763,11 +33848,11 @@ var REDIS_PREFIX11 = "orchestrator:decision:";
 var REDIS_INDEX5 = "orchestrator:decisions:index";
 var TTL_SECONDS9 = 7776e3;
 async function storeDecision(decision) {
-  const redis2 = getRedis();
-  if (!redis2) return false;
+  const redis3 = getRedis();
+  if (!redis3) return false;
   try {
-    await redis2.set(`${REDIS_PREFIX11}${decision.$id}`, JSON.stringify(decision), "EX", TTL_SECONDS9);
-    await redis2.sadd(REDIS_INDEX5, decision.$id);
+    await redis3.set(`${REDIS_PREFIX11}${decision.$id}`, JSON.stringify(decision), "EX", TTL_SECONDS9);
+    await redis3.sadd(REDIS_INDEX5, decision.$id);
     return true;
   } catch (err) {
     logger.warn({ err: String(err) }, "Redis store failed for decision");
@@ -33775,20 +33860,20 @@ async function storeDecision(decision) {
   }
 }
 async function loadDecision(id) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
+  const redis3 = getRedis();
+  if (!redis3) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX11}${id}`);
+    const raw = await redis3.get(`${REDIS_PREFIX11}${id}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
 }
 async function listAllDecisionIds() {
-  const redis2 = getRedis();
-  if (!redis2) return [];
+  const redis3 = getRedis();
+  if (!redis3) return [];
   try {
-    return await redis2.smembers(REDIS_INDEX5);
+    return await redis3.smembers(REDIS_INDEX5);
   } catch {
     return [];
   }
@@ -33997,14 +34082,14 @@ decisionsRouter.get("/", async (req, res) => {
   const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "50")), 1), 200);
   const offset = Math.max(parseInt(String(req.query.offset ?? "0")), 0);
   const allIds = await listAllDecisionIds();
-  const redis2 = getRedis();
-  if (!redis2 || allIds.length === 0) {
+  const redis3 = getRedis();
+  if (!redis3 || allIds.length === 0) {
     res.json({ decisions: [], total: 0, limit, offset });
     return;
   }
   const decisions = [];
   try {
-    const pipeline = redis2.pipeline();
+    const pipeline = redis3.pipeline();
     for (const id of allIds) {
       pipeline.get(`${REDIS_PREFIX11}${id}`);
     }
@@ -34178,13 +34263,13 @@ init_redis();
 init_chain_engine();
 var REDIS_FSM_PREFIX = "orchestrator:fsm:";
 async function listPlans() {
-  const redis2 = getRedis();
-  if (!redis2) return [];
+  const redis3 = getRedis();
+  if (!redis3) return [];
   try {
-    const keys = await redis2.keys(`${REDIS_FSM_PREFIX}*`);
+    const keys = await redis3.keys(`${REDIS_FSM_PREFIX}*`);
     const plans2 = [];
     for (const key of keys) {
-      const raw = await redis2.get(key);
+      const raw = await redis3.get(key);
       if (raw) plans2.push(JSON.parse(raw));
     }
     return plans2.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
@@ -36170,9 +36255,9 @@ import { Router as Router27 } from "express";
 var failuresRouter = Router27();
 failuresRouter.get("/summary", async (_req, res) => {
   try {
-    const redis2 = getRedis();
-    if (redis2) {
-      const cached = await redis2.get("orchestrator:failure-summary");
+    const redis3 = getRedis();
+    if (redis3) {
+      const cached = await redis3.get("orchestrator:failure-summary");
       if (cached) {
         try {
           res.json({ success: true, data: JSON.parse(cached), source: "cache" });
@@ -36183,8 +36268,8 @@ failuresRouter.get("/summary", async (_req, res) => {
     }
     const events = await harvestFailures(24);
     const summary = buildFailureSummary(events, 24);
-    if (redis2) {
-      await redis2.set("orchestrator:failure-summary", JSON.stringify(summary), "EX", 900).catch(() => {
+    if (redis3) {
+      await redis3.set("orchestrator:failure-summary", JSON.stringify(summary), "EX", 900).catch(() => {
       });
     }
     res.json({ success: true, data: summary, source: "fresh" });
@@ -36216,9 +36301,9 @@ var lastCrawlAt = 0;
 var CRAWL_COOLDOWN_MS = 36e5;
 competitiveRouter.get("/report", async (_req, res) => {
   try {
-    const redis2 = getRedis();
-    if (redis2) {
-      const cached = await redis2.get("orchestrator:competitive-report");
+    const redis3 = getRedis();
+    if (redis3) {
+      const cached = await redis3.get("orchestrator:competitive-report");
       if (cached) {
         try {
           res.json({ success: true, data: JSON.parse(cached), source: "cache" });
@@ -36282,24 +36367,24 @@ var foldRouter = Router29();
 var DAILY_LIMIT = 100;
 var REDIS_PREFIX12 = "caas:usage:";
 async function getUsageCount(apiKey) {
-  const redis2 = getRedis();
-  if (!redis2) return 0;
+  const redis3 = getRedis();
+  if (!redis3) return 0;
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
   const key = `${REDIS_PREFIX12}${today}:${apiKey}`;
-  const count = await redis2.get(key);
+  const count = await redis3.get(key);
   return parseInt(count ?? "0", 10);
 }
 async function incrementUsage(apiKey) {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
   const key = `${REDIS_PREFIX12}${today}:${apiKey}`;
-  await redis2.incr(key);
-  await redis2.expire(key, 86400 * 2);
+  await redis3.incr(key);
+  await redis3.expire(key, 86400 * 2);
 }
 async function logUsage(apiKey, inputTokens, outputTokens, durationMs) {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   const event = JSON.stringify({
     $id: `caas-usage:${Date.now()}`,
     api_key: apiKey.slice(0, 8) + "...",
@@ -36308,9 +36393,9 @@ async function logUsage(apiKey, inputTokens, outputTokens, durationMs) {
     duration_ms: durationMs,
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   });
-  await redis2.lpush("caas:usage-log", event).catch(() => {
+  await redis3.lpush("caas:usage-log", event).catch(() => {
   });
-  await redis2.ltrim("caas:usage-log", 0, 9999).catch(() => {
+  await redis3.ltrim("caas:usage-log", 0, 9999).catch(() => {
   });
 }
 foldRouter.post("/", async (req, res) => {
@@ -36403,14 +36488,14 @@ foldRouter.post("/", async (req, res) => {
   }
 });
 foldRouter.get("/usage", async (req, res) => {
-  const redis2 = getRedis();
-  if (!redis2) {
+  const redis3 = getRedis();
+  if (!redis3) {
     res.json({ success: true, data: { message: "Redis not available \u2014 no usage tracking" } });
     return;
   }
   try {
-    const logLength = await redis2.llen("caas:usage-log");
-    const recent = await redis2.lrange("caas:usage-log", 0, 9);
+    const logLength = await redis3.llen("caas:usage-log");
+    const recent = await redis3.lrange("caas:usage-log", 0, 9);
     const parsed = recent.map((r) => {
       try {
         return JSON.parse(r);
@@ -38401,12 +38486,12 @@ hyperagentAutoRouter.get("/status", (_req, res) => {
 hyperagentAutoRouter.get("/cycles", async (req, res) => {
   const limit = Math.min(parseInt(String(req.query.limit ?? "20"), 10) || 20, 100);
   try {
-    const redis2 = getRedis();
-    if (!redis2) {
+    const redis3 = getRedis();
+    if (!redis3) {
       res.json({ success: true, cycles: [], count: 0, source: "no-redis" });
       return;
     }
-    const raw = await redis2.lrange("hyperagent:autonomous-cycles", 0, limit - 1);
+    const raw = await redis3.lrange("hyperagent:autonomous-cycles", 0, limit - 1);
     const cycles = raw.map((r) => {
       try {
         return JSON.parse(r);
@@ -38464,12 +38549,12 @@ hyperagentAutoRouter.get("/phase/gate", (_req, res) => {
 hyperagentAutoRouter.get("/issues", async (req, res) => {
   const limit = Math.min(parseInt(String(req.query.limit ?? "50"), 10) || 50, 200);
   try {
-    const redis2 = getRedis();
-    if (!redis2) {
+    const redis3 = getRedis();
+    if (!redis3) {
       res.json({ success: true, issues: [], count: 0 });
       return;
     }
-    const raw = await redis2.lrange("hyperagent:autonomous-cycles", 0, limit - 1);
+    const raw = await redis3.lrange("hyperagent:autonomous-cycles", 0, limit - 1);
     const allIssues = [];
     for (const r of raw) {
       try {
@@ -38530,6 +38615,7 @@ data: ${JSON.stringify({
 });
 
 // src/routes/inventor.ts
+init_chat_broadcaster();
 init_inventor_loop();
 init_logger();
 import { Router as Router44 } from "express";
@@ -38584,8 +38670,17 @@ inventorRouter.post("/run", async (req, res) => {
     chainMode: config2.chainMode ?? "sequential"
   };
   try {
-    runInventor(fullConfig, resume ?? false).catch((err) => {
+    const runPromise = runInventor(fullConfig, resume ?? false);
+    runPromise.catch((err) => {
       logger.error({ err: String(err), experiment: fullConfig.experimentName }, "Inventor run failed");
+      broadcastMessage({
+        from: "Inventor",
+        to: "All",
+        source: "orchestrator",
+        type: "Message",
+        message: `\u{1F534} Inventor experiment '${fullConfig.experimentName}' failed: ${err instanceof Error ? err.message : String(err)}`,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      });
     });
     res.status(202).json({
       success: true,
@@ -39077,17 +39172,17 @@ Consider: hierarchical summarisation, key entity extraction, semantic clustering
 var runs = /* @__PURE__ */ new Map();
 var REDIS_KEY7 = "orchestrator:benchmarks";
 async function persist2() {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   const data = Array.from(runs.values());
-  await redis2.set(REDIS_KEY7, JSON.stringify(data), "EX", 86400 * 30).catch(() => {
+  await redis3.set(REDIS_KEY7, JSON.stringify(data), "EX", 86400 * 30).catch(() => {
   });
 }
 async function loadBenchmarkRuns() {
-  const redis2 = getRedis();
-  if (!redis2) return;
+  const redis3 = getRedis();
+  if (!redis3) return;
   try {
-    const raw = await redis2.get(REDIS_KEY7);
+    const raw = await redis3.get(REDIS_KEY7);
     if (!raw) return;
     const saved = JSON.parse(raw);
     let stuckCount = 0;
@@ -39229,9 +39324,9 @@ async function startAblationStudy(taskId, maxRoundsPerStrategy = 20) {
     runList.push(run);
     await new Promise((r) => setTimeout(r, 200));
   }
-  const redis2 = getRedis();
-  if (redis2) {
-    await redis2.set(`orchestrator:ablation:${ablationId}`, JSON.stringify({
+  const redis3 = getRedis();
+  if (redis3) {
+    await redis3.set(`orchestrator:ablation:${ablationId}`, JSON.stringify({
       ablationId,
       taskId,
       runIds: runList.map((r) => r.runId),
@@ -39452,6 +39547,12 @@ init_logger();
 import { Router as Router50 } from "express";
 var obsidianRouter = Router50();
 var TIMEOUT_MS = 8e3;
+function isLiveMode() {
+  return !!config.obsidianUrl;
+}
+function isGithubMode() {
+  return !config.obsidianUrl && !!config.githubToken;
+}
 async function obsidianFetch(path3, options = {}) {
   const base = config.obsidianUrl.replace(/\/$/, "");
   const url = `${base}${path3}`;
@@ -39470,83 +39571,231 @@ async function obsidianFetch(path3, options = {}) {
     clearTimeout(timer);
   }
 }
-obsidianRouter.get("/status", async (_req, res) => {
-  if (!config.obsidianUrl) {
-    return res.status(503).json({
-      connected: false,
-      error: "OBSIDIAN_API_URL not configured",
-      setup: "Set OBSIDIAN_API_URL=http://localhost:27123 and OBSIDIAN_API_TOKEN in Railway env vars"
-    });
-  }
+async function ghFetch(path3) {
+  const [owner, repo] = config.obsidianGithubRepo.split("/");
+  const base = `https://api.github.com/repos/${owner}/${repo}`;
+  const headers = {
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "Authorization": `Bearer ${config.githubToken}`
+  };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
-    const r = await obsidianFetch("/");
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    res.json({ connected: true, ...data });
-  } catch (err) {
-    logger.warn({ err: err.message }, "Obsidian status check failed");
-    res.status(503).json({ connected: false, error: err.message });
+    return await fetch(`${base}${path3}`, { headers, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
   }
+}
+async function ghListDir(path3) {
+  const encodedPath = path3 ? `/contents/${path3}` : "/contents";
+  const r = await ghFetch(encodedPath);
+  if (!r.ok) throw new Error(`GitHub API ${r.status}: ${r.statusText}`);
+  return r.json();
+}
+async function ghGetFile(path3) {
+  const r = await ghFetch(`/contents/${encodeURIComponent(path3)}`);
+  if (!r.ok) throw new Error(`GitHub API ${r.status}: ${r.statusText}`);
+  const data = await r.json();
+  if (data.encoding === "base64" && data.content) {
+    return Buffer.from(data.content.replace(/\n/g, ""), "base64").toString("utf-8");
+  }
+  throw new Error("Unexpected encoding from GitHub API");
+}
+async function ghSearchCode(query) {
+  const [owner, repo] = config.obsidianGithubRepo.split("/");
+  const q = `${encodeURIComponent(query)}+repo:${owner}/${repo}`;
+  const r = await fetch(
+    `https://api.github.com/search/code?q=${q}&per_page=20`,
+    {
+      headers: {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Authorization": `Bearer ${config.githubToken}`
+      }
+    }
+  );
+  if (!r.ok) throw new Error(`GitHub search ${r.status}: ${r.statusText}`);
+  const data = await r.json();
+  return (data.items ?? []).map((item) => ({
+    filename: item.path,
+    score: 1,
+    context: [`${item.name}`]
+  }));
+}
+async function ghGetTreeStats() {
+  const repoR = await ghFetch("");
+  if (!repoR.ok) throw new Error(`GitHub API ${repoR.status}`);
+  const repoData = await repoR.json();
+  const branchR = await ghFetch(`/branches/${repoData.default_branch}`);
+  if (!branchR.ok) throw new Error(`GitHub API ${branchR.status}`);
+  const branchData = await branchR.json();
+  const treeSha = branchData.commit.commit.tree.sha;
+  const treeR = await ghFetch(`/git/trees/${treeSha}?recursive=1`);
+  if (!treeR.ok) throw new Error(`GitHub tree API ${treeR.status}`);
+  const treeData = await treeR.json();
+  const files = treeData.tree.filter((n) => n.type === "blob");
+  const dirs = treeData.tree.filter((n) => n.type === "tree");
+  return { file_count: files.length, dir_count: dirs.length, sha: treeSha };
+}
+obsidianRouter.get("/status", async (_req, res) => {
+  if (isLiveMode()) {
+    try {
+      const r = await obsidianFetch("/");
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      res.json({ connected: true, mode: "live", ...data });
+    } catch (err) {
+      logger.warn({ err: err.message }, "Obsidian live status check failed");
+      res.status(503).json({ connected: false, mode: "live", error: err.message });
+    }
+    return;
+  }
+  if (isGithubMode()) {
+    try {
+      const r = await ghFetch("");
+      if (!r.ok) throw new Error(`GitHub API ${r.status}`);
+      const data = await r.json();
+      res.json({
+        connected: true,
+        mode: "github",
+        vault_name: data.name,
+        repo: data.full_name,
+        default_branch: data.default_branch,
+        versions: { obsidian: "GitHub", api: "v1" }
+      });
+    } catch (err) {
+      logger.warn({ err: err.message }, "Obsidian GitHub status check failed");
+      res.status(503).json({ connected: false, mode: "github", error: err.message });
+    }
+    return;
+  }
+  res.status(503).json({
+    connected: false,
+    error: "OBSIDIAN_API_URL not configured",
+    setup: [
+      "Option A (Live): Set OBSIDIAN_API_URL=http://your-tunnel + OBSIDIAN_API_TOKEN in Railway env vars.",
+      "Option B (GitHub): Set GITHUB_TOKEN=ghp_... in Railway env vars (reads vault from Clauskraft/Obsidian-Vault)."
+    ].join("\n")
+  });
 });
 obsidianRouter.get("/vault/stats", async (_req, res) => {
-  if (!config.obsidianUrl) return res.status(503).json({ error: "OBSIDIAN_API_URL not configured" });
-  try {
-    const r = await obsidianFetch("/vault/");
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    res.json(data);
-  } catch (err) {
-    res.status(503).json({ error: err.message });
+  if (isLiveMode()) {
+    try {
+      const r = await obsidianFetch("/vault/");
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      res.json(await r.json());
+    } catch (err) {
+      res.status(503).json({ error: err.message });
+    }
+    return;
   }
+  if (isGithubMode()) {
+    try {
+      const stats = await ghGetTreeStats();
+      res.json({
+        vault_name: config.obsidianGithubRepo.split("/")[1],
+        recursive_file_count: stats.file_count,
+        recursive_dir_count: stats.dir_count
+      });
+    } catch (err) {
+      res.status(503).json({ error: err.message });
+    }
+    return;
+  }
+  res.status(503).json({ error: "Not configured" });
 });
 obsidianRouter.get("/vault/list", async (req, res) => {
-  if (!config.obsidianUrl) return res.status(503).json({ error: "OBSIDIAN_API_URL not configured" });
-  const path3 = req.query.path ?? "/";
-  try {
-    const r = await obsidianFetch(`/vault${path3}`);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    res.json(data);
-  } catch (err) {
-    res.status(503).json({ error: err.message });
+  if (isLiveMode()) {
+    const path3 = req.query.path ?? "/";
+    try {
+      const r = await obsidianFetch(`/vault${path3}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      res.json(await r.json());
+    } catch (err) {
+      res.status(503).json({ error: err.message });
+    }
+    return;
   }
+  if (isGithubMode()) {
+    const path3 = (req.query.path ?? "").replace(/^\//, "");
+    try {
+      const entries = await ghListDir(path3);
+      res.json({
+        files: entries.map((e) => ({ path: e.path, type: e.type === "dir" ? "dir" : "file" }))
+      });
+    } catch (err) {
+      res.status(503).json({ error: err.message });
+    }
+    return;
+  }
+  res.status(503).json({ error: "Not configured" });
 });
 obsidianRouter.get("/search", async (req, res) => {
-  if (!config.obsidianUrl) return res.status(503).json({ error: "OBSIDIAN_API_URL not configured" });
   const query = req.query.q;
   if (!query) return res.status(400).json({ error: "q parameter required" });
-  try {
-    const r = await obsidianFetch(`/search/simple/?query=${encodeURIComponent(query)}&contextLength=100`);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    res.json(data);
-  } catch (err) {
-    res.status(503).json({ error: err.message });
+  if (isLiveMode()) {
+    try {
+      const r = await obsidianFetch(`/search/simple/?query=${encodeURIComponent(query)}&contextLength=100`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      res.json(await r.json());
+    } catch (err) {
+      res.status(503).json({ error: err.message });
+    }
+    return;
   }
+  if (isGithubMode()) {
+    try {
+      const results = await ghSearchCode(query);
+      res.json(results);
+    } catch (err) {
+      res.status(503).json({ error: err.message });
+    }
+    return;
+  }
+  res.status(503).json({ error: "Not configured" });
 });
 obsidianRouter.get("/note", async (req, res) => {
-  if (!config.obsidianUrl) return res.status(503).json({ error: "OBSIDIAN_API_URL not configured" });
   const path3 = req.query.path;
   if (!path3) return res.status(400).json({ error: "path parameter required" });
-  try {
-    const r = await obsidianFetch(`/vault/${encodeURIComponent(path3)}`);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const content = await r.text();
-    res.json({ path: path3, content });
-  } catch (err) {
-    res.status(503).json({ error: err.message });
+  if (isLiveMode()) {
+    try {
+      const r = await obsidianFetch(`/vault/${encodeURIComponent(path3)}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const content = await r.text();
+      res.json({ path: path3, content });
+    } catch (err) {
+      res.status(503).json({ error: err.message });
+    }
+    return;
   }
+  if (isGithubMode()) {
+    try {
+      const content = await ghGetFile(path3);
+      res.json({ path: path3, content });
+    } catch (err) {
+      res.status(503).json({ error: err.message });
+    }
+    return;
+  }
+  res.status(503).json({ error: "Not configured" });
 });
 obsidianRouter.get("/tags", async (_req, res) => {
-  if (!config.obsidianUrl) return res.status(503).json({ error: "OBSIDIAN_API_URL not configured" });
-  try {
-    const r = await obsidianFetch("/search/simple/?query=%23&contextLength=0");
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    res.json(data);
-  } catch (err) {
-    res.status(503).json({ error: err.message });
+  if (isLiveMode()) {
+    try {
+      const r = await obsidianFetch("/search/simple/?query=%23&contextLength=0");
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      res.json(await r.json());
+    } catch (err) {
+      res.status(503).json({ error: err.message });
+    }
+    return;
   }
+  if (isGithubMode()) {
+    res.json({});
+    return;
+  }
+  res.status(503).json({ error: "Not configured" });
 });
 
 // src/index.ts
@@ -39675,6 +39924,7 @@ app.use("/tools", requireApiKey, apiRateLimiter, toolsRouter);
 app.use("/chat", requireApiKey, chatRouter);
 app.use("/chains", requireApiKey, apiRateLimiter, chainsRouter);
 app.use("/cognitive", requireApiKey, apiRateLimiter, cognitiveRouter);
+app.use("/api/cognitive", requireApiKey, apiRateLimiter, cognitiveRouter);
 app.use("/cron", requireApiKey, cronRouter);
 app.use("/api/dashboard", dashboardRouter);
 app.use("/api/openclaw", requireApiKey, openclawRouter);
@@ -39832,8 +40082,5 @@ boot().catch((err) => {
 });
 process.on("SIGTERM", () => {
   logger.info("SIGTERM received \u2014 shutting down gracefully");
-  server.close(() => {
-    logger.info("Server closed");
-    process.exit(0);
-  });
+  process.exit(0);
 });

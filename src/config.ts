@@ -75,4 +75,9 @@ export const config = {
   // Obsidian REST API (LIN-652) — set to http://localhost:27123 or a tunnel URL
   obsidianUrl: optional('OBSIDIAN_API_URL', ''),
   obsidianToken: optional('OBSIDIAN_API_TOKEN', ''),
+
+  // GitHub token for Obsidian vault fallback (private repo access)
+  // When OBSIDIAN_API_URL is not set, reads vault directly from GitHub API
+  githubToken: optional('GITHUB_TOKEN', ''),
+  obsidianGithubRepo: optional('OBSIDIAN_GITHUB_REPO', 'Clauskraft/Obsidian-Vault'),
 } as const
