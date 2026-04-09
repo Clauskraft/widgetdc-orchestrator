@@ -9,3 +9,32 @@ pipelines/__pycache__/
 _abi-extract.tmp.*
 .playwright-mcp/
 test-screenshots/
+
+# AI-generated session output (Qwen, Claude, etc.)
+docs/Qwen_*.txt
+docs/Qwen_*.sh
+docs/Qwen_*.tsx
+docs/Qwen_*.ts
+
+# Temp commit message files
+.commitmsg.txt
+commitmsg.tmp
+*.commitmsg*
+
+# Session-specific agent files
+.claude/session-*.md
+
+# Screenshots (ad-hoc captures)
+chains-panel.png
+dashboard-*.png
+knowledge-panel.png
+
+# Temp/generated files
+fix-benchmark.py
+src/routes/*.bak
+
+# Chat exports and session data
+docs/chat-*.txt
+docs/chat-*.json
+docs/table-*.csv
+docs/*.plugin
