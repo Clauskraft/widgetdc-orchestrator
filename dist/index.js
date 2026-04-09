@@ -40802,7 +40802,6 @@ app.use("/api/peer-eval", requireApiKey, peerEvalRouter);
 app.use("/api/flywheel", requireApiKey, flywheelRouter);
 app.use("/api/benchmark", requireApiKey, benchmarkRouter);
 app.use("/api/phantom-bom", requireApiKey, apiRateLimiter, phantomBomRouter);
-app.use("/api/phantom-bom", requireApiKey, apiRateLimiter, phantomBomRouter);
 app.use("/api/obsidian", requireApiKey, obsidianRouter);
 app.use("/api/hyperagent/auto", requireApiKey, apiRateLimiter, hyperagentAutoRouter);
 app.use("/api/hyperagent", requireApiKey, apiRateLimiter, hyperagentRouter);
