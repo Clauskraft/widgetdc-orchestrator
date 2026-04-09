@@ -26912,33 +26912,35 @@ ${f.content}
   ).join("\n");
   return `You are a software intelligence analyst. Analyze this repository and extract a structured Bill of Materials (BOM).
 
+CRITICAL: Your entire response must be valid JSON only. No markdown, no explanation, no prose before or after. Start with { and end with }.
+
 Repository: ${repoUrl}
 
 FILES:
 ${fileBlocks}
 
-Extract and return a JSON object with this exact schema (no markdown, no explanation, just JSON):
+Return EXACTLY this JSON structure (replace angle-bracket placeholders with real values):
 
 {
   "repo_meta": {
-    "name": "<repo name>",
-    "description": "<1-2 sentence description>",
-    "primary_language": "<main programming language>",
-    "license": "<license or 'unknown'>",
-    "topics": ["<tag1>", "<tag2>"]
+    "name": "string \u2014 repo short name",
+    "description": "string \u2014 1-2 sentence description",
+    "primary_language": "string \u2014 main programming language e.g. Python, TypeScript, Go",
+    "license": "string \u2014 e.g. MIT, Apache-2.0, or unknown",
+    "topics": ["array", "of", "topic", "strings"]
   },
-  "confidence_score": <integer 0-100 representing overall extraction confidence>,
-  "summary": "<2-3 sentence summary of what this repo does and why it matters>",
+  "confidence_score": 85,
+  "summary": "string \u2014 2-3 sentences on what this repo does and why it matters for AI/ML practitioners",
   "components": [
     {
-      "name": "<component name>",
-      "type": "<one of: tool|api|model|dataset|pattern|agent|service|library>",
-      "description": "<what this component does>",
-      "source_file": "<file where this was found, or null>",
-      "capabilities": ["<capability1>", "<capability2>"],
-      "dependencies": ["<dep1>", "<dep2>"],
-      "confidence": <integer 0-100>,
-      "tags": ["<tag1>", "<tag2>"]
+      "name": "string \u2014 component name",
+      "type": "tool",
+      "description": "string \u2014 what this component does",
+      "source_file": "string or null \u2014 file path where found",
+      "capabilities": ["capability1", "capability2"],
+      "dependencies": ["dep1", "dep2"],
+      "confidence": 90,
+      "tags": ["tag1", "tag2"]
     }
   ]
 }
@@ -26977,6 +26979,10 @@ function parseLlmBom(raw, repoUrl) {
   let json = raw.trim();
   if (json.startsWith("```")) {
     json = json.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "").trim();
+  }
+  if (!json.startsWith("{")) {
+    const match = json.match(/\{[\s\S]*\}/);
+    if (match) json = match[0];
   }
   const parsed = JSON.parse(json);
   return {
@@ -27098,9 +27104,22 @@ async function extractPhantomBOM(repoUrl, sourceType = "git", runId) {
       throw new Error("No readable files found in repository");
     }
     const prompt = buildExtractionPrompt(repoUrl, files);
-    const rawLlmOutput = await callRlmLlm(prompt);
-    logger.info({ runId: id }, "LLM extraction complete");
-    const extracted = parseLlmBom(rawLlmOutput, repoUrl);
+    let extracted;
+    let lastLlmError = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const rawLlmOutput = await callRlmLlm(prompt);
+        logger.info({ runId: id, attempt }, "LLM extraction complete");
+        extracted = parseLlmBom(rawLlmOutput, repoUrl);
+        lastLlmError = null;
+        break;
+      } catch (parseErr) {
+        lastLlmError = parseErr instanceof Error ? parseErr : new Error(String(parseErr));
+        logger.warn({ runId: id, attempt, err: lastLlmError.message }, "LLM parse failed, retrying");
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 3e3 * (attempt + 1)));
+      }
+    }
+    if (!extracted) throw lastLlmError ?? new Error("LLM extraction failed after 3 attempts");
     const bom = {
       bom_version: "1.0",
       run_id: id,
@@ -27388,6 +27407,7 @@ app.use("/api/pheromone", requireApiKey, pheromoneRouter);
 app.use("/api/peer-eval", requireApiKey, peerEvalRouter);
 app.use("/api/flywheel", requireApiKey, flywheelRouter);
 app.use("/api/benchmark", requireApiKey, benchmarkRouter);
+app.use("/api/phantom-bom", requireApiKey, apiRateLimiter, phantomBomRouter);
 app.use("/api/phantom-bom", requireApiKey, apiRateLimiter, phantomBomRouter);
 app.use("/api/obsidian", requireApiKey, obsidianRouter);
 app.use("/api/hyperagent/auto", requireApiKey, apiRateLimiter, hyperagentAutoRouter);

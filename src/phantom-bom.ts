@@ -169,33 +169,35 @@ function buildExtractionPrompt(repoUrl: string, files: { path: string; content: 
 
   return `You are a software intelligence analyst. Analyze this repository and extract a structured Bill of Materials (BOM).
 
+CRITICAL: Your entire response must be valid JSON only. No markdown, no explanation, no prose before or after. Start with { and end with }.
+
 Repository: ${repoUrl}
 
 FILES:
 ${fileBlocks}
 
-Extract and return a JSON object with this exact schema (no markdown, no explanation, just JSON):
+Return EXACTLY this JSON structure (replace angle-bracket placeholders with real values):
 
 {
   "repo_meta": {
-    "name": "<repo name>",
-    "description": "<1-2 sentence description>",
-    "primary_language": "<main programming language>",
-    "license": "<license or 'unknown'>",
-    "topics": ["<tag1>", "<tag2>"]
+    "name": "string — repo short name",
+    "description": "string — 1-2 sentence description",
+    "primary_language": "string — main programming language e.g. Python, TypeScript, Go",
+    "license": "string — e.g. MIT, Apache-2.0, or unknown",
+    "topics": ["array", "of", "topic", "strings"]
   },
-  "confidence_score": <integer 0-100 representing overall extraction confidence>,
-  "summary": "<2-3 sentence summary of what this repo does and why it matters>",
+  "confidence_score": 85,
+  "summary": "string — 2-3 sentences on what this repo does and why it matters for AI/ML practitioners",
   "components": [
     {
-      "name": "<component name>",
-      "type": "<one of: tool|api|model|dataset|pattern|agent|service|library>",
-      "description": "<what this component does>",
-      "source_file": "<file where this was found, or null>",
-      "capabilities": ["<capability1>", "<capability2>"],
-      "dependencies": ["<dep1>", "<dep2>"],
-      "confidence": <integer 0-100>,
-      "tags": ["<tag1>", "<tag2>"]
+      "name": "string — component name",
+      "type": "tool",
+      "description": "string — what this component does",
+      "source_file": "string or null — file path where found",
+      "capabilities": ["capability1", "capability2"],
+      "dependencies": ["dep1", "dep2"],
+      "confidence": 90,
+      "tags": ["tag1", "tag2"]
     }
   ]
 }
@@ -241,6 +243,11 @@ function parseLlmBom(raw: string, repoUrl: string): { repo_meta: PhantomBOM['rep
   let json = raw.trim()
   if (json.startsWith('```')) {
     json = json.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim()
+  }
+  // Extract JSON object if prose surrounds it
+  if (!json.startsWith('{')) {
+    const match = json.match(/\{[\s\S]*\}/)
+    if (match) json = match[0]
   }
 
   const parsed = JSON.parse(json)
@@ -390,13 +397,24 @@ export async function extractPhantomBOM(
       throw new Error('No readable files found in repository')
     }
 
-    // 3. Build prompt and call LLM
+    // 3. Build prompt and call LLM (with 2 retries on JSON parse failure)
     const prompt = buildExtractionPrompt(repoUrl, files)
-    const rawLlmOutput = await callRlmLlm(prompt)
-    logger.info({ runId: id }, 'LLM extraction complete')
-
-    // 4. Parse BOM
-    const extracted = parseLlmBom(rawLlmOutput, repoUrl)
+    let extracted
+    let lastLlmError: Error | null = null
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const rawLlmOutput = await callRlmLlm(prompt)
+        logger.info({ runId: id, attempt }, 'LLM extraction complete')
+        extracted = parseLlmBom(rawLlmOutput, repoUrl)
+        lastLlmError = null
+        break
+      } catch (parseErr) {
+        lastLlmError = parseErr instanceof Error ? parseErr : new Error(String(parseErr))
+        logger.warn({ runId: id, attempt, err: lastLlmError.message }, 'LLM parse failed, retrying')
+        if (attempt < 2) await new Promise(r => setTimeout(r, 3000 * (attempt + 1)))
+      }
+    }
+    if (!extracted) throw lastLlmError ?? new Error('LLM extraction failed after 3 attempts')
 
     // 5. Assemble full BOM with IDs
     const bom: PhantomBOM = {

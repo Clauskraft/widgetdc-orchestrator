@@ -98,6 +98,7 @@ import { loadBenchmarkRuns } from './benchmark-runner.js'
 import { obsidianRouter } from './routes/obsidian.js'
 import { grafanaProxyRouter } from './routes/grafana-proxy.js'
 import { phantomBomRouter } from './routes/phantom-bom.js'
+import { phantomBomRouter } from './routes/phantom-bom.js'
 import { initPheromoneLayer, getPheromoneState } from './swarm/pheromone-layer.js'
 import { initPeerEval, getPeerEvalState } from './swarm/peer-eval.js'
 
@@ -323,6 +324,9 @@ app.use('/api/flywheel', requireApiKey, flywheelRouter)
 app.use('/api/benchmark', requireApiKey, benchmarkRouter)
 
 // PhantomBOM Extractor — repo → LLM → PhantomComponent nodes in Neo4j
+app.use('/api/phantom-bom', requireApiKey, apiRateLimiter, phantomBomRouter)
+
+// PhantomBOM Extractor — repo -> LLM -> PhantomComponent nodes in Neo4j
 app.use('/api/phantom-bom', requireApiKey, apiRateLimiter, phantomBomRouter)
 
 // Obsidian Vault proxy (LIN-652) — set OBSIDIAN_API_URL + OBSIDIAN_API_TOKEN in env
