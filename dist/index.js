@@ -40442,9 +40442,13 @@ async function generatePhantomClusters() {
   });
   const providers = res?.results ?? [];
   if (providers.length === 0) return [];
+  const normalizedProviders = providers.map((p) => ({
+    ...p,
+    conf: typeof p.conf === "object" && p.conf !== null ? p.conf.low : p.conf ?? 0
+  }));
   const clusters = [];
   for (const [strategy, def] of Object.entries(CLUSTER_STRATEGIES)) {
-    const members = providers.filter(
+    const members = normalizedProviders.filter(
       (p) => def.geoFilter.includes(p.geo) && def.costFilter.includes(p.cost) && (p.caps ?? []).some((c) => def.capabilityFilter.includes(c))
     );
     if (members.length === 0) continue;

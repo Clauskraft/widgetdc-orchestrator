@@ -712,15 +712,21 @@ export async function generatePhantomClusters(): Promise<PhantomCluster[]> {
   const res = await callBackendMcp('graph.read_cypher', {
     query: `MATCH (p:PhantomProvider) WHERE p.hitlRequired = false RETURN p.providerId as id, p.geoRestriction as geo, p.capabilities as caps, p.costModel as cost, p.confidence as conf`,
     params: {},
-  }) as { results?: Array<{ id: string; geo: string; caps: string[]; cost: string; conf: number }> }
+  }) as { results?: Array<{ id: string; geo: string; caps: string[]; cost: string; conf: number | { low: number; high: number } }> }
 
   const providers = res?.results ?? []
   if (providers.length === 0) return []
 
+  // Unwrap Neo4j integer objects {low, high} → plain numbers
+  const normalizedProviders = providers.map(p => ({
+    ...p,
+    conf: typeof p.conf === 'object' && p.conf !== null ? (p.conf as { low: number }).low : (p.conf ?? 0),
+  }))
+
   const clusters: PhantomCluster[] = []
 
   for (const [strategy, def] of Object.entries(CLUSTER_STRATEGIES) as [ClusterStrategy, typeof CLUSTER_STRATEGIES[ClusterStrategy]][]) {
-    const members = providers.filter(p =>
+    const members = normalizedProviders.filter(p =>
       def.geoFilter.includes(p.geo as GeoRestriction) &&
       def.costFilter.includes(p.cost as CostModel) &&
       (p.caps ?? []).some(c => def.capabilityFilter.includes(c as ProviderCapability))
