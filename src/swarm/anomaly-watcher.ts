@@ -689,8 +689,84 @@ export function getAnomalyPatterns(): AnomalyPattern[] {
 
 // ─── Init ───────────────────────────────────────────────────────────────────
 
+/** Known failure patterns seeded from production history. */
+const KNOWN_FAILURE_PATTERNS: AnomalyPattern[] = [
+  {
+    type: 'validation_error',
+    count: 52,
+    lastSeen: '2026-04-09T21:50:00.000Z',
+    avgDurationMs: 1200,
+    knownFix: 'Validate payloads before MCP dispatch — orchestrator sends badly formatted payloads to backend',
+  },
+  {
+    type: 'timeout_cascade',
+    count: 24,
+    lastSeen: '2026-04-09T21:48:00.000Z',
+    avgDurationMs: 15000,
+    knownFix: 'Add retry with exponential backoff for Neo4j, increase RLM timeout, circuit breaker for external APIs',
+  },
+  {
+    type: 'unknown_error',
+    count: 28,
+    lastSeen: '2026-04-09T21:49:00.000Z',
+    avgDurationMs: 800,
+    knownFix: 'Add structured error logging in backend MCP router to capture full error context',
+  },
+  {
+    type: '502_backend',
+    count: 4,
+    lastSeen: '2026-04-09T21:30:00.000Z',
+    avgDurationMs: 12000,
+    knownFix: 'Railway cold-start ~12s — add health check retry before marking as failure',
+  },
+  {
+    type: 'tool_offline',
+    count: 1,
+    lastSeen: '2026-04-09T21:50:42.000Z',
+    avgDurationMs: 0,
+    knownFix: 'slack.channel.post OFFLINE after 23 failures — "No Slack credentials configured". Set SLACK_BOT_TOKEN + SLACK_CHANNEL_ID',
+  },
+  {
+    type: 'chain_failure_spike',
+    count: 19,
+    lastSeen: '2026-04-09T20:00:00.000Z',
+    avgDurationMs: 3500,
+    knownFix: 'Kill chains with 0% success rate. Circuit breaker auto-disables after 3 consecutive failures.',
+  },
+  {
+    type: 'peer_eval_crash',
+    count: 2,
+    lastSeen: '2026-04-09T21:00:00.000Z',
+    avgDurationMs: 500,
+    knownFix: 'Null guard on quality_score — hookIntoExecution was passed string instead of context object',
+  },
+  {
+    type: 'circuit_breaker_open',
+    count: 5,
+    lastSeen: '2026-04-09T20:00:00.000Z',
+    avgDurationMs: 60000,
+    knownFix: 'Tool auto-recovers after 60s of no failures, or restart service',
+  },
+  {
+    type: 'stagnation',
+    count: 3,
+    lastSeen: '2026-04-09T19:00:00.000Z',
+    avgDurationMs: 0,
+    knownFix: 'Verify RLM_URL and Redis connection env vars',
+  },
+]
+
 export async function initAnomalyWatcher(): Promise<void> {
   await loadState()
+
+  // Seed known failure patterns if none exist (cold-start problem)
+  if (state.patterns.length === 0) {
+    state.patterns = [...KNOWN_FAILURE_PATTERNS]
+    await persistState()
+    logger.info({ seeded: state.patterns.length },
+      'Anomaly-watcher: seeded known failure patterns from production history')
+  }
+
   logger.info({ totalScans: state.totalScans, patterns: state.patterns.length },
     'Anomaly-watcher initialized')
 }
