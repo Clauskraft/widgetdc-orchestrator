@@ -1,22 +1,26 @@
 /**
- * phantom-bom.ts — PhantomBOMExtractor Service
+ * phantom-bom.ts — PhantomBOMExtractor + Snout MRP Service
  *
- * Uses repomix to pack external repos → direct DeepSeek LLM extraction →
- * MERGE PhantomBOMRun + PhantomComponent nodes into Neo4j.
+ * Two extraction modes:
+ *   1. REPO BOM  — repomix packs a GitHub/HuggingFace repo → DeepSeek extracts
+ *                  PhantomComponent nodes (tools/libs/services/agents)
+ *   2. PROVIDER  — structured ingest of LLM providers → PhantomProvider nodes
+ *                  with dual-path parsing (regex fast + LLM deep)
  *
- * Pipeline:
- *   npx repomix --remote <repo> --stdout --style plain
- *     → Packed repo text (token-optimised, no binaries)
- *     → DeepSeek LLM: extract structured BOM JSON
- *     → Neo4j MERGE: PhantomBOMRun + PhantomComponent + [:EXTRACTED]
+ * MRP Engine:
+ *   generatePhantomClusters() groups PhantomProvider nodes into PhantomCluster
+ *   nodes using strategy-based scoring:
+ *     score = 0.5×avg_conf + 0.3×min(count/5,1) + 0.2×avg_uptime
  *
- * Confidence thresholds:
- *   ≥80  — auto-accept
- *   70-79 — borderline (flagged)
- *   <70  — low confidence (HITL recommended)
+ * HITL Gate:
+ *   confidence < 70 → blocked, Linear issue created with label HITL
+ *   confidence ≥ 70 → auto-ingest to Neo4j
  *
- * Node labels: PhantomBOMRun, PhantomComponent
- * All PhantomComponent nodes get needsEmbedding: true
+ * CVE Cross-check:
+ *   After provider ingest, link to existing CVE nodes in graph
+ *
+ * Node labels: PhantomBOMRun, PhantomComponent, PhantomProvider, PhantomCluster
+ * All phantom nodes get needsEmbedding: true
  */
 
 import { execSync } from 'child_process'
@@ -393,4 +397,402 @@ export function listRuns() {
     component_count: state.bom?.components.length,
     error: state.error,
   }))
+}
+
+// ─── Snout MRP: Provider Types ────────────────────────────────────────────────
+
+export type GeoRestriction = 'global' | 'eu_only' | 'local_only' | 'cn_region'
+export type CostModel = 'free' | 'per_token' | 'subscription' | 'unknown'
+export type ProviderCapability = 'reasoning' | 'code' | 'vision' | 'text_generation' | 'embedding' | 'multimodal'
+export type ClusterStrategy = 'eu_safe_reasoning' | 'cost_optimized_code' | 'local_only_privacy' | 'open_source_eu'
+
+export interface PhantomProvider {
+  id: string                       // 'prov-' + sha256(sourceUrl+name)[:16]
+  name: string
+  source_url: string
+  source_type: 'github' | 'huggingface' | 'npm' | 'manual'
+  geo_restriction: GeoRestriction
+  primary_capability: ProviderCapability
+  version: string
+  context_window: number           // tokens, 0 = unknown
+  cost_model: CostModel
+  confidence: number               // 0-100
+  capabilities: ProviderCapability[]
+  cve_ids: string[]                // linked CVE node ids from graph
+  raw_docs: string                 // first 2000 chars of raw documentation
+  hitl_required: boolean           // true if confidence < HITL_THRESHOLD
+  hitl_linear_issue?: string       // Linear issue id if HITL triggered
+}
+
+export interface PhantomCluster {
+  id: string                       // 'cluster-' + strategy + '-' + timestamp
+  strategy: ClusterStrategy
+  score: number                    // 0-1 composite score
+  member_count: number
+  avg_confidence: number
+  provider_ids: string[]
+  created_at: string
+}
+
+// ─── Snout MRP: Constants ─────────────────────────────────────────────────────
+
+const HITL_THRESHOLD = 70          // confidence below this triggers HITL gate
+const CLUSTER_STRATEGIES: Record<ClusterStrategy, {
+  label: string
+  geoFilter: GeoRestriction[]
+  capabilityFilter: ProviderCapability[]
+  costFilter: CostModel[]
+}> = {
+  eu_safe_reasoning: {
+    label: 'EU Safe Reasoning Pool',
+    geoFilter: ['eu_only', 'global'],
+    capabilityFilter: ['reasoning', 'text_generation'],
+    costFilter: ['free', 'per_token', 'subscription'],
+  },
+  cost_optimized_code: {
+    label: 'Cost-Optimized Code Generation',
+    geoFilter: ['global', 'eu_only', 'local_only'],
+    capabilityFilter: ['code', 'reasoning'],
+    costFilter: ['free'],
+  },
+  local_only_privacy: {
+    label: 'Local-Only Privacy Pool',
+    geoFilter: ['local_only'],
+    capabilityFilter: ['reasoning', 'code', 'text_generation', 'embedding'],
+    costFilter: ['free'],
+  },
+  open_source_eu: {
+    label: 'Open Source EU Cluster',
+    geoFilter: ['eu_only', 'global'],
+    capabilityFilter: ['reasoning', 'code', 'text_generation', 'vision', 'embedding', 'multimodal'],
+    costFilter: ['free'],
+  },
+}
+
+// ─── Snout MRP: Dual-Path Provider Parser ────────────────────────────────────
+
+/**
+ * Fast-path: regex-based extraction of structured facts from raw docs.
+ * Returns partial PhantomProvider fields — merged with LLM deep-path.
+ */
+function regexProviderParse(rawDocs: string, sourceUrl: string): Partial<PhantomProvider> {
+  const result: Partial<PhantomProvider> = {}
+
+  // Context window (e.g. "128K tokens", "context window: 32768")
+  const ctxMatch = rawDocs.match(/(\d+)[Kk]\s*(?:token|context)|context.{0,20}:\s*(\d+)/i)
+  if (ctxMatch) {
+    const raw = ctxMatch[1] ? Number(ctxMatch[1]) * 1024 : Number(ctxMatch[2])
+    result.context_window = raw > 0 ? raw : 0
+  }
+
+  // Cost model
+  if (/free|open.?source|self.?host/i.test(rawDocs)) result.cost_model = 'free'
+  else if (/per.?token|\$/i.test(rawDocs)) result.cost_model = 'per_token'
+  else if (/subscri/i.test(rawDocs)) result.cost_model = 'subscription'
+
+  // Geo restriction
+  if (/local|self.?host|offline/i.test(rawDocs)) result.geo_restriction = 'local_only'
+  else if (/eu.only|gdpr|europe/i.test(rawDocs)) result.geo_restriction = 'eu_only'
+  else if (/china|cn.region|\bcn\b/i.test(rawDocs)) result.geo_restriction = 'cn_region'
+
+  // Capabilities
+  const caps: ProviderCapability[] = []
+  if (/reasoning|think|chain.of.thought/i.test(rawDocs)) caps.push('reasoning')
+  if (/code|program|develop/i.test(rawDocs)) caps.push('code')
+  if (/vision|image|visual/i.test(rawDocs)) caps.push('vision')
+  if (/embed/i.test(rawDocs)) caps.push('embedding')
+  if (/multimodal|multi.modal/i.test(rawDocs)) caps.push('multimodal')
+  if (caps.length === 0) caps.push('text_generation')
+  result.capabilities = caps
+
+  // Version (e.g. "v1.2", "version 3.5", "-3.5-", "-large-")
+  const verMatch = rawDocs.match(/v(\d+\.\d+(?:\.\d+)?)|version\s+(\d+\.\d+)|-(\d+\.\d+)-/i)
+  result.version = verMatch ? (verMatch[1] ?? verMatch[2] ?? verMatch[3] ?? 'unknown') : 'unknown'
+
+  return result
+}
+
+/**
+ * Deep-path: LLM extracts structured provider BOM from raw docs.
+ */
+async function llmProviderParse(name: string, sourceUrl: string, rawDocs: string): Promise<Partial<PhantomProvider>> {
+  const prompt = `You are a precise JSON-only AI provider analyst. Extract structured metadata about this AI model/provider.
+
+Provider: ${name}
+Source: ${sourceUrl}
+
+DOCUMENTATION:
+${rawDocs.substring(0, 3000)}
+
+Return EXACTLY this JSON (no prose, no markdown):
+{
+  "version": "version string or unknown",
+  "context_window": 128000,
+  "cost_model": "free",
+  "geo_restriction": "global",
+  "primary_capability": "reasoning",
+  "capabilities": ["reasoning", "code"],
+  "confidence": 85
+}
+
+cost_model: free | per_token | subscription | unknown
+geo_restriction: global | eu_only | local_only | cn_region
+primary_capability and capabilities items: reasoning | code | vision | text_generation | embedding | multimodal
+confidence: 80+ if well-documented, 70-79 partial, <70 if guessing`
+
+  const raw = await callDeepSeekLlm(prompt)
+  try {
+    const parsed = JSON.parse(raw.trim())
+    return {
+      version: String(parsed.version ?? 'unknown'),
+      context_window: Number(parsed.context_window ?? 0),
+      cost_model: (['free', 'per_token', 'subscription', 'unknown'] as CostModel[]).includes(parsed.cost_model)
+        ? parsed.cost_model as CostModel : 'unknown',
+      geo_restriction: (['global', 'eu_only', 'local_only', 'cn_region'] as GeoRestriction[]).includes(parsed.geo_restriction)
+        ? parsed.geo_restriction as GeoRestriction : 'global',
+      primary_capability: parsed.primary_capability as ProviderCapability ?? 'text_generation',
+      capabilities: Array.isArray(parsed.capabilities) ? parsed.capabilities as ProviderCapability[] : [],
+      confidence: Math.max(0, Math.min(100, Number(parsed.confidence ?? 50))),
+    }
+  } catch {
+    return {}
+  }
+}
+
+// ─── Snout MRP: CVE Cross-check ───────────────────────────────────────────────
+
+async function cveCheck(providerName: string): Promise<string[]> {
+  try {
+    const res = await callBackendMcp('graph.read_cypher', {
+      query: `MATCH (c:CVE) WHERE toLower(c.description) CONTAINS toLower($name) OR toLower(c.id) CONTAINS toLower($name) RETURN c.id as cveId LIMIT 10`,
+      params: { name: providerName },
+    }) as { results?: Array<{ cveId: string }> }
+    return (res?.results ?? []).map(r => r.cveId).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+// ─── Snout MRP: HITL Gate ─────────────────────────────────────────────────────
+
+async function hitlGate(provider: PhantomProvider): Promise<{ blocked: boolean; issueId?: string }> {
+  if (provider.confidence >= HITL_THRESHOLD) return { blocked: false }
+
+  // Create Linear issue
+  try {
+    const res = await callBackendMcp('linear.create_issue', {
+      title: `[HITL] PhantomProvider low confidence: ${provider.name} (${provider.confidence}%)`,
+      description: `PhantomProvider ingest blocked — confidence ${provider.confidence}% is below threshold ${HITL_THRESHOLD}%.\n\nProvider: ${provider.name}\nSource: ${provider.source_url}\nCapabilities: ${provider.capabilities.join(', ')}\n\nManual review required before Neo4j ingest.`,
+      labels: ['HITL', 'phantom-bom'],
+      priority: 2,
+    }) as { issueId?: string }
+    return { blocked: true, issueId: res?.issueId }
+  } catch {
+    return { blocked: true }
+  }
+}
+
+// ─── Snout MRP: Provider Neo4j Write ─────────────────────────────────────────
+
+async function writeProviderToNeo4j(provider: PhantomProvider): Promise<void> {
+  const cypher = `
+MERGE (p:PhantomProvider {providerId: $providerId})
+SET p.name = $name,
+    p.sourceUrl = $sourceUrl,
+    p.sourceType = $sourceType,
+    p.geoRestriction = $geoRestriction,
+    p.primaryCapability = $primaryCapability,
+    p.capabilities = $capabilities,
+    p.version = $version,
+    p.contextWindow = $contextWindow,
+    p.costModel = $costModel,
+    p.confidence = $confidence,
+    p.cveIds = $cveIds,
+    p.hitlRequired = $hitlRequired,
+    p.hitlLinearIssue = $hitlLinearIssue,
+    p.needsEmbedding = true,
+    p.updatedAt = datetime()
+RETURN p.providerId as id`
+
+  await callBackendMcp('graph.write_cypher', {
+    query: cypher,
+    params: {
+      providerId: provider.id,
+      name: provider.name,
+      sourceUrl: provider.source_url,
+      sourceType: provider.source_type,
+      geoRestriction: provider.geo_restriction,
+      primaryCapability: provider.primary_capability,
+      capabilities: provider.capabilities,
+      version: provider.version,
+      contextWindow: provider.context_window,
+      costModel: provider.cost_model,
+      confidence: provider.confidence,
+      cveIds: provider.cve_ids,
+      hitlRequired: provider.hitl_required,
+      hitlLinearIssue: provider.hitl_linear_issue ?? null,
+    },
+  })
+}
+
+// ─── Snout MRP: extractProvider ───────────────────────────────────────────────
+
+/**
+ * Ingest an AI provider (model/API) into the graph.
+ * Dual-path parse: regex fast-path merged with LLM deep-path.
+ * HITL gate: blocks Neo4j write if confidence < 70.
+ * CVE check: links to existing CVE nodes.
+ */
+export async function extractProvider(opts: {
+  name: string
+  source_url: string
+  source_type: 'github' | 'huggingface' | 'npm' | 'manual'
+  geo_restriction?: GeoRestriction
+  primary_capability?: ProviderCapability
+  raw_docs: string
+}): Promise<{ provider: PhantomProvider; blocked: boolean; hitl_issue?: string; cve_count: number }> {
+  const providerId = 'prov-' + createHash('sha256').update(opts.source_url + opts.name).digest('hex').substring(0, 16)
+  logger.info({ providerId, name: opts.name }, 'PhantomProvider extraction started')
+
+  // Dual-path parse — run in parallel, merge results
+  const [regexResult, llmResult] = await Promise.all([
+    Promise.resolve(regexProviderParse(opts.raw_docs, opts.source_url)),
+    llmProviderParse(opts.name, opts.source_url, opts.raw_docs),
+  ])
+
+  // Merge: LLM wins on conflicts (more semantic), regex fills gaps
+  const merged = { ...regexResult, ...llmResult }
+
+  // CVE cross-check
+  const cve_ids = await cveCheck(opts.name)
+
+  const provider: PhantomProvider = {
+    id: providerId,
+    name: opts.name,
+    source_url: opts.source_url,
+    source_type: opts.source_type,
+    geo_restriction: opts.geo_restriction ?? merged.geo_restriction ?? 'global',
+    primary_capability: opts.primary_capability ?? merged.primary_capability ?? 'text_generation',
+    version: merged.version ?? 'unknown',
+    context_window: merged.context_window ?? 0,
+    cost_model: merged.cost_model ?? 'unknown',
+    confidence: merged.confidence ?? 50,
+    capabilities: merged.capabilities ?? [],
+    cve_ids,
+    raw_docs: opts.raw_docs.substring(0, 2000),
+    hitl_required: (merged.confidence ?? 50) < HITL_THRESHOLD,
+    hitl_linear_issue: undefined,
+  }
+
+  // HITL gate
+  const hitl = await hitlGate(provider)
+  provider.hitl_required = hitl.blocked
+  provider.hitl_linear_issue = hitl.issueId
+
+  if (!hitl.blocked) {
+    await writeProviderToNeo4j(provider)
+    logger.info({ providerId, confidence: provider.confidence, cves: cve_ids.length }, 'PhantomProvider written to Neo4j')
+  } else {
+    logger.warn({ providerId, confidence: provider.confidence, issue: hitl.issueId }, 'PhantomProvider blocked by HITL gate')
+  }
+
+  return { provider, blocked: hitl.blocked, hitl_issue: hitl.issueId, cve_count: cve_ids.length }
+}
+
+// ─── Snout MRP: Phantom Cluster Generator ────────────────────────────────────
+
+/**
+ * MRP clustering engine. Queries all PhantomProvider nodes from Neo4j,
+ * groups them by strategy, computes cluster score, writes PhantomCluster nodes.
+ */
+export async function generatePhantomClusters(): Promise<PhantomCluster[]> {
+  logger.info('Generating PhantomClusters')
+
+  // Fetch all providers from Neo4j
+  const res = await callBackendMcp('graph.read_cypher', {
+    query: `MATCH (p:PhantomProvider) WHERE p.hitlRequired = false RETURN p.providerId as id, p.geoRestriction as geo, p.capabilities as caps, p.costModel as cost, p.confidence as conf`,
+    params: {},
+  }) as { results?: Array<{ id: string; geo: string; caps: string[]; cost: string; conf: number }> }
+
+  const providers = res?.results ?? []
+  if (providers.length === 0) return []
+
+  const clusters: PhantomCluster[] = []
+
+  for (const [strategy, def] of Object.entries(CLUSTER_STRATEGIES) as [ClusterStrategy, typeof CLUSTER_STRATEGIES[ClusterStrategy]][]) {
+    const members = providers.filter(p =>
+      def.geoFilter.includes(p.geo as GeoRestriction) &&
+      def.costFilter.includes(p.cost as CostModel) &&
+      (p.caps ?? []).some(c => def.capabilityFilter.includes(c as ProviderCapability))
+    )
+
+    if (members.length === 0) continue
+
+    const avg_conf = members.reduce((s, p) => s + (p.conf ?? 0), 0) / members.length
+    // score = 0.5×avg_conf/100 + 0.3×min(count/5,1) + 0.2×avg_uptime (uptime unknown → 0.8 default)
+    const score = Math.round((0.5 * (avg_conf / 100) + 0.3 * Math.min(members.length / 5, 1) + 0.2 * 0.8) * 100) / 100
+
+    const clusterId = `cluster-${strategy}-${Date.now()}`
+    const cluster: PhantomCluster = {
+      id: clusterId,
+      strategy,
+      score,
+      member_count: members.length,
+      avg_confidence: Math.round(avg_conf),
+      provider_ids: members.map(p => p.id),
+      created_at: new Date().toISOString(),
+    }
+
+    // MERGE PhantomCluster + link members
+    await callBackendMcp('graph.write_cypher', {
+      query: `
+MERGE (cl:PhantomCluster {clusterId: $clusterId})
+SET cl.strategy = $strategy,
+    cl.strategyLabel = $strategyLabel,
+    cl.score = $score,
+    cl.memberCount = $memberCount,
+    cl.avgConfidence = $avgConfidence,
+    cl.providerIds = $providerIds,
+    cl.createdAt = datetime($createdAt),
+    cl.updatedAt = datetime()
+RETURN cl.clusterId as id`,
+      params: {
+        clusterId,
+        strategy,
+        strategyLabel: def.label,
+        score,
+        memberCount: members.length,
+        avgConfidence: Math.round(avg_conf),
+        providerIds: members.map(p => p.id),
+        createdAt: cluster.created_at,
+      },
+    })
+
+    clusters.push(cluster)
+    logger.info({ clusterId, strategy, members: members.length, score }, 'PhantomCluster created')
+  }
+
+  return clusters
+}
+
+// ─── Snout MRP: Provider Registry ────────────────────────────────────────────
+
+export async function getProviderRegistry(): Promise<{
+  total: number
+  active: number
+  hitl_blocked: number
+  providers: Array<{ id: string; name: string; geo: string; capability: string; confidence: number; cves: number; hitl: boolean }>
+}> {
+  const res = await callBackendMcp('graph.read_cypher', {
+    query: `MATCH (p:PhantomProvider) RETURN p.providerId as id, p.name as name, p.geoRestriction as geo, p.primaryCapability as cap, p.confidence as conf, size(p.cveIds) as cves, p.hitlRequired as hitl ORDER BY p.confidence DESC`,
+    params: {},
+  }) as { results?: Array<{ id: string; name: string; geo: string; cap: string; conf: number; cves: number; hitl: boolean }> }
+
+  const rows = res?.results ?? []
+  return {
+    total: rows.length,
+    active: rows.filter(r => !r.hitl).length,
+    hitl_blocked: rows.filter(r => r.hitl).length,
+    providers: rows.map(r => ({ id: r.id, name: r.name, geo: r.geo, capability: r.cap, confidence: r.conf, cves: r.cves, hitl: r.hitl })),
+  }
 }

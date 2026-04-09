@@ -9101,7 +9101,7 @@ var init_write_gate = __esm({
   }
 });
 
-// ../widgetdc-contracts/dist/llm/LlmMatrix.js
+// ../Projetcs/widgetdc-contracts/dist/llm/LlmMatrix.js
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9112,7 +9112,7 @@ function env(key) {
 }
 var __dirname, matrix, LlmMatrix;
 var init_LlmMatrix = __esm({
-  "../widgetdc-contracts/dist/llm/LlmMatrix.js"() {
+  "../Projetcs/widgetdc-contracts/dist/llm/LlmMatrix.js"() {
     "use strict";
     __dirname = dirname(fileURLToPath(import.meta.url));
     matrix = JSON.parse(readFileSync(join(__dirname, "llm-matrix.json"), "utf-8"));
@@ -9250,9 +9250,9 @@ var init_LlmMatrix = __esm({
   }
 });
 
-// ../widgetdc-contracts/dist/llm/index.js
+// ../Projetcs/widgetdc-contracts/dist/llm/index.js
 var init_llm = __esm({
-  "../widgetdc-contracts/dist/llm/index.js"() {
+  "../Projetcs/widgetdc-contracts/dist/llm/index.js"() {
     "use strict";
     init_LlmMatrix();
   }
@@ -22963,7 +22963,7 @@ var TypeCompiler;
 init_esm();
 init_value5();
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/guard/value.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/guard/value.mjs
 var value_exports3 = {};
 __export(value_exports3, {
   HasPropertyKey: () => HasPropertyKey3,
@@ -23032,7 +23032,7 @@ function IsUndefined5(value) {
   return value === void 0;
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/clone/value.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/clone/value.mjs
 function ArrayType6(value) {
   return value.map((value2) => Visit17(value2));
 }
@@ -23062,12 +23062,12 @@ function Clone3(value) {
   return Visit17(value);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/clone/type.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/clone/type.mjs
 function CloneType2(schema, options) {
   return options === void 0 ? Clone3(schema) : Clone3({ ...options, ...schema });
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/value/guard/guard.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/value/guard/guard.mjs
 function IsObject6(value) {
   return value !== null && typeof value === "object";
 }
@@ -23081,7 +23081,7 @@ function IsNumber6(value) {
   return typeof value === "number";
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/system/policy.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/system/policy.mjs
 var TypeSystemPolicy2;
 (function(TypeSystemPolicy3) {
   TypeSystemPolicy3.InstanceMode = "default";
@@ -23113,7 +23113,7 @@ var TypeSystemPolicy2;
   TypeSystemPolicy3.IsVoidLike = IsVoidLike;
 })(TypeSystemPolicy2 || (TypeSystemPolicy2 = {}));
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/create/immutable.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/create/immutable.mjs
 function ImmutableArray2(value) {
   return globalThis.Object.freeze(value).map((value2) => Immutable2(value2));
 }
@@ -23140,7 +23140,7 @@ function Immutable2(value) {
   return IsArray5(value) ? ImmutableArray2(value) : IsDate5(value) ? ImmutableDate2(value) : IsUint8Array5(value) ? ImmutableUint8Array2(value) : IsRegExp4(value) ? ImmutableRegExp2(value) : IsObject5(value) ? ImmutableObject2(value) : value;
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/create/type.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/create/type.mjs
 function CreateType2(schema, options) {
   const result = options !== void 0 ? { ...options, ...schema } : schema;
   switch (TypeSystemPolicy2.InstanceMode) {
@@ -23153,21 +23153,21 @@ function CreateType2(schema, options) {
   }
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/error/error.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/error/error.mjs
 var TypeBoxError2 = class extends Error {
   constructor(message) {
     super(message);
   }
 };
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/symbols/symbols.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/symbols/symbols.mjs
 var TransformKind2 = /* @__PURE__ */ Symbol.for("TypeBox.Transform");
 var ReadonlyKind2 = /* @__PURE__ */ Symbol.for("TypeBox.Readonly");
 var OptionalKind2 = /* @__PURE__ */ Symbol.for("TypeBox.Optional");
 var Hint2 = /* @__PURE__ */ Symbol.for("TypeBox.Hint");
 var Kind2 = /* @__PURE__ */ Symbol.for("TypeBox.Kind");
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/guard/kind.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/guard/kind.mjs
 function IsReadonly3(value) {
   return IsObject5(value) && value[ReadonlyKind2] === "Readonly";
 }
@@ -23298,7 +23298,7 @@ function IsSchema3(value) {
   return IsAny3(value) || IsArgument3(value) || IsArray7(value) || IsBoolean6(value) || IsBigInt6(value) || IsAsyncIterator6(value) || IsComputed3(value) || IsConstructor3(value) || IsDate6(value) || IsFunction6(value) || IsInteger4(value) || IsIntersect3(value) || IsIterator6(value) || IsLiteral3(value) || IsMappedKey3(value) || IsMappedResult3(value) || IsNever3(value) || IsNot3(value) || IsNull6(value) || IsNumber7(value) || IsObject7(value) || IsPromise4(value) || IsRecord3(value) || IsRef3(value) || IsRegExp5(value) || IsString6(value) || IsSymbol6(value) || IsTemplateLiteral3(value) || IsThis3(value) || IsTuple3(value) || IsUndefined7(value) || IsUnion3(value) || IsUint8Array6(value) || IsUnknown3(value) || IsUnsafe3(value) || IsVoid3(value) || IsKind3(value);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/guard/type.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/guard/type.mjs
 var type_exports4 = {};
 __export(type_exports4, {
   IsAny: () => IsAny4,
@@ -23590,7 +23590,7 @@ function IsSchema4(value) {
   return IsObject5(value) && (IsAny4(value) || IsArgument4(value) || IsArray8(value) || IsBoolean7(value) || IsBigInt7(value) || IsAsyncIterator7(value) || IsComputed4(value) || IsConstructor4(value) || IsDate7(value) || IsFunction7(value) || IsInteger5(value) || IsIntersect4(value) || IsIterator7(value) || IsLiteral4(value) || IsMappedKey4(value) || IsMappedResult4(value) || IsNever4(value) || IsNot4(value) || IsNull7(value) || IsNumber8(value) || IsObject8(value) || IsPromise5(value) || IsRecord4(value) || IsRef4(value) || IsRegExp6(value) || IsString7(value) || IsSymbol7(value) || IsTemplateLiteral4(value) || IsThis4(value) || IsTuple4(value) || IsUndefined8(value) || IsUnion4(value) || IsUint8Array7(value) || IsUnknown4(value) || IsUnsafe4(value) || IsVoid4(value) || IsKind4(value));
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/patterns/patterns.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/patterns/patterns.mjs
 var PatternBoolean2 = "(true|false)";
 var PatternNumber2 = "(0|[1-9][0-9]*)";
 var PatternString2 = "(.*)";
@@ -23600,7 +23600,7 @@ var PatternNumberExact2 = `^${PatternNumber2}$`;
 var PatternStringExact2 = `^${PatternString2}$`;
 var PatternNeverExact2 = `^${PatternNever2}$`;
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/sets/set.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/sets/set.mjs
 function SetIncludes2(T, S) {
   return T.includes(S);
 }
@@ -23625,32 +23625,32 @@ function SetUnionMany2(T) {
   return Acc;
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/any/any.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/any/any.mjs
 function Any2(options) {
   return CreateType2({ [Kind2]: "Any" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/array/array.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/array/array.mjs
 function Array3(items, options) {
   return CreateType2({ [Kind2]: "Array", type: "array", items }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/argument/argument.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/argument/argument.mjs
 function Argument2(index) {
   return CreateType2({ [Kind2]: "Argument", index });
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/async-iterator/async-iterator.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/async-iterator/async-iterator.mjs
 function AsyncIterator2(items, options) {
   return CreateType2({ [Kind2]: "AsyncIterator", type: "AsyncIterator", items }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/computed/computed.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/computed/computed.mjs
 function Computed2(target, parameters, options) {
   return CreateType2({ [Kind2]: "Computed", target, parameters }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/discard/discard.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/discard/discard.mjs
 function DiscardKey2(value, key) {
   const { [key]: _, ...rest } = value;
   return rest;
@@ -23659,12 +23659,12 @@ function Discard2(value, keys) {
   return keys.reduce((acc, key) => DiscardKey2(acc, key), value);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/never/never.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/never/never.mjs
 function Never2(options) {
   return CreateType2({ [Kind2]: "Never", not: {} }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-result.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-result.mjs
 function MappedResult2(properties) {
   return CreateType2({
     [Kind2]: "MappedResult",
@@ -23672,22 +23672,22 @@ function MappedResult2(properties) {
   });
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/constructor/constructor.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/constructor/constructor.mjs
 function Constructor2(parameters, returns, options) {
   return CreateType2({ [Kind2]: "Constructor", type: "Constructor", parameters, returns }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/function/function.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/function/function.mjs
 function Function2(parameters, returns, options) {
   return CreateType2({ [Kind2]: "Function", type: "Function", parameters, returns }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/union/union-create.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/union/union-create.mjs
 function UnionCreate2(T, options) {
   return CreateType2({ [Kind2]: "Union", anyOf: T }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/union/union-evaluated.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/union/union-evaluated.mjs
 function IsUnionOptional2(types) {
   return types.some((type) => IsOptional3(type));
 }
@@ -23705,12 +23705,12 @@ function UnionEvaluated2(T, options) {
   return T.length === 1 ? CreateType2(T[0], options) : T.length === 0 ? Never2(options) : ResolveUnion2(T, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/union/union.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/union/union.mjs
 function Union3(types, options) {
   return types.length === 0 ? Never2(options) : types.length === 1 ? CreateType2(types[0], options) : UnionCreate2(types, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/parse.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/parse.mjs
 var TemplateLiteralParserError2 = class extends TypeBoxError2 {
 };
 function Unescape2(pattern) {
@@ -23834,7 +23834,7 @@ function TemplateLiteralParseExact2(pattern) {
   return TemplateLiteralParse2(pattern.slice(1, pattern.length - 1));
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/finite.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/finite.mjs
 var TemplateLiteralFiniteError2 = class extends TypeBoxError2 {
 };
 function IsNumberExpression2(expression) {
@@ -23856,7 +23856,7 @@ function IsTemplateLiteralFinite2(schema) {
   return IsTemplateLiteralExpressionFinite2(expression);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/generate.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/generate.mjs
 var TemplateLiteralGenerateError2 = class extends TypeBoxError2 {
 };
 function* GenerateReduce2(buffer) {
@@ -23888,7 +23888,7 @@ function TemplateLiteralGenerate2(schema) {
   return IsTemplateLiteralExpressionFinite2(expression) ? [...TemplateLiteralExpressionGenerate2(expression)] : [];
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/literal/literal.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/literal/literal.mjs
 function Literal2(value, options) {
   return CreateType2({
     [Kind2]: "Literal",
@@ -23897,27 +23897,27 @@ function Literal2(value, options) {
   }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/boolean/boolean.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/boolean/boolean.mjs
 function Boolean3(options) {
   return CreateType2({ [Kind2]: "Boolean", type: "boolean" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/bigint/bigint.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/bigint/bigint.mjs
 function BigInt3(options) {
   return CreateType2({ [Kind2]: "BigInt", type: "bigint" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/number/number.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/number/number.mjs
 function Number3(options) {
   return CreateType2({ [Kind2]: "Number", type: "number" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/string/string.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/string/string.mjs
 function String3(options) {
   return CreateType2({ [Kind2]: "String", type: "string" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/syntax.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/syntax.mjs
 function* FromUnion21(syntax) {
   const trim = syntax.trim().replace(/"|'/g, "");
   return trim === "boolean" ? yield Boolean3() : trim === "number" ? yield Number3() : trim === "bigint" ? yield BigInt3() : trim === "string" ? yield String3() : yield (() => {
@@ -23954,7 +23954,7 @@ function TemplateLiteralSyntax2(syntax) {
   return [...FromSyntax2(syntax)];
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/pattern.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/pattern.mjs
 var TemplateLiteralPatternError2 = class extends TypeBoxError2 {
 };
 function Escape3(value) {
@@ -23969,20 +23969,20 @@ function TemplateLiteralPattern2(kinds) {
   return `^${kinds.map((schema) => Visit18(schema, "")).join("")}$`;
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/union.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/union.mjs
 function TemplateLiteralToUnion2(schema) {
   const R = TemplateLiteralGenerate2(schema);
   const L = R.map((S) => Literal2(S));
   return UnionEvaluated2(L);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/template-literal.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/template-literal/template-literal.mjs
 function TemplateLiteral2(unresolved, options) {
   const pattern = IsString5(unresolved) ? TemplateLiteralPattern2(TemplateLiteralSyntax2(unresolved)) : TemplateLiteralPattern2(unresolved);
   return CreateType2({ [Kind2]: "TemplateLiteral", type: "string", pattern }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-property-keys.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-property-keys.mjs
 function FromTemplateLiteral7(templateLiteral) {
   const keys = TemplateLiteralGenerate2(templateLiteral);
   return keys.map((key) => key.toString());
@@ -24000,7 +24000,7 @@ function IndexPropertyKeys2(type) {
   return [...new Set(IsTemplateLiteral3(type) ? FromTemplateLiteral7(type) : IsUnion3(type) ? FromUnion22(type.anyOf) : IsLiteral3(type) ? FromLiteral7(type.const) : IsNumber7(type) ? ["[number]"] : IsInteger4(type) ? ["[number]"] : [])];
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-result.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-result.mjs
 function FromProperties20(type, properties, options) {
   const result = {};
   for (const K2 of Object.getOwnPropertyNames(properties)) {
@@ -24016,7 +24016,7 @@ function IndexFromMappedResult2(type, mappedResult, options) {
   return MappedResult2(properties);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed.mjs
 function FromRest8(types, key) {
   return types.map((type) => IndexFromPropertyKey2(type, key));
 }
@@ -24064,7 +24064,7 @@ function Index2(type, key, options) {
   return CreateType2(IsSchema3(key) ? FromSchema2(type, IndexPropertyKeys2(key)) : FromSchema2(type, key), options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-key.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-key.mjs
 function MappedIndexPropertyKey2(type, key, options) {
   return { [key]: Index2(type, [key], Clone3(options)) };
 }
@@ -24081,12 +24081,12 @@ function IndexFromMappedKey2(type, mappedKey, options) {
   return MappedResult2(properties);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/iterator/iterator.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/iterator/iterator.mjs
 function Iterator2(items, options) {
   return CreateType2({ [Kind2]: "Iterator", type: "Iterator", items }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/object/object.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/object/object.mjs
 function RequiredArray2(properties) {
   return globalThis.Object.keys(properties).filter((key) => !IsOptional3(properties[key]));
 }
@@ -24097,12 +24097,12 @@ function _Object2(properties, options) {
 }
 var Object3 = _Object2;
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/promise/promise.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/promise/promise.mjs
 function Promise3(item, options) {
   return CreateType2({ [Kind2]: "Promise", type: "Promise", item }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/readonly/readonly.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/readonly/readonly.mjs
 function RemoveReadonly2(schema) {
   return CreateType2(Discard2(schema, [ReadonlyKind2]));
 }
@@ -24117,7 +24117,7 @@ function Readonly2(schema, enable) {
   return IsMappedResult3(schema) ? ReadonlyFromMappedResult2(schema, F) : ReadonlyWithFlag2(schema, F);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/readonly/readonly-from-mapped-result.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/readonly/readonly-from-mapped-result.mjs
 function FromProperties21(K, F) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(K))
@@ -24132,12 +24132,12 @@ function ReadonlyFromMappedResult2(R, F) {
   return MappedResult2(P);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/tuple/tuple.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/tuple/tuple.mjs
 function Tuple2(types, options) {
   return CreateType2(types.length > 0 ? { [Kind2]: "Tuple", type: "array", items: types, additionalItems: false, minItems: types.length, maxItems: types.length } : { [Kind2]: "Tuple", type: "array", minItems: types.length, maxItems: types.length }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/mapped/mapped.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/mapped/mapped.mjs
 function FromMappedResult15(K, P) {
   return K in P ? FromSchemaType2(K, P[K]) : MappedResult2(P);
 }
@@ -24192,7 +24192,7 @@ function Mapped2(key, map3, options) {
   return Object3(R, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/optional/optional.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/optional/optional.mjs
 function RemoveOptional2(schema) {
   return CreateType2(Discard2(schema, [OptionalKind2]));
 }
@@ -24207,7 +24207,7 @@ function Optional2(schema, enable) {
   return IsMappedResult3(schema) ? OptionalFromMappedResult2(schema, F) : OptionalWithFlag2(schema, F);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/optional/optional-from-mapped-result.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/optional/optional-from-mapped-result.mjs
 function FromProperties23(P, F) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(P))
@@ -24222,14 +24222,14 @@ function OptionalFromMappedResult2(R, F) {
   return MappedResult2(P);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-create.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-create.mjs
 function IntersectCreate2(T, options = {}) {
   const allObjects = T.every((schema) => IsObject7(schema));
   const clonedUnevaluatedProperties = IsSchema3(options.unevaluatedProperties) ? { unevaluatedProperties: options.unevaluatedProperties } : {};
   return CreateType2(options.unevaluatedProperties === false || IsSchema3(options.unevaluatedProperties) || allObjects ? { ...clonedUnevaluatedProperties, [Kind2]: "Intersect", type: "object", allOf: T } : { ...clonedUnevaluatedProperties, [Kind2]: "Intersect", allOf: T }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-evaluated.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-evaluated.mjs
 function IsIntersectOptional2(types) {
   return types.every((left) => IsOptional3(left));
 }
@@ -24252,7 +24252,7 @@ function IntersectEvaluated2(types, options = {}) {
   return ResolveIntersect2(types, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intersect/intersect.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intersect/intersect.mjs
 function Intersect3(types, options) {
   if (types.length === 1)
     return CreateType2(types[0], options);
@@ -24263,7 +24263,7 @@ function Intersect3(types, options) {
   return IntersectCreate2(types, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/ref/ref.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/ref/ref.mjs
 function Ref2(...args) {
   const [$ref, options] = typeof args[0] === "string" ? [args[0], args[1]] : [args[0].$id, args[1]];
   if (typeof $ref !== "string")
@@ -24271,7 +24271,7 @@ function Ref2(...args) {
   return CreateType2({ [Kind2]: "Ref", $ref }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/awaited/awaited.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/awaited/awaited.mjs
 function FromComputed6(target, parameters) {
   return Computed2("Awaited", [Computed2(target, parameters)]);
 }
@@ -24294,7 +24294,7 @@ function Awaited2(type, options) {
   return CreateType2(IsComputed3(type) ? FromComputed6(type.target, type.parameters) : IsIntersect3(type) ? FromIntersect20(type.allOf) : IsUnion3(type) ? FromUnion24(type.anyOf) : IsPromise4(type) ? FromPromise8(type.item) : IsRef3(type) ? FromRef15(type.$ref) : type, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-keys.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-keys.mjs
 function FromRest11(types) {
   const result = [];
   for (const L of types)
@@ -24333,7 +24333,7 @@ function KeyOfPropertyKeys2(type) {
 }
 var includePatternProperties2 = false;
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/keyof/keyof.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/keyof/keyof.mjs
 function FromComputed7(target, parameters) {
   return Computed2("KeyOf", [Computed2(target, parameters)]);
 }
@@ -24353,7 +24353,7 @@ function KeyOf2(type, options) {
   return IsComputed3(type) ? FromComputed7(type.target, type.parameters) : IsRef3(type) ? FromRef16(type.$ref) : IsMappedResult3(type) ? KeyOfFromMappedResult2(type, options) : KeyOfFromType2(type, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-from-mapped-result.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-from-mapped-result.mjs
 function FromProperties25(properties, options) {
   const result = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(properties))
@@ -24368,7 +24368,7 @@ function KeyOfFromMappedResult2(mappedResult, options) {
   return MappedResult2(properties);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/composite/composite.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/composite/composite.mjs
 function CompositeKeys2(T) {
   const Acc = [];
   for (const L of T)
@@ -24398,37 +24398,37 @@ function Composite2(T, options) {
   return R;
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/date/date.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/date/date.mjs
 function Date3(options) {
   return CreateType2({ [Kind2]: "Date", type: "Date" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/null/null.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/null/null.mjs
 function Null2(options) {
   return CreateType2({ [Kind2]: "Null", type: "null" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/symbol/symbol.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/symbol/symbol.mjs
 function Symbol3(options) {
   return CreateType2({ [Kind2]: "Symbol", type: "symbol" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/undefined/undefined.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/undefined/undefined.mjs
 function Undefined2(options) {
   return CreateType2({ [Kind2]: "Undefined", type: "undefined" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/uint8array/uint8array.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/uint8array/uint8array.mjs
 function Uint8Array3(options) {
   return CreateType2({ [Kind2]: "Uint8Array", type: "Uint8Array" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/unknown/unknown.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/unknown/unknown.mjs
 function Unknown2(options) {
   return CreateType2({ [Kind2]: "Unknown" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/const/const.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/const/const.mjs
 function FromArray20(T) {
   return T.map((L) => FromValue3(L, false));
 }
@@ -24448,12 +24448,12 @@ function Const2(T, options) {
   return CreateType2(FromValue3(T, true), options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/constructor-parameters/constructor-parameters.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/constructor-parameters/constructor-parameters.mjs
 function ConstructorParameters2(schema, options) {
   return IsConstructor3(schema) ? Tuple2(schema.parameters, options) : Never2(options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/enum/enum.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/enum/enum.mjs
 function Enum2(item, options) {
   if (IsUndefined5(item))
     throw new Error("Enum undefined or empty");
@@ -24463,7 +24463,7 @@ function Enum2(item, options) {
   return Union3(anyOf, { ...options, [Hint2]: "Enum" });
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extends/extends-check.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extends/extends-check.mjs
 var ExtendsResolverError2 = class extends TypeBoxError2 {
 };
 var ExtendsResult2;
@@ -24714,7 +24714,7 @@ function ExtendsCheck2(left, right) {
   return Visit19(left, right);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-result.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-result.mjs
 function FromProperties27(P, Right, True, False, options) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(P))
@@ -24729,7 +24729,7 @@ function ExtendsFromMappedResult2(Left, Right, True, False, options) {
   return MappedResult2(P);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extends/extends.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extends/extends.mjs
 function ExtendsResolve2(left, right, trueType, falseType) {
   const R = ExtendsCheck2(left, right);
   return R === ExtendsResult2.Union ? Union3([trueType, falseType]) : R === ExtendsResult2.True ? trueType : falseType;
@@ -24738,7 +24738,7 @@ function Extends2(L, R, T, F, options) {
   return IsMappedResult3(L) ? ExtendsFromMappedResult2(L, R, T, F, options) : IsMappedKey3(L) ? CreateType2(ExtendsFromMappedKey2(L, R, T, F, options)) : CreateType2(ExtendsResolve2(L, R, T, F), options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-key.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-key.mjs
 function FromPropertyKey4(K, U, L, R, options) {
   return {
     [K]: Extends2(Literal2(K), U, L, R, Clone3(options))
@@ -24757,12 +24757,12 @@ function ExtendsFromMappedKey2(T, U, L, R, options) {
   return MappedResult2(P);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-template-literal.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-template-literal.mjs
 function ExcludeFromTemplateLiteral2(L, R) {
   return Exclude2(TemplateLiteralToUnion2(L), R);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/exclude/exclude.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/exclude/exclude.mjs
 function ExcludeRest2(L, R) {
   const excluded = L.filter((inner) => ExtendsCheck2(inner, R) === ExtendsResult2.False);
   return excluded.length === 1 ? excluded[0] : Union3(excluded);
@@ -24775,7 +24775,7 @@ function Exclude2(L, R, options = {}) {
   return CreateType2(IsUnion3(L) ? ExcludeRest2(L.anyOf, R) : ExtendsCheck2(L, R) !== ExtendsResult2.False ? Never2() : L, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-mapped-result.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-mapped-result.mjs
 function FromProperties28(P, U) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(P))
@@ -24790,12 +24790,12 @@ function ExcludeFromMappedResult2(R, T) {
   return MappedResult2(P);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-template-literal.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-template-literal.mjs
 function ExtractFromTemplateLiteral2(L, R) {
   return Extract2(TemplateLiteralToUnion2(L), R);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extract/extract.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extract/extract.mjs
 function ExtractRest2(L, R) {
   const extracted = L.filter((inner) => ExtendsCheck2(inner, R) !== ExtendsResult2.False);
   return extracted.length === 1 ? extracted[0] : Union3(extracted);
@@ -24808,7 +24808,7 @@ function Extract2(L, R, options) {
   return CreateType2(IsUnion3(L) ? ExtractRest2(L.anyOf, R) : ExtendsCheck2(L, R) !== ExtendsResult2.False ? L : Never2(), options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-mapped-result.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-mapped-result.mjs
 function FromProperties29(P, T) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(P))
@@ -24823,17 +24823,17 @@ function ExtractFromMappedResult2(R, T) {
   return MappedResult2(P);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/instance-type/instance-type.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/instance-type/instance-type.mjs
 function InstanceType2(schema, options) {
   return IsConstructor3(schema) ? CreateType2(schema.returns, options) : Never2(options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/readonly-optional/readonly-optional.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/readonly-optional/readonly-optional.mjs
 function ReadonlyOptional2(schema) {
   return Readonly2(Optional2(schema));
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/record/record.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/record/record.mjs
 function RecordCreateFromPattern2(pattern, T, options) {
   return CreateType2({ [Kind2]: "Record", type: "object", patternProperties: { [pattern]: T } }, options);
 }
@@ -24888,7 +24888,7 @@ function RecordValue4(type) {
   return type.patternProperties[RecordPattern2(type)];
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/instantiate/instantiate.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/instantiate/instantiate.mjs
 function FromConstructor10(args, type) {
   type.parameters = FromTypes3(args, type.parameters);
   type.returns = FromType3(args, type.returns);
@@ -24963,12 +24963,12 @@ function Instantiate2(type, args) {
   return FromType3(args, CloneType2(type));
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/integer/integer.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/integer/integer.mjs
 function Integer2(options) {
   return CreateType2({ [Kind2]: "Integer", type: "integer" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic-from-mapped-key.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic-from-mapped-key.mjs
 function MappedIntrinsicPropertyKey2(K, M, options) {
   return {
     [K]: Intrinsic2(Literal2(K), M, Clone3(options))
@@ -24988,7 +24988,7 @@ function IntrinsicFromMappedKey2(T, M, options) {
   return MappedResult2(P);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic.mjs
 function ApplyUncapitalize2(value) {
   const [first, rest] = [value.slice(0, 1), value.slice(1)];
   return [first.toLowerCase(), rest].join("");
@@ -25033,27 +25033,27 @@ function Intrinsic2(schema, mode, options = {}) {
   );
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/capitalize.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/capitalize.mjs
 function Capitalize2(T, options = {}) {
   return Intrinsic2(T, "Capitalize", options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/lowercase.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/lowercase.mjs
 function Lowercase2(T, options = {}) {
   return Intrinsic2(T, "Lowercase", options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/uncapitalize.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/uncapitalize.mjs
 function Uncapitalize2(T, options = {}) {
   return Intrinsic2(T, "Uncapitalize", options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/uppercase.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/intrinsic/uppercase.mjs
 function Uppercase2(T, options = {}) {
   return Intrinsic2(T, "Uppercase", options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-result.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-result.mjs
 function FromProperties31(properties, propertyKeys, options) {
   const result = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(properties))
@@ -25068,7 +25068,7 @@ function OmitFromMappedResult2(mappedResult, propertyKeys, options) {
   return MappedResult2(properties);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/omit/omit.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/omit/omit.mjs
 function FromIntersect24(types, propertyKeys) {
   return types.map((type) => OmitResolve2(type, propertyKeys));
 }
@@ -25102,7 +25102,7 @@ function Omit2(type, key, options) {
   return IsMappedResult3(type) ? OmitFromMappedResult2(type, propertyKeys, options) : IsMappedKey3(key) ? OmitFromMappedKey2(type, key, options) : isTypeRef && isKeyRef ? Computed2("Omit", [type, typeKey], options) : !isTypeRef && isKeyRef ? Computed2("Omit", [type, typeKey], options) : isTypeRef && !isKeyRef ? Computed2("Omit", [type, typeKey], options) : CreateType2({ ...OmitResolve2(type, propertyKeys), ...options });
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-key.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-key.mjs
 function FromPropertyKey5(type, key, options) {
   return { [key]: Omit2(type, [key], Clone3(options)) };
 }
@@ -25119,7 +25119,7 @@ function OmitFromMappedKey2(type, mappedKey, options) {
   return MappedResult2(properties);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-result.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-result.mjs
 function FromProperties33(properties, propertyKeys, options) {
   const result = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(properties))
@@ -25134,7 +25134,7 @@ function PickFromMappedResult2(mappedResult, propertyKeys, options) {
   return MappedResult2(properties);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/pick/pick.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/pick/pick.mjs
 function FromIntersect25(types, propertyKeys) {
   return types.map((type) => PickResolve2(type, propertyKeys));
 }
@@ -25168,7 +25168,7 @@ function Pick2(type, key, options) {
   return IsMappedResult3(type) ? PickFromMappedResult2(type, propertyKeys, options) : IsMappedKey3(key) ? PickFromMappedKey2(type, key, options) : isTypeRef && isKeyRef ? Computed2("Pick", [type, typeKey], options) : !isTypeRef && isKeyRef ? Computed2("Pick", [type, typeKey], options) : isTypeRef && !isKeyRef ? Computed2("Pick", [type, typeKey], options) : CreateType2({ ...PickResolve2(type, propertyKeys), ...options });
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-key.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-key.mjs
 function FromPropertyKey6(type, key, options) {
   return {
     [key]: Pick2(type, [key], Clone3(options))
@@ -25187,7 +25187,7 @@ function PickFromMappedKey2(type, mappedKey, options) {
   return MappedResult2(properties);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/partial/partial.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/partial/partial.mjs
 function FromComputed8(target, parameters) {
   return Computed2("Partial", [Computed2(target, parameters)]);
 }
@@ -25228,7 +25228,7 @@ function Partial2(type, options) {
   }
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/partial/partial-from-mapped-result.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/partial/partial-from-mapped-result.mjs
 function FromProperties36(K, options) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(K))
@@ -25243,7 +25243,7 @@ function PartialFromMappedResult2(R, options) {
   return MappedResult2(P);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/required/required.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/required/required.mjs
 function FromComputed9(target, parameters) {
   return Computed2("Required", [Computed2(target, parameters)]);
 }
@@ -25284,7 +25284,7 @@ function Required2(type, options) {
   }
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/required/required-from-mapped-result.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/required/required-from-mapped-result.mjs
 function FromProperties38(P, options) {
   const Acc = {};
   for (const K2 of globalThis.Object.getOwnPropertyNames(P))
@@ -25299,7 +25299,7 @@ function RequiredFromMappedResult2(R, options) {
   return MappedResult2(P);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/module/compute.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/module/compute.mjs
 function DereferenceParameters2(moduleProperties, types) {
   return types.map((type) => {
     return IsRef3(type) ? Dereference2(moduleProperties, type.$ref) : FromType4(moduleProperties, type);
@@ -25395,7 +25395,7 @@ function ComputeModuleProperties2(moduleProperties) {
   }, {});
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/module/module.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/module/module.mjs
 var TModule2 = class {
   constructor($defs) {
     const computed = ComputeModuleProperties2($defs);
@@ -25418,17 +25418,17 @@ function Module2(properties) {
   return new TModule2(properties);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/not/not.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/not/not.mjs
 function Not3(type, options) {
   return CreateType2({ [Kind2]: "Not", not: type }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/parameters/parameters.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/parameters/parameters.mjs
 function Parameters2(schema, options) {
   return IsFunction6(schema) ? Tuple2(schema.parameters, options) : Never2();
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/recursive/recursive.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/recursive/recursive.mjs
 var Ordinal2 = 0;
 function Recursive2(callback, options = {}) {
   if (IsUndefined5(options.$id))
@@ -25438,13 +25438,13 @@ function Recursive2(callback, options = {}) {
   return CreateType2({ [Hint2]: "Recursive", ...thisType }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/regexp/regexp.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/regexp/regexp.mjs
 function RegExp3(unresolved, options) {
   const expr = IsString5(unresolved) ? new globalThis.RegExp(unresolved) : unresolved;
   return CreateType2({ [Kind2]: "RegExp", type: "RegExp", source: expr.source, flags: expr.flags }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/rest/rest.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/rest/rest.mjs
 function RestResolve2(T) {
   return IsIntersect3(T) ? T.allOf : IsUnion3(T) ? T.anyOf : IsTuple3(T) ? T.items ?? [] : [];
 }
@@ -25452,12 +25452,12 @@ function Rest2(T) {
   return RestResolve2(T);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/return-type/return-type.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/return-type/return-type.mjs
 function ReturnType2(schema, options) {
   return IsFunction6(schema) ? CreateType2(schema.returns, options) : Never2(options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/transform/transform.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/transform/transform.mjs
 var TransformDecodeBuilder2 = class {
   constructor(schema) {
     this.schema = schema;
@@ -25489,17 +25489,17 @@ function Transform2(schema) {
   return new TransformDecodeBuilder2(schema);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/unsafe/unsafe.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/unsafe/unsafe.mjs
 function Unsafe2(options = {}) {
   return CreateType2({ [Kind2]: options[Kind2] ?? "Unsafe" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/void/void.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/void/void.mjs
 function Void2(options) {
   return CreateType2({ [Kind2]: "Void", type: "void" }, options);
 }
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/type/type.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/type/type.mjs
 var type_exports5 = {};
 __export(type_exports5, {
   Any: () => Any2,
@@ -25566,10 +25566,10 @@ __export(type_exports5, {
   Void: () => Void2
 });
 
-// ../widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/type/index.mjs
+// ../Projetcs/widgetdc-contracts/node_modules/@sinclair/typebox/build/esm/type/type/index.mjs
 var Type2 = type_exports5;
 
-// ../widgetdc-contracts/dist/orchestrator/fabric-proof.js
+// ../Projetcs/widgetdc-contracts/dist/orchestrator/fabric-proof.js
 var FabricProof = Type2.Object({
   proof_id: Type2.String({
     format: "uuid",
@@ -25605,7 +25605,7 @@ var FabricProof = Type2.Object({
   description: "Verified immutable fabric proof issued during agent handshake. Used to authorize high-risk delegation and tool execution."
 });
 
-// ../widgetdc-contracts/dist/orchestrator/tool-call.js
+// ../Projetcs/widgetdc-contracts/dist/orchestrator/tool-call.js
 var OrchestratorToolCall = Type2.Object({
   /** Unique call ID — used to correlate with OrchestratorToolResult */
   call_id: Type2.String({
@@ -25645,7 +25645,7 @@ var OrchestratorToolCall = Type2.Object({
   description: "Agent \u2192 Orchestrator: request to invoke an MCP tool on the WidgeTDC backend. Orchestrator injects auth and handles SSE."
 });
 
-// ../widgetdc-contracts/dist/orchestrator/tool-result.js
+// ../Projetcs/widgetdc-contracts/dist/orchestrator/tool-result.js
 var OrchestratorToolStatus = Type2.Union([
   Type2.Literal("success"),
   Type2.Literal("error"),
@@ -25692,7 +25692,7 @@ var OrchestratorToolResult = Type2.Object({
   description: "Orchestrator \u2192 Agent: result of an MCP tool invocation. Includes raw output or structured error."
 });
 
-// ../widgetdc-contracts/dist/orchestrator/agent-message.js
+// ../Projetcs/widgetdc-contracts/dist/orchestrator/agent-message.js
 var AgentId = Type2.Union([
   Type2.Literal("Claude"),
   Type2.Literal("Gemini"),
@@ -25806,7 +25806,7 @@ var AgentMessage = Type2.Object({
   description: "Shared message format for agent\u2194agent and agent\u2194user communication. Matches Notion Global Chat schema."
 });
 
-// ../widgetdc-contracts/dist/orchestrator/agent-handshake.js
+// ../Projetcs/widgetdc-contracts/dist/orchestrator/agent-handshake.js
 var AgentCapability = Type2.Union([
   Type2.Literal("graph_read"),
   // Can read Neo4j via graph.read_cypher
@@ -25906,7 +25906,7 @@ var AgentHandshake = Type2.Object({
   description: "Agent registration payload. Sent to Orchestrator on boot to declare identity, capabilities, and tool permissions."
 });
 
-// ../widgetdc-contracts/dist/orchestrator/stored-message.js
+// ../Projetcs/widgetdc-contracts/dist/orchestrator/stored-message.js
 var StoredMessage = Type2.Intersect([
   AgentMessage,
   Type2.Object({
@@ -25926,7 +25926,7 @@ var StoredMessage = Type2.Intersect([
   description: "Persisted agent message with storage-layer fields (id, reactions, pinned). Extends AgentMessage."
 });
 
-// ../widgetdc-contracts/dist/agent/enums.js
+// ../Projetcs/widgetdc-contracts/dist/agent/enums.js
 var AgentTier = Type2.Union([
   Type2.Literal("ANALYST"),
   Type2.Literal("ASSOCIATE"),
@@ -25958,7 +25958,7 @@ var SignalType = Type2.Union([
   Type2.Literal("warning")
 ], { $id: "SignalType", description: "Agent signal event type" });
 
-// ../widgetdc-contracts/dist/orchestrator/agent-trust-profile.js
+// ../Projetcs/widgetdc-contracts/dist/orchestrator/agent-trust-profile.js
 var OrchestratorTaskDomain = Type2.Union([
   Type2.Literal("intake"),
   Type2.Literal("decomposition"),
@@ -26049,7 +26049,7 @@ var AgentTrustProfile = Type2.Object({
   description: "Minimal orchestrator trust profile. Persona is the primary identity; provider identifiers are telemetry-only correlation metadata."
 });
 
-// ../widgetdc-contracts/dist/orchestrator/scorecard-entry.js
+// ../Projetcs/widgetdc-contracts/dist/orchestrator/scorecard-entry.js
 var ScorecardMetricStatus = Type2.Union([
   Type2.Literal("pass"),
   Type2.Literal("warn"),
@@ -26104,7 +26104,7 @@ var ScorecardEntry = Type2.Object({
   description: "Canonical decision-quality scorecard entry used for runtime enforcement, monitoring, and governed routing review."
 });
 
-// ../widgetdc-contracts/dist/orchestrator/telemetry-entry.js
+// ../Projetcs/widgetdc-contracts/dist/orchestrator/telemetry-entry.js
 var TelemetryPhase = Type2.Union([
   Type2.Literal("discover"),
   Type2.Literal("define"),
@@ -26171,7 +26171,7 @@ var TelemetryEntry = Type2.Object({
   description: "Normalized telemetry sample for orchestrator trust and scorecard ingestion. It aligns telemetry with persona-based trust instead of provider identity."
 });
 
-// ../widgetdc-contracts/dist/orchestrator/routing-intent.js
+// ../Projetcs/widgetdc-contracts/dist/orchestrator/routing-intent.js
 var RoutingCapability = Type2.Union([
   Type2.Literal("engagement_intake"),
   Type2.Literal("guided_decomposition"),
@@ -26233,7 +26233,7 @@ var RoutingIntent = Type2.Object({
   description: "Canonical routing intent used by the orchestrator to classify and constrain work within the active WidgeTDC wedge."
 });
 
-// ../widgetdc-contracts/dist/orchestrator/routing-decision.js
+// ../Projetcs/widgetdc-contracts/dist/orchestrator/routing-decision.js
 var RoutingDecision = Type2.Object({
   decision_id: Type2.String({
     description: "Stable routing decision identifier for runtime lineage and read-back."
@@ -26289,7 +26289,7 @@ var RoutingDecision = Type2.Object({
   description: "Minimal routing decision envelope. Supports orchestrator routing transparency without introducing a second governance truth."
 });
 
-// ../widgetdc-contracts/dist/orchestrator/workflow-envelope.js
+// ../Projetcs/widgetdc-contracts/dist/orchestrator/workflow-envelope.js
 var WorkflowPhase = Type2.Union([
   Type2.Literal("discover"),
   Type2.Literal("define"),
@@ -26365,7 +26365,7 @@ var AgentWorkflowEnvelope = Type2.Object({
   description: "Minimal workflow envelope for orchestrator routing and lineage. Not a platform-wide execution bus or governance replacement."
 });
 
-// ../widgetdc-contracts/dist/orchestrator/launcher-evidence-packet.js
+// ../Projetcs/widgetdc-contracts/dist/orchestrator/launcher-evidence-packet.js
 var LauncherEvidenceFamily = Type2.Union([
   Type2.Literal("research"),
   Type2.Literal("regulatory"),
@@ -26463,7 +26463,7 @@ var LauncherEvidencePacket = Type2.Object({
   description: "Canonical tri-source evidence packet for launcher routing. Read-only surface for backend and launcher coordination; not a promotion decision."
 });
 
-// ../widgetdc-contracts/dist/orchestrator/launcher-contracts.js
+// ../Projetcs/widgetdc-contracts/dist/orchestrator/launcher-contracts.js
 var LauncherIntent = Type2.Union([
   Type2.Literal("info"),
   Type2.Literal("analyze"),
@@ -26787,7 +26787,7 @@ var ReasonRuntimeResponse = Type2.Object({
   description: "Shared /reason runtime response contract used by launcher-like surfaces."
 });
 
-// ../widgetdc-contracts/dist/orchestrator/artifact-contracts.js
+// ../Projetcs/widgetdc-contracts/dist/orchestrator/artifact-contracts.js
 var BackendGovernanceEvidenceItemResponseV1 = Type2.Object({
   id: Type2.String({
     minLength: 1,
@@ -39597,260 +39597,8 @@ benchmarkRouter.get("/ablation/:taskId/report", (req, res) => {
 
 // src/routes/obsidian.ts
 init_config();
-init_logger();
 import { Router as Router50 } from "express";
 var obsidianRouter = Router50();
-var TIMEOUT_MS = 8e3;
-function isLiveMode() {
-  return !!config.obsidianUrl;
-}
-function isGithubMode() {
-  return !config.obsidianUrl && !!config.githubToken;
-}
-async function obsidianFetch(path3, options = {}) {
-  const base = config.obsidianUrl.replace(/\/$/, "");
-  const url = `${base}${path3}`;
-  const headers = {
-    "Content-Type": "application/json",
-    ...options.headers ?? {}
-  };
-  if (config.obsidianToken) {
-    headers["Authorization"] = `Bearer ${config.obsidianToken}`;
-  }
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-  try {
-    return await fetch(url, { ...options, headers, signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
-  }
-}
-async function ghFetch(path3) {
-  const [owner, repo] = config.obsidianGithubRepo.split("/");
-  const base = `https://api.github.com/repos/${owner}/${repo}`;
-  const headers = {
-    "Accept": "application/vnd.github+json",
-    "X-GitHub-Api-Version": "2022-11-28",
-    "Authorization": `Bearer ${config.githubToken}`
-  };
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-  try {
-    return await fetch(`${base}${path3}`, { headers, signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
-  }
-}
-async function ghListDir(path3) {
-  const encodedPath = path3 ? `/contents/${path3}` : "/contents";
-  const r = await ghFetch(encodedPath);
-  if (!r.ok) throw new Error(`GitHub API ${r.status}: ${r.statusText}`);
-  return r.json();
-}
-async function ghGetFile(path3) {
-  const r = await ghFetch(`/contents/${encodeURIComponent(path3)}`);
-  if (!r.ok) throw new Error(`GitHub API ${r.status}: ${r.statusText}`);
-  const data = await r.json();
-  if (data.encoding === "base64" && data.content) {
-    return Buffer.from(data.content.replace(/\n/g, ""), "base64").toString("utf-8");
-  }
-  throw new Error("Unexpected encoding from GitHub API");
-}
-async function ghSearchCode(query) {
-  const [owner, repo] = config.obsidianGithubRepo.split("/");
-  const q = `${encodeURIComponent(query)}+repo:${owner}/${repo}`;
-  const r = await fetch(
-    `https://api.github.com/search/code?q=${q}&per_page=20`,
-    {
-      headers: {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "Authorization": `Bearer ${config.githubToken}`
-      }
-    }
-  );
-  if (!r.ok) throw new Error(`GitHub search ${r.status}: ${r.statusText}`);
-  const data = await r.json();
-  return (data.items ?? []).map((item) => ({
-    filename: item.path,
-    score: 1,
-    context: [`${item.name}`]
-  }));
-}
-async function ghGetTreeStats() {
-  const repoR = await ghFetch("");
-  if (!repoR.ok) throw new Error(`GitHub API ${repoR.status}`);
-  const repoData = await repoR.json();
-  const branchR = await ghFetch(`/branches/${repoData.default_branch}`);
-  if (!branchR.ok) throw new Error(`GitHub API ${branchR.status}`);
-  const branchData = await branchR.json();
-  const treeSha = branchData.commit.commit.tree.sha;
-  const treeR = await ghFetch(`/git/trees/${treeSha}?recursive=1`);
-  if (!treeR.ok) throw new Error(`GitHub tree API ${treeR.status}`);
-  const treeData = await treeR.json();
-  const files = treeData.tree.filter((n) => n.type === "blob");
-  const dirs = treeData.tree.filter((n) => n.type === "tree");
-  return { file_count: files.length, dir_count: dirs.length, sha: treeSha };
-}
-obsidianRouter.get("/status", async (_req, res) => {
-  if (isLiveMode()) {
-    try {
-      const r = await obsidianFetch("/");
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json();
-      res.json({ connected: true, mode: "live", ...data });
-    } catch (err) {
-      logger.warn({ err: err.message }, "Obsidian live status check failed");
-      res.status(503).json({ connected: false, mode: "live", error: err.message });
-    }
-    return;
-  }
-  if (isGithubMode()) {
-    try {
-      const r = await ghFetch("");
-      if (!r.ok) throw new Error(`GitHub API ${r.status}`);
-      const data = await r.json();
-      res.json({
-        connected: true,
-        mode: "github",
-        vault_name: data.name,
-        repo: data.full_name,
-        default_branch: data.default_branch,
-        versions: { obsidian: "GitHub", api: "v1" }
-      });
-    } catch (err) {
-      logger.warn({ err: err.message }, "Obsidian GitHub status check failed");
-      res.status(503).json({ connected: false, mode: "github", error: err.message });
-    }
-    return;
-  }
-  res.status(503).json({
-    connected: false,
-    error: "OBSIDIAN_API_URL not configured",
-    setup: [
-      "Option A (Live): Set OBSIDIAN_API_URL=http://your-tunnel + OBSIDIAN_API_TOKEN in Railway env vars.",
-      "Option B (GitHub): Set GITHUB_TOKEN=ghp_... in Railway env vars (reads vault from Clauskraft/Obsidian-Vault)."
-    ].join("\n")
-  });
-});
-obsidianRouter.get("/vault/stats", async (_req, res) => {
-  if (isLiveMode()) {
-    try {
-      const r = await obsidianFetch("/vault/");
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      res.json(await r.json());
-    } catch (err) {
-      res.status(503).json({ error: err.message });
-    }
-    return;
-  }
-  if (isGithubMode()) {
-    try {
-      const stats = await ghGetTreeStats();
-      res.json({
-        vault_name: config.obsidianGithubRepo.split("/")[1],
-        recursive_file_count: stats.file_count,
-        recursive_dir_count: stats.dir_count
-      });
-    } catch (err) {
-      res.status(503).json({ error: err.message });
-    }
-    return;
-  }
-  res.status(503).json({ error: "Not configured" });
-});
-obsidianRouter.get("/vault/list", async (req, res) => {
-  if (isLiveMode()) {
-    const path3 = req.query.path ?? "/";
-    try {
-      const r = await obsidianFetch(`/vault${path3}`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      res.json(await r.json());
-    } catch (err) {
-      res.status(503).json({ error: err.message });
-    }
-    return;
-  }
-  if (isGithubMode()) {
-    const path3 = (req.query.path ?? "").replace(/^\//, "");
-    try {
-      const entries = await ghListDir(path3);
-      res.json({
-        files: entries.map((e2) => ({ path: e2.path, type: e2.type === "dir" ? "dir" : "file" }))
-      });
-    } catch (err) {
-      res.status(503).json({ error: err.message });
-    }
-    return;
-  }
-  res.status(503).json({ error: "Not configured" });
-});
-obsidianRouter.get("/search", async (req, res) => {
-  const query = req.query.q;
-  if (!query) return res.status(400).json({ error: "q parameter required" });
-  if (isLiveMode()) {
-    try {
-      const r = await obsidianFetch(`/search/simple/?query=${encodeURIComponent(query)}&contextLength=100`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      res.json(await r.json());
-    } catch (err) {
-      res.status(503).json({ error: err.message });
-    }
-    return;
-  }
-  if (isGithubMode()) {
-    try {
-      const results = await ghSearchCode(query);
-      res.json(results);
-    } catch (err) {
-      res.status(503).json({ error: err.message });
-    }
-    return;
-  }
-  res.status(503).json({ error: "Not configured" });
-});
-obsidianRouter.get("/note", async (req, res) => {
-  const path3 = req.query.path;
-  if (!path3) return res.status(400).json({ error: "path parameter required" });
-  if (isLiveMode()) {
-    try {
-      const r = await obsidianFetch(`/vault/${encodeURIComponent(path3)}`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const content = await r.text();
-      res.json({ path: path3, content });
-    } catch (err) {
-      res.status(503).json({ error: err.message });
-    }
-    return;
-  }
-  if (isGithubMode()) {
-    try {
-      const content = await ghGetFile(path3);
-      res.json({ path: path3, content });
-    } catch (err) {
-      res.status(503).json({ error: err.message });
-    }
-    return;
-  }
-  res.status(503).json({ error: "Not configured" });
-});
-obsidianRouter.get("/tags", async (_req, res) => {
-  if (isLiveMode()) {
-    try {
-      const r = await obsidianFetch("/search/simple/?query=%23&contextLength=0");
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      res.json(await r.json());
-    } catch (err) {
-      res.status(503).json({ error: err.message });
-    }
-    return;
-  }
-  if (isGithubMode()) {
-    res.json({});
-    return;
-  }
-  res.status(503).json({ error: "Not configured" });
-});
 
 // src/routes/grafana-proxy.ts
 init_logger();
@@ -40230,6 +39978,272 @@ function listRuns() {
     error: state4.error
   }));
 }
+var HITL_THRESHOLD = 70;
+var CLUSTER_STRATEGIES = {
+  eu_safe_reasoning: {
+    label: "EU Safe Reasoning Pool",
+    geoFilter: ["eu_only", "global"],
+    capabilityFilter: ["reasoning", "text_generation"],
+    costFilter: ["free", "per_token", "subscription"]
+  },
+  cost_optimized_code: {
+    label: "Cost-Optimized Code Generation",
+    geoFilter: ["global", "eu_only", "local_only"],
+    capabilityFilter: ["code", "reasoning"],
+    costFilter: ["free"]
+  },
+  local_only_privacy: {
+    label: "Local-Only Privacy Pool",
+    geoFilter: ["local_only"],
+    capabilityFilter: ["reasoning", "code", "text_generation", "embedding"],
+    costFilter: ["free"]
+  },
+  open_source_eu: {
+    label: "Open Source EU Cluster",
+    geoFilter: ["eu_only", "global"],
+    capabilityFilter: ["reasoning", "code", "text_generation", "vision", "embedding", "multimodal"],
+    costFilter: ["free"]
+  }
+};
+function regexProviderParse(rawDocs, sourceUrl) {
+  const result = {};
+  const ctxMatch = rawDocs.match(/(\d+)[Kk]\s*(?:token|context)|context.{0,20}:\s*(\d+)/i);
+  if (ctxMatch) {
+    const raw = ctxMatch[1] ? Number(ctxMatch[1]) * 1024 : Number(ctxMatch[2]);
+    result.context_window = raw > 0 ? raw : 0;
+  }
+  if (/free|open.?source|self.?host/i.test(rawDocs)) result.cost_model = "free";
+  else if (/per.?token|\$/i.test(rawDocs)) result.cost_model = "per_token";
+  else if (/subscri/i.test(rawDocs)) result.cost_model = "subscription";
+  if (/local|self.?host|offline/i.test(rawDocs)) result.geo_restriction = "local_only";
+  else if (/eu.only|gdpr|europe/i.test(rawDocs)) result.geo_restriction = "eu_only";
+  else if (/china|cn.region|\bcn\b/i.test(rawDocs)) result.geo_restriction = "cn_region";
+  const caps = [];
+  if (/reasoning|think|chain.of.thought/i.test(rawDocs)) caps.push("reasoning");
+  if (/code|program|develop/i.test(rawDocs)) caps.push("code");
+  if (/vision|image|visual/i.test(rawDocs)) caps.push("vision");
+  if (/embed/i.test(rawDocs)) caps.push("embedding");
+  if (/multimodal|multi.modal/i.test(rawDocs)) caps.push("multimodal");
+  if (caps.length === 0) caps.push("text_generation");
+  result.capabilities = caps;
+  const verMatch = rawDocs.match(/v(\d+\.\d+(?:\.\d+)?)|version\s+(\d+\.\d+)|-(\d+\.\d+)-/i);
+  result.version = verMatch ? verMatch[1] ?? verMatch[2] ?? verMatch[3] ?? "unknown" : "unknown";
+  return result;
+}
+async function llmProviderParse(name, sourceUrl, rawDocs) {
+  const prompt = `You are a precise JSON-only AI provider analyst. Extract structured metadata about this AI model/provider.
+
+Provider: ${name}
+Source: ${sourceUrl}
+
+DOCUMENTATION:
+${rawDocs.substring(0, 3e3)}
+
+Return EXACTLY this JSON (no prose, no markdown):
+{
+  "version": "version string or unknown",
+  "context_window": 128000,
+  "cost_model": "free",
+  "geo_restriction": "global",
+  "primary_capability": "reasoning",
+  "capabilities": ["reasoning", "code"],
+  "confidence": 85
+}
+
+cost_model: free | per_token | subscription | unknown
+geo_restriction: global | eu_only | local_only | cn_region
+primary_capability and capabilities items: reasoning | code | vision | text_generation | embedding | multimodal
+confidence: 80+ if well-documented, 70-79 partial, <70 if guessing`;
+  const raw = await callDeepSeekLlm(prompt);
+  try {
+    const parsed = JSON.parse(raw.trim());
+    return {
+      version: String(parsed.version ?? "unknown"),
+      context_window: Number(parsed.context_window ?? 0),
+      cost_model: ["free", "per_token", "subscription", "unknown"].includes(parsed.cost_model) ? parsed.cost_model : "unknown",
+      geo_restriction: ["global", "eu_only", "local_only", "cn_region"].includes(parsed.geo_restriction) ? parsed.geo_restriction : "global",
+      primary_capability: parsed.primary_capability ?? "text_generation",
+      capabilities: Array.isArray(parsed.capabilities) ? parsed.capabilities : [],
+      confidence: Math.max(0, Math.min(100, Number(parsed.confidence ?? 50)))
+    };
+  } catch {
+    return {};
+  }
+}
+async function cveCheck(providerName) {
+  try {
+    const res = await callBackendMcp("graph.read_cypher", {
+      query: `MATCH (c:CVE) WHERE toLower(c.description) CONTAINS toLower($name) OR toLower(c.id) CONTAINS toLower($name) RETURN c.id as cveId LIMIT 10`,
+      params: { name: providerName }
+    });
+    return (res?.results ?? []).map((r) => r.cveId).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+async function hitlGate(provider) {
+  if (provider.confidence >= HITL_THRESHOLD) return { blocked: false };
+  try {
+    const res = await callBackendMcp("linear.create_issue", {
+      title: `[HITL] PhantomProvider low confidence: ${provider.name} (${provider.confidence}%)`,
+      description: `PhantomProvider ingest blocked \u2014 confidence ${provider.confidence}% is below threshold ${HITL_THRESHOLD}%.
+
+Provider: ${provider.name}
+Source: ${provider.source_url}
+Capabilities: ${provider.capabilities.join(", ")}
+
+Manual review required before Neo4j ingest.`,
+      labels: ["HITL", "phantom-bom"],
+      priority: 2
+    });
+    return { blocked: true, issueId: res?.issueId };
+  } catch {
+    return { blocked: true };
+  }
+}
+async function writeProviderToNeo4j(provider) {
+  const cypher = `
+MERGE (p:PhantomProvider {providerId: $providerId})
+SET p.name = $name,
+    p.sourceUrl = $sourceUrl,
+    p.sourceType = $sourceType,
+    p.geoRestriction = $geoRestriction,
+    p.primaryCapability = $primaryCapability,
+    p.capabilities = $capabilities,
+    p.version = $version,
+    p.contextWindow = $contextWindow,
+    p.costModel = $costModel,
+    p.confidence = $confidence,
+    p.cveIds = $cveIds,
+    p.hitlRequired = $hitlRequired,
+    p.hitlLinearIssue = $hitlLinearIssue,
+    p.needsEmbedding = true,
+    p.updatedAt = datetime()
+RETURN p.providerId as id`;
+  await callBackendMcp("graph.write_cypher", {
+    query: cypher,
+    params: {
+      providerId: provider.id,
+      name: provider.name,
+      sourceUrl: provider.source_url,
+      sourceType: provider.source_type,
+      geoRestriction: provider.geo_restriction,
+      primaryCapability: provider.primary_capability,
+      capabilities: provider.capabilities,
+      version: provider.version,
+      contextWindow: provider.context_window,
+      costModel: provider.cost_model,
+      confidence: provider.confidence,
+      cveIds: provider.cve_ids,
+      hitlRequired: provider.hitl_required,
+      hitlLinearIssue: provider.hitl_linear_issue ?? null
+    }
+  });
+}
+async function extractProvider(opts) {
+  const providerId = "prov-" + createHash("sha256").update(opts.source_url + opts.name).digest("hex").substring(0, 16);
+  logger.info({ providerId, name: opts.name }, "PhantomProvider extraction started");
+  const [regexResult, llmResult] = await Promise.all([
+    Promise.resolve(regexProviderParse(opts.raw_docs, opts.source_url)),
+    llmProviderParse(opts.name, opts.source_url, opts.raw_docs)
+  ]);
+  const merged = { ...regexResult, ...llmResult };
+  const cve_ids = await cveCheck(opts.name);
+  const provider = {
+    id: providerId,
+    name: opts.name,
+    source_url: opts.source_url,
+    source_type: opts.source_type,
+    geo_restriction: opts.geo_restriction ?? merged.geo_restriction ?? "global",
+    primary_capability: opts.primary_capability ?? merged.primary_capability ?? "text_generation",
+    version: merged.version ?? "unknown",
+    context_window: merged.context_window ?? 0,
+    cost_model: merged.cost_model ?? "unknown",
+    confidence: merged.confidence ?? 50,
+    capabilities: merged.capabilities ?? [],
+    cve_ids,
+    raw_docs: opts.raw_docs.substring(0, 2e3),
+    hitl_required: (merged.confidence ?? 50) < HITL_THRESHOLD,
+    hitl_linear_issue: void 0
+  };
+  const hitl = await hitlGate(provider);
+  provider.hitl_required = hitl.blocked;
+  provider.hitl_linear_issue = hitl.issueId;
+  if (!hitl.blocked) {
+    await writeProviderToNeo4j(provider);
+    logger.info({ providerId, confidence: provider.confidence, cves: cve_ids.length }, "PhantomProvider written to Neo4j");
+  } else {
+    logger.warn({ providerId, confidence: provider.confidence, issue: hitl.issueId }, "PhantomProvider blocked by HITL gate");
+  }
+  return { provider, blocked: hitl.blocked, hitl_issue: hitl.issueId, cve_count: cve_ids.length };
+}
+async function generatePhantomClusters() {
+  logger.info("Generating PhantomClusters");
+  const res = await callBackendMcp("graph.read_cypher", {
+    query: `MATCH (p:PhantomProvider) WHERE p.hitlRequired = false RETURN p.providerId as id, p.geoRestriction as geo, p.capabilities as caps, p.costModel as cost, p.confidence as conf`,
+    params: {}
+  });
+  const providers = res?.results ?? [];
+  if (providers.length === 0) return [];
+  const clusters = [];
+  for (const [strategy, def] of Object.entries(CLUSTER_STRATEGIES)) {
+    const members = providers.filter(
+      (p) => def.geoFilter.includes(p.geo) && def.costFilter.includes(p.cost) && (p.caps ?? []).some((c) => def.capabilityFilter.includes(c))
+    );
+    if (members.length === 0) continue;
+    const avg_conf = members.reduce((s, p) => s + (p.conf ?? 0), 0) / members.length;
+    const score = Math.round((0.5 * (avg_conf / 100) + 0.3 * Math.min(members.length / 5, 1) + 0.2 * 0.8) * 100) / 100;
+    const clusterId = `cluster-${strategy}-${Date.now()}`;
+    const cluster = {
+      id: clusterId,
+      strategy,
+      score,
+      member_count: members.length,
+      avg_confidence: Math.round(avg_conf),
+      provider_ids: members.map((p) => p.id),
+      created_at: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    await callBackendMcp("graph.write_cypher", {
+      query: `
+MERGE (cl:PhantomCluster {clusterId: $clusterId})
+SET cl.strategy = $strategy,
+    cl.strategyLabel = $strategyLabel,
+    cl.score = $score,
+    cl.memberCount = $memberCount,
+    cl.avgConfidence = $avgConfidence,
+    cl.providerIds = $providerIds,
+    cl.createdAt = datetime($createdAt),
+    cl.updatedAt = datetime()
+RETURN cl.clusterId as id`,
+      params: {
+        clusterId,
+        strategy,
+        strategyLabel: def.label,
+        score,
+        memberCount: members.length,
+        avgConfidence: Math.round(avg_conf),
+        providerIds: members.map((p) => p.id),
+        createdAt: cluster.created_at
+      }
+    });
+    clusters.push(cluster);
+    logger.info({ clusterId, strategy, members: members.length, score }, "PhantomCluster created");
+  }
+  return clusters;
+}
+async function getProviderRegistry() {
+  const res = await callBackendMcp("graph.read_cypher", {
+    query: `MATCH (p:PhantomProvider) RETURN p.providerId as id, p.name as name, p.geoRestriction as geo, p.primaryCapability as cap, p.confidence as conf, size(p.cveIds) as cves, p.hitlRequired as hitl ORDER BY p.confidence DESC`,
+    params: {}
+  });
+  const rows = res?.results ?? [];
+  return {
+    total: rows.length,
+    active: rows.filter((r) => !r.hitl).length,
+    hitl_blocked: rows.filter((r) => r.hitl).length,
+    providers: rows.map((r) => ({ id: r.id, name: r.name, geo: r.geo, capability: r.cap, confidence: r.conf, cves: r.cves, hitl: r.hitl }))
+  };
+}
 
 // src/routes/phantom-bom.ts
 init_logger();
@@ -40307,6 +40321,63 @@ phantomBomRouter.get("/runs/:id", (req, res) => {
     bom: state4.bom ?? null,
     error: state4.error ?? null
   });
+});
+phantomBomRouter.post("/providers", async (req, res) => {
+  const { name, source_url, source_type, geo_restriction, primary_capability, raw_docs } = req.body;
+  if (!name || !source_url || !raw_docs) {
+    res.status(400).json({ success: false, error: { code: "MISSING_FIELDS", message: "name, source_url, raw_docs are required", status_code: 400 } });
+    return;
+  }
+  const validSourceTypes = ["github", "huggingface", "npm", "manual"];
+  if (source_type && !validSourceTypes.includes(source_type)) {
+    res.status(400).json({ success: false, error: { code: "INVALID_SOURCE_TYPE", message: `source_type must be one of: ${validSourceTypes.join(", ")}`, status_code: 400 } });
+    return;
+  }
+  try {
+    const result = await extractProvider({
+      name,
+      source_url,
+      source_type: source_type ?? "manual",
+      geo_restriction,
+      primary_capability,
+      raw_docs
+    });
+    res.json({
+      success: true,
+      provider: result.provider,
+      blocked: result.blocked,
+      hitl_issue: result.hitl_issue ?? null,
+      cve_count: result.cve_count,
+      message: result.blocked ? `Provider blocked by HITL gate (confidence ${result.provider.confidence}% < 70%). Linear issue: ${result.hitl_issue ?? "created"}` : `Provider ingested. CVEs linked: ${result.cve_count}`
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ name, err: msg }, "Provider extraction failed");
+    res.status(500).json({ success: false, error: { code: "PROVIDER_EXTRACTION_FAILED", message: msg, status_code: 500 } });
+  }
+});
+phantomBomRouter.get("/providers", async (_req, res) => {
+  try {
+    const registry2 = await getProviderRegistry();
+    res.json({ success: true, ...registry2 });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, error: { code: "REGISTRY_FAILED", message: msg, status_code: 500 } });
+  }
+});
+phantomBomRouter.post("/clusters/generate", async (_req, res) => {
+  try {
+    const clusters = await generatePhantomClusters();
+    res.json({
+      success: true,
+      clusters,
+      count: clusters.length,
+      message: clusters.length > 0 ? `Generated ${clusters.length} PhantomCluster(s) and written to Neo4j` : "No clusters generated \u2014 insufficient providers or none pass geo/cost/capability filters"
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, error: { code: "CLUSTER_GENERATION_FAILED", message: msg, status_code: 500 } });
+  }
 });
 
 // src/index.ts
@@ -40605,7 +40676,4 @@ process.on("SIGINT", () => {
   server.close(() => {
     process.exit(0);
   });
-});
-process.on("unhandledRejection", (reason) => {
-  logger.error({ reason: String(reason) }, "Unhandled rejection");
 });

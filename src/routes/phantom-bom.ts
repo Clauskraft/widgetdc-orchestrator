@@ -1,13 +1,17 @@
 /**
- * routes/phantom-bom.ts — PhantomBOM Extractor API
+ * routes/phantom-bom.ts — PhantomBOM Extractor + Snout MRP API
  *
- *   POST /api/phantom-bom/extract       — Async fire-and-forget extraction
- *   POST /api/phantom-bom/extract/sync  — Synchronous extraction (waits for result)
- *   GET  /api/phantom-bom/runs          — List all extraction runs
- *   GET  /api/phantom-bom/runs/:id      — Get specific run + components
+ *   POST /api/phantom-bom/extract         — Async fire-and-forget repo extraction
+ *   POST /api/phantom-bom/extract/sync    — Synchronous repo extraction
+ *   GET  /api/phantom-bom/runs            — List all extraction runs
+ *   GET  /api/phantom-bom/runs/:id        — Get specific run + BOM
+ *
+ *   POST /api/phantom-bom/providers       — Ingest LLM provider (Snout MRP FR-01)
+ *   GET  /api/phantom-bom/providers       — Provider registry (FR-07)
+ *   POST /api/phantom-bom/clusters/generate — Generate PhantomClusters (MRP engine)
  */
 import { Router, Request, Response } from 'express'
-import { extractPhantomBOM, getRunState, listRuns } from '../phantom-bom.js'
+import { extractPhantomBOM, getRunState, listRuns, extractProvider, generatePhantomClusters, getProviderRegistry } from '../phantom-bom.js'
 import { logger } from '../logger.js'
 
 export const phantomBomRouter = Router()
@@ -119,4 +123,87 @@ phantomBomRouter.get('/runs/:id', (req: Request, res: Response) => {
     bom: state.bom ?? null,
     error: state.error ?? null,
   })
+})
+
+// ─── Snout MRP Routes ─────────────────────────────────────────────────────────
+
+/**
+ * POST /api/phantom-bom/providers
+ * Ingest an LLM provider (Snout MRP FR-01).
+ * Body: { name, source_url, source_type, geo_restriction?, primary_capability?, raw_docs }
+ */
+phantomBomRouter.post('/providers', async (req: Request, res: Response) => {
+  const { name, source_url, source_type, geo_restriction, primary_capability, raw_docs } = req.body as Record<string, string>
+
+  if (!name || !source_url || !raw_docs) {
+    res.status(400).json({ success: false, error: { code: 'MISSING_FIELDS', message: 'name, source_url, raw_docs are required', status_code: 400 } })
+    return
+  }
+
+  const validSourceTypes = ['github', 'huggingface', 'npm', 'manual']
+  if (source_type && !validSourceTypes.includes(source_type)) {
+    res.status(400).json({ success: false, error: { code: 'INVALID_SOURCE_TYPE', message: `source_type must be one of: ${validSourceTypes.join(', ')}`, status_code: 400 } })
+    return
+  }
+
+  try {
+    const result = await extractProvider({
+      name,
+      source_url,
+      source_type: (source_type ?? 'manual') as 'github' | 'huggingface' | 'npm' | 'manual',
+      geo_restriction: geo_restriction as 'global' | 'eu_only' | 'local_only' | 'cn_region' | undefined,
+      primary_capability: primary_capability as 'reasoning' | 'code' | 'vision' | 'text_generation' | 'embedding' | 'multimodal' | undefined,
+      raw_docs,
+    })
+
+    res.json({
+      success: true,
+      provider: result.provider,
+      blocked: result.blocked,
+      hitl_issue: result.hitl_issue ?? null,
+      cve_count: result.cve_count,
+      message: result.blocked
+        ? `Provider blocked by HITL gate (confidence ${result.provider.confidence}% < 70%). Linear issue: ${result.hitl_issue ?? 'created'}`
+        : `Provider ingested. CVEs linked: ${result.cve_count}`,
+    })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    logger.error({ name, err: msg }, 'Provider extraction failed')
+    res.status(500).json({ success: false, error: { code: 'PROVIDER_EXTRACTION_FAILED', message: msg, status_code: 500 } })
+  }
+})
+
+/**
+ * GET /api/phantom-bom/providers
+ * Provider registry — all PhantomProvider nodes from Neo4j.
+ */
+phantomBomRouter.get('/providers', async (_req: Request, res: Response) => {
+  try {
+    const registry = await getProviderRegistry()
+    res.json({ success: true, ...registry })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    res.status(500).json({ success: false, error: { code: 'REGISTRY_FAILED', message: msg, status_code: 500 } })
+  }
+})
+
+/**
+ * POST /api/phantom-bom/clusters/generate
+ * Run MRP clustering engine — groups PhantomProviders into PhantomClusters.
+ */
+phantomBomRouter.post('/clusters/generate', async (_req: Request, res: Response) => {
+  try {
+    const clusters = await generatePhantomClusters()
+    res.json({
+      success: true,
+      clusters,
+      count: clusters.length,
+      message: clusters.length > 0
+        ? `Generated ${clusters.length} PhantomCluster(s) and written to Neo4j`
+        : 'No clusters generated — insufficient providers or none pass geo/cost/capability filters',
+    })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    res.status(500).json({ success: false, error: { code: 'CLUSTER_GENERATION_FAILED', message: msg, status_code: 500 } })
+  }
 })
