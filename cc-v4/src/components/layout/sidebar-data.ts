@@ -147,6 +147,12 @@ export const sidebarData: NavGroup[] = [
         icon: AlertTriangle,
         description: 'Anomaly detection',
       },
+      {
+        title: 'Observability',
+        path: '/observability',
+        icon: Activity,
+        description: 'Real-time platform health, Grafana, anomalies, failures',
+      },
     ],
   },
   {
