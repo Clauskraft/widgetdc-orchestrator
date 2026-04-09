@@ -1,42 +1,29 @@
 /**
  * observability.tsx — Real-time platform observability dashboard
  *
- * Streams metrics from:
- * - Grafana Cloud (Prometheus queries via /api/grafana)
- * - Backend health endpoint
- * - Orchestrator health endpoint
- * - Failure harvester
- * - Pheromone layer
- * - HyperAgent status
- * - Chain execution stats
- * - Linear issues
- *
- * Shows live charts, anomaly alerts, and agent activity.
+ * ONE purpose: real-time platform health — streaming metrics, alerts, failures.
+ * NOT here: flywheel radar, engagement KPIs, decisions, project stats.
+ * Those live in /project-overview and /flywheel.
  */
 import { createFileRoute } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { useState, useEffect } from 'react'
-import { apiGet } from '@/lib/api-client'
+import { useState } from 'react'
+import { apiGet, normalizeError } from '@/lib/api-client'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  AreaChart, Area, BarChart, Bar, RadarChart, Radar, PolarGrid, PolarAngleAxis, Legend, Cell,
+  BarChart, Bar, Cell,
 } from 'recharts'
-import { Activity, AlertTriangle, CheckCircle, TrendingUp, Zap, Clock, Server, Database, RefreshCw } from 'lucide-react'
+import {
+  Activity, AlertTriangle, CheckCircle, TrendingUp, Zap, Clock, Server,
+  Database, RefreshCw, WifiOff, AlertCircle, AlertOctagon,
+} from 'lucide-react'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
-
-interface GrafanaQueryResult {
-  data?: {
-    result: Array<{
-      metric: Record<string, string>
-      value: [number, string]
-    }>
-  }
-}
 
 interface HealthResponse {
   status: string
@@ -64,12 +51,6 @@ interface PheromoneStatus {
   totalDeposits: number
   totalAmplifications: number
   totalDecays: number
-}
-
-interface FlywheelReport {
-  compoundScore: number
-  weeklyDelta: number
-  pillars: Array<{ name: string; score: number; trend: string; headline: string }>
 }
 
 interface ChainResponse {
@@ -100,73 +81,135 @@ interface HyperagentStatus {
   totalCycles: number
 }
 
+interface ApiErrorInfo {
+  message: string
+  status?: number
+  isOffline: boolean
+  isRetryable: boolean
+}
+
 // ─── Page ────────────────────────────────────────────────────────────────────
 
 function ObservabilityPage() {
   const [autoRefresh, setAutoRefresh] = useState(true)
+  const [apiErrors, setApiErrors] = useState<ApiErrorInfo[]>([])
   const refreshInterval = autoRefresh ? 15000 : 0
 
+  const addError = (e: unknown) => {
+    const err = normalizeError(e)
+    setApiErrors(prev => {
+      const exists = prev.find(p => p.message === err.message)
+      return exists ? prev : [...prev, err]
+    })
+  }
+
+  const clearErrors = () => setApiErrors([])
+
   // ─── Health Queries ──────────────────────────────────────────────────
-  const { data: backendHealth, isLoading: loadingBackend } = useQuery<HealthResponse>({
+  const {
+    data: backendHealth,
+    isLoading: loadingBackend,
+    refetch: refetchBackend,
+  } = useQuery<HealthResponse>({
     queryKey: ['backend-health'],
-    queryFn: () => apiGet('/health'),
+    queryFn: async () => {
+      try {
+        return await apiGet<HealthResponse>('/health')
+      } catch (e) { addError(e); throw e }
+    },
     refetchInterval: refreshInterval,
+    retry: (count, error) => normalizeError(error).isRetryable && count < 2,
   })
 
-  const { data: orchestratorHealth, isLoading: loadingOrchestrator } = useQuery<HealthResponse>({
+  const {
+    data: orchestratorHealth,
+    isLoading: loadingOrchestrator,
+    refetch: refetchOrchestrator,
+  } = useQuery<HealthResponse>({
     queryKey: ['orchestrator-health'],
-    queryFn: () => apiGet('/api/grafana/health'),
+    queryFn: async () => {
+      try {
+        return await apiGet<HealthResponse>('/api/orchestrator/health')
+      } catch (e) { addError(e); throw e }
+    },
     refetchInterval: refreshInterval,
+    retry: false, // non-critical secondary health
   })
 
   // ─── Platform Metrics ──────────────────────────────────────────────
-  const { data: pheromones, isLoading: loadingPheromones } = useQuery<PheromoneStatus>({
+  const {
+    data: pheromones,
+    isLoading: loadingPheromones,
+    refetch: refetchPheromones,
+  } = useQuery<PheromoneStatus>({
     queryKey: ['pheromones'],
-    queryFn: () => apiGet('/api/pheromone/status'),
+    queryFn: async () => {
+      try {
+        return await apiGet<PheromoneStatus>('/api/pheromone/status')
+      } catch (e) { addError(e); throw e }
+    },
     refetchInterval: refreshInterval,
+    retry: (count, error) => normalizeError(error).isRetryable && count < 2,
   })
 
-  const { data: flywheel, isLoading: loadingFlywheel } = useQuery<{ report: FlywheelReport | null }>({
-    queryKey: ['flywheel'],
-    queryFn: () => apiGet('/api/flywheel/metrics'),
-    refetchInterval: 60000,
-  })
-
-  const { data: chains, isLoading: loadingChains } = useQuery<ChainResponse>({
+  const {
+    data: chains,
+    isLoading: loadingChains,
+    refetch: refetchChains,
+  } = useQuery<ChainResponse>({
     queryKey: ['chains'],
-    queryFn: () => apiGet('/chains?limit=20'),
+    queryFn: async () => {
+      try {
+        return await apiGet<ChainResponse>('/chains?limit=20')
+      } catch (e) { addError(e); throw e }
+    },
     refetchInterval: refreshInterval,
+    retry: (count, error) => normalizeError(error).isRetryable && count < 2,
   })
 
-  const { data: anomalies, isLoading: loadingAnomalies } = useQuery<AnomalyState>({
+  const {
+    data: anomalies,
+    isLoading: loadingAnomalies,
+    refetch: refetchAnomalies,
+  } = useQuery<AnomalyState>({
     queryKey: ['anomalies'],
-    queryFn: () => apiGet('/api/anomaly-watcher/status'),
+    queryFn: async () => {
+      try {
+        return await apiGet<AnomalyState>('/api/anomaly-watcher/status')
+      } catch (e) { addError(e); throw e }
+    },
     refetchInterval: refreshInterval,
+    retry: false,
   })
 
-  const { data: hyperagent, isLoading: loadingHyperagent } = useQuery<HyperagentStatus>({
+  const {
+    data: hyperagent,
+    isLoading: loadingHyperagent,
+    refetch: refetchHyperagent,
+  } = useQuery<HyperagentStatus>({
     queryKey: ['hyperagent'],
-    queryFn: () => apiGet('/api/hyperagent/auto/status'),
+    queryFn: async () => {
+      try {
+        return await apiGet<HyperagentStatus>('/api/hyperagent/auto/status')
+      } catch (e) { addError(e); throw e }
+    },
     refetchInterval: refreshInterval,
+    retry: (count, error) => normalizeError(error).isRetryable && count < 2,
   })
 
-  const { data: failures, isLoading: loadingFailures } = useQuery<FailureHarvest>({
+  const {
+    data: failures,
+    isLoading: loadingFailures,
+    refetch: refetchFailures,
+  } = useQuery<FailureHarvest>({
     queryKey: ['failures'],
-    queryFn: () => apiGet('/api/failures?window_hours=24'),
+    queryFn: async () => {
+      try {
+        return await apiGet<FailureHarvest>('/api/failures?window_hours=24')
+      } catch (e) { addError(e); throw e }
+    },
     refetchInterval: refreshInterval,
-  })
-
-  // ─── Grafana Streaming Metrics ─────────────────────────────────────
-  const { data: grafanaMemory } = useQuery<GrafanaQueryResult>({
-    queryKey: ['grafana-memory'],
-    queryFn: () => apiGet('/api/grafana/query?query=nodejs_heap_size_used_bytes&range=1'),
-    refetchInterval: 30000,
-  })
-
-  const { data: grafanaUptime } = useQuery<GrafanaQueryResult>({
-    queryKey: ['grafana-uptime'],
-    queryFn: () => apiGet('/api/grafana/query?query=process_uptime_seconds&range=1'),
-    refetchInterval: 30000,
+    retry: false,
   })
 
   // ─── Derived Data ──────────────────────────────────────────────────
@@ -191,18 +234,27 @@ function ObservabilityPage() {
       : '#22c55e',
   })) : []
 
-  const pillarData = flywheel?.report?.pillars?.map(p => ({
-    metric: p.name.split(' ')[0],
-    score: Math.round(p.score * 100),
-    fullMark: 100,
-  })) ?? []
-
-  // ─── Anomaly pattern timeline ──────────────────────────────────────
+  // Anomaly pattern timeline
   const patternData = anomalies?.patterns?.map(p => ({
     type: p.type.replace(/_/g, ' '),
     count: p.count,
     lastSeen: p.lastSeen ? new Date(p.lastSeen).toLocaleDateString() : '—',
+    knownFix: p.knownFix,
   })) ?? []
+
+  const anyOffline = apiErrors.some(e => e.isOffline)
+  const hasNonOfflineErrors = apiErrors.some(e => !e.isOffline)
+
+  const refetchAll = () => {
+    clearErrors()
+    refetchBackend()
+    refetchOrchestrator()
+    refetchPheromones()
+    refetchChains()
+    refetchAnomalies()
+    refetchHyperagent()
+    refetchFailures()
+  }
 
   return (
     <div className="flex flex-col gap-6 p-8">
@@ -211,7 +263,7 @@ function ObservabilityPage() {
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Observability</h1>
           <p className="text-muted-foreground mt-1">
-            Real-time platform health — Grafana streaming, anomalies, failures, agents
+            Real-time platform health — metrics, alerts, failures, agent activity
           </p>
         </div>
         <div className="flex gap-2 items-center">
@@ -223,10 +275,44 @@ function ObservabilityPage() {
             <RefreshCw className={`w-3 h-3 mr-1 ${autoRefresh ? 'animate-spin' : ''}`} />
             {autoRefresh ? 'Pause' : 'Resume'}
           </Button>
+          <Button variant="outline" size="sm" onClick={refetchAll}>
+            <RefreshCw className="w-3 h-3 mr-1" /> Refresh All
+          </Button>
         </div>
       </div>
 
-      {/* KPI Strip */}
+      {/* Error alerts */}
+      {anyOffline && (
+        <Alert variant="destructive">
+          <WifiOff className="h-4 w-4" />
+          <AlertTitle>Connection issues detected</AlertTitle>
+          <AlertDescription>
+            Some services are unreachable. Auto-retry is active.
+            <Button variant="outline" size="sm" className="ml-2" onClick={refetchAll}>
+              Retry all now
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {hasNonOfflineErrors && (
+        <Alert>
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>API Errors</AlertTitle>
+          <AlertDescription>
+            {apiErrors.filter(e => !e.isOffline).map((e, i) => (
+              <div key={i} className="text-sm mt-1">
+                {e.message}
+                {e.status === 404 && ' — Endpoint not deployed.'}
+                {e.status === 403 && ' — Permission denied.'}
+                {e.status === 429 && ' — Rate limited.'}
+              </div>
+            ))}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {/* KPI Strip — Health cards only */}
       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
         <HealthCard
           label="Backend"
@@ -237,31 +323,32 @@ function ObservabilityPage() {
         />
         <HealthCard
           label="Orchestrator"
-          status={orchestratorUp ? 'healthy' : 'down'}
-          value={orchestratorUp ? 'OK' : 'DOWN'}
+          status={orchestratorUp ? 'healthy' : 'unknown'}
+          value={orchestratorUp ? 'OK' : '—'}
           icon={Server}
-          color={orchestratorUp ? 'var(--color-success)' : 'var(--color-destructive)'}
+          color={orchestratorUp ? 'var(--color-success)' : 'var(--color-muted)'}
         />
         <HealthCard
-          label="Neo4j Aura"
+          label="Neo4j"
           status={backendHealth?.resources?.neo4j_connected ? 'connected' : 'disconnected'}
-          value={backendHealth?.resources?.neo4j_connected ? 'Connected' : '—'}
+          value={backendHealth?.resources?.neo4j_connected ? 'OK' : '—'}
           icon={Database}
           color={backendHealth?.resources?.neo4j_connected ? 'var(--color-success)' : 'var(--color-destructive)'}
         />
         <HealthCard
           label="Redis"
           status={backendHealth?.resources?.redis_connected ? 'connected' : 'disconnected'}
-          value={backendHealth?.resources?.redis_connected ? 'Connected' : '—'}
+          value={backendHealth?.resources?.redis_connected ? 'OK' : '—'}
           icon={Zap}
           color={backendHealth?.resources?.redis_connected ? 'var(--color-success)' : 'var(--color-destructive)'}
         />
         <HealthCard
           label="Tools"
           status={offlineTools > 0 ? 'degraded' : 'healthy'}
-          value={`${totalTools - offlineTools}/${totalTools}`}
+          value={`${totalTools - offlineTools - unstableTools}`}
           icon={Activity}
           color={offlineTools > 0 ? 'var(--color-warning)' : 'var(--color-success)'}
+          sub={`/${totalTools || '—'}`}
         />
         <HealthCard
           label="Failures 24h"
@@ -274,7 +361,7 @@ function ObservabilityPage() {
           label="Anomalies"
           status={(anomalies?.activeAnomalies ?? 0) > 0 ? 'warning' : 'healthy'}
           value={String(anomalies?.activeAnomalies ?? 0)}
-          icon={AlertTriangle}
+          icon={AlertOctagon}
           color={(anomalies?.activeAnomalies ?? 0) > 0 ? 'var(--color-warning)' : 'var(--color-success)'}
         />
         <HealthCard
@@ -289,31 +376,8 @@ function ObservabilityPage() {
       {/* Main grid: 3 columns */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
-        {/* Column 1: Flywheel + Failure Trends */}
+        {/* Column 1: Failure Trends + Anomaly Patterns */}
         <div className="space-y-6">
-          {/* Flywheel Radar */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-lg">Flywheel Health</CardTitle>
-              <CardDescription>5-pillar compound: {Math.round((flywheel?.report?.compoundScore ?? 0) * 100)}%</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {loadingFlywheel || !flywheel?.report ? (
-                <Skeleton className="h-48 w-full" />
-              ) : pillarData.length > 0 ? (
-                <ResponsiveContainer width="100%" height={200}>
-                  <RadarChart data={pillarData}>
-                    <PolarGrid />
-                    <PolarAngleAxis dataKey="metric" tick={{ fontSize: 10 }} />
-                    <Radar name="Score" dataKey="score" stroke="hsl(var(--primary))" fill="hsl(var(--primary))" fillOpacity={0.3} />
-                  </RadarChart>
-                </ResponsiveContainer>
-              ) : (
-                <p className="text-sm text-muted-foreground text-center py-8">No flywheel data</p>
-              )}
-            </CardContent>
-          </Card>
-
           {/* Failure Categories */}
           <Card>
             <CardHeader>
@@ -321,8 +385,13 @@ function ObservabilityPage() {
               <CardDescription>{failures?.total_events ?? 0} total events</CardDescription>
             </CardHeader>
             <CardContent>
-              {loadingFailures || !failureData.length ? (
+              {loadingFailures ? (
                 <Skeleton className="h-40 w-full" />
+              ) : !failureData.length ? (
+                <div className="text-center py-8">
+                  <CheckCircle className="w-8 h-8 mx-auto text-green-500 mb-2" />
+                  <p className="text-sm text-muted-foreground">No failures in the last 24 hours</p>
+                </div>
               ) : (
                 <ResponsiveContainer width="100%" height={180}>
                   <BarChart data={failureData}>
@@ -348,14 +417,24 @@ function ObservabilityPage() {
               <CardDescription>{anomalies?.patterns?.length ?? 0} patterns · {anomalies?.totalScans ?? 0} scans</CardDescription>
             </CardHeader>
             <CardContent>
-              {loadingAnomalies || !patternData.length ? (
+              {loadingAnomalies ? (
                 <Skeleton className="h-40 w-full" />
+              ) : !patternData.length ? (
+                <div className="text-center py-8">
+                  <CheckCircle className="w-8 h-8 mx-auto text-green-500 mb-2" />
+                  <p className="text-sm text-muted-foreground">No known failure patterns</p>
+                </div>
               ) : (
                 <div className="space-y-2">
                   {patternData.map((p, i) => (
-                    <div key={i} className="flex items-center justify-between text-sm py-1.5 border-b last:border-0">
-                      <span className="font-medium">{p.type}</span>
-                      <div className="flex items-center gap-3">
+                    <div key={i} className="flex items-center justify-between text-sm py-1.5 border-b last:border-0 group">
+                      <div className="flex-1 min-w-0">
+                        <span className="font-medium">{p.type}</span>
+                        {p.knownFix && (
+                          <div className="text-xs text-muted-foreground truncate">Fix: {p.knownFix}</div>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-3 ml-2">
                         <Badge variant="outline" className="text-xs">{p.count}×</Badge>
                         <span className="text-xs text-muted-foreground">{p.lastSeen}</span>
                       </div>
@@ -367,7 +446,7 @@ function ObservabilityPage() {
           </Card>
         </div>
 
-        {/* Column 2: Chain Status + Pheromones + HyperAgent */}
+        {/* Column 2: Chain Status + Pheromones */}
         <div className="space-y-6">
           {/* Chain Status */}
           <Card>
@@ -376,30 +455,72 @@ function ObservabilityPage() {
               <CardDescription>Recent chain activity</CardDescription>
             </CardHeader>
             <CardContent>
-              {loadingChains || !chainStatusData.length ? (
+              {loadingChains ? (
                 <Skeleton className="h-40 w-full" />
+              ) : !chainStatusData.length ? (
+                <div className="text-center py-8">
+                  <Activity className="w-8 h-8 mx-auto text-muted-foreground mb-2" />
+                  <p className="text-sm text-muted-foreground">No chain executions</p>
+                </div>
               ) : (
-                <ResponsiveContainer width="100%" height={180}>
-                  <BarChart data={chainStatusData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                    <XAxis dataKey="status" tick={{ fontSize: 10 }} />
-                    <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
-                    <Tooltip />
-                    <Bar dataKey="count" radius={[4, 4, 0, 0]}>
-                      {chainStatusData.map((entry, i) => (
-                        <Cell key={i} fill={
-                          entry.status === 'completed' ? 'hsl(var(--success))'
-                            : entry.status === 'failed' ? 'hsl(var(--destructive))'
-                            : 'hsl(var(--warning))'
-                        } />
-                      ))}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
+                <div>
+                  <ResponsiveContainer width="100%" height={180}>
+                    <BarChart data={chainStatusData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                      <XAxis dataKey="status" tick={{ fontSize: 10 }} />
+                      <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
+                      <Tooltip />
+                      <Bar dataKey="count" radius={[4, 4, 0, 0]}>
+                        {chainStatusData.map((entry, i) => (
+                          <Cell key={i} fill={
+                            entry.status === 'completed' ? 'hsl(var(--success))'
+                              : entry.status === 'failed' ? 'hsl(var(--destructive))'
+                              : 'hsl(var(--warning))'
+                          } />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                  <div className="mt-2 text-xs text-muted-foreground text-center">
+                    {chains?.chains?.length ?? 0} recent chains
+                  </div>
+                </div>
               )}
-              <div className="mt-2 text-xs text-muted-foreground text-center">
-                {chains?.chains?.length ?? 0} recent chains
-              </div>
+            </CardContent>
+          </Card>
+
+          {/* Recent Chains Table */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg">Recent Chains</CardTitle>
+              <CardDescription>Last 10 executions</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {loadingChains ? (
+                <Skeleton className="h-40 w-full" />
+              ) : !chains?.chains?.length ? (
+                <div className="text-center py-8">
+                  <Activity className="w-8 h-8 mx-auto text-muted-foreground mb-2" />
+                  <p className="text-sm text-muted-foreground">No chain executions</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {chains.chains.slice(0, 10).map((chain, i) => (
+                    <div key={i} className="flex items-center justify-between text-sm py-1.5 border-b last:border-0">
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium truncate">{chain.name}</div>
+                        <div className="text-xs text-muted-foreground">{chain.mode}{chain.duration ? ` · ${chain.duration}` : ''}</div>
+                      </div>
+                      <Badge
+                        variant={chain.status === 'completed' ? 'default' : chain.status === 'failed' ? 'destructive' : 'outline'}
+                        className="text-xs ml-2"
+                      >
+                        {chain.status}
+                      </Badge>
+                    </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
 
@@ -415,88 +536,22 @@ function ObservabilityPage() {
               ) : (
                 <div className="space-y-3">
                   <MetricRow label="Active" value={pheromones?.activePheromones ?? 0} icon={Activity} color="var(--color-primary)" />
-                  <MetricRow label="Total Deposits" value={pheromones?.totalDeposits ?? 0} icon={TrendingUp} color="var(--color-success)" />
+                  <MetricRow label="Deposits" value={pheromones?.totalDeposits ?? 0} icon={TrendingUp} color="var(--color-success)" />
                   <MetricRow label="Amplifications" value={pheromones?.totalAmplifications ?? 0} icon={Zap} color="var(--color-warning)" />
                   <MetricRow label="Decay Cycles" value={pheromones?.totalDecays ?? 0} icon={Clock} color="var(--color-muted)" />
                 </div>
               )}
             </CardContent>
           </Card>
-
-          {/* HyperAgent */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-lg">HyperAgent</CardTitle>
-              <CardDescription>Autonomous execution engine</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {loadingHyperagent ? (
-                <Skeleton className="h-32 w-full" />
-              ) : (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-muted-foreground">Status</span>
-                    <Badge variant={hyperagent?.isRunning ? 'default' : 'outline'} className="text-xs">
-                      {hyperagent?.isRunning ? 'Running' : 'Idle'}
-                    </Badge>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-muted-foreground">Phase</span>
-                    <Badge variant="outline" className="text-xs">{hyperagent?.currentPhase ?? '—'}</Badge>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-muted-foreground">Cycles</span>
-                    <span className="text-sm font-mono">{hyperagent?.totalCycles ?? 0}</span>
-                  </div>
-                  {hyperagent?.currentStep && hyperagent.currentStep !== 'idle' && (
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm text-muted-foreground">Step</span>
-                      <span className="text-sm font-mono">{hyperagent.currentStep}</span>
-                    </div>
-                  )}
-                </div>
-              )}
-            </CardContent>
-          </Card>
         </div>
 
-        {/* Column 3: Recent Chains + Agent Activity + Uptime */}
+        {/* Column 3: Tool Health + Uptime + HyperAgent */}
         <div className="space-y-6">
-          {/* Recent Chains Table */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-lg">Recent Chains</CardTitle>
-              <CardDescription>Last 10 executions</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {loadingChains || !chains?.chains?.length ? (
-                <Skeleton className="h-40 w-full" />
-              ) : (
-                <div className="space-y-2">
-                  {chains.chains.slice(0, 10).map((chain, i) => (
-                    <div key={i} className="flex items-center justify-between text-sm py-1.5 border-b last:border-0">
-                      <div className="flex-1 min-w-0">
-                        <div className="font-medium truncate">{chain.name}</div>
-                        <div className="text-xs text-muted-foreground">{chain.mode}</div>
-                      </div>
-                      <Badge
-                        variant={chain.status === 'completed' ? 'default' : chain.status === 'failed' ? 'destructive' : 'outline'}
-                        className="text-xs ml-2"
-                      >
-                        {chain.status}
-                      </Badge>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
           {/* Tool Health */}
           <Card>
             <CardHeader>
               <CardTitle className="text-lg">Tool Health</CardTitle>
-              <CardDescription>{totalTools} registered tools</CardDescription>
+              <CardDescription>{totalTools || '—'} registered tools</CardDescription>
             </CardHeader>
             <CardContent>
               {loadingBackend ? (
@@ -547,16 +602,16 @@ function ObservabilityPage() {
           <Card>
             <CardHeader>
               <CardTitle className="text-lg">Uptime</CardTitle>
-              <CardDescription>Backend & Orchestrator</CardDescription>
+              <CardDescription>Backend service</CardDescription>
             </CardHeader>
             <CardContent>
-              {loadingBackend || loadingOrchestrator ? (
+              {loadingBackend ? (
                 <Skeleton className="h-20 w-full" />
               ) : (
                 <div className="space-y-3">
                   <MetricRow
                     label="Backend"
-                    value={backendHealth?.uptime_seconds ? `${Math.round(backendHealth.uptime_seconds / 60)} min` : '—'}
+                    value={backendHealth?.uptime_seconds ? `${Math.round(backendHealth.uptime_seconds / 3600)}h ${Math.round((backendHealth.uptime_seconds % 3600) / 60)}m` : '—'}
                     icon={Server}
                     color={backendUp ? 'var(--color-success)' : 'var(--color-destructive)'}
                   />
@@ -566,6 +621,56 @@ function ObservabilityPage() {
                     icon={Activity}
                     color="var(--color-muted)"
                   />
+                  {backendHealth?.resources?.memory_mb && (
+                    <MetricRow
+                      label="Memory"
+                      value={`${Math.round(backendHealth.resources.memory_mb)} MB`}
+                      icon={Database}
+                      color="var(--color-muted)"
+                    />
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* HyperAgent */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg">HyperAgent</CardTitle>
+              <CardDescription>Autonomous execution engine</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {loadingHyperagent ? (
+                <Skeleton className="h-32 w-full" />
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-muted-foreground">Status</span>
+                    <Badge variant={hyperagent?.isRunning ? 'default' : 'outline'} className="text-xs">
+                      {hyperagent?.isRunning ? 'Running' : 'Idle'}
+                    </Badge>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-muted-foreground">Phase</span>
+                    <Badge variant="outline" className="text-xs">{hyperagent?.currentPhase ?? '—'}</Badge>
+                  </div>
+                  {hyperagent?.fitnessScore !== undefined && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-muted-foreground">Fitness</span>
+                      <span className="text-sm font-mono font-medium">{Math.round(hyperagent.fitnessScore * 100)}%</span>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-muted-foreground">Cycles</span>
+                    <span className="text-sm font-mono">{hyperagent?.totalCycles ?? 0}</span>
+                  </div>
+                  {hyperagent?.currentStep && hyperagent.currentStep !== 'idle' && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-muted-foreground">Step</span>
+                      <span className="text-sm font-mono">{hyperagent.currentStep}</span>
+                    </div>
+                  )}
                 </div>
               )}
             </CardContent>
@@ -578,13 +683,15 @@ function ObservabilityPage() {
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
-function HealthCard({ label, status, value, icon: Icon, color }: {
-  label: string; status: string; value: string | number; icon: React.ElementType; color: string
+function HealthCard({ label, status, value, icon: Icon, color, sub }: {
+  label: string; status: string; value: string | number; icon: React.ElementType; color: string; sub?: string
 }) {
   return (
     <div className="rounded-lg border bg-card p-4 text-center">
       <div className="text-xs text-muted-foreground uppercase tracking-wider">{label}</div>
-      <div className="text-2xl font-bold mt-1" style={{ color }}>{value}</div>
+      <div className="text-2xl font-bold mt-1" style={{ color }}>
+        {value}{sub && <span className="text-sm text-muted-foreground ml-0.5">{sub}</span>}
+      </div>
       <Badge
         variant="outline"
         className="mt-1 text-[10px]"

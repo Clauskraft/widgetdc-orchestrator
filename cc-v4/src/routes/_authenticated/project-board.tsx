@@ -3,16 +3,17 @@
  *
  * Shows issues by status (Backlog → Todo → In Progress → Done),
  * allows creating/editing issues, and assigns agents to work.
- * Connects to Linear via the orchestrator's Linear MCP proxy.
+ * Connects to Linear via the orchestrator's Linear MCP tools.
  */
 import { createFileRoute } from '@tanstack/react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { apiGet, apiPost } from '@/lib/api-client'
+import { apiGet, apiPost, normalizeError } from '@/lib/api-client'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
@@ -21,7 +22,10 @@ import { Textarea } from '@/components/ui/textarea'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
-import { Plus, Edit2, CheckCircle2, Circle, Play, Pause } from 'lucide-react'
+import {
+  Plus, Edit2, CheckCircle2, Play, AlertCircle, WifiOff, RefreshCw, Filter,
+  Users, Clock, ChevronRight, ExternalLink, GitBranch, Tag,
+} from 'lucide-react'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -47,6 +51,13 @@ interface LinearLabel {
   description: string | null
 }
 
+interface ApiErrorInfo {
+  message: string
+  status?: number
+  isOffline: boolean
+  isRetryable: boolean
+}
+
 interface CreateIssuePayload {
   title: string
   description?: string
@@ -60,21 +71,20 @@ interface CreateIssuePayload {
 
 // ─── Priority helpers ────────────────────────────────────────────────────────
 
-const PRIORITY_LABELS: Record<number, { label: string; color: string }> = {
-  0: { label: 'None', color: 'bg-gray-500' },
-  1: { label: 'Urgent', color: 'bg-red-500' },
-  2: { label: 'High', color: 'bg-orange-500' },
-  3: { label: 'Normal', color: 'bg-blue-500' },
-  4: { label: 'Low', color: 'bg-gray-400' },
+const PRIORITY_LABELS: Record<number, { label: string; color: string; bg: string }> = {
+  0: { label: 'None', color: 'text-gray-500', bg: 'bg-gray-100' },
+  1: { label: 'Urgent', color: 'text-red-600', bg: 'bg-red-100' },
+  2: { label: 'High', color: 'text-orange-600', bg: 'bg-orange-100' },
+  3: { label: 'Normal', color: 'text-blue-600', bg: 'bg-blue-100' },
+  4: { label: 'Low', color: 'text-gray-400', bg: 'bg-gray-50' },
 }
 
-const STATE_COLORS: Record<string, string> = {
-  backlog: 'bg-slate-500',
-  todo: 'bg-blue-500',
-  'in progress': 'bg-yellow-500',
-  completed: 'bg-green-500',
-  canceled: 'bg-red-500',
-}
+const STATE_COLUMNS = [
+  { key: 'backlog', label: 'Backlog', color: 'bg-slate-400' },
+  { key: 'todo', label: 'Todo', color: 'bg-blue-500' },
+  { key: 'in progress', label: 'In Progress', color: 'bg-yellow-500' },
+  { key: 'completed', label: 'Done', color: 'bg-green-500' },
+] as const
 
 // ─── Page ────────────────────────────────────────────────────────────────────
 
@@ -85,19 +95,34 @@ function ProjectBoardPage() {
   const [selectedIssue, setSelectedIssue] = useState<LinearIssue | null>(null)
   const [filterStatus, setFilterStatus] = useState<string>('all')
   const [filterAssignee, setFilterAssignee] = useState<string>('all')
+  const [apiError, setApiError] = useState<ApiErrorInfo | null>(null)
 
-  // Fetch issues from Linear via orchestrator
-  const { data: issues, isLoading: loadingIssues } = useQuery<LinearIssue[]>({
+  // Fetch issues from Linear via orchestrator MCP proxy
+  const { data: issues, isLoading: loadingIssues, error: issuesError, refetch: refetchIssues } = useQuery<LinearIssue[]>({
     queryKey: ['linear-issues'],
-    queryFn: () => apiGet('/api/linear/issues?limit=100'),
+    queryFn: async () => {
+      try {
+        setApiError(null)
+        return await apiGet<LinearIssue[]>('/api/linear/issues?limit=100')
+      } catch (e) {
+        const err = normalizeError(e)
+        setApiError(err)
+        throw e
+      }
+    },
     refetchInterval: 30000,
+    retry: (count, error) => {
+      const err = normalizeError(error)
+      return err.isRetryable && count < 2
+    },
   })
 
   // Fetch labels
-  const { data: labels, isLoading: loadingLabels } = useQuery<LinearLabel[]>({
+  const { data: labels } = useQuery<LinearLabel[]>({
     queryKey: ['linear-labels'],
-    queryFn: () => apiGet('/api/linear/labels'),
+    queryFn: () => apiGet<LinearLabel[]>('/api/linear/labels'),
     refetchInterval: 60000,
+    retry: false, // labels are non-critical
   })
 
   // Filter issues
@@ -163,27 +188,59 @@ function ProjectBoardPage() {
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Project Board</h1>
           <p className="text-muted-foreground mt-1">
-            Linear backlog — view, edit, and assign work to agents
+            Linear Kanban — view, edit, and assign work to agents
           </p>
         </div>
         <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => refetchIssues()} disabled={loadingIssues}>
+            <RefreshCw className={`w-3 h-3 mr-1 ${loadingIssues ? 'animate-spin' : ''}`} />
+            Refresh
+          </Button>
           <Button variant="outline" size="sm" onClick={() => setCreateDialog(true)}>
             <Plus className="w-4 h-4 mr-1" /> New Issue
           </Button>
         </div>
       </div>
 
+      {/* Offline indicator */}
+      {apiError?.isOffline && (
+        <Alert variant="destructive">
+          <WifiOff className="h-4 w-4" />
+          <AlertTitle>Connection lost</AlertTitle>
+          <AlertDescription>
+            Cannot reach the Linear proxy. Retrying automatically...
+            <Button variant="outline" size="sm" className="ml-2" onClick={() => refetchIssues()}>
+              Retry now
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {/* API error (non-offline) */}
+      {apiError && !apiError.isOffline && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Linear API Error</AlertTitle>
+          <AlertDescription>
+            {apiError.message}
+            {apiError.status === 401 && ' — Please sign in again.'}
+            {apiError.status === 403 && ' — You do not have permission to access Linear.'}
+            {apiError.status === 429 && ' — Rate limited. Please wait a moment.'}
+          </AlertDescription>
+        </Alert>
+      )}
+
       {/* KPI Strip */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        <KpiCard label="Total Issues" value={totalIssues} sub="Linear" color="var(--color-primary)" />
-        <KpiCard label="In Progress" value={inProgress} sub="active work" color="var(--color-warning)" />
-        <KpiCard label="Completed" value={completed} sub="this sprint" color="var(--color-success)" />
-        <KpiCard label="Urgent" value={urgent} sub="P0 priority" color={urgent > 0 ? 'var(--color-destructive)' : 'var(--color-success)'} />
-        <KpiCard label="Agents Active" value="0" sub="of 56 online" color="var(--color-primary)" />
+        <KpiCard label="Total" value={totalIssues} icon={Filter} sub="Linear issues" color="var(--color-primary)" />
+        <KpiCard label="In Progress" value={inProgress} icon={Play} sub="active work" color="var(--color-warning)" />
+        <KpiCard label="Completed" value={completed} icon={CheckCircle2} sub="done" color="var(--color-success)" />
+        <KpiCard label="Urgent" value={urgent} icon={AlertCircle} sub="P0 priority" color={urgent > 0 ? 'var(--color-destructive)' : 'var(--color-success)'} />
+        <KpiCard label="Assignees" value={assignees.length} icon={Users} sub="active agents" color="var(--color-secondary)" />
       </div>
 
       {/* Filters */}
-      <div className="flex gap-4 items-center">
+      <div className="flex gap-4 items-center flex-wrap">
         <div className="flex gap-2">
           {['all', 'backlog', 'todo', 'in progress', 'completed'].map(status => (
             <Button
@@ -192,7 +249,7 @@ function ProjectBoardPage() {
               size="sm"
               onClick={() => setFilterStatus(status)}
             >
-              {status === 'all' ? 'All' : status.charAt(0).toUpperCase() + status.slice(1)}
+              {status === 'all' ? 'All' : status === 'in progress' ? 'In Progress' : status.charAt(0).toUpperCase() + status.slice(1)}
             </Button>
           ))}
         </div>
@@ -210,37 +267,49 @@ function ProjectBoardPage() {
       </div>
 
       {/* Board columns */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        {(['backlog', 'todo', 'in progress', 'completed'] as const).map(column => (
-          <div key={column} className="flex flex-col gap-3">
-            <div className="flex items-center gap-2 mb-2">
-              <div className={`w-3 h-3 rounded-full ${STATE_COLORS[column] ?? 'bg-gray-500'}`} />
-              <h2 className="text-sm font-semibold uppercase tracking-wider">
-                {column === 'in progress' ? 'In Progress' : column.charAt(0).toUpperCase() + column.slice(1)}
-              </h2>
-              <span className="text-xs text-muted-foreground">
-                {(grouped[column] ?? []).length}
-              </span>
+      {loadingIssues ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {STATE_COLUMNS.map(col => (
+            <div key={col.key} className="space-y-3">
+              <Skeleton className="h-6 w-32" />
+              {Array.from({ length: 3 }).map((_, i) => (
+                <Skeleton key={i} className="h-24 w-full" />
+              ))}
             </div>
+          ))}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {STATE_COLUMNS.map(col => {
+            const colIssues = grouped[col.key] ?? []
+            return (
+              <div key={col.key} className="flex flex-col gap-3">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className={`w-3 h-3 rounded-full ${col.color}`} />
+                  <h2 className="text-sm font-semibold uppercase tracking-wider">{col.label}</h2>
+                  <span className="text-xs text-muted-foreground ml-auto">{colIssues.length}</span>
+                </div>
 
-            {(grouped[column] ?? []).map(issue => (
-              <IssueCard
-                key={issue.id}
-                issue={issue}
-                onEdit={() => setEditIssue(issue)}
-                onSelect={() => setSelectedIssue(issue)}
-                onStateChange={(state) => quickStateMutation.mutate({ id: issue.id, state })}
-              />
-            ))}
-
-            {(!grouped[column] || grouped[column].length === 0) && (
-              <div className="text-center py-8 text-sm text-muted-foreground border rounded-lg border-dashed">
-                No {column} issues
+                {colIssues.length === 0 ? (
+                  <div className="text-center py-8 text-sm text-muted-foreground border rounded-lg border-dashed">
+                    No issues
+                  </div>
+                ) : (
+                  colIssues.map(issue => (
+                    <IssueCard
+                      key={issue.id}
+                      issue={issue}
+                      onEdit={() => setEditIssue(issue)}
+                      onSelect={() => setSelectedIssue(issue)}
+                      onStateChange={(state) => quickStateMutation.mutate({ id: issue.id, state })}
+                    />
+                  ))
+                )}
               </div>
-            )}
-          </div>
-        ))}
-      </div>
+            )
+          })}
+        </div>
+      )}
 
       {/* Create Issue Dialog */}
       <IssueDialog
@@ -273,12 +342,28 @@ function ProjectBoardPage() {
       {/* Issue Detail Dialog */}
       {selectedIssue && (
         <Dialog open={!!selectedIssue} onOpenChange={() => setSelectedIssue(null)}>
-          <DialogContent className="max-w-2xl">
+          <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
             <DialogHeader>
-              <DialogTitle>{selectedIssue.identifier}: {selectedIssue.title}</DialogTitle>
+              <div className="flex items-center gap-2">
+                <DialogTitle className="text-lg">{selectedIssue.identifier}: {selectedIssue.title}</DialogTitle>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6"
+                  onClick={() => {
+                    if (selectedIssue.branchName) {
+                      navigator.clipboard.writeText(selectedIssue.branchName!)
+                    }
+                  }}
+                  title="Copy branch name"
+                >
+                  <GitBranch className="w-3 h-3" />
+                </Button>
+              </div>
               <DialogDescription>
                 Created {new Date(selectedIssue.createdAt).toLocaleDateString()}
                 {selectedIssue.assignee && ` · Assigned to ${selectedIssue.assignee.displayName}`}
+                {selectedIssue.updatedAt && ` · Updated ${new Date(selectedIssue.updatedAt).toLocaleDateString()}`}
               </DialogDescription>
             </DialogHeader>
             {selectedIssue.description && (
@@ -291,25 +376,39 @@ function ProjectBoardPage() {
             <div className="flex flex-wrap gap-2 mt-4">
               {selectedIssue.labels.map(l => (
                 <Badge key={l.name} variant="outline" style={{ borderColor: l.color, color: l.color }}>
-                  {l.name}
+                  <Tag className="w-3 h-3 mr-1" /> {l.name}
                 </Badge>
               ))}
               {selectedIssue.priority !== null && selectedIssue.priority !== undefined && (
                 <PriorityBadge priority={selectedIssue.priority} />
               )}
               {selectedIssue.estimate && (
-                <Badge variant="secondary">{selectedIssue.estimate} pts</Badge>
+                <Badge variant="secondary"><Clock className="w-3 h-3 mr-1" /> {selectedIssue.estimate} pts</Badge>
+              )}
+              {selectedIssue.branchName && (
+                <Badge variant="outline" className="font-mono text-xs">{selectedIssue.branchName}</Badge>
               )}
             </div>
             <DialogFooter className="flex gap-2">
               <Button variant="outline" size="sm" onClick={() => { setEditIssue(selectedIssue); setSelectedIssue(null) }}>
                 <Edit2 className="w-3 h-3 mr-1" /> Edit
               </Button>
-              <Button variant="outline" size="sm" onClick={() => quickStateMutation.mutate({ id: selectedIssue.id, state: 'In Progress' })}>
-                <Play className="w-3 h-3 mr-1" /> Start
-              </Button>
-              <Button variant="outline" size="sm" onClick={() => quickStateMutation.mutate({ id: selectedIssue.id, state: 'Completed' })}>
-                <CheckCircle2 className="w-3 h-3 mr-1" /> Complete
+              {selectedIssue.state.toLowerCase() !== 'in progress' && (
+                <Button variant="outline" size="sm" onClick={() => quickStateMutation.mutate({ id: selectedIssue.id, state: 'In Progress' })}>
+                  <Play className="w-3 h-3 mr-1" /> Start
+                </Button>
+              )}
+              {selectedIssue.state.toLowerCase() !== 'completed' && (
+                <Button variant="outline" size="sm" onClick={() => quickStateMutation.mutate({ id: selectedIssue.id, state: 'Completed' })}>
+                  <CheckCircle2 className="w-3 h-3 mr-1" /> Complete
+                </Button>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => window.open(`https://linear.app/widgetdc/issue/${selectedIssue.identifier.split('-')[1]}`, '_blank')}
+              >
+                <ExternalLink className="w-3 h-3 mr-1" /> Open in Linear
               </Button>
             </DialogFooter>
           </DialogContent>
@@ -321,20 +420,25 @@ function ProjectBoardPage() {
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
-function KpiCard({ label, value, sub, color }: { label: string; value: string | number; sub: string; color: string }) {
+function KpiCard({ label, value, sub, color, icon: Icon }: {
+  label: string; value: string | number; sub: string; color: string; icon: React.ElementType
+}) {
   return (
-    <div className="rounded-lg border bg-card p-4 text-center">
-      <div className="text-xs text-muted-foreground uppercase tracking-wider">{label}</div>
-      <div className="text-2xl font-bold mt-1" style={{ color }}>{value}</div>
+    <div className="rounded-lg border bg-card p-4">
+      <div className="flex items-center gap-2 mb-1">
+        <Icon className="w-4 h-4 text-muted-foreground" />
+        <div className="text-xs text-muted-foreground uppercase tracking-wider">{label}</div>
+      </div>
+      <div className="text-2xl font-bold" style={{ color }}>{value}</div>
       <div className="text-xs text-muted-foreground mt-1">{sub}</div>
     </div>
   )
 }
 
 function PriorityBadge({ priority }: { priority: number }) {
-  const config = PRIORITY_LABELS[priority] ?? { label: 'Unknown', color: 'bg-gray-500' }
+  const config = PRIORITY_LABELS[priority] ?? { label: 'Unknown', color: 'text-gray-500', bg: 'bg-gray-100' }
   return (
-    <Badge variant="outline" className={`${config.color} text-white text-xs`}>
+    <Badge variant="outline" className={`${config.bg} ${config.color} text-xs`}>
       P{priority} {config.label}
     </Badge>
   )
@@ -355,9 +459,17 @@ function IssueCard({
     ? PRIORITY_LABELS[issue.priority]
     : null
 
+  const nextStates = issue.state.toLowerCase() === 'backlog'
+    ? ['todo', 'in progress']
+    : issue.state.toLowerCase() === 'todo'
+    ? ['in progress']
+    : issue.state.toLowerCase() === 'in progress'
+    ? ['completed']
+    : []
+
   return (
     <div
-      className="p-3 rounded-lg border bg-card hover:bg-accent cursor-pointer transition-colors"
+      className="p-3 rounded-lg border bg-card hover:bg-accent cursor-pointer transition-colors group"
       onClick={onSelect}
     >
       <div className="flex items-start justify-between gap-2">
@@ -365,8 +477,8 @@ function IssueCard({
           <div className="text-sm font-medium truncate">{issue.title}</div>
           <div className="text-xs text-muted-foreground font-mono">{issue.identifier}</div>
         </div>
-        <div className="flex gap-1">
-          <button onClick={(e) => { e.stopPropagation(); onEdit() }} className="p-1 hover:bg-muted rounded">
+        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          <button onClick={(e) => { e.stopPropagation(); onEdit() }} className="p-1 hover:bg-muted rounded" title="Edit">
             <Edit2 className="w-3 h-3" />
           </button>
         </div>
@@ -380,7 +492,7 @@ function IssueCard({
 
       <div className="flex flex-wrap gap-1 mt-2">
         {priorityConfig && (
-          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${priorityConfig.color} text-white`}>
+          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${priorityConfig.bg} ${priorityConfig.color}`}>
             P{issue.priority}
           </span>
         )}
@@ -399,8 +511,24 @@ function IssueCard({
         )}
       </div>
 
+      {/* Quick state transitions */}
+      {nextStates.length > 0 && (
+        <div className="flex gap-1 mt-2 pt-2 border-t">
+          {nextStates.map(state => (
+            <button
+              key={state}
+              onClick={(e) => { e.stopPropagation(); onStateChange(state) }}
+              className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground px-2 py-0.5 rounded bg-muted/50 hover:bg-muted transition-colors"
+            >
+              <ChevronRight className="w-3 h-3" />
+              {state === 'in progress' ? 'Start' : state === 'completed' ? 'Done' : state}
+            </button>
+          ))}
+        </div>
+      )}
+
       {issue.estimate && (
-        <div className="text-xs text-muted-foreground mt-1">{issue.estimate} estimate points</div>
+        <div className="text-xs text-muted-foreground mt-1">{issue.estimate} pts</div>
       )}
     </div>
   )
@@ -448,7 +576,7 @@ function IssueDialog({
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>
-            Create or edit a Linear issue. Changes sync to Linear immediately.
+            Create or edit a Linear issue. Changes sync to Linear.
           </DialogDescription>
         </DialogHeader>
 
@@ -513,6 +641,9 @@ function IssueDialog({
           <div>
             <label className="text-sm font-medium">Labels</label>
             <div className="flex flex-wrap gap-2 mt-1">
+              {labels?.length === 0 && (
+                <span className="text-xs text-muted-foreground">No labels available</span>
+              )}
               {labels?.map(label => (
                 <button
                   key={label.name}
