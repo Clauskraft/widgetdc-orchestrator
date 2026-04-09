@@ -121,6 +121,25 @@ function ProjectOverviewPage() {
     refetchInterval: 30000,
   })
 
+  // ─── Grafana Cloud Streaming Metrics ───────────────────────────────
+  const { data: grafanaHealth } = useQuery<{ data?: { result: Array<{ metric: Record<string, string>; value: [number, string] }> } }>({
+    queryKey: ['grafana-health'],
+    queryFn: () => apiGet('/api/grafana/query?query=up{job="widgetdc-backend"}&range=1'),
+    refetchInterval: 30000,
+  })
+
+  const { data: grafanaMemory } = useQuery<{ data?: { result: Array<{ metric: Record<string, string>; value: [number, string] }> } }>({
+    queryKey: ['grafana-memory'],
+    queryFn: () => apiGet('/api/grafana/query?query=nodejs_heap_size_used_bytes{job="widgetdc-backend"}&range=1'),
+    refetchInterval: 30000,
+  })
+
+  const { data: grafanaChains } = useQuery<{ data?: { result: Array<{ metric: Record<string, string>; value: [number, string] }> } }>({
+    queryKey: ['grafana-chains'],
+    queryFn: () => apiGet('/api/grafana/query?query=rate(orchestrator_chain_failures_total[1h])&range=1'),
+    refetchInterval: 30000,
+  })
+
   // Drill-down dialog state
   const [planDialog, setPlanDialog] = useState(false)
   const [selectedPlanEngagement, setSelectedPlanEngagement] = useState<string | null>(null)

@@ -69,6 +69,10 @@ export const config = {
   // OpenTelemetry (LIN-589) — set OTEL_EXPORTER_OTLP_ENDPOINT to activate tracing
   otelEnabled: !!process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
 
+  // Grafana Cloud — metrics streaming to cc-v4 dashboard
+  grafanaApiKey: optional('GRAFANA_API_KEY', ''),
+  grafanaOrgId: optional('GRAFANA_ORG_ID', '2833073'),
+
   // F4: IP deny list — comma-separated IPs or CIDRs (e.g. "167.82.233.0/24,104.156.83.88")
   ipDenyList: optional('IP_DENY_LIST', ''),
 

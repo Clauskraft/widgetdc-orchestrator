@@ -96,6 +96,7 @@ import { flywheelRouter } from './routes/flywheel.js'
 import { benchmarkRouter } from './routes/benchmark.js'
 import { loadBenchmarkRuns } from './benchmark-runner.js'
 import { obsidianRouter } from './routes/obsidian.js'
+import { grafanaProxyRouter } from './routes/grafana-proxy.js'
 import { initPheromoneLayer, getPheromoneState } from './swarm/pheromone-layer.js'
 import { initPeerEval, getPeerEvalState } from './swarm/peer-eval.js'
 
@@ -270,6 +271,10 @@ app.use('/api/loose-ends', requireApiKey, looseEndsRouter)
 app.use('/api/decisions', requireApiKey, decisionsRouter)
 app.use('/monitor', requireApiKey, monitorRouter)
 app.use('/api/s1-s4', requireApiKey, s1s4Router)
+
+// Grafana Cloud proxy — stream Prometheus metrics to cc-v4 dashboard
+// No rate limiter — Grafana queries are read-only, proxied to Cloud
+app.use('/api/grafana', requireApiKey, grafanaProxyRouter)
 
 // LIN-567: Red Queen Failure Harvester
 app.use('/api/failures', requireApiKey, apiRateLimiter, failuresRouter)

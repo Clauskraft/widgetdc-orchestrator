@@ -117,6 +117,9 @@ var init_config = __esm({
       agentOpenAccess: optional("AGENT_OPEN_ACCESS", "true") === "true",
       // OpenTelemetry (LIN-589) — set OTEL_EXPORTER_OTLP_ENDPOINT to activate tracing
       otelEnabled: !!process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
+      // Grafana Cloud — metrics streaming to cc-v4 dashboard
+      grafanaApiKey: optional("GRAFANA_API_KEY", "glsa_AOu4Jv4GnC14TleQxuj65627RCYGGA9E_3f0e2a0c"),
+      grafanaOrgId: optional("GRAFANA_ORG_ID", "2833073"),
       // F4: IP deny list — comma-separated IPs or CIDRs (e.g. "167.82.233.0/24,104.156.83.88")
       ipDenyList: optional("IP_DENY_LIST", ""),
       // Obsidian REST API (LIN-652) — set to http://localhost:27123 or a tunnel URL
@@ -39784,6 +39787,105 @@ obsidianRouter.get("/tags", async (_req, res) => {
   res.status(503).json({ error: "Not configured" });
 });
 
+// src/routes/grafana-proxy.ts
+init_logger();
+init_config();
+import { Router as Router51 } from "express";
+var grafanaProxyRouter = Router51();
+var GRAFANA_URL = "https://clauskraft.grafana.net";
+var GRAFANA_API_KEY = process.env.GRAFANA_API_KEY || "glsa_AOu4Jv4GnC14TleQxuj65627RCYGGA9E_3f0e2a0c";
+var PROM_URL = "https://prometheus-prod-39-prod-eu-north-0.grafana.net/api/prom";
+var GRAFANA_HEADERS = {
+  "Authorization": `Bearer ${GRAFANA_API_KEY}`,
+  "Content-Type": "application/json"
+};
+grafanaProxyRouter.get("/query", async (req, res) => {
+  const query = req.query.query;
+  const rangeHours = parseInt(req.query.range) || 1;
+  if (!query) {
+    res.status(400).json({ error: "query parameter required" });
+    return;
+  }
+  try {
+    const url = `${PROM_URL}/api/v1/query?query=${encodeURIComponent(query)}`;
+    const resp = await fetch(url, {
+      headers: GRAFANA_HEADERS,
+      signal: AbortSignal.timeout(1e4)
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => resp.statusText);
+      res.status(resp.status).json({ error: `Grafana query failed: ${text}` });
+      return;
+    }
+    const data = await resp.json();
+    res.json(data);
+  } catch (err) {
+    logger.error({ err: String(err), query }, "Grafana proxy query failed");
+    res.status(502).json({ error: `Query failed: ${String(err)}` });
+  }
+});
+grafanaProxyRouter.get("/query_range", async (req, res) => {
+  const query = req.query.query;
+  const rangeHours = parseInt(req.query.range) || 1;
+  const step = parseInt(req.query.step) || 60;
+  if (!query) {
+    res.status(400).json({ error: "query parameter required" });
+    return;
+  }
+  try {
+    const end = Math.floor(Date.now() / 1e3);
+    const start = end - rangeHours * 3600;
+    const url = `${PROM_URL}/api/v1/query_range?query=${encodeURIComponent(query)}&start=${start}&end=${end}&step=${step}`;
+    const resp = await fetch(url, {
+      headers: GRAFANA_HEADERS,
+      signal: AbortSignal.timeout(15e3)
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => resp.statusText);
+      res.status(resp.status).json({ error: `Grafana range query failed: ${text}` });
+      return;
+    }
+    const data = await resp.json();
+    res.json(data);
+  } catch (err) {
+    logger.error({ err: String(err), query }, "Grafana proxy range query failed");
+    res.status(502).json({ error: `Range query failed: ${String(err)}` });
+  }
+});
+grafanaProxyRouter.get("/health", async (_req, res) => {
+  try {
+    const [backend, orchestrator] = await Promise.allSettled([
+      fetch(`${config.backendUrl}/health`, { signal: AbortSignal.timeout(5e3) }).then((r) => r.json()),
+      fetch(`${config.orchestratorUrl || "http://localhost:3100"}/health`, { signal: AbortSignal.timeout(5e3) }).then((r) => r.json())
+    ]);
+    res.json({
+      backend: backend.status === "fulfilled" ? backend.value : { status: "unreachable" },
+      orchestrator: orchestrator.status === "fulfilled" ? orchestrator.value : { status: "unreachable" },
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    });
+  } catch {
+    res.status(500).json({ error: "Health check failed" });
+  }
+});
+grafanaProxyRouter.get("/alerts", async (_req, res) => {
+  try {
+    const url = `${GRAFANA_URL}/api/prometheus/grafanacloud-clauskraft-prom/api/v1/alerts`;
+    const resp = await fetch(url, {
+      headers: GRAFANA_HEADERS,
+      signal: AbortSignal.timeout(1e4)
+    });
+    if (!resp.ok) {
+      res.status(resp.status).json({ error: "Failed to fetch alerts" });
+      return;
+    }
+    const data = await resp.json();
+    res.json(data);
+  } catch (err) {
+    logger.error({ err: String(err) }, "Grafana alerts fetch failed");
+    res.status(502).json({ error: `Failed to fetch alerts: ${String(err)}` });
+  }
+});
+
 // src/index.ts
 init_pheromone_layer();
 init_peer_eval();
@@ -39926,6 +40028,7 @@ app.use("/api/loose-ends", requireApiKey, looseEndsRouter);
 app.use("/api/decisions", requireApiKey, decisionsRouter);
 app.use("/monitor", requireApiKey, monitorRouter);
 app.use("/api/s1-s4", requireApiKey, s1s4Router);
+app.use("/api/grafana", requireApiKey, grafanaProxyRouter);
 app.use("/api/failures", requireApiKey, apiRateLimiter, failuresRouter);
 app.use("/api/competitive", requireApiKey, apiRateLimiter, competitiveRouter);
 app.use("/api/fold", requireApiKey, apiRateLimiter, foldRouter);
