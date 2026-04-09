@@ -76,6 +76,12 @@ export const config = {
   // F4: IP deny list — comma-separated IPs or CIDRs (e.g. "167.82.233.0/24,104.156.83.88")
   ipDenyList: optional('IP_DENY_LIST', ''),
 
-  // Obsidian REST API (LIN-652: obsidianApiUrl='',
-  obsidianApiToken: process.env.OBSIDIAN_API_TOKEN ?? '',
-}
+  // Obsidian REST API (LIN-652) — Live mode: set OBSIDIAN_API_URL + OBSIDIAN_API_TOKEN
+  // GitHub fallback mode: set GITHUB_TOKEN (reads Clauskraft/Obsidian-Vault via GitHub API)
+  obsidianUrl: optional('OBSIDIAN_API_URL', ''),
+  obsidianToken: optional('OBSIDIAN_API_TOKEN', ''),
+
+  // GitHub token for Obsidian vault fallback (private repo access)
+  githubToken: optional('GITHUB_TOKEN', ''),
+  obsidianGithubRepo: optional('OBSIDIAN_GITHUB_REPO', 'Clauskraft/Obsidian-Vault'),
+} as const
