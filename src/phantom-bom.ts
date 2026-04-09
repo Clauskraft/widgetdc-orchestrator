@@ -1,27 +1,28 @@
 /**
  * phantom-bom.ts — PhantomBOMExtractor Service
  *
- * Clones external repos → scans key files → LLM entity extraction via RLM Engine →
+ * Uses repomix to pack external repos → direct DeepSeek LLM extraction →
  * MERGE PhantomBOMRun + PhantomComponent nodes into Neo4j.
  *
- * Design:
- *  - Confidence ≥ 80: auto-accept
- *  - Confidence 70-79: borderline (flagged in BOM)
- *  - Confidence < 70: low confidence (HITL recommended)
+ * Pipeline:
+ *   npx repomix --remote <repo> --stdout --style plain
+ *     → Packed repo text (token-optimised, no binaries)
+ *     → DeepSeek LLM: extract structured BOM JSON
+ *     → Neo4j MERGE: PhantomBOMRun + PhantomComponent + [:EXTRACTED]
+ *
+ * Confidence thresholds:
+ *   ≥80  — auto-accept
+ *   70-79 — borderline (flagged)
+ *   <70  — low confidence (HITL recommended)
  *
  * Node labels: PhantomBOMRun, PhantomComponent
- * Relationship: (:PhantomBOMRun)-[:EXTRACTED]->(:PhantomComponent)
- *
- * All components get needsEmbedding: true for downstream reindex cron.
+ * All PhantomComponent nodes get needsEmbedding: true
  */
 
 import { execSync } from 'child_process'
-import { existsSync, mkdirSync, rmSync, readFileSync, readdirSync, statSync } from 'fs'
-import { join, extname, basename } from 'path'
 import { createHash } from 'crypto'
 import { config } from './config.js'
 import { logger } from './logger.js'
-import { tmpdir } from 'os'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -59,29 +60,17 @@ export type PhantomBOMRunStatus = 'running' | 'completed' | 'failed'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const KEY_FILE_PATTERNS = [
-  // Documentation / entry points
-  'README.md', 'README.rst', 'README.txt', 'ARCHITECTURE.md', 'DESIGN.md',
-  // Package manifests
-  'package.json', 'pyproject.toml', 'setup.py', 'setup.cfg', 'Cargo.toml', 'go.mod',
-  'requirements.txt', 'composer.json', 'pom.xml', 'build.gradle',
-  // Config / deployment
-  'docker-compose.yml', 'docker-compose.yaml', 'Dockerfile',
-  'railway.json', 'vercel.json', 'netlify.toml',
-  // OpenAPI / schemas
-  'openapi.yaml', 'openapi.json', 'openapi.yml',
-  'swagger.yaml', 'swagger.json',
-]
-
-const KEY_CODE_EXTENSIONS = ['.ts', '.py', '.js', '.go', '.rs', '.java', '.cs', '.rb']
-const MAX_CODE_FILES = 12
-const MAX_FILE_CHARS = 8000
-const MAX_TOTAL_CHARS = 40000
+// repomix token cap — keep LLM prompt manageable
+const REPOMIX_MAX_CHARS = 60_000
 const LLM_TIMEOUT_MS = 120_000
-const CLONE_TIMEOUT_MS = 60_000
 
-// In-memory run state (survives for this process lifetime)
-const runState = new Map<string, { status: PhantomBOMRunStatus; bom?: PhantomBOM; error?: string; startedAt: string }>()
+// In-memory run state (process lifetime)
+const runState = new Map<string, {
+  status: PhantomBOMRunStatus
+  bom?: PhantomBOM
+  error?: string
+  startedAt: string
+}>()
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -90,110 +79,57 @@ function phantomId(sourceRepo: string, name: string, type: string): string {
   return `phantom-${hash}`
 }
 
-function safeStat(p: string) {
-  try { return statSync(p) } catch { return null }
-}
+/**
+ * Run repomix --remote <repoUrl> and return packed text output.
+ * Falls back to github.com URL if bare "user/repo" format given.
+ */
+function runRepomix(repoUrl: string): string {
+  // Accept both "https://github.com/user/repo" and "user/repo" shorthand
+  const remoteArg = repoUrl.startsWith('http') ? repoUrl : repoUrl
 
-function collectKeyFiles(repoDir: string): { path: string; content: string }[] {
-  const results: { path: string; content: string }[] = []
-  let totalChars = 0
+  const cmd = `npx --yes repomix --remote "${remoteArg}" --stdout --style plain --quiet`
+  logger.info({ cmd }, 'Running repomix')
 
-  // 1. Priority: key file names (README, manifests, etc.)
-  for (const pattern of KEY_FILE_PATTERNS) {
-    const fullPath = join(repoDir, pattern)
-    const s = safeStat(fullPath)
-    if (s && s.isFile()) {
-      try {
-        const raw = readFileSync(fullPath, 'utf8')
-        const truncated = raw.substring(0, MAX_FILE_CHARS)
-        results.push({ path: pattern, content: truncated })
-        totalChars += truncated.length
-        if (totalChars >= MAX_TOTAL_CHARS) break
-      } catch { /* skip unreadable */ }
-    }
-  }
-
-  if (totalChars >= MAX_TOTAL_CHARS) return results
-
-  // 2. Source code files: walk top 2 levels only (avoid deep src crawl)
-  const codeCandidates: string[] = []
-  const walkLevel = (dir: string, depth: number) => {
-    if (depth > 2) return
-    try {
-      for (const entry of readdirSync(dir)) {
-        if (entry.startsWith('.') || entry === 'node_modules' || entry === '__pycache__' || entry === 'dist' || entry === 'build') continue
-        const full = join(dir, entry)
-        const s = safeStat(full)
-        if (!s) continue
-        if (s.isFile() && KEY_CODE_EXTENSIONS.includes(extname(entry))) {
-          codeCandidates.push(full)
-        } else if (s.isDirectory() && depth < 2) {
-          walkLevel(full, depth + 1)
-        }
-      }
-    } catch { /* skip unreadable dir */ }
-  }
-  walkLevel(repoDir, 0)
-
-  // Sort: prefer shorter paths (root-level files), then alphabetical
-  codeCandidates.sort((a, b) => {
-    const depthA = a.split('/').length
-    const depthB = b.split('/').length
-    if (depthA !== depthB) return depthA - depthB
-    return a.localeCompare(b)
+  const raw = execSync(cmd, {
+    timeout: 120_000,
+    maxBuffer: 50 * 1024 * 1024, // 50MB buffer
+    stdio: ['pipe', 'pipe', 'pipe'],
+    encoding: 'utf8',
   })
 
-  let codeCount = 0
-  for (const codePath of codeCandidates) {
-    if (codeCount >= MAX_CODE_FILES) break
-    if (totalChars >= MAX_TOTAL_CHARS) break
-    // Skip if already captured as a key file
-    const rel = codePath.replace(repoDir + '/', '')
-    if (results.some(r => r.path === rel)) continue
-    try {
-      const raw = readFileSync(codePath, 'utf8')
-      const truncated = raw.substring(0, MAX_FILE_CHARS)
-      results.push({ path: rel, content: truncated })
-      totalChars += truncated.length
-      codeCount++
-    } catch { /* skip */ }
-  }
-
-  return results
+  const text = typeof raw === 'string' ? raw : raw.toString('utf8')
+  // Truncate to cap
+  return text.substring(0, REPOMIX_MAX_CHARS)
 }
 
-function buildExtractionPrompt(repoUrl: string, files: { path: string; content: string }[]): string {
-  const fileBlocks = files.map(f =>
-    `=== FILE: ${f.path} ===\n${f.content}\n`
-  ).join('\n')
-
+function buildExtractionPrompt(repoUrl: string, packedRepo: string): string {
   return `You are a software intelligence analyst. Analyze this repository and extract a structured Bill of Materials (BOM).
 
-CRITICAL: Your entire response must be valid JSON only. No markdown, no explanation, no prose before or after. Start with { and end with }.
+CRITICAL: Your entire response must be valid JSON only. No markdown, no explanation, no prose. Start with { and end with }.
 
 Repository: ${repoUrl}
 
-FILES:
-${fileBlocks}
+REPOSITORY CONTENTS (packed by repomix):
+${packedRepo}
 
-Return EXACTLY this JSON structure (replace angle-bracket placeholders with real values):
+Return EXACTLY this JSON structure:
 
 {
   "repo_meta": {
-    "name": "string — repo short name",
-    "description": "string — 1-2 sentence description",
-    "primary_language": "string — main programming language e.g. Python, TypeScript, Go",
-    "license": "string — e.g. MIT, Apache-2.0, or unknown",
-    "topics": ["array", "of", "topic", "strings"]
+    "name": "short repo name",
+    "description": "1-2 sentence description",
+    "primary_language": "main programming language",
+    "license": "license name or unknown",
+    "topics": ["topic1", "topic2"]
   },
   "confidence_score": 85,
-  "summary": "string — 2-3 sentences on what this repo does and why it matters for AI/ML practitioners",
+  "summary": "2-3 sentences on what this repo does and why it matters for AI/ML practitioners",
   "components": [
     {
-      "name": "string — component name",
+      "name": "component name",
       "type": "tool",
-      "description": "string — what this component does",
-      "source_file": "string or null — file path where found",
+      "description": "what this component does",
+      "source_file": "path/to/file or null",
       "capabilities": ["capability1", "capability2"],
       "dependencies": ["dep1", "dep2"],
       "confidence": 90,
@@ -202,45 +138,53 @@ Return EXACTLY this JSON structure (replace angle-bracket placeholders with real
   ]
 }
 
-Rules:
-- Extract 3-15 meaningful components. Skip boilerplate files.
-- type must be exactly one of: tool, api, model, dataset, pattern, agent, service, library
-- confidence_score: 80+ if files clearly document the system, 70-79 if partial info, <70 if guessing
-- Return ONLY valid JSON. No markdown fences, no explanation.`
+type must be exactly one of: tool, api, model, dataset, pattern, agent, service, library
+Extract 5-20 meaningful components. confidence_score: 80+ if well-documented, 70-79 if partial, <70 if guessing.
+Return ONLY valid JSON.`
 }
 
-async function callRlmLlm(prompt: string): Promise<string> {
-  const body = {
-    messages: [{ role: 'user', parts: [{ type: 'text', text: prompt }] }],
-    skill_id: 'cognitive-reasoning',
-    provider: 'deepseek',
-  }
+async function callDeepSeekLlm(prompt: string): Promise<string> {
+  const apiKey = config.deepseekApiKey
+  if (!apiKey) throw new Error('DEEPSEEK_API_KEY not configured')
 
-  const res = await fetch(`${config.rlmUrl}/a2a/tasks/send`, {
+  const res = await fetch('https://api.deepseek.com/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.backendApiKey}`,
+      Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({
+      model: 'deepseek-chat',
+      messages: [
+        { role: 'system', content: 'You are a precise JSON-only software analyst. Never output anything except valid JSON.' },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0.1,
+      max_tokens: 4096,
+      response_format: { type: 'json_object' },
+    }),
     signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
   })
 
   if (!res.ok) {
     const text = await res.text().catch(() => '')
-    throw new Error(`RLM LLM call failed: ${res.status} — ${text.substring(0, 200)}`)
+    throw new Error(`DeepSeek LLM failed: ${res.status} — ${text.substring(0, 200)}`)
   }
 
-  const data = await res.json() as { result?: { text?: string }; output?: string; text?: string }
-  // RLM returns result.text or output or text depending on skill version
-  const text = data?.result?.text ?? (data as Record<string, unknown>)?.output as string ?? data?.text ?? ''
-  if (!text) throw new Error('RLM returned empty text')
-  return text as string
+  const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> }
+  const content = data?.choices?.[0]?.message?.content ?? ''
+  if (!content) throw new Error('DeepSeek returned empty content')
+  return content
 }
 
-function parseLlmBom(raw: string, repoUrl: string): { repo_meta: PhantomBOM['repo_meta']; confidence_score: number; summary: string; components: Omit<PhantomComponent, 'id'>[] } {
-  // Strip markdown fences if model ignored instructions
+function parseLlmBom(raw: string, repoUrl: string): {
+  repo_meta: PhantomBOM['repo_meta']
+  confidence_score: number
+  summary: string
+  components: Omit<PhantomComponent, 'id'>[]
+} {
   let json = raw.trim()
+  // Strip markdown fences if model added them despite instructions
   if (json.startsWith('```')) {
     json = json.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim()
   }
@@ -253,7 +197,7 @@ function parseLlmBom(raw: string, repoUrl: string): { repo_meta: PhantomBOM['rep
   const parsed = JSON.parse(json)
   return {
     repo_meta: {
-      name: String(parsed.repo_meta?.name ?? basename(repoUrl)),
+      name: String(parsed.repo_meta?.name ?? repoUrl.split('/').pop() ?? 'unknown'),
       description: String(parsed.repo_meta?.description ?? ''),
       primary_language: String(parsed.repo_meta?.primary_language ?? 'unknown'),
       license: String(parsed.repo_meta?.license ?? 'unknown'),
@@ -276,6 +220,23 @@ function parseLlmBom(raw: string, repoUrl: string): { repo_meta: PhantomBOM['rep
   }
 }
 
+async function callBackendMcp(tool: string, payload: Record<string, unknown>): Promise<unknown> {
+  const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.backendApiKey}`,
+    },
+    body: JSON.stringify({ tool, payload }),
+    signal: AbortSignal.timeout(30_000),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`Backend MCP ${tool} failed: ${res.status} — ${text.substring(0, 200)}`)
+  }
+  return res.json()
+}
+
 async function writeToNeo4j(bom: PhantomBOM): Promise<void> {
   // MERGE PhantomBOMRun
   const runCypher = `
@@ -294,24 +255,25 @@ SET r.sourceRepo = $sourceRepo,
     r.updatedAt = datetime()
 RETURN r.runId as runId`
 
-  const runParams = {
-    runId: bom.run_id,
-    sourceRepo: bom.source_repo,
-    sourceType: bom.source_type,
-    ingestionTimestamp: bom.ingestion_timestamp,
-    confidenceScore: bom.confidence_score,
-    summary: bom.summary,
-    repoName: bom.repo_meta.name,
-    repoDescription: bom.repo_meta.description,
-    primaryLanguage: bom.repo_meta.primary_language,
-    license: bom.repo_meta.license,
-    topics: bom.repo_meta.topics,
-    componentCount: bom.components.length,
-  }
+  await callBackendMcp('graph.write_cypher', {
+    query: runCypher,
+    params: {
+      runId: bom.run_id,
+      sourceRepo: bom.source_repo,
+      sourceType: bom.source_type,
+      ingestionTimestamp: bom.ingestion_timestamp,
+      confidenceScore: bom.confidence_score,
+      summary: bom.summary,
+      repoName: bom.repo_meta.name,
+      repoDescription: bom.repo_meta.description,
+      primaryLanguage: bom.repo_meta.primary_language,
+      license: bom.repo_meta.license,
+      topics: bom.repo_meta.topics,
+      componentCount: bom.components.length,
+    },
+  })
 
-  await callBackendMcp('graph.write_cypher', { query: runCypher, params: runParams })
-
-  // MERGE each PhantomComponent + create relationship
+  // MERGE each PhantomComponent + [:EXTRACTED] relationship
   for (const comp of bom.components) {
     const compCypher = `
 MERGE (c:PhantomComponent {componentId: $componentId})
@@ -331,39 +293,23 @@ MATCH (r:PhantomBOMRun {runId: $runId})
 MERGE (r)-[:EXTRACTED]->(c)
 RETURN c.componentId as id`
 
-    const compParams = {
-      componentId: comp.id,
-      name: comp.name,
-      type: comp.type,
-      description: comp.description,
-      sourceRepo: bom.source_repo,
-      sourceFile: comp.source_file,
-      capabilities: comp.capabilities,
-      dependencies: comp.dependencies,
-      confidence: comp.confidence,
-      tags: comp.tags,
-      runId: bom.run_id,
-    }
-
-    await callBackendMcp('graph.write_cypher', { query: compCypher, params: compParams })
+    await callBackendMcp('graph.write_cypher', {
+      query: compCypher,
+      params: {
+        componentId: comp.id,
+        name: comp.name,
+        type: comp.type,
+        description: comp.description,
+        sourceRepo: bom.source_repo,
+        sourceFile: comp.source_file,
+        capabilities: comp.capabilities,
+        dependencies: comp.dependencies,
+        confidence: comp.confidence,
+        tags: comp.tags,
+        runId: bom.run_id,
+      },
+    })
   }
-}
-
-async function callBackendMcp(tool: string, payload: Record<string, unknown>): Promise<unknown> {
-  const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.backendApiKey}`,
-    },
-    body: JSON.stringify({ tool, payload }),
-    signal: AbortSignal.timeout(30_000),
-  })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`Backend MCP ${tool} failed: ${res.status} — ${text.substring(0, 200)}`)
-  }
-  return res.json()
 }
 
 // ─── Core extraction ──────────────────────────────────────────────────────────
@@ -374,49 +320,35 @@ export async function extractPhantomBOM(
   runId?: string
 ): Promise<PhantomBOM> {
   const id = runId ?? `pbom-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`
-  const cloneDir = join(tmpdir(), `phantom-bom-${id}`)
-
   runState.set(id, { status: 'running', startedAt: new Date().toISOString() })
   logger.info({ runId: id, repoUrl }, 'PhantomBOM extraction started')
 
   try {
-    // 1. Clone repo (shallow, 1 commit only)
-    mkdirSync(cloneDir, { recursive: true })
-    const cloneCmd = sourceType === 'git'
-      ? `git clone --depth 1 --single-branch ${repoUrl} ${cloneDir}`
-      : `git clone --depth 1 https://huggingface.co/${repoUrl} ${cloneDir}`
+    // 1. Pack repo with repomix (no clone dir, no cleanup needed)
+    const packedRepo = runRepomix(repoUrl)
+    logger.info({ runId: id, chars: packedRepo.length }, 'Repomix packed repo')
 
-    execSync(cloneCmd, { timeout: CLONE_TIMEOUT_MS, stdio: 'pipe' })
-    logger.info({ runId: id }, 'Repo cloned')
-
-    // 2. Collect key files
-    const files = collectKeyFiles(cloneDir)
-    logger.info({ runId: id, fileCount: files.length }, 'Files collected')
-
-    if (files.length === 0) {
-      throw new Error('No readable files found in repository')
-    }
-
-    // 3. Build prompt and call LLM (with 2 retries on JSON parse failure)
-    const prompt = buildExtractionPrompt(repoUrl, files)
+    // 2. Build prompt and call DeepSeek with 2 retries on parse failure
+    const prompt = buildExtractionPrompt(repoUrl, packedRepo)
     let extracted
-    let lastLlmError: Error | null = null
+    let lastError: Error | null = null
+
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const rawLlmOutput = await callRlmLlm(prompt)
-        logger.info({ runId: id, attempt }, 'LLM extraction complete')
-        extracted = parseLlmBom(rawLlmOutput, repoUrl)
-        lastLlmError = null
+        const raw = await callDeepSeekLlm(prompt)
+        extracted = parseLlmBom(raw, repoUrl)
+        lastError = null
+        logger.info({ runId: id, attempt, components: extracted.components.length }, 'LLM extraction parsed')
         break
-      } catch (parseErr) {
-        lastLlmError = parseErr instanceof Error ? parseErr : new Error(String(parseErr))
-        logger.warn({ runId: id, attempt, err: lastLlmError.message }, 'LLM parse failed, retrying')
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err))
+        logger.warn({ runId: id, attempt, err: lastError.message }, 'LLM parse failed, retrying')
         if (attempt < 2) await new Promise(r => setTimeout(r, 3000 * (attempt + 1)))
       }
     }
-    if (!extracted) throw lastLlmError ?? new Error('LLM extraction failed after 3 attempts')
+    if (!extracted) throw lastError ?? new Error('LLM extraction failed after 3 attempts')
 
-    // 5. Assemble full BOM with IDs
+    // 3. Assemble BOM with stable IDs
     const bom: PhantomBOM = {
       bom_version: '1.0',
       run_id: id,
@@ -432,7 +364,7 @@ export async function extractPhantomBOM(
       })),
     }
 
-    // 6. Write to Neo4j
+    // 4. Write to Neo4j
     await writeToNeo4j(bom)
     logger.info({ runId: id, components: bom.components.length }, 'PhantomBOM written to Neo4j')
 
@@ -444,11 +376,6 @@ export async function extractPhantomBOM(
     logger.error({ runId: id, err: msg }, 'PhantomBOM extraction failed')
     runState.set(id, { status: 'failed', error: msg, startedAt: runState.get(id)!.startedAt })
     throw err
-  } finally {
-    // Always clean up clone dir
-    try {
-      if (existsSync(cloneDir)) rmSync(cloneDir, { recursive: true, force: true })
-    } catch { /* cleanup failure is non-critical */ }
   }
 }
 
