@@ -142,6 +142,9 @@ export async function callCognitive(
       }
     }
 
+    // WIRE_FORMAT v0.4.3: $id required in all cross-service payloads
+    body.$id = 'CognitiveRequest'
+
     const res = await fetch(url, {
       method: 'POST',
       headers: {
@@ -262,6 +265,9 @@ export async function callCognitiveRaw(
         mode: params.mode ?? 'standard',
       }
     }
+
+    // WIRE_FORMAT v0.4.3: $id required in all cross-service payloads
+    body.$id = 'CognitiveRequest'
 
     const res = await fetch(url, {
       method: 'POST',
