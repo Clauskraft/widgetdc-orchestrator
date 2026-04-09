@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { apiGet } from '@/lib/api-client'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -7,6 +7,8 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Input } from '@/components/ui/input'
+import { Button } from '@/components/ui/button'
+import { RefreshCw, Search as SearchIcon } from 'lucide-react'
 
 interface ObsidianStatus {
   connected: boolean
@@ -20,18 +22,30 @@ interface VaultEntry {
   type: 'file' | 'dir'
 }
 
+interface VaultStats {
+  vault_name?: string
+  root_count?: number
+  recursive_file_count?: number
+  recursive_dir_count?: number
+}
+
 interface SearchResult {
   filename: string
   score: number
   context?: string[]
 }
 
+interface TagCloud {
+  [tag: string]: number
+}
+
 function ObsidianPage() {
+  const queryClient = useQueryClient()
   const [searchQuery, setSearchQuery] = useState('')
   const [activeSearch, setActiveSearch] = useState('')
   const [selectedNote, setSelectedNote] = useState<string | null>(null)
 
-  const { data: status, isLoading: statusLoading } = useQuery<ObsidianStatus>({
+  const { data: status, isLoading: statusLoading, refetch: refetchStatus } = useQuery<ObsidianStatus>({
     queryKey: ['obsidian-status'],
     queryFn: () => apiGet('/api/obsidian/status'),
     retry: 1,
@@ -44,10 +58,24 @@ function ObsidianPage() {
     retry: 1,
   })
 
+  const { data: vaultStats, isLoading: statsLoading } = useQuery<VaultStats>({
+    queryKey: ['obsidian-vault-stats'],
+    queryFn: () => apiGet('/api/obsidian/vault/stats'),
+    enabled: status?.connected === true,
+    retry: 1,
+  })
+
   const { data: searchResults, isLoading: searching } = useQuery<SearchResult[]>({
     queryKey: ['obsidian-search', activeSearch],
     queryFn: () => apiGet(`/api/obsidian/search?q=${encodeURIComponent(activeSearch)}`),
     enabled: activeSearch.length > 2 && status?.connected === true,
+    retry: 1,
+  })
+
+  const { data: tags, isLoading: tagsLoading } = useQuery<TagCloud>({
+    queryKey: ['obsidian-tags'],
+    queryFn: () => apiGet('/api/obsidian/tags'),
+    enabled: status?.connected === true,
     retry: 1,
   })
 
@@ -57,6 +85,13 @@ function ObsidianPage() {
     enabled: selectedNote != null && status?.connected === true,
     retry: 1,
   })
+
+  const handleRefresh = () => {
+    refetchStatus()
+    queryClient.invalidateQueries({ queryKey: ['obsidian-vault'] })
+    queryClient.invalidateQueries({ queryKey: ['obsidian-vault-stats'] })
+    queryClient.invalidateQueries({ queryKey: ['obsidian-tags'] })
+  }
 
   if (statusLoading) {
     return (
@@ -111,6 +146,9 @@ function ObsidianPage() {
   const mdFiles = files.filter(f => f.type === 'file' && f.path.endsWith('.md'))
   const folders = files.filter(f => f.type === 'dir')
 
+  // Sort tags by frequency, get top 20
+  const sortedTags = tags ? Object.entries(tags).sort((a, b) => b[1] - a[1]).slice(0, 20) : []
+
   return (
     <div className="flex flex-col gap-6 p-8">
       <div className="flex items-center justify-between">
@@ -118,16 +156,27 @@ function ObsidianPage() {
           <h1 className="text-3xl font-bold tracking-tight">Obsidian Vault</h1>
           <p className="text-muted-foreground mt-1">Browse and search your knowledge base</p>
         </div>
-        <Badge className="bg-green-600 text-white">Connected</Badge>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleRefresh}
+            disabled={statusLoading || vaultLoading || statsLoading}
+          >
+            <RefreshCw className="h-4 w-4 mr-1" />
+            Refresh
+          </Button>
+          <Badge className="bg-green-600 text-white">Connected</Badge>
+        </div>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">Notes</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{vaultLoading ? '…' : mdFiles.length}</div>
+            <div className="text-2xl font-bold">{vaultLoading || statsLoading ? '…' : vaultStats?.recursive_file_count ?? mdFiles.length}</div>
             <p className="text-xs text-muted-foreground">Markdown files</p>
           </CardContent>
         </Card>
@@ -136,8 +185,17 @@ function ObsidianPage() {
             <CardTitle className="text-sm font-medium text-muted-foreground">Folders</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{vaultLoading ? '…' : folders.length}</div>
+            <div className="text-2xl font-bold">{vaultLoading || statsLoading ? '…' : vaultStats?.recursive_dir_count ?? folders.length}</div>
             <p className="text-xs text-muted-foreground">Directories</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">Tags</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{tagsLoading ? '…' : sortedTags.length}</div>
+            <p className="text-xs text-muted-foreground">Unique tags</p>
           </CardContent>
         </Card>
         <Card>
@@ -150,6 +208,30 @@ function ObsidianPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Tag Cloud */}
+      {sortedTags.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Tag Cloud</CardTitle>
+            <CardDescription>Most frequently used tags in vault</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex flex-wrap gap-2">
+              {sortedTags.map(([tag, count]) => (
+                <button
+                  key={tag}
+                  onClick={() => setActiveSearch(`#${tag}`)}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-muted hover:bg-muted/80 transition-colors text-sm"
+                >
+                  <span className="font-medium text-primary">#{tag}</span>
+                  <Badge variant="secondary" className="h-fit text-xs">{count}</Badge>
+                </button>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Search */}
       <Card>
@@ -166,16 +248,18 @@ function ObsidianPage() {
               onKeyDown={e => { if (e.key === 'Enter' && searchQuery.length > 2) setActiveSearch(searchQuery) }}
               className="flex-1"
             />
-            <button
+            <Button
               onClick={() => searchQuery.length > 2 && setActiveSearch(searchQuery)}
-              className="px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-medium hover:bg-primary/90 transition-colors"
+              disabled={searching || searchQuery.length < 3}
+              size="sm"
             >
+              <SearchIcon className="h-4 w-4 mr-1" />
               Search
-            </button>
+            </Button>
           </div>
           {searching && <div className="text-sm text-muted-foreground animate-pulse">Searching…</div>}
           {searchResults && searchResults.length > 0 && (
-            <div className="space-y-2 max-h-64 overflow-y-auto">
+            <div className="space-y-2 max-h-96 overflow-y-auto">
               {searchResults.map((r, i) => (
                 <div
                   key={i}
@@ -183,8 +267,8 @@ function ObsidianPage() {
                   onClick={() => setSelectedNote(r.filename)}
                 >
                   <div className="flex items-center justify-between">
-                    <span className="font-mono text-sm font-medium">{r.filename}</span>
-                    <Badge variant="outline" className="text-xs">score {r.score?.toFixed(2)}</Badge>
+                    <span className="font-mono text-sm font-medium truncate flex-1">{r.filename}</span>
+                    <Badge variant="outline" className="text-xs ml-2">score {r.score?.toFixed(2)}</Badge>
                   </div>
                   {r.context && r.context.length > 0 && (
                     <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{r.context[0]}</p>

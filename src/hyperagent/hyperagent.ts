@@ -11,7 +11,7 @@
  */
 import { v4 as uuid } from 'uuid'
 import { executeChain, type ChainDefinition, type ChainStep, type ChainExecution } from '../chain/chain-engine.js'
-import { callCognitive } from '../cognitive-proxy.js'
+import { callCognitiveRaw } from '../cognitive-proxy.js'
 import { callMcpTool } from '../mcp-caller.js'
 import { getRedis } from '../redis.js'
 import { broadcastMessage } from '../chat-broadcaster.js'
@@ -254,14 +254,14 @@ export async function createPlan(
   // Decompose goal into steps via RLM cognitive proxy
   let steps: ChainStep[] = []
   try {
-    const cogResult = await callCognitive('plan', {
+    const cogResult = await callCognitiveRaw('plan', {
       prompt: goal,
       context: { sessionId, profile: profile.id, maxSteps: profile.maxSteps },
       agent_id: 'hyperagent',
     })
 
     // Parse execution_steps from cognitive response into ChainSteps
-    const rawSteps = (cogResult as Record<string, unknown>)?.execution_steps
+    const rawSteps = cogResult?.execution_steps
     if (Array.isArray(rawSteps)) {
       steps = rawSteps.slice(0, profile.maxSteps).map((s: unknown, i: number) => {
         if (typeof s === 'object' && s !== null) {

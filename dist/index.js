@@ -18223,7 +18223,7 @@ async function createPlan(goal, sessionId, profileId = "read_only") {
   const planId = `hyp-${uuid20().slice(0, 12)}`;
   let steps = [];
   try {
-    const cogResult = await callCognitive("plan", {
+    const cogResult = await callCognitiveRaw("plan", {
       prompt: goal,
       context: { sessionId, profile: profile.id, maxSteps: profile.maxSteps },
       agent_id: "hyperagent"
@@ -33357,6 +33357,68 @@ monitorRouter.post("/compress", async (req, res) => {
     });
   } catch (err) {
     logger.error({ err: String(err) }, "Compress error");
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
+monitorRouter.get("/errors", async (req, res) => {
+  const windowHours = parseInt(String(req.query.window_hours ?? "24"), 10) || 24;
+  const limit = parseInt(String(req.query.limit ?? "20"), 10) || 20;
+  try {
+    const [failureResult, traceResult, decisionResult] = await Promise.allSettled([
+      graphRead2(`
+        MATCH (f:FailureMemory)
+        WHERE f.last_seen > datetime() - duration({hours: ${windowHours}})
+           OR f.created_at > datetime() - duration({hours: ${windowHours}})
+        RETURN f.category AS category, f.pattern AS pattern,
+               f.hit_count AS hit_count, f.resolution AS resolution,
+               f.resolved IS NOT NULL AS resolved, f.last_seen AS last_seen
+        ORDER BY f.hit_count DESC LIMIT ${limit}
+      `),
+      graphRead2(`
+        MATCH (e:ExecutionTrace)
+        WHERE e.completedAt > datetime() - duration({hours: ${windowHours}})
+          AND e.status = 'failed'
+        RETURN e.chainName AS chain, e.mode AS mode,
+               e.stepsCompleted AS steps_done, e.stepsTotal AS steps_total,
+               e.durationMs AS duration_ms, e.completedAt AS ts
+        ORDER BY e.completedAt DESC LIMIT 10
+      `),
+      graphRead2(`
+        MATCH (d:Decision)
+        WHERE d.timestamp > datetime() - duration({hours: ${windowHours}})
+          AND d.reasoning CONTAINS 'FAILED'
+        RETURN d.agent AS agent, d.choice AS choice,
+               d.reasoning AS reasoning, d.timestamp AS ts
+        ORDER BY d.timestamp DESC LIMIT 10
+      `)
+    ]);
+    const failures = failureResult.status === "fulfilled" ? failureResult.value : [];
+    const traces = traceResult.status === "fulfilled" ? traceResult.value : [];
+    const decisions = decisionResult.status === "fulfilled" ? decisionResult.value : [];
+    const totalHits = failures.reduce((s, f) => s + (neo4jInt2(f.hit_count) || 0), 0);
+    const unresolvedCount = failures.filter((f) => !f.resolved).length;
+    const health = unresolvedCount === 0 && traces.length === 0 ? "green" : unresolvedCount <= 2 && traces.length <= 3 ? "yellow" : "red";
+    logger.debug({ windowHours, failures: failures.length, traces: traces.length, health }, "Monitor /errors");
+    res.json({
+      success: true,
+      data: {
+        window_hours: windowHours,
+        summary: {
+          failure_memory_patterns: failures.length,
+          unresolved_patterns: unresolvedCount,
+          total_hits: totalHits,
+          failed_chains: traces.length,
+          failed_decisions: decisions.length,
+          health
+        },
+        failure_memory: failures,
+        failed_chains: traces,
+        failed_decisions: decisions,
+        generated_at: (/* @__PURE__ */ new Date()).toISOString()
+      }
+    });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Monitor /errors error");
     res.status(500).json({ success: false, error: String(err) });
   }
 });
