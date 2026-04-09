@@ -19662,6 +19662,7 @@ __export(inventor_loop_exports, {
   getInventorNode: () => getInventorNode,
   getInventorNodes: () => getInventorNodes,
   getInventorStatus: () => getInventorStatus,
+  getNodesByExperiment: () => getNodesByExperiment,
   runInventor: () => runInventor,
   stopInventor: () => stopInventor
 });
@@ -20255,6 +20256,17 @@ function stopInventor() {
   abortRequested = true;
   logger.info("Inventor: stop requested \u2014 will halt after current step completes");
   return { success: true, message: `Stopping experiment "${currentConfig?.experimentName ?? ""}" after step ${currentStep2}` };
+}
+async function getNodesByExperiment(experimentName) {
+  const redis2 = getRedis();
+  if (!redis2) return [];
+  try {
+    const raw = await redis2.get(nodeKey(experimentName));
+    if (!raw) return [];
+    return JSON.parse(raw);
+  } catch {
+    return [];
+  }
 }
 async function getExperimentHistory(limit = 20) {
   const redis2 = getRedis();
@@ -21732,11 +21744,12 @@ ${lines.join("\n")}`;
       return JSON.stringify(getStatus());
     }
     case "inventor_nodes": {
-      const { getInventorNodes: getInventorNodes2 } = await Promise.resolve().then(() => (init_inventor_loop(), inventor_loop_exports));
+      const { getInventorNodes: getInventorNodes2, getNodesByExperiment: getNodesByExperiment2 } = await Promise.resolve().then(() => (init_inventor_loop(), inventor_loop_exports));
       const sort = args.sort ?? "score";
       const limit = Math.min(args.limit ?? 50, 200);
       const offset = args.offset ?? 0;
-      let nodes2 = getInventorNodes2();
+      const experimentName = args.experiment_name;
+      let nodes2 = experimentName ? await getNodesByExperiment2(experimentName) : getInventorNodes2();
       if (sort === "created") {
         nodes2 = [...nodes2].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
       } else {
@@ -38982,41 +38995,19 @@ async function loadBenchmarkRuns() {
     if (!raw) return;
     const saved = JSON.parse(raw);
     let stuckCount = 0;
-    const pendingToRequeue = [];
     for (const run of saved) {
-      if (run.status === "running") {
+      if (run.status === "running" || run.status === "pending") {
         run.status = "failed";
-        run.error = "Process restarted while run was in progress (benchmark-runner restart recovery)";
+        run.error = `Process restarted while run was ${run.status} (benchmark-runner restart recovery)`;
         stuckCount++;
       }
-      if (run.status === "pending") pendingToRequeue.push(run);
       runs.set(run.runId, run);
     }
     if (stuckCount > 0) {
       await persist2();
-      logger.warn({ stuckCount }, "[Benchmark] Marked stuck running\u2192failed on boot (restart recovery)");
+      logger.warn({ stuckCount }, "[Benchmark] Marked stuck running/pending\u2192failed on boot");
     }
-    logger.info({ count: saved.length, requeue: pendingToRequeue.length }, "[Benchmark] Hydrated runs from Redis");
-    if (pendingToRequeue.length > 0) {
-      for (const run of pendingToRequeue) {
-        const task = getBenchmarkTask(run.taskId);
-        if (!task) continue;
-        const inventorConfig = {
-          experimentName: run.inventorExperimentName,
-          taskDescription: `${task.researcherPrompt}
-
-BENCHMARK: ${task.id} | STRATEGY: ${run.strategy} | RUN: ${run.runId}`,
-          initialArtifact: task.initialArtifact,
-          sampling: buildSamplingConfig(run.strategy),
-          cognition: { topK: 5, threshold: 0.25 },
-          pipeline: { maxSteps: run.maxRounds, maxArtifactLength: 6e3, engineerTimeoutMs: 9e4, numWorkers: 1 },
-          chainMode: "sequential"
-        };
-        launchRunWhenIdle(run, inventorConfig).catch(() => {
-        });
-      }
-      logger.info({ count: pendingToRequeue.length }, "[Benchmark] Re-queued pending runs after restart");
-    }
+    logger.info({ count: saved.length }, "[Benchmark] Hydrated runs from Redis");
   } catch {
   }
 }

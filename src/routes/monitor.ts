@@ -254,3 +254,77 @@ monitorRouter.post('/compress', async (req: Request, res: Response) => {
     res.status(500).json({ success: false, error: String(err) })
   }
 })
+
+// ─── GET /errors — Recent service errors + FailureMemory digest ──────────────
+// Phase 0 KPI gate A-13: exposes error state for external monitoring and the
+// HyperAgent graduated-autonomy health check.
+
+monitorRouter.get('/errors', async (req: Request, res: Response) => {
+  const windowHours = parseInt(String(req.query.window_hours ?? '24'), 10) || 24
+  const limit = parseInt(String(req.query.limit ?? '20'), 10) || 20
+
+  try {
+    const [failureResult, traceResult, decisionResult] = await Promise.allSettled([
+      graphRead(`
+        MATCH (f:FailureMemory)
+        WHERE f.last_seen > datetime() - duration({hours: ${windowHours}})
+           OR f.created_at > datetime() - duration({hours: ${windowHours}})
+        RETURN f.category AS category, f.pattern AS pattern,
+               f.hit_count AS hit_count, f.resolution AS resolution,
+               f.resolved IS NOT NULL AS resolved, f.last_seen AS last_seen
+        ORDER BY f.hit_count DESC LIMIT ${limit}
+      `),
+      graphRead(`
+        MATCH (e:ExecutionTrace)
+        WHERE e.completedAt > datetime() - duration({hours: ${windowHours}})
+          AND e.status = 'failed'
+        RETURN e.chainName AS chain, e.mode AS mode,
+               e.stepsCompleted AS steps_done, e.stepsTotal AS steps_total,
+               e.durationMs AS duration_ms, e.completedAt AS ts
+        ORDER BY e.completedAt DESC LIMIT 10
+      `),
+      graphRead(`
+        MATCH (d:Decision)
+        WHERE d.timestamp > datetime() - duration({hours: ${windowHours}})
+          AND d.reasoning CONTAINS 'FAILED'
+        RETURN d.agent AS agent, d.choice AS choice,
+               d.reasoning AS reasoning, d.timestamp AS ts
+        ORDER BY d.timestamp DESC LIMIT 10
+      `),
+    ])
+
+    const failures = failureResult.status === 'fulfilled' ? failureResult.value : []
+    const traces   = traceResult.status === 'fulfilled'   ? traceResult.value   : []
+    const decisions = decisionResult.status === 'fulfilled' ? decisionResult.value : []
+
+    const totalHits      = failures.reduce((s: number, f: any) => s + (neo4jInt(f.hit_count) || 0), 0)
+    const unresolvedCount = failures.filter((f: any) => !f.resolved).length
+
+    const health = unresolvedCount === 0 && traces.length === 0 ? 'green'
+                 : unresolvedCount <= 2  && traces.length <= 3  ? 'yellow' : 'red'
+
+    logger.debug({ windowHours, failures: failures.length, traces: traces.length, health }, 'Monitor /errors')
+
+    res.json({
+      success: true,
+      data: {
+        window_hours: windowHours,
+        summary: {
+          failure_memory_patterns: failures.length,
+          unresolved_patterns: unresolvedCount,
+          total_hits: totalHits,
+          failed_chains: traces.length,
+          failed_decisions: decisions.length,
+          health,
+        },
+        failure_memory: failures,
+        failed_chains: traces,
+        failed_decisions: decisions,
+        generated_at: new Date().toISOString(),
+      },
+    })
+  } catch (err) {
+    logger.error({ err: String(err) }, 'Monitor /errors error')
+    res.status(500).json({ success: false, error: String(err) })
+  }
+})
