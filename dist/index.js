@@ -40446,11 +40446,17 @@ async function generatePhantomClusters() {
     ...p,
     conf: typeof p.conf === "object" && p.conf !== null ? p.conf.low : p.conf ?? 0
   }));
+  logger.info({ totalProviders: normalizedProviders.length, sample: normalizedProviders[0] }, "PhantomCluster: loaded providers");
   const clusters = [];
   for (const [strategy, def] of Object.entries(CLUSTER_STRATEGIES)) {
-    const members = normalizedProviders.filter(
-      (p) => def.geoFilter.includes(p.geo) && def.costFilter.includes(p.cost) && (p.caps ?? []).some((c) => def.capabilityFilter.includes(c))
-    );
+    const members = normalizedProviders.filter((p) => {
+      const geoOk = def.geoFilter.includes(p.geo);
+      const costOk = def.costFilter.includes(p.cost);
+      const capOk = (p.caps ?? []).some((c) => def.capabilityFilter.includes(c));
+      logger.info({ provider: p.id, strategy, geo: p.geo, geoOk, cost: p.cost, costOk, caps: p.caps, capOk }, "PhantomCluster: provider filter check");
+      return geoOk && costOk && capOk;
+    });
+    logger.info({ strategy, memberCount: members.length }, "PhantomCluster: strategy members");
     if (members.length === 0) continue;
     const avg_conf = members.reduce((s, p) => s + (p.conf ?? 0), 0) / members.length;
     const score = Math.round((0.5 * (avg_conf / 100) + 0.3 * Math.min(members.length / 5, 1) + 0.2 * 0.8) * 100) / 100;

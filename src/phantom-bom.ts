@@ -723,14 +723,19 @@ export async function generatePhantomClusters(): Promise<PhantomCluster[]> {
     conf: typeof p.conf === 'object' && p.conf !== null ? (p.conf as { low: number }).low : (p.conf ?? 0),
   }))
 
+  logger.info({ totalProviders: normalizedProviders.length, sample: normalizedProviders[0] }, 'PhantomCluster: loaded providers')
+
   const clusters: PhantomCluster[] = []
 
   for (const [strategy, def] of Object.entries(CLUSTER_STRATEGIES) as [ClusterStrategy, typeof CLUSTER_STRATEGIES[ClusterStrategy]][]) {
-    const members = normalizedProviders.filter(p =>
-      def.geoFilter.includes(p.geo as GeoRestriction) &&
-      def.costFilter.includes(p.cost as CostModel) &&
-      (p.caps ?? []).some(c => def.capabilityFilter.includes(c as ProviderCapability))
-    )
+    const members = normalizedProviders.filter(p => {
+      const geoOk = def.geoFilter.includes(p.geo as GeoRestriction)
+      const costOk = def.costFilter.includes(p.cost as CostModel)
+      const capOk = (p.caps ?? []).some(c => def.capabilityFilter.includes(c as ProviderCapability))
+      logger.info({ provider: p.id, strategy, geo: p.geo, geoOk, cost: p.cost, costOk, caps: p.caps, capOk }, 'PhantomCluster: provider filter check')
+      return geoOk && costOk && capOk
+    })
+    logger.info({ strategy, memberCount: members.length }, 'PhantomCluster: strategy members')
 
     if (members.length === 0) continue
 
