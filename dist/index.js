@@ -30608,6 +30608,24 @@ function isJobOverdue(job) {
   }
   return false;
 }
+var STAGGER_MS = 5e3;
+var BOOT_PRIORITY = {
+  "health-pulse": 1,
+  "graph-check": 2,
+  "anomaly-watch": 3,
+  "failure-digest": 10,
+  "competitive-crawl": 20,
+  "adoption-snapshot": 30,
+  "loose-end-scan": 40,
+  "graph-hygiene": 50,
+  "community-summary": 60,
+  "adaptive-rag": 70,
+  "fleet-analysis": 80,
+  "flywheel-sync": 85,
+  "consolidation": 90,
+  "autonomous-cycle": 95,
+  "pheromone-cron": 98
+};
 async function bootKickstartOverdueJobs() {
   const overdue = [];
   for (const job of jobs.values()) {
@@ -30618,19 +30636,33 @@ async function bootKickstartOverdueJobs() {
     logger.info("Cron boot-kickstart: no overdue jobs detected");
     return;
   }
+  overdue.sort((a, b) => {
+    const pa = BOOT_PRIORITY[a.id] ?? 99;
+    const pb = BOOT_PRIORITY[b.id] ?? 99;
+    return pa - pb;
+  });
+  const total = overdue.length;
   logger.info(
-    { count: overdue.length, ids: overdue.map((j) => j.id) },
-    "Cron boot-kickstart: firing overdue jobs sequentially"
+    { count: total, ids: overdue.map((j) => j.id), stagger_ms: STAGGER_MS },
+    "Cron boot-kickstart: staggering overdue jobs"
   );
-  for (const job of overdue) {
-    try {
-      logger.info({ id: job.id, schedule: job.schedule, last_run: job.last_run ?? "never" }, "Cron boot-kickstart: firing overdue job");
-      await runCronJob(job.id);
-    } catch (err) {
-      logger.warn({ id: job.id, err: String(err) }, "Cron boot-kickstart: job failed (continuing)");
-    }
+  for (let i = 0; i < total; i++) {
+    const job = overdue[i];
+    const delayMs = i * STAGGER_MS;
+    logger.info(
+      { id: job.id, index: i + 1, total, delay_ms: delayMs, last_run: job.last_run ?? "never" },
+      `Cron boot-kickstart: firing job ${i + 1} of ${total} in ${delayMs}ms`
+    );
+    setTimeout(() => {
+      runCronJob(job.id).catch((err) => {
+        logger.warn({ id: job.id, err: String(err) }, "Cron boot-kickstart: job failed");
+      });
+    }, delayMs);
   }
-  logger.info({ count: overdue.length }, "Cron boot-kickstart: complete");
+  logger.info(
+    { count: total, total_ramp_ms: (total - 1) * STAGGER_MS },
+    "Cron boot-kickstart: all jobs scheduled (staggered)"
+  );
 }
 function buildKnowledgeBriefing(feed) {
   const date = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);

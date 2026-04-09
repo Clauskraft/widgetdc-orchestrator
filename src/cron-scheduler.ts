@@ -896,10 +896,36 @@ function isJobOverdue(job: CronJob): boolean {
   return false
 }
 
+// Stagger delay between each boot-kickstart job (ms). 5 s apart = 35 jobs → ~2:55 ramp-up.
+const STAGGER_MS = 5_000
+
 /**
- * S1.2 (6-edges handlingsplan) — Fire any overdue jobs once at boot, sequentially
- * to avoid thundering herd during startup. Call AFTER hydrateCronJobs() and
- * registerDefaultLoops() so all jobs are visible.
+ * Priority ordering for boot-kickstart — lower number = fires first.
+ * Jobs NOT listed here get priority 99 (lowest).
+ */
+const BOOT_PRIORITY: Record<string, number> = {
+  'health-pulse': 1,
+  'graph-check': 2,
+  'anomaly-watch': 3,
+  'failure-digest': 10,
+  'competitive-crawl': 20,
+  'adoption-snapshot': 30,
+  'loose-end-scan': 40,
+  'graph-hygiene': 50,
+  'community-summary': 60,
+  'adaptive-rag': 70,
+  'fleet-analysis': 80,
+  'flywheel-sync': 85,
+  'consolidation': 90,
+  'autonomous-cycle': 95,
+  'pheromone-cron': 98,
+}
+
+/**
+ * S1.2 (6-edges handlingsplan) — Fire any overdue jobs once at boot with a
+ * staggered delay to prevent thundering-herd log storms and Neo4j write bursts.
+ * Jobs are sorted by priority (critical first) and scheduled STAGGER_MS apart.
+ * Call AFTER hydrateCronJobs() and registerDefaultLoops() so all jobs are visible.
  */
 export async function bootKickstartOverdueJobs(): Promise<void> {
   const overdue: CronJob[] = []
@@ -913,21 +939,37 @@ export async function bootKickstartOverdueJobs(): Promise<void> {
     return
   }
 
+  // Sort by priority — critical jobs fire first.
+  overdue.sort((a, b) => {
+    const pa = BOOT_PRIORITY[a.id] ?? 99
+    const pb = BOOT_PRIORITY[b.id] ?? 99
+    return pa - pb
+  })
+
+  const total = overdue.length
   logger.info(
-    { count: overdue.length, ids: overdue.map(j => j.id) },
-    'Cron boot-kickstart: firing overdue jobs sequentially',
+    { count: total, ids: overdue.map(j => j.id), stagger_ms: STAGGER_MS },
+    'Cron boot-kickstart: staggering overdue jobs',
   )
 
-  for (const job of overdue) {
-    try {
-      logger.info({ id: job.id, schedule: job.schedule, last_run: job.last_run ?? 'never' }, 'Cron boot-kickstart: firing overdue job')
-      await runCronJob(job.id)
-    } catch (err) {
-      logger.warn({ id: job.id, err: String(err) }, 'Cron boot-kickstart: job failed (continuing)')
-    }
+  for (let i = 0; i < total; i++) {
+    const job = overdue[i]
+    const delayMs = i * STAGGER_MS
+    logger.info(
+      { id: job.id, index: i + 1, total, delay_ms: delayMs, last_run: job.last_run ?? 'never' },
+      `Cron boot-kickstart: firing job ${i + 1} of ${total} in ${delayMs}ms`,
+    )
+    setTimeout(() => {
+      runCronJob(job.id).catch(err => {
+        logger.warn({ id: job.id, err: String(err) }, 'Cron boot-kickstart: job failed')
+      })
+    }, delayMs)
   }
 
-  logger.info({ count: overdue.length }, 'Cron boot-kickstart: complete')
+  logger.info(
+    { count: total, total_ramp_ms: (total - 1) * STAGGER_MS },
+    'Cron boot-kickstart: all jobs scheduled (staggered)',
+  )
 }
 
 /**
