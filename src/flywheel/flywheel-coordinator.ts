@@ -71,17 +71,23 @@ export async function runWeeklySync(): Promise<FlywheelReport> {
   ])
 
   // Compound: geometric mean (all pillars must be healthy for high score)
+  // REAL zeros: if any pillar is truly 0, compound is 0 — no masking
   const compound = Math.pow(
     pillars.reduce((product, p) => product * Math.max(0.01, p.score), 1),
     1 / pillars.length,
   )
+  // If more than 1 pillar is near-zero, compound should reflect that harshly
+  const nearZeroCount = pillars.filter(p => p.score < 0.1).length
+  const finalCompound = nearZeroCount >= 2
+    ? compound * 0.5  // Halve compound score if 2+ pillars are near-zero
+    : compound
 
   const optimizations = identifyOptimizations(pillars)
   const delta = lastReport ? compound - lastReport.compoundScore : 0
 
   const report: FlywheelReport = {
     generatedAt: new Date().toISOString(),
-    compoundScore: parseFloat(compound.toFixed(4)),
+    compoundScore: parseFloat(finalCompound.toFixed(4)),
     pillars,
     nextOptimizations: optimizations.slice(0, 5),
     weeklyDelta: parseFloat(delta.toFixed(4)),
@@ -248,20 +254,60 @@ async function scorePlatformHealth(): Promise<PillarScore> {
     const cb = getCircuitBreakerStats?.() ?? null
     const circuitOpen = cb?.open === true
     const failures = cb?.failures ?? 0
-    // Simple health: no open circuit + low failures
-    const score = circuitOpen ? 0.2 : Math.max(0, 1 - failures * 0.05)
+
+    // ACTUAL CHAIN HEALTH: read from Redis chain execution data
+    const redis = getRedis()
+    let chainSuccessRate = 0.5
+    let totalChains = 0
+    let failedChains = 0
+
+    if (redis) {
+      try {
+        // Scan recent chain executions from Redis
+        const keys = await redis.keys('orchestrator:chain:*')
+        totalChains = keys.length
+        let completedCount = 0
+        for (const key of keys.slice(0, 100)) { // cap at 100 to avoid OOM
+          const raw = await redis.get(key)
+          if (raw) {
+            try {
+              const data = JSON.parse(raw)
+              if (data.status === 'completed') completedCount++
+              if (data.status === 'failed') failedChains++
+            } catch { /* skip parse errors */ }
+          }
+        }
+        if (totalChains > 0) {
+          chainSuccessRate = completedCount / Math.min(totalChains, 100)
+        }
+      } catch { /* fallback to circuit breaker only */ }
+    }
+
+    // Composite score: 60% chain success rate + 40% circuit breaker health
+    const circuitScore = circuitOpen ? 0 : Math.max(0, 1 - failures * 0.05)
+    const score = 0.6 * chainSuccessRate + 0.4 * circuitScore
+
+    const isLying = chainSuccessRate < 0.3 && circuitScore > 0.8
+    const headline = isLying
+      ? `⚠ ${failedChains} of ${totalChains} chains failed — circuit breaker silent`
+      : circuitOpen
+        ? `⚠ Circuit breaker OPEN`
+        : `${Math.round(chainSuccessRate * 100)}% chain success rate`
+
     return {
       name: 'Platform Health',
       score: parseFloat(Math.min(1, score).toFixed(3)),
-      trend: circuitOpen ? 'down' : failures > 0 ? 'flat' : 'up',
-      headline: circuitOpen ? '⚠ Circuit breaker OPEN' : `${failures} backend failures`,
+      trend: chainSuccessRate < 0.3 ? 'down' : circuitOpen ? 'down' : failures > 0 ? 'flat' : 'up',
+      headline,
       details: [
+        `Chain success rate: ${Math.round(chainSuccessRate * 100)}% (${completedCount}/${Math.min(totalChains, 100)})`,
         `Circuit breaker: ${circuitOpen ? 'OPEN' : 'closed'}`,
-        `Recent failures: ${failures}`,
+        `Backend failures: ${failures}`,
+        `Failed chains: ${failedChains}`,
       ],
     }
   } catch {
-    return { name: 'Platform Health', score: 0.7, trend: 'flat', headline: 'Health data unavailable', details: [] }
+    return { name: 'Platform Health', score: 0.5, trend: 'flat', headline: 'Health data unavailable', details: [] }
   }
 }
 

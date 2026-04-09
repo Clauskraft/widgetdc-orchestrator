@@ -21,6 +21,7 @@ import {
   Activity,
   RotateCw,
   FlaskConical,
+  LayoutDashboard,
 } from 'lucide-react'
 
 export interface NavItem {
@@ -44,6 +45,12 @@ export const sidebarData: NavGroup[] = [
         path: '/',
         icon: Home,
         description: 'Platform overview and KPIs',
+      },
+      {
+        title: 'Project Overview',
+        path: '/project-overview',
+        icon: LayoutDashboard,
+        description: 'Engagements, decisions, architecture, drill-down',
       },
       {
         title: 'Agents',

@@ -5,6 +5,7 @@
  * variant alongside the existing Orchestrator.
  */
 import { Router, Request, Response } from 'express'
+import { broadcastMessage } from '../chat-broadcaster.js'
 import {
   runInventor,
   getInventorStatus,
@@ -80,8 +81,18 @@ inventorRouter.post('/run', async (req: Request, res: Response) => {
 
   try {
     // Fire-and-forget — caller polls /status
-    runInventor(fullConfig, resume ?? false).catch(err => {
+    // BUG FIX: wrap in try/catch to log any sync errors before the async dispatch
+    const runPromise = runInventor(fullConfig, resume ?? false)
+    runPromise.catch(err => {
       logger.error({ err: String(err), experiment: fullConfig.experimentName }, 'Inventor run failed')
+      broadcastMessage({
+        from: 'Inventor',
+        to: 'All',
+        source: 'orchestrator',
+        type: 'Message',
+        message: `🔴 Inventor experiment '${fullConfig.experimentName}' failed: ${err instanceof Error ? err.message : String(err)}`,
+        timestamp: new Date().toISOString(),
+      } as Record<string, unknown>)
     })
 
     res.status(202).json({

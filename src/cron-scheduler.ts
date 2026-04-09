@@ -36,6 +36,7 @@ interface CronJob {
   last_run?: string
   last_status?: string
   run_count: number
+  consecutive_failures: number  // Circuit breaker: auto-disable after threshold
 }
 
 const jobs = new Map<string, CronJob>()
@@ -55,7 +56,7 @@ export function registerCronJob(job: Omit<CronJob, 'run_count'>): void {
   const existing = cronTasks.get(job.id)
   if (existing) existing.stop()
 
-  const cronJob: CronJob = { ...job, run_count: 0 }
+  const cronJob: CronJob = { ...job, run_count: 0, consecutive_failures: 0 }
   jobs.set(job.id, cronJob)
 
   if (job.enabled) {
@@ -708,6 +709,7 @@ export async function runCronJob(jobId: string): Promise<void> {
     job.last_run = new Date().toISOString()
     job.last_status = result.status
     job.run_count++
+    job.consecutive_failures = 0  // Reset on success
     persistCronJobs()
 
     // Post-chain: cache knowledge feed in Redis and broadcast via SSE
@@ -742,8 +744,27 @@ export async function runCronJob(jobId: string): Promise<void> {
     job.last_run = new Date().toISOString()
     job.last_status = 'failed'
     job.run_count++
+    job.consecutive_failures = (job.consecutive_failures || 0) + 1
+
+    // Circuit breaker: auto-disable after 3 consecutive failures
+    if (job.consecutive_failures >= 3 && job.enabled) {
+      job.enabled = false
+      const existing = cronTasks.get(job.id)
+      if (existing) existing.stop()
+      cronTasks.delete(job.id)
+      logger.error({ id: job.id, failures: job.consecutive_failures }, 'CIRCUIT BREAKER: auto-disabled after 3 consecutive failures')
+      broadcastMessage({
+        from: 'Orchestrator',
+        to: 'All',
+        source: 'orchestrator',
+        type: 'Message',
+        message: `🔴 CIRCUIT BREAKER: "${job.name}" auto-disabled after ${job.consecutive_failures} consecutive failures. Manual review required.`,
+        timestamp: new Date().toISOString(),
+      })
+    }
+
     persistCronJobs()
-    logger.error({ id: job.id, err: String(err) }, 'Cron job failed')
+    logger.error({ id: job.id, err: String(err), consecutive_failures: job.consecutive_failures }, 'Cron job failed')
   } finally {
     // Release cron overlap lock
     if (redis) await redis.del(lockKey).catch(() => {})
@@ -1094,12 +1115,12 @@ export function registerDefaultLoops(): void {
   })
 
   // Adoption Drift Detection — nightly CI gate check (detective layer)
-  // Detects registry↔executor drift, missing tests, missing docs, ABI regressions
+  // DISABLED 2026-04-09: script not found, burns capacity
   registerCronJob({
     id: 'adoption-drift-check',
     name: 'Adoption Gate Drift Detection',
     schedule: '0 2 * * *', // Daily 02:00 UTC
-    enabled: true,
+    enabled: false,
     chain: {
       name: 'Adoption Drift',
       mode: 'sequential',
@@ -1168,11 +1189,12 @@ export function registerDefaultLoops(): void {
   })
 
   // CIA Guardian Loop — monitors fleet health and triggers autonomous remediation
+  // DISABLED 2026-04-09: chain produces 0% success rate, burns capacity
   registerCronJob({
     id: 'cia-guardian',
     name: 'CIA Guardian (Autonomous Remediation)',
     schedule: '2,12,22,32,42,52 * * * *', // Every 10 min, offset +2 from health-pulse
-    enabled: true,
+    enabled: false,
     chain: {
       name: 'CIA Health Scan',
       mode: 'sequential',
@@ -1189,11 +1211,12 @@ export function registerDefaultLoops(): void {
   })
 
   // Dynamic Watchtower — scans all topics defined in :WatchDefinition (Public IT, Vendors, Tenders)
+  // DISABLED 2026-04-09: chain produces 0% success rate, burns capacity
   registerCronJob({
     id: 'dynamic-watchtower',
     name: 'Intelligence Watchtower (Multi-Domain)',
     schedule: '0 */4 * * *', // Every 4 hours
-    enabled: true,
+    enabled: false,
     chain: {
       name: 'Dynamic Intelligence Pipeline',
       mode: 'sequential',
@@ -1421,11 +1444,12 @@ export function registerDefaultLoops(): void {
   // ═══════════════════════════════════════════════════════════════════════
 
   // 1. Knowledge Synthesis — SRAG + KG-RAG + Context Folding (*/30 min)
+  // DISABLED 2026-04-09: chain produces 0% success rate, burns capacity
   registerCronJob({
     id: 'intel-knowledge-synthesis',
     name: 'Intelligence: Knowledge Synthesis',
     schedule: '*/30 * * * *',
-    enabled: true,
+    enabled: false,
     chain: {
       name: 'Knowledge Synthesis Pipeline',
       mode: 'sequential',
@@ -1458,11 +1482,12 @@ export function registerDefaultLoops(): void {
   })
 
   // 2. Graph Enrichment — Autonomous GraphRAG deep analysis (*/1h)
+  // DISABLED 2026-04-09: chain produces 0% success rate, burns capacity
   registerCronJob({
     id: 'intel-graph-enrichment',
     name: 'Intelligence: Graph Enrichment',
     schedule: '0 * * * *',
-    enabled: true,
+    enabled: false,
     chain: {
       name: 'Graph Enrichment Pipeline',
       mode: 'sequential',
@@ -1490,11 +1515,12 @@ export function registerDefaultLoops(): void {
   })
 
   // 3. ROMA Observer — Multi-agent coordination analysis (*/4h)
+  // DISABLED 2026-04-09: chain produces 0% success rate, burns capacity
   registerCronJob({
     id: 'intel-roma-observer',
     name: 'Intelligence: ROMA Optimization Observer',
     schedule: '0 */4 * * *',
-    enabled: true,
+    enabled: false,
     chain: {
       name: 'ROMA Observer Pipeline',
       mode: 'sequential',
@@ -1516,11 +1542,12 @@ export function registerDefaultLoops(): void {
   })
 
   // 4. Compliance Scan — Governance check (*/6h)
+  // DISABLED 2026-04-09: chain produces 0% success rate, burns capacity
   registerCronJob({
     id: 'intel-compliance-scan',
     name: 'Intelligence: Compliance Scan',
     schedule: '0 */6 * * *',
-    enabled: true,
+    enabled: false,
     chain: {
       name: 'Compliance Scan Pipeline',
       mode: 'sequential',
@@ -1540,11 +1567,12 @@ export function registerDefaultLoops(): void {
   })
 
   // 5. Harvest Cycle — Template-based knowledge harvesting (*/8h)
+  // DISABLED 2026-04-09: chain produces 0% success rate, burns capacity
   registerCronJob({
     id: 'intel-harvest-cycle',
     name: 'Intelligence: Knowledge Harvest',
     schedule: '0 */8 * * *',
-    enabled: true,
+    enabled: false,
     chain: {
       name: 'Knowledge Harvest Pipeline',
       mode: 'sequential',
@@ -1572,11 +1600,12 @@ export function registerDefaultLoops(): void {
   })
 
   // 6. Metrics Snapshot — Platform KPI tracking (*/1h)
+  // DISABLED 2026-04-09: chain produces 0% success rate, burns capacity
   registerCronJob({
     id: 'intel-metrics-snapshot',
     name: 'Intelligence: Metrics Snapshot',
     schedule: '30 * * * *',
-    enabled: true,
+    enabled: false,
     chain: {
       name: 'Metrics Snapshot Pipeline',
       mode: 'sequential',
@@ -1600,15 +1629,12 @@ export function registerDefaultLoops(): void {
 
   // ═══════════════════════════════════════════════════════════════════════
   // G2.7: Daily Knowledge Feed — Adoption Blueprint
-  // Runs daily at 06:00 UTC. Graph pulse → gap analysis → emerging clusters.
-  // Results cached in Redis (orchestrator:knowledge-feed, 24h TTL) and
-  // broadcast via SSE to connected Command Center clients.
-  // ═══════════════════════════════════════════════════════════════════════
+  // DISABLED 2026-04-09: chain produces 0% success rate, burns capacity
   registerCronJob({
     id: 'daily-knowledge-feed',
     name: 'Daily Knowledge Feed',
     schedule: '0 6 * * *',
-    enabled: true,
+    enabled: false,
     chain: {
       name: 'Daily Knowledge Feed',
       mode: 'sequential',
@@ -1688,11 +1714,12 @@ export function registerDefaultLoops(): void {
   })
 
   // Skill Forge — auto-generate composite MCP tools from usage patterns
+  // DISABLED 2026-04-09: backend endpoint not responding, burns capacity
   registerCronJob({
     id: 'skill-forge',
     name: 'Skill Forge (Composite Tool Generation)',
     schedule: '0 4 * * 0', // Sunday 04:00 UTC
-    enabled: true,
+    enabled: false,
     chain: {
       name: 'Skill Forge',
       mode: 'sequential',
