@@ -118,7 +118,7 @@ var init_config = __esm({
       // OpenTelemetry (LIN-589) — set OTEL_EXPORTER_OTLP_ENDPOINT to activate tracing
       otelEnabled: !!process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
       // Grafana Cloud — metrics streaming to cc-v4 dashboard
-      grafanaApiKey: optional("GRAFANA_API_KEY", "glsa_AOu4Jv4GnC14TleQxuj65627RCYGGA9E_3f0e2a0c"),
+      grafanaApiKey: optional("GRAFANA_API_KEY", ""),
       grafanaOrgId: optional("GRAFANA_ORG_ID", "2833073"),
       // F4: IP deny list — comma-separated IPs or CIDRs (e.g. "167.82.233.0/24,104.156.83.88")
       ipDenyList: optional("IP_DENY_LIST", ""),
@@ -39793,7 +39793,7 @@ init_config();
 import { Router as Router51 } from "express";
 var grafanaProxyRouter = Router51();
 var GRAFANA_URL = "https://clauskraft.grafana.net";
-var GRAFANA_API_KEY = process.env.GRAFANA_API_KEY || "glsa_AOu4Jv4GnC14TleQxuj65627RCYGGA9E_3f0e2a0c";
+var GRAFANA_API_KEY = config.grafanaApiKey;
 var PROM_URL = "https://prometheus-prod-39-prod-eu-north-0.grafana.net/api/prom";
 var GRAFANA_HEADERS = {
   "Authorization": `Bearer ${GRAFANA_API_KEY}`,
