@@ -92,6 +92,73 @@ VERIFICATION:
 NEXT MOVE:
 - one concrete execution step only
 
+## Boot Sequence — MANDATORY on every session start
+
+Execute in order before any task:
+
+**Step 1 — Service Health**
+```bash
+curl -s https://backend-production-d3da.up.railway.app/health | grep -o '"status":"[^"]*"'
+curl -s https://orchestrator-production-c27e.up.railway.app/health | grep -o '"status":"[^"]*"'
+```
+If any service DOWN: report to user before proceeding.
+
+**Step 2 — Lesson Check**
+```json
+{"tool":"audit.lessons","payload":{"agentId":"codex"}}
+```
+Via Neural Bridge: `POST https://backend-production-d3da.up.railway.app/api/mcp/route` with `Authorization: Bearer Heravej_22`
+
+**Step 3 — A2A Presence Signal**
+```json
+{"tool":"graph.write_cypher","payload":{"query":"MERGE (m:AgentMemory {agentId:$aid,key:'session_start'}) SET m.value=$ts,m.type='heartbeat',m.updatedAt=datetime()","params":{"aid":"codex","ts":"<ISO_TIMESTAMP>"}}}
+```
+
+**Step 4 — Linear Hygiene**
+```json
+{"tool":"linear.issues","payload":{"state":"In Progress","limit":10}}
+```
+Scan Backlog for stale issues (>14d + Urgent/High). Zero tolerance for backlog rot.
+
+**Step 5 — Read Active Backlog Item** from Linear before any implementation.
+
+---
+
+## Communication Channels
+
+### 1. Neural Bridge (MCP — Primary)
+```
+POST https://backend-production-d3da.up.railway.app/api/mcp/route
+Authorization: Bearer Heravej_22
+{"tool":"<TOOL_NAME>","payload":{...}}
+```
+`payload` only — never `args`.
+
+### 2. Orchestrator API
+```
+POST https://orchestrator-production-c27e.up.railway.app/api/chains/execute
+POST https://orchestrator-production-c27e.up.railway.app/api/cognitive/reason
+POST https://orchestrator-production-c27e.up.railway.app/mcp  (JSON-RPC 2.0)
+Authorization: Bearer Heravej_22
+```
+
+### 3. A2A via Neo4j
+Claim: `MERGE (m:AgentMemory {agentId:'codex',key:$scope}) SET m.value=$claim,m.type='claim',m.updatedAt=datetime()`
+Read peers: `MATCH (m:AgentMemory) WHERE m.type IN ['claim','heartbeat'] AND m.agentId <> 'codex' RETURN m ORDER BY m.updatedAt DESC LIMIT 20`
+Close: `MATCH (m:AgentMemory {agentId:'codex',key:$scope}) SET m.type='closure',m.value=$result,m.updatedAt=datetime()`
+
+### 4. RLM Engine
+```
+POST https://rlm-engine-production.up.railway.app/reason
+Authorization: Bearer Heravej_22
+{"query":"...","agent_id":"codex","depth":3}
+```
+
+### 5. Linear — `{"tool":"linear.issues","payload":{"state":"In Progress"}}`
+### 6. Slack — Human escalation only. Bot: kaptajn_klo, workspace T09K7Q2D1GB.
+
+---
+
 ## Final Rule
 
 If it is not verified, it is not done.

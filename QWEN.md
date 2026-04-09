@@ -271,6 +271,37 @@ NEXT MOVE:
 - one concrete execution step only
 ```
 
+## Boot Sequence — MANDATORY on every session start
+
+Execute in order before any task:
+
+**Step 1 — Service Health**
+```bash
+curl -s https://backend-production-d3da.up.railway.app/health | grep -o '"status":"[^"]*"'
+curl -s https://orchestrator-production-c27e.up.railway.app/health | grep -o '"status":"[^"]*"'
+```
+If any service DOWN: report to user before proceeding.
+
+**Step 2 — Lesson Check**
+```json
+{"tool":"call_mcp_tool","payload":{"tool":"audit.lessons","payload":{"agentId":"qwen"}}}
+```
+
+**Step 3 — A2A Presence Signal**
+```json
+{"tool":"call_mcp_tool","payload":{"tool":"graph.write_cypher","payload":{"query":"MERGE (m:AgentMemory {agentId:$aid,key:'session_start'}) SET m.value=$ts,m.type='heartbeat',m.updatedAt=datetime()","params":{"aid":"qwen","ts":"<ISO_TIMESTAMP>"}}}}
+```
+
+**Step 4 — Linear Hygiene**
+```json
+{"tool":"check_tasks","payload":{"project":"WidgeTDC","scope":"active"}}
+```
+Scan Backlog for stale issues (>14d + Urgent/High). Zero tolerance for backlog rot.
+
+**Step 5 — Read Active Backlog Item** via `linear_issues` before any task.
+
+---
+
 ## Final Rule
 
 If it is not enforced, it is not real.
