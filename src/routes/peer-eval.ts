@@ -75,7 +75,10 @@ peerEvalRouter.post('/evaluate', async (req: Request, res: Response) => {
       return
     }
     const evalReport = await hookIntoExecution(agentId, taskId, {
-      taskType, success, metrics, insights,
+      taskType,
+      success: success ?? true,
+      metrics,
+      insights,
     })
     res.json({ success: true, data: { evalId: evalReport.id, selfScore: evalReport.selfScore, novelty: evalReport.novelty } })
   } catch (err) {

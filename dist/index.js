@@ -11494,8 +11494,9 @@ __export(peer_eval_exports, {
 import { v4 as uuid6 } from "uuid";
 async function hookIntoExecution(agentId, taskId, context) {
   const t0 = Date.now();
-  const qualityScore = context.metrics.quality_score ?? (context.success ? 0.7 : 0.2);
-  const latencyPenalty = context.metrics.latency_ms > 1e4 ? 0.1 : 0;
+  const qualityScore = context.metrics?.quality_score ?? (context.success ? 0.7 : 0.2);
+  const latencyMs = context.metrics?.latency_ms ?? 1e3;
+  const latencyPenalty = latencyMs > 1e4 ? 0.1 : 0;
   const selfScore = Math.max(0, Math.min(1, qualityScore - latencyPenalty));
   let novelty = 0.5;
   try {
@@ -11517,10 +11518,10 @@ async function hookIntoExecution(agentId, taskId, context) {
     selfScore,
     confidence: context.success ? 0.8 : 0.5,
     metrics: {
-      cost_usd: context.metrics.cost_usd ?? 0,
-      latency_ms: context.metrics.latency_ms,
+      cost_usd: context.metrics?.cost_usd ?? 0,
+      latency_ms: latencyMs,
       quality_score: qualityScore,
-      token_count: context.metrics.token_count
+      token_count: context.metrics?.token_count
     },
     insights: context.insights ?? [],
     novelty,
@@ -11530,7 +11531,7 @@ async function hookIntoExecution(agentId, taskId, context) {
     createdAt: (/* @__PURE__ */ new Date()).toISOString()
   };
   if (context.success) {
-    await onChainStepSuccess(agentId, context.taskType, context.metrics.latency_ms, "evaluated");
+    await onChainStepSuccess(agentId, context.taskType, latencyMs, "evaluated");
   } else {
     await onChainStepFailure(agentId, context.taskType, "Task failed");
   }
@@ -11747,7 +11748,10 @@ Analyze:
       agent_id: "peer-eval",
       depth: 2
     }, 2e4);
-    const analysis = String(result.answer || result.result || "");
+    const analysis = result ? String(result.answer ?? result.result ?? "") : "RLM cognitive analysis returned no results (check RLM health and fleet data volume)";
+    if (!analysis || analysis.length === 0) {
+      return "Fleet analysis produced empty output (insufficient data or RLM unavailable)";
+    }
     if (analysis.length > 50) {
       try {
         await callMcpTool({
@@ -21664,11 +21668,24 @@ ${lines.join("\n")}`;
     }
     case "peer_eval_evaluate": {
       const { hookIntoExecution: hookIntoExecution2 } = await Promise.resolve().then(() => (init_peer_eval(), peer_eval_exports));
-      const report = await hookIntoExecution2(
-        args.agent_id,
-        args.task_id ?? uuid23(),
-        args.context ?? "Manual evaluation via MCP tool"
-      );
+      const agentId = args.agent_id;
+      const taskId = args.task_id ?? uuid23();
+      const taskType = args.task_type ?? "manual-eval";
+      const success = args.success ?? true;
+      const latencyMs = typeof args.latency_ms === "number" ? args.latency_ms : 1e3;
+      const qualityScore = typeof args.quality_score === "number" ? args.quality_score : void 0;
+      const costUsd = typeof args.cost_usd === "number" ? args.cost_usd : void 0;
+      const insights = Array.isArray(args.insights) ? args.insights : void 0;
+      const report = await hookIntoExecution2(agentId, taskId, {
+        taskType,
+        success,
+        metrics: {
+          latency_ms: latencyMs,
+          quality_score: qualityScore,
+          cost_usd: costUsd
+        },
+        insights
+      });
       return JSON.stringify(report);
     }
     case "peer_eval_analyze": {
@@ -38958,7 +38975,7 @@ peerEvalRouter.post("/evaluate", async (req, res) => {
     }
     const evalReport = await hookIntoExecution(agentId, taskId, {
       taskType,
-      success,
+      success: success ?? true,
       metrics: metrics2,
       insights
     });

@@ -130,8 +130,9 @@ export async function hookIntoExecution(
   const t0 = Date.now()
 
   // Calculate self-score based on available metrics
-  const qualityScore = context.metrics.quality_score ?? (context.success ? 0.7 : 0.2)
-  const latencyPenalty = context.metrics.latency_ms > 10000 ? 0.1 : 0
+  const qualityScore = context.metrics?.quality_score ?? (context.success ? 0.7 : 0.2)
+  const latencyMs = context.metrics?.latency_ms ?? 1000
+  const latencyPenalty = latencyMs > 10000 ? 0.1 : 0
   const selfScore = Math.max(0, Math.min(1, qualityScore - latencyPenalty))
 
   // Calculate novelty by checking existing pheromone trails
@@ -159,10 +160,10 @@ export async function hookIntoExecution(
     selfScore,
     confidence: context.success ? 0.8 : 0.5,
     metrics: {
-      cost_usd: context.metrics.cost_usd ?? 0,
-      latency_ms: context.metrics.latency_ms,
+      cost_usd: context.metrics?.cost_usd ?? 0,
+      latency_ms: latencyMs,
       quality_score: qualityScore,
-      token_count: context.metrics.token_count,
+      token_count: context.metrics?.token_count,
     },
     insights: context.insights ?? [],
     novelty,
@@ -174,7 +175,7 @@ export async function hookIntoExecution(
 
   // ── 1. Deposit pheromones based on outcome ──
   if (context.success) {
-    await onChainStepSuccess(agentId, context.taskType, context.metrics.latency_ms, 'evaluated')
+    await onChainStepSuccess(agentId, context.taskType, latencyMs, 'evaluated')
   } else {
     await onChainStepFailure(agentId, context.taskType, 'Task failed')
   }
@@ -459,7 +460,13 @@ Analyze:
       depth: 2,
     }, 20000)
 
-    const analysis = String(result.answer || result.result || '')
+    const analysis = result
+      ? String(result.answer ?? result.result ?? '')
+      : 'RLM cognitive analysis returned no results (check RLM health and fleet data volume)'
+
+    if (!analysis || analysis.length === 0) {
+      return 'Fleet analysis produced empty output (insufficient data or RLM unavailable)'
+    }
 
     // Store analysis to memory
     if (analysis.length > 50) {

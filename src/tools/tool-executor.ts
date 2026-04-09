@@ -1718,11 +1718,24 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'peer_eval_evaluate': {
       const { hookIntoExecution } = await import('../swarm/peer-eval.js')
-      const report = await hookIntoExecution(
-        args.agent_id as string,
-        (args.task_id as string) ?? uuid(),
-        (args.context as string) ?? 'Manual evaluation via MCP tool'
-      )
+      const agentId = args.agent_id as string
+      const taskId = (args.task_id as string) ?? uuid()
+      const taskType = (args.task_type as string) ?? 'manual-eval'
+      const success = (args.success as boolean) ?? true
+      const latencyMs = typeof args.latency_ms === 'number' ? args.latency_ms : 1000
+      const qualityScore = typeof args.quality_score === 'number' ? args.quality_score : undefined
+      const costUsd = typeof args.cost_usd === 'number' ? args.cost_usd : undefined
+      const insights = Array.isArray(args.insights) ? args.insights as string[] : undefined
+      const report = await hookIntoExecution(agentId, taskId, {
+        taskType,
+        success,
+        metrics: {
+          latency_ms: latencyMs,
+          quality_score: qualityScore,
+          cost_usd: costUsd,
+        },
+        insights,
+      })
       return JSON.stringify(report)
     }
 
