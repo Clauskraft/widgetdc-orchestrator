@@ -134,7 +134,7 @@ function ObservabilityPage() {
 
   const { data: chains, isLoading: loadingChains } = useQuery<ChainResponse>({
     queryKey: ['chains'],
-    queryFn: () => apiGet('/api/chains?limit=20'),
+    queryFn: () => apiGet('/chains?limit=20'),
     refetchInterval: refreshInterval,
   })
 

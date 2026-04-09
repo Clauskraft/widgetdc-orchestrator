@@ -111,7 +111,7 @@ function ProjectOverviewPage() {
 
   const { data: chains, isLoading: loadingChains } = useQuery<{ chains: ChainStatus[] }>({
     queryKey: ['chains'],
-    queryFn: () => apiGet('/api/chains?limit=15'),
+    queryFn: () => apiGet('/chains?limit=15'),
     refetchInterval: 15000,
   })
 
