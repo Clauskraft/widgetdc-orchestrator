@@ -11586,6 +11586,7 @@ async function hookIntoExecution(agentId, taskId, context) {
   }
   state2.totalEvals++;
   state2.lastEvalAt = (/* @__PURE__ */ new Date()).toISOString();
+  await persistState();
   broadcastSSE("peer-eval", {
     event: "eval_complete",
     evalId: evalReport.id,
@@ -11783,6 +11784,18 @@ function getPeerEvalState() {
     lastEvalAt: state2.lastEvalAt
   };
 }
+async function persistState() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const serializable = {
+      ...state2,
+      fleetLearnings: Object.fromEntries(state2.fleetLearnings)
+    };
+    await redis2.set(REDIS_STATE_KEY2, JSON.stringify(serializable));
+  } catch {
+  }
+}
 async function loadState() {
   const redis2 = getRedis();
   if (!redis2) return;
@@ -11799,6 +11812,36 @@ async function loadState() {
         { totalEvals: state2.totalEvals, taskTypes: state2.fleetLearnings.size },
         "PeerEval: restored state from Redis"
       );
+    } else {
+      await rebuildStateFromRecentEvals(redis2);
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, "PeerEval: failed to load state from Redis, starting fresh");
+  }
+}
+async function rebuildStateFromRecentEvals(redis2) {
+  try {
+    const recentRaw = await redis2.zrange(`${REDIS_PREFIX2}recent`, "-inf", "+inf", "BYSCORE");
+    if (recentRaw && recentRaw.length > 0) {
+      let rebuilt = 0;
+      for (const raw of recentRaw) {
+        try {
+          const eval_ = JSON.parse(raw);
+          updateFleetLearning(eval_);
+          state2.totalEvals++;
+          state2.lastEvalAt = eval_.createdAt;
+          if (eval_.selfScore >= BROADCAST_THRESHOLD && eval_.novelty >= NOVELTY_THRESHOLD) {
+            state2.totalBestPracticesShared++;
+          }
+          rebuilt++;
+        } catch {
+        }
+      }
+      logger.info(
+        { rebuilt, totalEvals: state2.totalEvals, taskTypes: state2.fleetLearnings.size },
+        "PeerEval: rebuilt state from recent evals in Redis"
+      );
+      await persistState();
     }
   } catch {
   }
@@ -19934,7 +19977,7 @@ async function persistNodes(experimentName) {
   await redis2.set(nodeKey(experimentName), data).catch(() => {
   });
 }
-async function persistState(experimentName) {
+async function persistState2(experimentName) {
   const redis2 = getRedis();
   if (!redis2) return;
   const state4 = {
@@ -20050,7 +20093,7 @@ async function runStep(config2) {
   }
   lastStepAt = (/* @__PURE__ */ new Date()).toISOString();
   await persistNodes(config2.experimentName);
-  await persistState(config2.experimentName);
+  await persistState2(config2.experimentName);
   if (node.analysis.length > 20) {
     try {
       await callMcpTool({
@@ -29538,7 +29581,7 @@ async function runAnomalyScan() {
       critical: critCount,
       duration_ms: Date.now() - t0
     }, "Anomaly scan complete");
-    await persistState2();
+    await persistState3();
     return { anomalies, health, analysis, patterns: state3.patterns };
   }
   broadcastSSE("anomaly-watcher", {
@@ -29548,10 +29591,10 @@ async function runAnomalyScan() {
     critical: 0,
     duration_ms: Date.now() - t0
   });
-  await persistState2();
+  await persistState3();
   return { anomalies: [], health, analysis: "", patterns: state3.patterns };
 }
-async function persistState2() {
+async function persistState3() {
   const redis2 = getRedis();
   if (!redis2) return;
   try {
@@ -29657,7 +29700,7 @@ async function initAnomalyWatcher() {
   await loadState3();
   if (state3.patterns.length === 0) {
     state3.patterns = [...KNOWN_FAILURE_PATTERNS];
-    await persistState2();
+    await persistState3();
     logger.info(
       { seeded: state3.patterns.length },
       "Anomaly-watcher: seeded known failure patterns from production history"

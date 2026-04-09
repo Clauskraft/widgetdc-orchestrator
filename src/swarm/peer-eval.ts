@@ -243,6 +243,9 @@ export async function hookIntoExecution(
   state.totalEvals++
   state.lastEvalAt = new Date().toISOString()
 
+  // Persist state to Redis so it survives restarts
+  await persistState()
+
   broadcastSSE('peer-eval', {
     event: 'eval_complete',
     evalId: evalReport.id,
@@ -538,6 +541,36 @@ async function loadState(): Promise<void> {
       }
       logger.info({ totalEvals: state.totalEvals, taskTypes: state.fleetLearnings.size },
         'PeerEval: restored state from Redis')
+    } else {
+      // No persisted state — rebuild fleet learnings from recent evals in Redis
+      await rebuildStateFromRecentEvals(redis)
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, 'PeerEval: failed to load state from Redis, starting fresh')
+  }
+}
+
+/** Rebuild fleet learning state from recent evals stored in Redis sorted set. */
+async function rebuildStateFromRecentEvals(redis: any): Promise<void> {
+  try {
+    const recentRaw = await redis.zrange(`${REDIS_PREFIX}recent`, '-inf', '+inf', 'BYSCORE')
+    if (recentRaw && recentRaw.length > 0) {
+      let rebuilt = 0
+      for (const raw of recentRaw) {
+        try {
+          const eval_ = JSON.parse(raw) as EvalReport
+          updateFleetLearning(eval_)
+          state.totalEvals++
+          state.lastEvalAt = eval_.createdAt
+          if (eval_.selfScore >= BROADCAST_THRESHOLD && eval_.novelty >= NOVELTY_THRESHOLD) {
+            state.totalBestPracticesShared++
+          }
+          rebuilt++
+        } catch { /* skip parse errors */ }
+      }
+      logger.info({ rebuilt, totalEvals: state.totalEvals, taskTypes: state.fleetLearnings.size },
+        'PeerEval: rebuilt state from recent evals in Redis')
+      await persistState()
     }
   } catch { /* */ }
 }
