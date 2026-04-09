@@ -32,7 +32,7 @@ const MATRIX_ALIAS_TARGETS: Record<string, string> = {
   'claude-opus': 'claude-sonnet-4-20250514', // opus not in matrix — route to sonnet
   'gemini-flash': 'gemini-2.0-flash',
   'deepseek-chat': 'deepseek-chat',
-  'qwen-plus': 'qwen-plus',
+  'qwen-plus': 'qwen3.6-plus',
   'gpt-4o': 'gpt-4o',
 }
 
@@ -227,7 +227,7 @@ const MODELS: ModelEntry[] = [
   { id: 'claude-opus', provider: 'claude', displayName: 'Claude Opus 4' },
   { id: 'gemini-flash', provider: 'gemini', displayName: 'Gemini 2.0 Flash' },
   { id: 'deepseek-chat', provider: 'deepseek', displayName: 'DeepSeek Chat' },
-  { id: 'qwen-plus', provider: 'qwen', displayName: 'Qwen Plus' },
+  { id: 'qwen-plus', provider: 'qwen', displayName: 'Qwen 3.6 Plus' },
   { id: 'gpt-4o', provider: 'openai', displayName: 'GPT-4o' },
   { id: 'groq-llama', provider: 'groq', displayName: 'Groq Llama 3.3 70B' },
   // Consulting Assistants (LIN-524)
