@@ -509,3 +509,8 @@ process.on('SIGINT', () => {
   logger.info('SIGINT received - shutting down')
   server.close(() => { process.exit(0) })
 })
+
+// Graceful shutdown on unhandled rejections
+process.on('unhandledRejection', (reason) => {
+  logger.error({ reason: String(reason) }, 'Unhandled rejection')
+})

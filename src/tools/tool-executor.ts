@@ -1861,27 +1861,21 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       return JSON.stringify(best)
     }
 
-    case 'inventor_stop': {
+        case 'inventor_stop': {
       const { stopInventor } = await import('../intelligence/inventor-loop.js')
       const result = stopInventor()
       return `${result.success ? 'Stopped' : 'Failed'}: ${result.message}`
     }
 
     case 'inventor_history': {
+      const limit = Math.min(50, Math.max(1, Number(input?.limit ?? 20)))
       const { getExperimentHistory } = await import('../intelligence/inventor-loop.js')
-      const limit = Math.min(Math.max(1, Number(args.limit) || 20), 50)
-      return JSON.stringify(getExperimentHistory(limit))
+      const history = await getExperimentHistory(limit)
+      if (!history.length) return 'No experiment history found. Run experiments with inventor_run.'
+      return JSON.stringify(history, null, 2)
     }
 
-    default: {
-      // Check forged tools before giving up
-      try {
-        const { hasForgedTool, executeForgedTool } = await import('../llm/skill-forge.js')
-        if (hasForgedTool(name)) {
-          return await executeForgedTool(name, args)
-        }
-      } catch { /* not a forged tool */ }
-      return `Unknown tool: ${name}`
-    }
+    default:
+      throw new Error(`Unknown tool: ${toolName}`)
   }
 }

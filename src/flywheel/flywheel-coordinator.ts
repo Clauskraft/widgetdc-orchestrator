@@ -307,45 +307,6 @@ async function scorePlatformHealth(): Promise<PillarScore> {
       ],
     }
   } catch {
-    return { name: 'Platform Health', score: 0.5, trend: 'flat', headline: 'Health data unavailable', details: [] }
+   return { success: false, error: String(e) }
   }
-}
-
-// ─── Optimization identifier ──────────────────────────────────────────────────
-
-function identifyOptimizations(pillars: PillarScore[]): FlywheelReport['nextOptimizations'] {
-  const opts: FlywheelReport['nextOptimizations'] = []
-  for (const p of pillars) {
-    if (p.score < 0.4) {
-      opts.push({
-        title: `Improve ${p.name} (score ${(p.score * 100).toFixed(0)}%)`,
-        pillar: p.name,
-        impact: 1 - p.score,
-        action: getActionForPillar(p.name, p),
-      })
-    } else if (p.score < 0.7) {
-      opts.push({
-        title: `Grow ${p.name} (${(p.score * 100).toFixed(0)}% → 70%+)`,
-        pillar: p.name,
-        impact: (0.7 - p.score) * 0.5,
-        action: getActionForPillar(p.name, p),
-      })
-    }
-  }
-  return opts.sort((a, b) => b.impact - a.impact)
-}
-
-function getActionForPillar(name: string, p: PillarScore): string {
-  switch (name) {
-    case 'Cost Efficiency': return p.details[0]?.includes('degraded') ? 'Investigate degraded agents, check error logs' : 'Add cost tracking to more chain steps'
-    case 'Fleet Intelligence': return 'Run more chain executions to accumulate peer-eval data'
-    case 'Adoption': return 'Enable advanced tools (reason_deeply, kg_rag, inventor_run) in more chains'
-    case 'Pheromone Signal': return 'Deposit attraction pheromones on high-value task types'
-    case 'Platform Health': return 'Check /health endpoint and error logs'
-    default: return 'Review telemetry data'
-  }
-}
-
-function fallbackPillar(name: string): PillarScore {
-  return { name, score: 0.5, trend: 'flat', headline: 'Data unavailable', details: [] }
 }
