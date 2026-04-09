@@ -432,6 +432,17 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 })
 
 // ─── Boot ────────────────────────────────────────────────────────────────────
+// Start listening immediately so Railway healthcheck passes while boot runs.
+// Validation (74 live backend calls) can take >2min when backend is rate-limiting —
+// moving it after listen() prevents healthcheck timeout on deploy.
+initWebSocket(server)
+server.listen(config.port, () => {
+  logger.info(
+    { port: config.port, backend: config.backendUrl, env: config.nodeEnv, redis: isRedisEnabled() },
+    'WidgeTDC Orchestrator listening (booting...)'
+  )
+})
+
 async function boot() {
   // Bulletproof W1: Fail-fast startup validation — registry↔executor parity
   // If any tool in TOOL_REGISTRY has no executor case, refuse to start.
@@ -462,14 +473,8 @@ async function boot() {
     logger.warn({ err: String(err) }, 'Cron boot-kickstart encountered error')
   })
   initOpenClaw()
-  initWebSocket(server)
 
-  server.listen(config.port, () => {
-    logger.info(
-      { port: config.port, backend: config.backendUrl, env: config.nodeEnv, redis: isRedisEnabled() },
-      'WidgeTDC Orchestrator ready'
-    )
-  })
+  logger.info('WidgeTDC Orchestrator boot complete')
 }
 
 boot().catch(err => {

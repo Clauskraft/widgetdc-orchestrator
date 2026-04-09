@@ -39762,6 +39762,13 @@ app.use((err, _req, res, _next) => {
     error: { code: "INTERNAL_ERROR", message: "Internal server error", status_code: 500 }
   });
 });
+initWebSocket(server);
+server.listen(config.port, () => {
+  logger.info(
+    { port: config.port, backend: config.backendUrl, env: config.nodeEnv, redis: isRedisEnabled() },
+    "WidgeTDC Orchestrator listening (booting...)"
+  );
+});
 async function boot() {
   const { validateOrThrow: validateOrThrow2 } = await Promise.resolve().then(() => (init_startup_validator(), startup_validator_exports));
   await validateOrThrow2();
@@ -39783,13 +39790,7 @@ async function boot() {
     logger.warn({ err: String(err) }, "Cron boot-kickstart encountered error");
   });
   initOpenClaw();
-  initWebSocket(server);
-  server.listen(config.port, () => {
-    logger.info(
-      { port: config.port, backend: config.backendUrl, env: config.nodeEnv, redis: isRedisEnabled() },
-      "WidgeTDC Orchestrator ready"
-    );
-  });
+  logger.info("WidgeTDC Orchestrator boot complete");
 }
 boot().catch((err) => {
   logger.error({ err: String(err) }, "Boot failed");
