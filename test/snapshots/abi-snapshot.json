@@ -1296,11 +1296,1650 @@
         "list"
       ],
       "deprecated": false
+    },
+    {
+      "name": "engagement_create",
+      "namespace": "engagement",
+      "version": "1.0",
+      "description": "Create a first-class Engagement entity. Writes to Neo4j via MERGE (Engagement + USES_METHODOLOGY edges) and indexes in raptor.index for semantic precedent retrieval. Required: client, domain, objective, start_date, target_end_date.",
+      "category": "engagement",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "client": {
+            "type": "string",
+            "description": "Client name"
+          },
+          "domain": {
+            "type": "string",
+            "description": "Engagement domain (Finance, Healthcare, Operations, etc.)"
+          },
+          "objective": {
+            "type": "string",
+            "description": "Engagement objective (min 10 chars)"
+          },
+          "start_date": {
+            "type": "string",
+            "description": "ISO date string"
+          },
+          "target_end_date": {
+            "type": "string",
+            "description": "ISO date string"
+          },
+          "budget_dkk": {
+            "type": "number",
+            "description": "Budget in DKK (optional)"
+          },
+          "team_size": {
+            "type": "number",
+            "description": "Team size (optional)"
+          },
+          "methodology_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Methodology framework names"
+          }
+        },
+        "required": [
+          "client",
+          "domain",
+          "objective",
+          "start_date",
+          "target_end_date"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 15000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "engagement",
+        "create"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "engagement_match",
+      "namespace": "engagement",
+      "version": "1.0",
+      "description": "Find similar past engagements via Cypher (actual :Engagement nodes ranked by outcome grade + methodology overlap + freshness) with dualChannelRAG fallback. Returns top precedents with outcome grades and staleness flags.",
+      "category": "engagement",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "objective": {
+            "type": "string",
+            "description": "Engagement objective to match against"
+          },
+          "domain": {
+            "type": "string",
+            "description": "Domain filter"
+          },
+          "max_results": {
+            "type": "number",
+            "description": "Max precedents returned (default 5)"
+          }
+        },
+        "required": [
+          "objective",
+          "domain"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 30000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "engagement",
+        "match"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "engagement_plan",
+      "namespace": "engagement",
+      "version": "1.0",
+      "description": "Generate structured consulting plan (phases, risks, skills) via RLM /cognitive/analyze + 4-channel retrieval (graphrag 3-hop + srag + cypher + kg_rag) + context folding. Enforces smart gates: sanity validation, consensus gate for high-stakes (>20M DKK or >20 team or >40w), RLM mission for complex (>40w).",
+      "category": "engagement",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "objective": {
+            "type": "string",
+            "description": "Engagement objective"
+          },
+          "domain": {
+            "type": "string",
+            "description": "Consulting domain"
+          },
+          "duration_weeks": {
+            "type": "number",
+            "description": "Plan duration 1-260 weeks (hard cap)"
+          },
+          "team_size": {
+            "type": "number",
+            "description": "Team size 1-100 (hard cap)"
+          },
+          "budget_dkk": {
+            "type": "number",
+            "description": "Budget in DKK, max 500M hard cap"
+          },
+          "engagement_id": {
+            "type": "string",
+            "description": "Attach plan to existing engagement"
+          }
+        },
+        "required": [
+          "objective",
+          "domain",
+          "duration_weeks",
+          "team_size"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 120000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "engagement",
+        "plan"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "engagement_outcome",
+      "namespace": "engagement",
+      "version": "1.0",
+      "description": "Record engagement completion outcome. Writes EngagementOutcome node + HAS_OUTCOME edge to Neo4j, sets engagement status=completed, and sends Q-learning reward to adaptive-rag based on grade + precedent accuracy.",
+      "category": "engagement",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "engagement_id": {
+            "type": "string",
+            "description": "Target engagement ID"
+          },
+          "grade": {
+            "type": "string",
+            "description": "Outcome grade"
+          },
+          "actual_end_date": {
+            "type": "string",
+            "description": "ISO date actual completion"
+          },
+          "deliverables_shipped": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of shipped deliverables"
+          },
+          "what_went_well": {
+            "type": "string",
+            "description": "Success narrative"
+          },
+          "what_went_wrong": {
+            "type": "string",
+            "description": "Failure narrative"
+          },
+          "recorded_by": {
+            "type": "string",
+            "description": "Recorder agent/user ID"
+          },
+          "precedent_match_accuracy": {
+            "type": "number",
+            "description": "0-1 how well top precedent predicted outcome"
+          }
+        },
+        "required": [
+          "engagement_id",
+          "grade",
+          "actual_end_date",
+          "deliverables_shipped",
+          "what_went_well",
+          "what_went_wrong",
+          "recorded_by"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 15000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "engagement",
+        "outcome"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "engagement_list",
+      "namespace": "engagement",
+      "version": "1.0",
+      "description": "List recent engagements from Redis + Neo4j. Supports limit filter. Returns most recent first by createdAt.",
+      "category": "engagement",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "number",
+            "description": "Max engagements returned (default 20, max 100)"
+          }
+        }
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 10000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "engagement",
+        "list"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "memory_store",
+      "namespace": "memory",
+      "version": "1.0",
+      "description": "Store an entry in agent working memory (8-layer memory system, LIN-582 SNOUT-4). Backed by Redis with optional TTL. Retrievable via memory_retrieve.",
+      "category": "memory",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "description": "Agent identifier"
+          },
+          "key": {
+            "type": "string",
+            "description": "Memory key"
+          },
+          "value": {
+            "type": "string",
+            "description": "Memory value (any JSON-serializable)"
+          },
+          "ttl": {
+            "type": "number",
+            "description": "TTL in seconds (default: 3600)"
+          }
+        },
+        "required": [
+          "agent_id",
+          "key",
+          "value"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 5000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "memory",
+        "store"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "memory_retrieve",
+      "namespace": "memory",
+      "version": "1.0",
+      "description": "Retrieve a specific memory entry or list all entries for an agent (LIN-582). Working memory is the agent cognition layer.",
+      "category": "memory",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "description": "Agent identifier"
+          },
+          "key": {
+            "type": "string",
+            "description": "Specific key (omit to list all for agent)"
+          }
+        },
+        "required": [
+          "agent_id"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 5000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "memory",
+        "retrieve"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "failure_harvest",
+      "namespace": "intelligence",
+      "version": "1.0",
+      "description": "Harvest recent orchestrator failures (timeouts, 502s, auth errors, MCP errors) for Red Queen learning loop (LIN-567). Returns categorized failure summary with counts and patterns.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "window_hours": {
+            "type": "number",
+            "description": "Lookback window in hours (default: 24)"
+          }
+        }
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 30000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "failure",
+        "harvest"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "context_fold",
+      "namespace": "cognitive",
+      "version": "1.0",
+      "description": "Compress large context via RLM /cognitive/fold (LIN-568 CaaS Mercury). Auto-selects strategy (baseline/neural/deepseek). Rate limited 100 req/day per API key.",
+      "category": "cognitive",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Text to compress"
+          },
+          "query": {
+            "type": "string",
+            "description": "Query context for attention-focused folding"
+          },
+          "budget": {
+            "type": "number",
+            "description": "Target token budget (default 4000)"
+          },
+          "domain": {
+            "type": "string",
+            "description": "Domain hint for strategy selection"
+          }
+        },
+        "required": [
+          "text"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 30000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "context",
+        "fold"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "competitive_crawl",
+      "namespace": "intelligence",
+      "version": "1.0",
+      "description": "Trigger competitive phagocytosis crawl (LIN-566). Fetches competitor docs, extracts capabilities via DeepSeek LLM, MERGEs into Neo4j as :Competitor + :Capability nodes, produces gap report.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 180000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "competitive",
+        "crawl"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "loose_ends_scan",
+      "namespace": "intelligence",
+      "version": "1.0",
+      "description": "Scan synthesis funnel for loose ends — unresolved dependencies, contradictions, orphaned blocks (LIN-535). Returns scan result with categorized findings.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 60000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "loose",
+        "ends",
+        "scan"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "llm_chat",
+      "namespace": "llm",
+      "version": "1.0",
+      "description": "Direct LLM chat proxy supporting 6 providers (deepseek, qwen, openai, groq, gemini, claude). Returns provider/model/content.",
+      "category": "llm",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "description": "LLM provider: deepseek|qwen|openai|groq|gemini|claude"
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "role": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "role",
+                "content"
+              ]
+            },
+            "description": "Chat messages array"
+          },
+          "model": {
+            "type": "string",
+            "description": "Model override (defaults per provider)"
+          },
+          "temperature": {
+            "type": "number",
+            "description": "0-2 sampling temperature"
+          },
+          "max_tokens": {
+            "type": "number",
+            "description": "Max tokens to generate"
+          }
+        },
+        "required": [
+          "provider",
+          "messages"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 60000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "llm",
+        "chat"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "llm_providers",
+      "namespace": "llm",
+      "version": "1.0",
+      "description": "List available LLM providers configured in the orchestrator with their default models.",
+      "category": "llm",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 5000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "llm",
+        "providers"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "decision_certify",
+      "namespace": "decisions",
+      "version": "1.0",
+      "description": "Certify an assembly as an architecture decision (LIN-536). Traverses Assembly → Blocks → Patterns → Signals lineage, produces DecisionCertificate with full provenance trail stored in Redis.",
+      "category": "decisions",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "assembly_id": {
+            "type": "string",
+            "description": "Source assembly ID"
+          },
+          "title": {
+            "type": "string",
+            "description": "Decision title"
+          },
+          "description": {
+            "type": "string",
+            "description": "Decision description"
+          },
+          "decided_by": {
+            "type": "string",
+            "description": "Decider agent/user ID"
+          }
+        },
+        "required": [
+          "assembly_id",
+          "title"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 30000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "decision",
+        "certify"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "decision_list",
+      "namespace": "decisions",
+      "version": "1.0",
+      "description": "List all certified decisions from the orchestrator Redis store. Returns decision metadata sorted by creation.",
+      "category": "decisions",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "number",
+            "description": "Max decisions returned (default 50)"
+          }
+        }
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 10000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "decision",
+        "list"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "decision_lineage",
+      "namespace": "decisions",
+      "version": "1.0",
+      "description": "Build full lineage chain for a decision or assembly — traces from Assembly → Blocks → Patterns → Signals via Neo4j graph traversal. Used for audit and provenance (LIN-536).",
+      "category": "decisions",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "assembly_id": {
+            "type": "string",
+            "description": "Assembly ID to trace lineage from"
+          }
+        },
+        "required": [
+          "assembly_id"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 20000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "decision",
+        "lineage"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "artifact_list",
+      "namespace": "assembly",
+      "version": "1.0",
+      "description": "List AnalysisArtifact objects from the broker (G4.2-5). Artifacts are Obsidian-Markdown exportable analysis outputs with blocks (text, table, chart, kpi_card, cypher, mermaid).",
+      "category": "assembly",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "number",
+            "description": "Max artifacts returned (default 20)"
+          }
+        }
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 10000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "artifact",
+        "list"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "artifact_get",
+      "namespace": "assembly",
+      "version": "1.0",
+      "description": "Retrieve a specific AnalysisArtifact by ID with all blocks, graph refs, tags, and metadata.",
+      "category": "assembly",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {
+            "type": "string",
+            "description": "Artifact $id"
+          }
+        },
+        "required": [
+          "artifact_id"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 5000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "artifact",
+        "get"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "drill_start",
+      "namespace": "graph",
+      "version": "1.0",
+      "description": "Start a hierarchical drill-down session (G4.15). Creates Redis session and returns children at the domain level. Navigation path: Domain → Segment → Framework → KPI → Trend → Recommendation.",
+      "category": "graph",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "description": "Consulting domain to begin drill from"
+          }
+        },
+        "required": [
+          "domain"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 15000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "drill",
+        "start"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "drill_down",
+      "namespace": "graph",
+      "version": "1.0",
+      "description": "Drill down into a child level in an active session (G4.16). Pushes current position to stack, moves to target_id at target_level.",
+      "category": "graph",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "description": "Active drill session ID"
+          },
+          "target_id": {
+            "type": "string",
+            "description": "Child node ID to drill into"
+          },
+          "target_level": {
+            "type": "string",
+            "description": "Child level: segment|framework|kpi|trend|recommendation"
+          }
+        },
+        "required": [
+          "session_id",
+          "target_id",
+          "target_level"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 15000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "drill",
+        "down"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "drill_up",
+      "namespace": "graph",
+      "version": "1.0",
+      "description": "Navigate up one level in drill session (G4.17). Pops parent from stack, returns children at parent level.",
+      "category": "graph",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "description": "Active drill session ID"
+          }
+        },
+        "required": [
+          "session_id"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 15000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "drill"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "drill_children",
+      "namespace": "graph",
+      "version": "1.0",
+      "description": "Fetch children at current drill position without navigating (G4.18). Safe read-only inspection.",
+      "category": "graph",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "description": "Active drill session ID"
+          }
+        },
+        "required": [
+          "session_id"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 10000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "drill",
+        "children"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "research_harvest",
+      "namespace": "intelligence",
+      "version": "1.0",
+      "description": "Trigger the S1-S4 research harvesting pipeline — Extract (OSINT) → Map (cognitive analyze) → Sync/Inject (Neo4j) → Verify (audit). Returns execution_id.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "URL or local path to harvest"
+          },
+          "source_type": {
+            "type": "string",
+            "description": "Source type (e.g. MEDIA, BLOG, PAPER)"
+          },
+          "topic": {
+            "type": "string",
+            "description": "Topic context for mapping"
+          },
+          "weights": {
+            "type": "object",
+            "description": "Optional salience weights"
+          }
+        },
+        "required": [
+          "url"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 180000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "research",
+        "harvest"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "hyperagent_auto_run",
+      "namespace": "hyperagent",
+      "version": "1.0",
+      "description": "Trigger an autonomous execution cycle. Prioritizes targets by fitness function, plans via RLM, executes via chain engine, evaluates, discovers issues, and evolves weights. Callable from ANY repo via MCP. Persistent memory ensures continuity across sessions and repos.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "phase": {
+            "type": "string",
+            "enum": [
+              "phase_0",
+              "phase_1",
+              "phase_2",
+              "phase_3"
+            ],
+            "description": "Override phase (default: current)"
+          },
+          "max_targets": {
+            "type": "number",
+            "description": "Max targets per cycle (default: phase-dependent batch size)"
+          },
+          "caller_repo": {
+            "type": "string",
+            "description": "Calling repo identifier for cross-repo memory tracking"
+          }
+        }
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 300000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "hyperagent",
+        "auto",
+        "run"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "hyperagent_auto_status",
+      "namespace": "hyperagent",
+      "version": "1.0",
+      "description": "Get current autonomous executor status — phase, fitness score, edge scores, running state, cycle count, last cycle results. Callable from ANY repo via MCP.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "include_history": {
+            "type": "boolean",
+            "description": "Include last N cycle results (default: false)"
+          },
+          "history_limit": {
+            "type": "number",
+            "description": "Number of historical cycles to include (default: 5)"
+          }
+        }
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 10000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "hyperagent",
+        "auto",
+        "status"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "hyperagent_auto_memory",
+      "namespace": "hyperagent",
+      "version": "1.0",
+      "description": "Read/write persistent cross-repo memory for the autonomous executor. Stores lessons, discoveries, and execution context in Redis + Neo4j. Memory is keyed by domain and persists across sessions, repos, and restarts.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "Memory operation"
+          },
+          "domain": {
+            "type": "string",
+            "description": "Memory domain (e.g. \"lessons\", \"discoveries\", \"fitness\", \"edges\")"
+          },
+          "key": {
+            "type": "string",
+            "description": "Specific memory key (for read/write)"
+          },
+          "value": {
+            "type": "string",
+            "description": "Value to store (for write)"
+          },
+          "caller_repo": {
+            "type": "string",
+            "description": "Calling repo for provenance tracking"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 15000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "hyperagent",
+        "auto",
+        "memory"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "hyperagent_auto_issues",
+      "namespace": "hyperagent",
+      "version": "1.0",
+      "description": "List all issues discovered during autonomous execution cycles. Issues are accumulated across all cycles and repos. Useful for cross-repo coordination and backlog grooming.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "number",
+            "description": "Max issues to return (default: 50)"
+          },
+          "since_cycle": {
+            "type": "string",
+            "description": "Only issues discovered after this cycle ID"
+          },
+          "caller_repo": {
+            "type": "string",
+            "description": "Calling repo identifier"
+          }
+        }
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 10000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "hyperagent",
+        "auto",
+        "issues"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "pheromone_status",
+      "namespace": "pheromone",
+      "version": "1.0",
+      "description": "Get pheromone layer status: active pheromone count, total deposits, decay cycles, amplifications, trail count. Use to check flywheel health.",
+      "category": "monitor",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 5000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "pheromone",
+        "status"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "pheromone_sense",
+      "namespace": "pheromone",
+      "version": "1.0",
+      "description": "Sense pheromones in a domain — returns active signals ranked by strength. Use before task execution to find best trails, or to check which strategies are working in a domain.",
+      "category": "monitor",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "description": "Domain to sense (e.g., \"research\", \"analysis\", \"chain:sequential\")"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "attraction",
+              "repellent",
+              "trail",
+              "external",
+              "amplification"
+            ],
+            "description": "Filter by pheromone type"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Filter by tags"
+          },
+          "min_strength": {
+            "type": "number",
+            "description": "Minimum strength threshold (0-1, default 0.1)"
+          },
+          "limit": {
+            "type": "number",
+            "description": "Max results (default 20)"
+          }
+        }
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 5000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "pheromone",
+        "sense"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "pheromone_deposit",
+      "namespace": "pheromone",
+      "version": "1.0",
+      "description": "Deposit a pheromone signal — attraction (good result), repellent (bad result), trail (successful path), or external (outside intelligence). Use after task completion to share learnings with the fleet.",
+      "category": "monitor",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Pheromone type"
+          },
+          "domain": {
+            "type": "string",
+            "description": "Domain (e.g., \"research\", \"analysis\", \"cost-optimization\")"
+          },
+          "source": {
+            "type": "string",
+            "description": "Who deposited (agent ID or system)"
+          },
+          "strength": {
+            "type": "number",
+            "description": "Signal strength 0-1 (default 0.5)"
+          },
+          "label": {
+            "type": "string",
+            "description": "Human-readable label for the signal"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Classification tags"
+          },
+          "metadata": {
+            "type": "object",
+            "description": "Numeric metrics (e.g., { score: 0.9, latency_ms: 50 })"
+          }
+        },
+        "required": [
+          "type",
+          "domain",
+          "source"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 5000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "pheromone",
+        "deposit"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "pheromone_heatmap",
+      "namespace": "pheromone",
+      "version": "1.0",
+      "description": "Get cross-domain pheromone heatmap — shows which domains have the strongest signals and most activity. Use for strategic overview of where the flywheel is spinning fastest.",
+      "category": "monitor",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 5000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "pheromone",
+        "heatmap"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "peer_eval_status",
+      "namespace": "peereval",
+      "version": "1.0",
+      "description": "Get fleet learning status: total evals, task types tracked, best practices shared. Use to check if the fleet is learning effectively.",
+      "category": "monitor",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 5000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "peer",
+        "eval",
+        "status"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "peer_eval_fleet",
+      "namespace": "peereval",
+      "version": "1.0",
+      "description": "Get fleet learning data for a specific task type or all task types. Returns best agent, average efficiency, top strategies from pheromone trails, and EMA-aggregated scores.",
+      "category": "monitor",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "task_type": {
+            "type": "string",
+            "description": "Specific task type to query (omit for all)"
+          }
+        }
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 10000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "peer",
+        "eval",
+        "fleet"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "peer_eval_evaluate",
+      "namespace": "peereval",
+      "version": "1.0",
+      "description": "Trigger a manual peer evaluation for an agent task. Records self-assessment, deposits pheromones, updates fleet learning, and broadcasts best practices if score + novelty are high.",
+      "category": "monitor",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "description": "Agent that performed the task"
+          },
+          "task_id": {
+            "type": "string",
+            "description": "Task identifier"
+          },
+          "context": {
+            "type": "string",
+            "description": "What the agent did (for self-assessment prompt)"
+          }
+        },
+        "required": [
+          "agent_id"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 15000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "peer",
+        "eval",
+        "evaluate"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "peer_eval_analyze",
+      "namespace": "peereval",
+      "version": "1.0",
+      "description": "Run RLM-powered fleet analysis — identifies underperformers, top strategies, and strategic recommendations across all task types. Expensive but high-value. Runs weekly via cron.",
+      "category": "monitor",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 45000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "peer",
+        "eval",
+        "analyze"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "inventor_run",
+      "namespace": "inventor",
+      "version": "1.0",
+      "description": "Start or resume an Inventor evolution experiment. Fire-and-forget — poll inventor_status for progress. Requires experiment name + task description. Supports UCB1, greedy, random, or island (MAP-Elites) sampling.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "experiment_name": {
+            "type": "string",
+            "description": "Unique experiment identifier (used for Redis/Neo4j namespacing)"
+          },
+          "task_description": {
+            "type": "string",
+            "description": "Problem description to evolve solutions for"
+          },
+          "initial_artifact": {
+            "type": "string",
+            "description": "Optional seed solution to start from"
+          },
+          "sampling_algorithm": {
+            "type": "string",
+            "enum": [
+              "ucb1",
+              "greedy",
+              "random",
+              "island"
+            ],
+            "description": "Sampling strategy (default: ucb1)"
+          },
+          "sample_n": {
+            "type": "number",
+            "description": "Number of parent nodes to sample per step (default: 3)"
+          },
+          "max_steps": {
+            "type": "number",
+            "description": "Maximum evolution steps (default: 20)"
+          },
+          "chain_mode": {
+            "type": "string",
+            "enum": [
+              "sequential",
+              "parallel",
+              "debate"
+            ],
+            "description": "Chain execution mode (default: sequential)"
+          },
+          "resume": {
+            "type": "boolean",
+            "description": "Resume a paused experiment (default: false)"
+          }
+        },
+        "required": [
+          "experiment_name",
+          "task_description"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 30000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "inventor",
+        "run"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "inventor_status",
+      "namespace": "inventor",
+      "version": "1.0",
+      "description": "Get current Inventor experiment status: running state, current step, total steps, nodes created, best score, best node ID, sampling algorithm, and last error if any.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 5000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "inventor",
+        "status"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "inventor_nodes",
+      "namespace": "inventor",
+      "version": "1.0",
+      "description": "List all Inventor trial nodes from current or last experiment. Sortable by score or creation time. Each node has: artifact, score, metrics, analysis, motivation, parent lineage.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sort": {
+            "type": "string",
+            "enum": [
+              "score",
+              "created"
+            ],
+            "description": "Sort order (default: score)"
+          },
+          "limit": {
+            "type": "number",
+            "description": "Max nodes to return (default: 50, max: 200)"
+          },
+          "offset": {
+            "type": "number",
+            "description": "Pagination offset (default: 0)"
+          }
+        }
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 5000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "inventor",
+        "nodes"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "inventor_node",
+      "namespace": "inventor",
+      "version": "1.0",
+      "description": "Get a specific Inventor trial node by ID. Returns full artifact, score, metrics, analysis, motivation, parent ID, island, visit count, and timestamps.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "node_id": {
+            "type": "string",
+            "description": "The trial node ID to retrieve"
+          }
+        },
+        "required": [
+          "node_id"
+        ]
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 5000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "inventor",
+        "node"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "inventor_best",
+      "namespace": "inventor",
+      "version": "1.0",
+      "description": "Get the best-scoring Inventor trial node from the current or last experiment. Returns the winning solution with full artifact, score breakdown, and evolution lineage.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 5000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "inventor",
+        "best"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "inventor_stop",
+      "namespace": "inventor",
+      "version": "1.0",
+      "description": "Stop the currently running Inventor experiment gracefully. The experiment will halt after the current step completes and persist results to history.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 5000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "inventor",
+        "stop"
+      ],
+      "deprecated": false
+    },
+    {
+      "name": "inventor_history",
+      "namespace": "inventor",
+      "version": "1.0",
+      "description": "List past Inventor experiments with their status, scores, and configuration. Returns up to 20 most recent experiments from Redis history.",
+      "category": "mcp",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "number",
+            "description": "Max experiments to return (default: 20, max: 50)"
+          }
+        }
+      },
+      "handler": "orchestrator",
+      "backendTool": null,
+      "timeoutMs": 5000,
+      "authRequired": true,
+      "availableVia": [
+        "openai",
+        "openapi",
+        "mcp"
+      ],
+      "tags": [
+        "inventor",
+        "history"
+      ],
+      "deprecated": false
     }
   ],
   "protocols": {
     "openai": {
-      "count": 32,
+      "count": 74,
       "tools": [
         "search_knowledge",
         "reason_deeply",
@@ -1333,11 +2972,53 @@
         "moa_query",
         "forge_tool",
         "forge_analyze_gaps",
-        "forge_list"
+        "forge_list",
+        "engagement_create",
+        "engagement_match",
+        "engagement_plan",
+        "engagement_outcome",
+        "engagement_list",
+        "memory_store",
+        "memory_retrieve",
+        "failure_harvest",
+        "context_fold",
+        "competitive_crawl",
+        "loose_ends_scan",
+        "llm_chat",
+        "llm_providers",
+        "decision_certify",
+        "decision_list",
+        "decision_lineage",
+        "artifact_list",
+        "artifact_get",
+        "drill_start",
+        "drill_down",
+        "drill_up",
+        "drill_children",
+        "research_harvest",
+        "hyperagent_auto_run",
+        "hyperagent_auto_status",
+        "hyperagent_auto_memory",
+        "hyperagent_auto_issues",
+        "pheromone_status",
+        "pheromone_sense",
+        "pheromone_deposit",
+        "pheromone_heatmap",
+        "peer_eval_status",
+        "peer_eval_fleet",
+        "peer_eval_evaluate",
+        "peer_eval_analyze",
+        "inventor_run",
+        "inventor_status",
+        "inventor_nodes",
+        "inventor_node",
+        "inventor_best",
+        "inventor_stop",
+        "inventor_history"
       ]
     },
     "mcp": {
-      "count": 32,
+      "count": 74,
       "tools": [
         "search_knowledge",
         "reason_deeply",
@@ -1370,11 +3051,53 @@
         "moa_query",
         "forge_tool",
         "forge_analyze_gaps",
-        "forge_list"
+        "forge_list",
+        "engagement_create",
+        "engagement_match",
+        "engagement_plan",
+        "engagement_outcome",
+        "engagement_list",
+        "memory_store",
+        "memory_retrieve",
+        "failure_harvest",
+        "context_fold",
+        "competitive_crawl",
+        "loose_ends_scan",
+        "llm_chat",
+        "llm_providers",
+        "decision_certify",
+        "decision_list",
+        "decision_lineage",
+        "artifact_list",
+        "artifact_get",
+        "drill_start",
+        "drill_down",
+        "drill_up",
+        "drill_children",
+        "research_harvest",
+        "hyperagent_auto_run",
+        "hyperagent_auto_status",
+        "hyperagent_auto_memory",
+        "hyperagent_auto_issues",
+        "pheromone_status",
+        "pheromone_sense",
+        "pheromone_deposit",
+        "pheromone_heatmap",
+        "peer_eval_status",
+        "peer_eval_fleet",
+        "peer_eval_evaluate",
+        "peer_eval_analyze",
+        "inventor_run",
+        "inventor_status",
+        "inventor_nodes",
+        "inventor_node",
+        "inventor_best",
+        "inventor_stop",
+        "inventor_history"
       ]
     },
     "openapi": {
-      "count": 32,
+      "count": 74,
       "paths": [
         "/api/tools/search_knowledge",
         "/api/tools/reason_deeply",
@@ -1407,26 +3130,76 @@
         "/api/tools/moa_query",
         "/api/tools/forge_tool",
         "/api/tools/forge_analyze_gaps",
-        "/api/tools/forge_list"
+        "/api/tools/forge_list",
+        "/api/tools/engagement_create",
+        "/api/tools/engagement_match",
+        "/api/tools/engagement_plan",
+        "/api/tools/engagement_outcome",
+        "/api/tools/engagement_list",
+        "/api/tools/memory_store",
+        "/api/tools/memory_retrieve",
+        "/api/tools/failure_harvest",
+        "/api/tools/context_fold",
+        "/api/tools/competitive_crawl",
+        "/api/tools/loose_ends_scan",
+        "/api/tools/llm_chat",
+        "/api/tools/llm_providers",
+        "/api/tools/decision_certify",
+        "/api/tools/decision_list",
+        "/api/tools/decision_lineage",
+        "/api/tools/artifact_list",
+        "/api/tools/artifact_get",
+        "/api/tools/drill_start",
+        "/api/tools/drill_down",
+        "/api/tools/drill_up",
+        "/api/tools/drill_children",
+        "/api/tools/research_harvest",
+        "/api/tools/hyperagent_auto_run",
+        "/api/tools/hyperagent_auto_status",
+        "/api/tools/hyperagent_auto_memory",
+        "/api/tools/hyperagent_auto_issues",
+        "/api/tools/pheromone_status",
+        "/api/tools/pheromone_sense",
+        "/api/tools/pheromone_deposit",
+        "/api/tools/pheromone_heatmap",
+        "/api/tools/peer_eval_status",
+        "/api/tools/peer_eval_fleet",
+        "/api/tools/peer_eval_evaluate",
+        "/api/tools/peer_eval_analyze",
+        "/api/tools/inventor_run",
+        "/api/tools/inventor_status",
+        "/api/tools/inventor_nodes",
+        "/api/tools/inventor_node",
+        "/api/tools/inventor_best",
+        "/api/tools/inventor_stop",
+        "/api/tools/inventor_history"
       ]
     }
   },
   "meta": {
-    "total_tools": 32,
+    "total_tools": 74,
     "namespaces": [
       "assembly",
       "chains",
       "cognitive",
       "compliance",
+      "decisions",
+      "engagement",
       "graph",
+      "hyperagent",
       "intelligence",
+      "inventor",
       "knowledge",
       "linear",
+      "llm",
       "mcp",
-      "monitor"
+      "memory",
+      "monitor",
+      "peereval",
+      "pheromone"
     ],
     "deprecated_count": 0,
-    "generated_at": "2026-04-03T19:49:20.076Z",
+    "generated_at": "2026-04-09T00:49:03.175Z",
     "abi_version": "1.0"
   }
 }
