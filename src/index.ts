@@ -233,9 +233,10 @@ app.use(express.static(path.join(__dirname, 'public'), {
 const spaIndexPath = path.join(__dirname, 'public', 'index.html')
 app.use((req, res, next) => {
   if (req.method !== 'GET' && req.method !== 'HEAD') return next()
-  // Skip WebSocket, SSE, health, and static assets
+  // Skip WebSocket, SSE, health, API routes, and static assets
   if (req.path.startsWith('/ws') || req.path.startsWith('/sse') ||
-      req.path.startsWith('/health') || req.path.match(/\.\w+$/)) return next()
+      req.path.startsWith('/health') || req.path.startsWith('/api/') ||
+      req.path.match(/\.\w+$/)) return next()
   // Serve SPA for browser navigation, let API calls through
   if (req.accepts('html', 'json') === 'html') {
     return res.sendFile(spaIndexPath)
