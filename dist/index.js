@@ -21121,60 +21121,25 @@ RULES:
 - artifact should be a complete solution
 - motivation should be 1-2 sentences`;
   try {
-    let result = null;
-    let lastRlmErr = null;
-    const rlmAvailable = isRlmAvailable();
-    const maxAttempts = rlmAvailable ? 3 : 0;
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      if (attempt > 0) {
-        const delayMs = 3e3 * attempt;
-        logger.warn({ attempt, delayMs }, "Inventor: researcher retrying after RLM null response");
-        await new Promise((r2) => setTimeout(r2, delayMs));
-      }
-      result = await callCognitiveRaw("reason", {
-        prompt,
-        agent_id: "inventor-researcher",
-        depth: 2,
-        context: {
-          parentCount: parentNodes.length,
-          bestParentScore: parentNodes.length > 0 ? Math.max(...parentNodes.map((n) => n.score)) : 0,
-          cognitionCount: cognitionItems.length
-        }
-      }, config2.pipeline.engineerTimeoutMs);
-      if (result) break;
-      lastRlmErr = new Error("RLM returned null (non-OK response)");
+    const { chatLLM: chatLLM2 } = await Promise.resolve().then(() => (init_llm_proxy(), llm_proxy_exports));
+    const llmResult = await chatLLM2({
+      provider: "deepseek",
+      messages: [
+        { role: "system", content: "You are a JSON-only API for an evolutionary AI system. Respond with ONLY valid JSON. No markdown code blocks, no explanation text, no extra commentary. The response must parse as valid JSON." },
+        { role: "user", content: prompt }
+      ],
+      model: "deepseek-chat",
+      max_tokens: 4e3,
+      temperature: 0.7
+    });
+    if (!llmResult || !llmResult.content) {
+      throw new Error(`LLM returned empty result (provider: deepseek)`);
     }
-    if (!result) {
-      logger.warn({ attempts: maxAttempts }, "Inventor: RLM unavailable/failing, falling back to direct LLM call");
-      try {
-        const { chatLLM: chatLLM2 } = await Promise.resolve().then(() => (init_llm_proxy(), llm_proxy_exports));
-        const llmResult = await chatLLM2({
-          provider: "deepseek",
-          messages: [
-            { role: "system", content: "You are a JSON-only API for an evolutionary AI system. Respond with ONLY valid JSON. No markdown code blocks, no explanation text, no extra commentary. The response must parse as JSON." },
-            { role: "user", content: prompt }
-          ],
-          model: "deepseek-chat",
-          max_tokens: 4e3,
-          temperature: 0.7
-        });
-        if (llmResult && llmResult.content) {
-          result = { answer: llmResult.content, content: llmResult.content };
-          logger.info({ contentLength: llmResult.content.length }, "Inventor: LLM fallback succeeded");
-        }
-      } catch (llmErr) {
-        logger.error({ error: String(llmErr) }, "Inventor: LLM fallback also failed");
-      }
-    }
-    if (!result) throw lastRlmErr ?? new Error("RLM returned null after 3 attempts");
-    const r = result;
-    logger.info({ resultKeys: Object.keys(r) }, "Inventor: researcher RLM response keys");
-    const text = String(
-      r.answer ?? r.result ?? r.reasoning ?? r.plan ?? (r.analysis && typeof r.analysis === "object" ? JSON.stringify(r.analysis) : "") ?? (r.content ?? "")
-    );
+    logger.info({ contentLength: llmResult.content.length, model: llmResult.model }, "Inventor: researcher LLM generation complete");
+    const result = { answer: llmResult.content, content: llmResult.content };
+    const text = llmResult.content;
     if (!text) {
-      logger.warn({ resultKeys: Object.keys(r) }, "Inventor: researcher got empty text from RLM");
-      throw new Error(`RLM returned no usable text (keys: ${Object.keys(r).join(", ")})`);
+      throw new Error("LLM returned empty content");
     }
     try {
       const stripped = text.replace(/^```json\s*/m, "").replace(/^```\s*$/m, "").trim();
@@ -21193,10 +21158,10 @@ RULES:
     const motivation = text.split("\n").slice(0, 3).join(" ").slice(0, 200);
     return {
       artifact: text.slice(0, config2.pipeline.maxArtifactLength),
-      motivation: motivation || "Generated via RLM reasoning (raw output)"
+      motivation: motivation || "Generated via LLM (raw output)"
     };
   } catch (err) {
-    throw new Error(`Researcher failed: ${err instanceof Error ? err.message : String(err)}`);
+    throw new Error(`Researcher generation failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 async function runEngineer(node, config2) {

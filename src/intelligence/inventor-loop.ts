@@ -205,70 +205,32 @@ RULES:
 - motivation should be 1-2 sentences`
 
   try {
-    // Retry up to 3 attempts with backoff to handle cold-start transient failures
-    let result = null
-    let lastRlmErr: Error | null = null
-    // If RLM is not available, skip retries and go directly to LLM fallback
-    const rlmAvailable = isRlmAvailable()
-    const maxAttempts = rlmAvailable ? 3 : 0
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      if (attempt > 0) {
-        const delayMs = 3000 * attempt
-        logger.warn({ attempt, delayMs }, 'Inventor: researcher retrying after RLM null response')
-        await new Promise(r => setTimeout(r, delayMs))
-      }
-      result = await callCognitiveRaw('reason', {
-        prompt,
-        agent_id: 'inventor-researcher',
-        depth: 2,
-        context: {
-          parentCount: parentNodes.length,
-          bestParentScore: parentNodes.length > 0 ? Math.max(...parentNodes.map(n => n.score)) : 0,
-          cognitionCount: cognitionItems.length,
-        },
-      }, config.pipeline.engineerTimeoutMs)
-      if (result) break
-      lastRlmErr = new Error('RLM returned null (non-OK response)')
+    // RLM Engine is a reasoning/strategy engine, NOT a content generator.
+    // It returns recommendation/reasoning about HOW to solve, not the solution itself.
+    // For artifact generation, use LLM direct (much better results).
+    // Only use RLM for folding parent context (already done above).
+    const { chatLLM } = await import('../llm/llm-proxy.js')
+    const llmResult = await chatLLM({
+      provider: 'deepseek',
+      messages: [
+        { role: 'system', content: 'You are a JSON-only API for an evolutionary AI system. Respond with ONLY valid JSON. No markdown code blocks, no explanation text, no extra commentary. The response must parse as valid JSON.' },
+        { role: 'user', content: prompt },
+      ],
+      model: 'deepseek-chat',
+      max_tokens: 4000,
+      temperature: 0.7,
+    })
+    if (!llmResult || !llmResult.content) {
+      throw new Error(`LLM returned empty result (provider: deepseek)`)
     }
+    logger.info({ contentLength: llmResult.content.length, model: llmResult.model }, 'Inventor: researcher LLM generation complete')
+    const result = { answer: llmResult.content, content: llmResult.content }
 
-    if (!result) {
-      // RLM unavailable or consistently failing — use LLM direct as fallback
-      logger.warn({ attempts: maxAttempts }, 'Inventor: RLM unavailable/failing, falling back to direct LLM call')
-      try {
-        const { chatLLM } = await import('../llm/llm-proxy.js')
-        const llmResult = await chatLLM({
-          provider: 'deepseek',
-          messages: [
-            { role: 'system', content: 'You are a JSON-only API for an evolutionary AI system. Respond with ONLY valid JSON. No markdown code blocks, no explanation text, no extra commentary. The response must parse as JSON.' },
-            { role: 'user', content: prompt },
-          ],
-          model: 'deepseek-chat',
-          max_tokens: 4000,
-          temperature: 0.7,
-        })
-        if (llmResult && llmResult.content) {
-          result = { answer: llmResult.content, content: llmResult.content }
-          logger.info({ contentLength: llmResult.content.length }, 'Inventor: LLM fallback succeeded')
-        }
-      } catch (llmErr) {
-        logger.error({ error: String(llmErr) }, 'Inventor: LLM fallback also failed')
-      }
-    }
-
-    if (!result) throw lastRlmErr ?? new Error('RLM returned null after 3 attempts')
-
-    // Defensive extraction — RLM response structure varies by version
-    const r = result as Record<string, unknown>
-    logger.info({ resultKeys: Object.keys(r) }, 'Inventor: researcher RLM response keys')
-    const text = String(
-      r.answer ?? r.result ?? r.reasoning ?? r.plan ??
-      (r.analysis && typeof r.analysis === 'object' ? JSON.stringify(r.analysis) : '') ??
-      (r.content ?? '')
-    )
+    // Extract text from LLM response
+    const text = llmResult.content
 
     if (!text) {
-      logger.warn({ resultKeys: Object.keys(r) }, 'Inventor: researcher got empty text from RLM')
-      throw new Error(`RLM returned no usable text (keys: ${Object.keys(r).join(', ')})`)
+      throw new Error('LLM returned empty content')
     }
 
     // Try to parse JSON response
@@ -291,10 +253,10 @@ RULES:
     const motivation = text.split('\n').slice(0, 3).join(' ').slice(0, 200)
     return {
       artifact: text.slice(0, config.pipeline.maxArtifactLength),
-      motivation: motivation || 'Generated via RLM reasoning (raw output)',
+      motivation: motivation || 'Generated via LLM (raw output)',
     }
   } catch (err) {
-    throw new Error(`Researcher failed: ${err instanceof Error ? err.message : String(err)}`)
+    throw new Error(`Researcher generation failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
