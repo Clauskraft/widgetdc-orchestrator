@@ -18,6 +18,7 @@ export type ToolCategory =
   | 'knowledge' | 'graph' | 'cognitive' | 'chains' | 'agents'
   | 'assembly' | 'decisions' | 'adoption' | 'linear' | 'compliance'
   | 'llm' | 'monitor' | 'mcp' | 'engagement' | 'memory' | 'inventor'
+  | 'grafana' | 'railway'
 
 export interface CanonicalTool {
   name: string
@@ -68,8 +69,9 @@ function inferCategory(namespace: string): ToolCategory {
     chains: 'chains', agents: 'agents', assembly: 'assembly',
     decisions: 'decisions', adoption: 'adoption', linear: 'linear',
     compliance: 'compliance', llm: 'llm', monitor: 'monitor', mcp: 'mcp',
-    engagement: 'engagement', memory: 'memory',
-    pheromone: 'monitor', peereval: 'monitor',
+    engagement: 'engagement', memory: 'memory', inventor: 'inventor',
+    pheromone: 'monitor', peereval: 'monitor', grafana: 'monitor',
+    railway: 'deploy',
   }
   return map[namespace] ?? 'mcp'
 }
@@ -1093,6 +1095,52 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     }),
     timeoutMs: 5000,
   }),
+
+  // ─── Grafana Cloud — observability via neural-bridge ──────────────────
+
+  defineTool({
+    name: 'grafana_dashboard',
+    namespace: 'grafana',
+    description: 'Query Grafana Cloud dashboards and panels. Use for platform observability, metrics visualization, and alert status.',
+    input: z.object({
+      dashboard_uid: z.string().optional().describe('Dashboard UID (default: widgetdc-platform-monitor)'),
+      panel_id: z.number().optional().describe('Specific panel ID'),
+      from: z.string().optional().describe('Time range from (default: now-6h)'),
+      to: z.string().optional().describe('Time range to (default: now)'),
+    }),
+    backendTool: 'grafana.dashboard',
+    timeoutMs: 15000,
+  }),
+
+  // ─── Railway — deployment & infrastructure via neural-bridge ─────────
+
+  defineTool({
+    name: 'railway_deploy',
+    namespace: 'railway',
+    description: 'Trigger a Railway deployment or check deployment status. Use for deploy verification, health checks, and service restarts.',
+    input: z.object({
+      service: z.enum(['backend', 'orchestrator', 'rlm-engine']).optional().describe('Target service (default: current)'),
+      action: z.enum(['deploy', 'status', 'restart', 'logs']).optional().describe('Action to perform (default: status)'),
+    }),
+    backendTool: 'railway.deploy',
+    timeoutMs: 30000,
+  }),
+
+  defineTool({
+    name: 'railway_env',
+    namespace: 'railway',
+    description: 'Get or set Railway environment variables for any service. Use for configuration changes, API key updates, and feature flags.',
+    input: z.object({
+      service: z.string().describe('Target service name'),
+      action: z.enum(['get', 'set', 'list']).describe('Action: get, set, or list env vars'),
+      key: z.string().optional().describe('Variable key (for get/set)'),
+      value: z.string().optional().describe('Variable value (for set)'),
+    }),
+    backendTool: 'railway.env',
+    timeoutMs: 15000,
+  }),
+
+  // ─── Universal Agent Communication ───────────────────────────────────
 ]
 
 // ─── Protocol Compilers ─────────────────────────────────────────────────────

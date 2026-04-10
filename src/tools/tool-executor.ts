@@ -1875,6 +1875,71 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       return JSON.stringify(history, null, 2)
     }
 
+    // ─── Grafana Cloud ─────────────────────────────────────────────────
+
+    case 'grafana_dashboard': {
+      const grafanaUrl = 'https://clauskraft.grafana.net'
+      const grafanaKey = process.env.GRAFANA_API_KEY
+      if (!grafanaKey) throw new Error('GRAFANA_API_KEY not configured')
+      const uid = input?.dashboard_uid ?? 'widgetdc-platform-monitor'
+      const from = input?.from ?? 'now-6h'
+      const to = input?.to ?? 'now'
+      const res = await fetch(`${grafanaUrl}/api/dashboards/uid/${uid}`, {
+        headers: { 'Authorization': `Bearer ${grafanaKey}` },
+        signal: AbortSignal.timeout(15000),
+      })
+      if (!res.ok) throw new Error(`Grafana API: ${res.status} ${res.statusText}`)
+      const dashboard = await res.json()
+      const panels = dashboard?.dashboard?.panels ?? []
+      return JSON.stringify({ uid, title: dashboard?.dashboard?.title, panels: panels.map((p: any) => ({ id: p.id, title: p.title, type: p.type })) }, null, 2)
+    }
+
+    // ─── Railway ───────────────────────────────────────────────────────
+
+    case 'railway_deploy': {
+      const service = input?.service ?? 'orchestrator'
+      const action = input?.action ?? 'status'
+      // Deploy by pushing to main — Railway auto-deploys
+      const { execSync } = await import('child_process')
+      if (action === 'deploy') {
+        execSync('git push origin main', { stdio: 'pipe', timeout: 30000 })
+        return `Deploy triggered for ${service}. Check status in Railway dashboard.`
+      }
+      if (action === 'restart') {
+        return `Restart requested for ${service}. Use Railway CLI or dashboard to restart.`
+      }
+      if (action === 'logs') {
+        return `Logs for ${service}: View at https://railway.com/project/widgetdc-orchestrator/service/${service}`
+      }
+      return `${service} status: Check https://railway.com/project/widgetdc-orchestrator/service/${service}`
+    }
+
+    case 'railway_env': {
+      const service = input?.service
+      const action = input?.action ?? 'list'
+      if (!service) throw new Error('service is required')
+      // Use Railway CLI to get/set env vars
+      const { execSync } = await import('child_process')
+      if (action === 'list') {
+        const output = execSync(`railway variables --service ${service}`, { encoding: 'utf8', timeout: 15000 })
+        return output || 'No variables found'
+      }
+      if (action === 'get') {
+        const key = input?.key
+        if (!key) throw new Error('key is required for get action')
+        const output = execSync(`railway variables --service ${service}`, { encoding: 'utf8', timeout: 15000 })
+        return output || `Variable ${key} not found`
+      }
+      if (action === 'set') {
+        const key = input?.key
+        const value = input?.value
+        if (!key || !value) throw new Error('key and value are required for set action')
+        execSync(`railway variables --set ${key}=${value} --service ${service}`, { encoding: 'utf8', timeout: 15000 })
+        return `Set ${key} for ${service}. Service will restart automatically.`
+      }
+      throw new Error(`Unknown railway_env action: ${action}`)
+    }
+
     default:
       throw new Error(`Unknown tool: ${toolName}`)
   }

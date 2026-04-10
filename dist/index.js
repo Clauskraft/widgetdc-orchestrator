@@ -11914,8 +11914,11 @@ function inferCategory(namespace) {
     mcp: "mcp",
     engagement: "engagement",
     memory: "memory",
+    inventor: "inventor",
     pheromone: "monitor",
-    peereval: "monitor"
+    peereval: "monitor",
+    grafana: "monitor",
+    railway: "deploy"
   };
   return map3[namespace] ?? "mcp";
 }
@@ -12914,7 +12917,47 @@ var init_tool_registry = __esm({
           limit: z.number().optional().describe("Max experiments to return (default: 20, max: 50)")
         }),
         timeoutMs: 5e3
+      }),
+      // ─── Grafana Cloud — observability via neural-bridge ──────────────────
+      defineTool({
+        name: "grafana_dashboard",
+        namespace: "grafana",
+        description: "Query Grafana Cloud dashboards and panels. Use for platform observability, metrics visualization, and alert status.",
+        input: z.object({
+          dashboard_uid: z.string().optional().describe("Dashboard UID (default: widgetdc-platform-monitor)"),
+          panel_id: z.number().optional().describe("Specific panel ID"),
+          from: z.string().optional().describe("Time range from (default: now-6h)"),
+          to: z.string().optional().describe("Time range to (default: now)")
+        }),
+        backendTool: "grafana.dashboard",
+        timeoutMs: 15e3
+      }),
+      // ─── Railway — deployment & infrastructure via neural-bridge ─────────
+      defineTool({
+        name: "railway_deploy",
+        namespace: "railway",
+        description: "Trigger a Railway deployment or check deployment status. Use for deploy verification, health checks, and service restarts.",
+        input: z.object({
+          service: z.enum(["backend", "orchestrator", "rlm-engine"]).optional().describe("Target service (default: current)"),
+          action: z.enum(["deploy", "status", "restart", "logs"]).optional().describe("Action to perform (default: status)")
+        }),
+        backendTool: "railway.deploy",
+        timeoutMs: 3e4
+      }),
+      defineTool({
+        name: "railway_env",
+        namespace: "railway",
+        description: "Get or set Railway environment variables for any service. Use for configuration changes, API key updates, and feature flags.",
+        input: z.object({
+          service: z.string().describe("Target service name"),
+          action: z.enum(["get", "set", "list"]).describe("Action: get, set, or list env vars"),
+          key: z.string().optional().describe("Variable key (for get/set)"),
+          value: z.string().optional().describe("Variable value (for set)")
+        }),
+        backendTool: "railway.env",
+        timeoutMs: 15e3
       })
+      // ─── Universal Agent Communication ───────────────────────────────────
     ];
   }
 });
@@ -21853,6 +21896,64 @@ ${lines.join("\n")}`;
       const history = await getExperimentHistory2(limit);
       if (!history.length) return "No experiment history found. Run experiments with inventor_run.";
       return JSON.stringify(history, null, 2);
+    }
+    // ─── Grafana Cloud ─────────────────────────────────────────────────
+    case "grafana_dashboard": {
+      const grafanaUrl = "https://clauskraft.grafana.net";
+      const grafanaKey = process.env.GRAFANA_API_KEY;
+      if (!grafanaKey) throw new Error("GRAFANA_API_KEY not configured");
+      const uid = input?.dashboard_uid ?? "widgetdc-platform-monitor";
+      const from = input?.from ?? "now-6h";
+      const to = input?.to ?? "now";
+      const res = await fetch(`${grafanaUrl}/api/dashboards/uid/${uid}`, {
+        headers: { "Authorization": `Bearer ${grafanaKey}` },
+        signal: AbortSignal.timeout(15e3)
+      });
+      if (!res.ok) throw new Error(`Grafana API: ${res.status} ${res.statusText}`);
+      const dashboard = await res.json();
+      const panels = dashboard?.dashboard?.panels ?? [];
+      return JSON.stringify({ uid, title: dashboard?.dashboard?.title, panels: panels.map((p) => ({ id: p.id, title: p.title, type: p.type })) }, null, 2);
+    }
+    // ─── Railway ───────────────────────────────────────────────────────
+    case "railway_deploy": {
+      const service = input?.service ?? "orchestrator";
+      const action = input?.action ?? "status";
+      const { execSync: execSync2 } = await import("child_process");
+      if (action === "deploy") {
+        execSync2("git push origin main", { stdio: "pipe", timeout: 3e4 });
+        return `Deploy triggered for ${service}. Check status in Railway dashboard.`;
+      }
+      if (action === "restart") {
+        return `Restart requested for ${service}. Use Railway CLI or dashboard to restart.`;
+      }
+      if (action === "logs") {
+        return `Logs for ${service}: View at https://railway.com/project/widgetdc-orchestrator/service/${service}`;
+      }
+      return `${service} status: Check https://railway.com/project/widgetdc-orchestrator/service/${service}`;
+    }
+    case "railway_env": {
+      const service = input?.service;
+      const action = input?.action ?? "list";
+      if (!service) throw new Error("service is required");
+      const { execSync: execSync2 } = await import("child_process");
+      if (action === "list") {
+        const output = execSync2(`railway variables --service ${service}`, { encoding: "utf8", timeout: 15e3 });
+        return output || "No variables found";
+      }
+      if (action === "get") {
+        const key = input?.key;
+        if (!key) throw new Error("key is required for get action");
+        const output = execSync2(`railway variables --service ${service}`, { encoding: "utf8", timeout: 15e3 });
+        return output || `Variable ${key} not found`;
+      }
+      if (action === "set") {
+        const key = input?.key;
+        const value = input?.value;
+        if (!key || !value) throw new Error("key and value are required for set action");
+        execSync2(`railway variables --set ${key}=${value} --service ${service}`, { encoding: "utf8", timeout: 15e3 });
+        return `Set ${key} for ${service}. Service will restart automatically.`;
+      }
+      throw new Error(`Unknown railway_env action: ${action}`);
     }
     default:
       throw new Error(`Unknown tool: ${toolName}`);
