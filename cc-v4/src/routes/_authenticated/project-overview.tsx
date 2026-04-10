@@ -70,7 +70,8 @@ function ProjectOverviewPage() {
     queryFn: async () => {
       try {
         setApiError(null)
-        return await apiGet<Engagement[]>('/api/engagements?limit=15')
+        const resp = await apiGet<{ success: boolean; data: Engagement[] }>('/api/engagements?limit=15')
+        return resp?.data ?? []
       } catch (e) {
         const err = normalizeError(e)
         setApiError(err)
@@ -88,9 +89,12 @@ function ProjectOverviewPage() {
   const {
     data: decisions,
     isLoading: loadingDecisions,
-  } = useQuery<{ decisions: Decision[] }>({
+  } = useQuery<Decision[]>({
     queryKey: ['decisions'],
-    queryFn: () => apiGet<{ decisions: Decision[] }>('/api/decisions?limit=15'),
+    queryFn: async () => {
+      const resp = await apiGet<{ success: boolean; data: Decision[] }>('/api/decisions?limit=15')
+      return resp?.data ?? []
+    },
     refetchInterval: 30000,
     retry: false,
   })
@@ -100,7 +104,7 @@ function ProjectOverviewPage() {
   const totalEngagements = engagements?.length ?? 0
   const activeEngagements = engagements?.filter(e => e.status === 'active' || e.status === 'in_progress').length ?? 0
   const completedEngagements = engagements?.filter(e => e.status === 'completed').length ?? 0
-  const totalDecisions = decisions?.decisions?.length ?? 0
+  const totalDecisions = decisions?.length ?? 0
 
   // Engagement domain breakdown
   const domainBreakdown = engagements?.reduce<Record<string, number>>((acc, e) => {
@@ -222,14 +226,14 @@ function ProjectOverviewPage() {
           <CardContent>
             {loadingDecisions ? (
               <div className="space-y-3">{Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-10 w-full" />)}</div>
-            ) : !decisions?.decisions || decisions.decisions.length === 0 ? (
+            ) : !decisions || decisions.length === 0 ? (
               <div className="text-center py-12">
                 <GitCommit className="w-8 h-8 mx-auto text-muted-foreground mb-2" />
                 <p className="text-sm text-muted-foreground">No decisions yet</p>
               </div>
             ) : (
               <div className="space-y-2">
-                {decisions.decisions.map(d => (
+                {decisions.map(d => (
                   <div
                     key={d.id}
                     className="flex items-center justify-between p-3 rounded-lg border hover:bg-accent cursor-pointer transition-colors group"
