@@ -27,7 +27,8 @@ import {
   shouldCompactContext,
   compactContext,
 } from '../llm/cost-governance.js'
-import { getTool } from '../tools/tool-registry.js'
+import { getTool, type CanonicalTool } from '../tools/tool-registry.js'
+import { executeToolUnified } from '../tools/tool-executor.js'
 import type {
   AgentWorkflowEnvelope,
   RoutingCapability,
@@ -197,6 +198,16 @@ async function executeStep(step: ChainStep, previousOutput: unknown): Promise<St
           llm_model: step.llm_model,
         }, step.timeout_ms ?? toolDef?.timeoutMs ?? 30000)
         output = result
+      } else if (backendToolName === step.tool_name) {
+        // Orchestrator-only tool — execute locally through tool executor
+        const result = await executeToolUnified(step.tool_name, args, {
+          call_id: uuid(),
+          fold: false,
+        })
+        if (result.error) {
+          throw new Error(result.error)
+        }
+        output = result.result
       } else if (backendToolName.includes('+')) {
         // Multi-tool (e.g., 'srag.query + graph.read_cypher') — call first one
         const firstTool = backendToolName.split('+')[0].trim()

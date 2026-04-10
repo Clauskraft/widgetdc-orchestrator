@@ -14532,6 +14532,15 @@ async function executeStep(step, previousOutput) {
           llm_model: step.llm_model
         }, step.timeout_ms ?? toolDef?.timeoutMs ?? 3e4);
         output = result;
+      } else if (backendToolName === step.tool_name) {
+        const result = await executeToolUnified(step.tool_name, args, {
+          call_id: uuid8(),
+          fold: false
+        });
+        if (result.error) {
+          throw new Error(result.error);
+        }
+        output = result.result;
       } else if (backendToolName.includes("+")) {
         const firstTool = backendToolName.split("+")[0].trim();
         const result = await callMcpTool({
@@ -14997,6 +15006,7 @@ var init_chain_engine = __esm({
     init_cost_optimizer();
     init_cost_governance();
     init_tool_registry();
+    init_tool_executor();
     FUNNEL_STAGES = [
       "signal",
       "pattern",
