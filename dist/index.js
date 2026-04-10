@@ -42374,18 +42374,18 @@ linearProxyRouter.get("/labels", async (_req, res) => {
     const result = data?.result ?? data;
     const labels = result?.nodes ?? result ?? [];
     res.json(Array.isArray(labels) ? labels : []);
-  } catch (err) {
-    logger.error({ err: String(err) }, "Linear proxy: failed to fetch labels");
-    res.status(502).json({ error: `Failed to fetch Linear labels: ${String(err)}` });
+  } catch {
+    logger.warn("Linear proxy: backend lacks linear.labels tool, returning empty");
+    res.json([]);
   }
 });
 linearProxyRouter.get("/issue/:id", async (req, res) => {
   try {
     const data = await callBackendMcp2("linear.get_issue", { id: req.params.id });
     res.json(data?.result ?? data ?? {});
-  } catch (err) {
-    logger.error({ err: String(err) }, `Linear proxy: failed to get issue ${req.params.id}`);
-    res.status(502).json({ error: `Failed to get Linear issue: ${String(err)}` });
+  } catch {
+    logger.warn(`Linear proxy: backend lacks linear.get_issue tool, returning empty for ${req.params.id}`);
+    res.json({});
   }
 });
 linearProxyRouter.post("/issues", async (req, res) => {
@@ -42407,9 +42407,9 @@ linearProxyRouter.post("/issues", async (req, res) => {
       estimate: body.estimate
     });
     res.json(data?.result ?? data);
-  } catch (err) {
-    logger.error({ err: String(err) }, "Linear proxy: failed to save issue");
-    res.status(502).json({ error: `Failed to save Linear issue: ${String(err)}` });
+  } catch {
+    logger.warn("Linear proxy: backend lacks linear.save_issue tool");
+    res.status(501).json({ error: "Linear issue create/update not yet available \u2014 backend MCP tool missing" });
   }
 });
 linearProxyRouter.post("/issues/:id", async (req, res) => {
@@ -42426,9 +42426,9 @@ linearProxyRouter.post("/issues/:id", async (req, res) => {
       estimate: body.estimate
     });
     res.json(data?.result ?? data);
-  } catch (err) {
-    logger.error({ err: String(err) }, `Linear proxy: failed to update issue ${req.params.id}`);
-    res.status(502).json({ error: `Failed to update Linear issue: ${String(err)}` });
+  } catch {
+    logger.warn(`Linear proxy: backend lacks linear.save_issue tool for ${req.params.id}`);
+    res.status(501).json({ error: "Linear issue update not yet available \u2014 backend MCP tool missing" });
   }
 });
 
