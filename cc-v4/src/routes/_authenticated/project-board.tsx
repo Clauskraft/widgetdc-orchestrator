@@ -127,7 +127,8 @@ function ProjectBoardPage() {
 
   // Filter issues
   const filteredIssues = issues?.filter(issue => {
-    if (filterStatus !== 'all' && issue.state.toLowerCase() !== filterStatus.toLowerCase()) return false
+    const state = issue.state?.toLowerCase() ?? 'backlog'
+    if (filterStatus !== 'all' && state !== filterStatus.toLowerCase()) return false
     if (filterAssignee !== 'all') {
       const assigneeName = issue.assignee?.name || 'Unassigned'
       if (assigneeName.toLowerCase() !== filterAssignee.toLowerCase()) return false
@@ -137,7 +138,7 @@ function ProjectBoardPage() {
 
   // Group by status
   const grouped = filteredIssues.reduce<Record<string, LinearIssue[]>>((acc, issue) => {
-    const state = issue.state.toLowerCase()
+    const state = issue.state?.toLowerCase() ?? 'backlog'
     if (!acc[state]) acc[state] = []
     acc[state].push(issue)
     return acc
@@ -177,8 +178,8 @@ function ProjectBoardPage() {
 
   // Stats
   const totalIssues = issues?.length ?? 0
-  const inProgress = issues?.filter(i => i.state.toLowerCase() === 'in progress').length ?? 0
-  const completed = issues?.filter(i => i.state.toLowerCase() === 'completed').length ?? 0
+  const inProgress = issues?.filter(i => i.state?.toLowerCase() === 'in progress').length ?? 0
+  const completed = issues?.filter(i => i.state?.toLowerCase() === 'completed').length ?? 0
   const urgent = issues?.filter(i => i.priority === 1).length ?? 0
 
   return (
@@ -331,7 +332,7 @@ function ProjectBoardPage() {
             title: editIssue.title,
             description: editIssue.description ?? '',
             priority: editIssue.priority ?? 3,
-            state: editIssue.state.toLowerCase(),
+            state: editIssue.state?.toLowerCase() ?? 'backlog',
           }}
           onSubmit={(payload) => updateMutation.mutate({ id: editIssue.id, ...payload })}
           isSubmitting={updateMutation.isPending}
@@ -393,12 +394,12 @@ function ProjectBoardPage() {
               <Button variant="outline" size="sm" onClick={() => { setEditIssue(selectedIssue); setSelectedIssue(null) }}>
                 <Edit2 className="w-3 h-3 mr-1" /> Edit
               </Button>
-              {selectedIssue.state.toLowerCase() !== 'in progress' && (
+              {selectedIssue.state?.toLowerCase() !== 'in progress' && (
                 <Button variant="outline" size="sm" onClick={() => quickStateMutation.mutate({ id: selectedIssue.id, state: 'In Progress' })}>
                   <Play className="w-3 h-3 mr-1" /> Start
                 </Button>
               )}
-              {selectedIssue.state.toLowerCase() !== 'completed' && (
+              {selectedIssue.state?.toLowerCase() !== 'completed' && (
                 <Button variant="outline" size="sm" onClick={() => quickStateMutation.mutate({ id: selectedIssue.id, state: 'Completed' })}>
                   <CheckCircle2 className="w-3 h-3 mr-1" /> Complete
                 </Button>
@@ -459,11 +460,12 @@ function IssueCard({
     ? PRIORITY_LABELS[issue.priority]
     : null
 
-  const nextStates = issue.state.toLowerCase() === 'backlog'
+  const stateLower = issue.state?.toLowerCase() ?? 'backlog'
+  const nextStates = stateLower === 'backlog'
     ? ['todo', 'in progress']
-    : issue.state.toLowerCase() === 'todo'
+    : stateLower === 'todo'
     ? ['in progress']
-    : issue.state.toLowerCase() === 'in progress'
+    : stateLower === 'in progress'
     ? ['completed']
     : []
 

@@ -42361,7 +42361,11 @@ linearProxyRouter.get("/issues", async (req, res) => {
     if (state4) payload.status = state4;
     const data = await callBackendMcp2("linear.issues", payload);
     const result = data?.result ?? data;
-    const issues = result?.issues ?? result?.nodes ?? result ?? [];
+    const rawIssues = result?.issues ?? result?.nodes ?? result ?? [];
+    const issues = rawIssues.map((issue) => ({
+      ...issue,
+      state: issue.state?.name ?? issue.state ?? "Backlog"
+    }));
     res.json(Array.isArray(issues) ? issues : []);
   } catch (err) {
     logger.error({ err: String(err) }, "Linear proxy: failed to fetch issues");

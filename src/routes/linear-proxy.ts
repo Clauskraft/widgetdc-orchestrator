@@ -40,7 +40,12 @@ linearProxyRouter.get('/issues', async (req: Request, res: Response) => {
 
     const data = await callBackendMcp('linear.issues', payload)
     const result = data?.result ?? data
-    const issues = result?.issues ?? result?.nodes ?? result ?? []
+    const rawIssues = result?.issues ?? result?.nodes ?? result ?? []
+    // Normalize: ensure state is a string, not an object
+    const issues = rawIssues.map((issue: any) => ({
+      ...issue,
+      state: issue.state?.name ?? issue.state ?? 'Backlog',
+    }))
     res.json(Array.isArray(issues) ? issues : [])
   } catch (err) {
     logger.error({ err: String(err) }, 'Linear proxy: failed to fetch issues')
