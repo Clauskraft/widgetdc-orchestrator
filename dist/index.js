@@ -14484,6 +14484,8 @@ async function executeStep(step, previousOutput) {
         llm_model: step.llm_model
       }, step.timeout_ms);
     } else if (step.tool_name) {
+      const toolDef = getTool(step.tool_name);
+      const backendToolName = toolDef?.backendTool ?? step.tool_name;
       const args = { ...step.arguments };
       for (const [k, v] of Object.entries(args)) {
         if (typeof v === "string") {
@@ -14494,10 +14496,10 @@ async function executeStep(step, previousOutput) {
         args.context = { instruction: args.context };
       }
       const result = await callMcpTool({
-        toolName: step.tool_name,
+        toolName: backendToolName,
         args,
         callId: uuid8(),
-        timeoutMs: step.timeout_ms ?? 3e4
+        timeoutMs: step.timeout_ms ?? toolDef?.timeoutMs ?? 3e4
       });
       if (result.status !== "success") {
         throw new Error(result.error_message ?? `Tool ${step.tool_name} failed: ${result.status}`);
@@ -14943,6 +14945,7 @@ var init_chain_engine = __esm({
     init_failure_harvester();
     init_cost_optimizer();
     init_cost_governance();
+    init_tool_registry();
     FUNNEL_STAGES = [
       "signal",
       "pattern",

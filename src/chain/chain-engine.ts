@@ -27,6 +27,7 @@ import {
   shouldCompactContext,
   compactContext,
 } from '../llm/cost-governance.js'
+import { getTool } from '../tools/tool-registry.js'
 import type {
   AgentWorkflowEnvelope,
   RoutingCapability,
@@ -170,7 +171,9 @@ async function executeStep(step: ChainStep, previousOutput: unknown): Promise<St
         llm_model: step.llm_model,
       }, step.timeout_ms)
     } else if (step.tool_name) {
-      // Call MCP tool via backend
+      // Call MCP tool via backend — resolve tool name from registry first
+      const toolDef = getTool(step.tool_name)
+      const backendToolName = toolDef?.backendTool ?? step.tool_name
       const args = { ...step.arguments }
       // Replace {{prev}} in string argument values
       for (const [k, v] of Object.entries(args)) {
@@ -183,10 +186,10 @@ async function executeStep(step: ChainStep, previousOutput: unknown): Promise<St
         args.context = { instruction: args.context }
       }
       const result = await callMcpTool({
-        toolName: step.tool_name,
+        toolName: backendToolName,
         args,
         callId: uuid(),
-        timeoutMs: step.timeout_ms ?? 30000,
+        timeoutMs: step.timeout_ms ?? toolDef?.timeoutMs ?? 30000,
       })
       if (result.status !== 'success') {
         throw new Error(result.error_message ?? `Tool ${step.tool_name} failed: ${result.status}`)
