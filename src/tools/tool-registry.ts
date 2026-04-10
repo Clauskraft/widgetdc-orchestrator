@@ -427,11 +427,11 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
   defineTool({
     name: 'linear_get_issue',
     namespace: 'linear',
-    description: 'Get a single Linear issue by ID or identifier. Returns full issue details with attachments, comments, and git branch name.',
+    description: 'Get a single Linear issue by identifier (e.g. LIN-493). Returns full issue details.',
     input: z.object({
-      id: z.string().describe('Issue ID or identifier (e.g., LIN-493)'),
+      identifier: z.string().describe('Issue identifier (e.g., LIN-493)'),
     }),
-    backendTool: 'linear.get_issue',
+    backendTool: 'linear.issue_get',
     timeoutMs: 10000,
   }),
 

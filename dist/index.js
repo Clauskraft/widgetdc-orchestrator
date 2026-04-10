@@ -12337,11 +12337,11 @@ var init_tool_registry = __esm({
       defineTool({
         name: "linear_get_issue",
         namespace: "linear",
-        description: "Get a single Linear issue by ID or identifier. Returns full issue details with attachments, comments, and git branch name.",
+        description: "Get a single Linear issue by identifier (e.g. LIN-493). Returns full issue details.",
         input: z.object({
-          id: z.string().describe("Issue ID or identifier (e.g., LIN-493)")
+          identifier: z.string().describe("Issue identifier (e.g., LIN-493)")
         }),
-        backendTool: "linear.get_issue",
+        backendTool: "linear.issue_get",
         timeoutMs: 1e4
       }),
       defineTool({
@@ -42759,20 +42759,20 @@ linearProxyRouter.get("/labels", async (_req, res) => {
   try {
     const data = await callBackendMcp2("linear.labels", { limit: 100 });
     const result = data?.result ?? data;
-    const labels = result?.nodes ?? result ?? [];
+    const labels = result?.labels ?? result?.nodes ?? result ?? [];
     res.json(Array.isArray(labels) ? labels : []);
-  } catch {
-    logger.warn("Linear proxy: backend lacks linear.labels tool, returning empty");
-    res.json([]);
+  } catch (err) {
+    logger.error({ err: String(err) }, "Linear proxy: failed to fetch labels");
+    res.status(502).json({ error: `Failed to fetch Linear labels: ${String(err)}` });
   }
 });
 linearProxyRouter.get("/issue/:id", async (req, res) => {
   try {
-    const data = await callBackendMcp2("linear.get_issue", { id: req.params.id });
+    const data = await callBackendMcp2("linear.issue_get", { identifier: req.params.id });
     res.json(data?.result ?? data ?? {});
-  } catch {
-    logger.warn(`Linear proxy: backend lacks linear.get_issue tool, returning empty for ${req.params.id}`);
-    res.json({});
+  } catch (err) {
+    logger.error({ err: String(err) }, `Linear proxy: failed to fetch issue ${req.params.id}`);
+    res.status(502).json({ error: `Failed to fetch Linear issue: ${String(err)}` });
   }
 });
 linearProxyRouter.post("/issues", async (req, res) => {
@@ -42794,9 +42794,9 @@ linearProxyRouter.post("/issues", async (req, res) => {
       estimate: body.estimate
     });
     res.json(data?.result ?? data);
-  } catch {
-    logger.warn("Linear proxy: backend lacks linear.save_issue tool");
-    res.status(501).json({ error: "Linear issue create/update not yet available \u2014 backend MCP tool missing" });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Linear proxy: failed to save issue");
+    res.status(502).json({ error: `Failed to save Linear issue: ${String(err)}` });
   }
 });
 linearProxyRouter.post("/issues/:id", async (req, res) => {
@@ -42813,9 +42813,9 @@ linearProxyRouter.post("/issues/:id", async (req, res) => {
       estimate: body.estimate
     });
     res.json(data?.result ?? data);
-  } catch {
-    logger.warn(`Linear proxy: backend lacks linear.save_issue tool for ${req.params.id}`);
-    res.status(501).json({ error: "Linear issue update not yet available \u2014 backend MCP tool missing" });
+  } catch (err) {
+    logger.error({ err: String(err) }, `Linear proxy: failed to update issue ${req.params.id}`);
+    res.status(502).json({ error: `Failed to update Linear issue: ${String(err)}` });
   }
 });
 
