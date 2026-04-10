@@ -1950,7 +1950,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     }
 
     case 'inventor_history': {
-      const limit = Math.min(50, Math.max(1, Number(input?.limit ?? 20)))
+      const limit = Math.min(50, Math.max(1, Number(args?.limit ?? 20)))
       const { getExperimentHistory } = await import('../intelligence/inventor-loop.js')
       const history = await getExperimentHistory(limit)
       if (!history.length) return 'No experiment history found. Run experiments with inventor_run.'
@@ -1963,9 +1963,9 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       const grafanaUrl = 'https://clauskraft.grafana.net'
       const grafanaKey = process.env.GRAFANA_API_KEY
       if (!grafanaKey) throw new Error('GRAFANA_API_KEY not configured')
-      const uid = input?.dashboard_uid ?? 'widgetdc-platform-monitor'
-      const from = input?.from ?? 'now-6h'
-      const to = input?.to ?? 'now'
+      const uid = args?.dashboard_uid ?? 'widgetdc-platform-monitor'
+      const from = args?.from ?? 'now-6h'
+      const to = args?.to ?? 'now'
       const res = await fetch(`${grafanaUrl}/api/dashboards/uid/${uid}`, {
         headers: { 'Authorization': `Bearer ${grafanaKey}` },
         signal: AbortSignal.timeout(15000),
@@ -1979,8 +1979,8 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     // ─── Railway ───────────────────────────────────────────────────────
 
     case 'railway_deploy': {
-      const service = input?.service ?? 'orchestrator'
-      const action = input?.action ?? 'status'
+      const service = args?.service ?? 'orchestrator'
+      const action = args?.action ?? 'status'
       // Deploy by pushing to main — Railway auto-deploys
       const { execSync } = await import('child_process')
       if (action === 'deploy') {
@@ -1997,8 +1997,8 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     }
 
     case 'railway_env': {
-      const service = input?.service
-      const action = input?.action ?? 'list'
+      const service = args?.service
+      const action = args?.action ?? 'list'
       if (!service) throw new Error('service is required')
       // Use Railway CLI to get/set env vars
       const { execSync } = await import('child_process')
@@ -2007,14 +2007,14 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
         return output || 'No variables found'
       }
       if (action === 'get') {
-        const key = input?.key
+        const key = args?.key
         if (!key) throw new Error('key is required for get action')
         const output = execSync(`railway variables --service ${service}`, { encoding: 'utf8', timeout: 15000 })
         return output || `Variable ${key} not found`
       }
       if (action === 'set') {
-        const key = input?.key
-        const value = input?.value
+        const key = args?.key
+        const value = args?.value
         if (!key || !value) throw new Error('key and value are required for set action')
         execSync(`railway variables --set ${key}=${value} --service ${service}`, { encoding: 'utf8', timeout: 15000 })
         return `Set ${key} for ${service}. Service will restart automatically.`
@@ -2034,7 +2034,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     case 'data_integrity_check': {
       const { callMcpTool: callMcp } = await import('../mcp-caller.js')
       const backendMap: Record<string, string> = { data_graph_read: 'graph.read_cypher', data_graph_stats: 'graph.stats', data_integrity_check: 'graph.hintegrity_run' }
-      const result = await callMcp({ toolName: backendMap[toolName] || 'graph.read_cypher', args: input ?? {}, callId: `data-${toolName}-${Date.now()}` })
+      const result = await callMcp({ toolName: backendMap[toolName] || 'graph.read_cypher', args: args ?? {}, callId: `data-${toolName}-${Date.now()}` })
       return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
     }
 
@@ -2042,7 +2042,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       const { getRedis } = await import('../redis.js')
       const redis = getRedis()
       if (!redis) return 'Redis not connected'
-      const pattern = input?.key_pattern ?? '*'
+      const pattern = args?.key_pattern ?? '*'
       const keys = pattern === '*' ? await redis.dbsize() : (await redis.keys(pattern)).length
       const info = await redis.info('memory')
       const memMatch = info.match(/used_memory_human:(\S+)/)
@@ -2061,7 +2061,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'system_logs_summary': {
       const { callMcpTool: callMcp } = await import('../mcp-caller.js')
-      const result = await callMcp({ toolName: 'failure_harvest', args: { window_hours: input?.window_hours ?? 1 }, callId: `system-logs-${Date.now()}` })
+      const result = await callMcp({ toolName: 'failure_harvest', args: { window_hours: args?.window_hours ?? 1 }, callId: `system-logs-${Date.now()}` })
       return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
     }
 
@@ -2075,7 +2075,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'agent_status':
     case 'agent_capabilities': {
-      const agentId = input?.agent_id
+      const agentId = args?.agent_id
       if (!agentId) throw new Error('agent_id is required')
       const { callMcpTool: callMcp } = await import('../mcp-caller.js')
       const result = await callMcp({ toolName: 'graph.read_cypher', args: { query: 'MATCH (a:Agent {agentId: $id}) RETURN properties(a) as agent', params: { id: agentId } }, callId: `agent-${toolName}-${Date.now()}` })
@@ -2084,25 +2084,25 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'agent_dispatch': {
       const { callMcpTool: callMcp } = await import('../mcp-caller.js')
-      const result = await callMcp({ toolName: 'peer_eval_evaluate', args: { agentId: input?.agent_id, taskId: input?.task_id, taskType: input?.task_type, context: input?.context }, callId: `agent-dispatch-${Date.now()}` })
+      const result = await callMcp({ toolName: 'peer_eval_evaluate', args: { agentId: args?.agent_id, taskId: args?.task_id, taskType: args?.task_type, context: args?.context }, callId: `agent-dispatch-${Date.now()}` })
       return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
     }
 
     case 'agent_memory': {
       const { callMcpTool: callMcp } = await import('../mcp-caller.js')
-      const result = await callMcp({ toolName: 'memory_retrieve', args: { agent_id: input?.agent_id, key: input?.key }, callId: `agent-memory-${Date.now()}` })
+      const result = await callMcp({ toolName: 'memory_retrieve', args: { agent_id: args?.agent_id, key: args?.key }, callId: `agent-memory-${Date.now()}` })
       return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
     }
 
     // ─── chat.* — A2A messaging ──────────────────────────────────────
 
     case 'chat_send': {
-      const from = String(input?.from ?? 'unknown')
-      const to = String(input?.to ?? 'All')
-      const message = String(input?.message ?? '')
+      const from = String(args?.from ?? 'unknown')
+      const to = String(args?.to ?? 'All')
+      const message = String(args?.message ?? '')
       if (!message) throw new Error('message is required')
       const payload: Record<string, unknown> = { from, to, message, type: 'Text', source: 'agent' }
-      if (input?.thread_id) payload.thread_id = String(input.thread_id)
+      if (args?.thread_id) payload.thread_id = String(args.thread_id)
       const { config } = await import('../config.js')
       const res = await fetch(`http://localhost:${config.port}/chat/message`, {
         method: 'POST',
@@ -2115,11 +2115,11 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
         signal: AbortSignal.timeout(8000),
       })
       const data = await res.json().catch(() => ({}))
-      return JSON.stringify({ sent: res.ok, id: (data as any)?.data?.id, from, to, thread_id: input?.thread_id ?? null }, null, 2)
+      return JSON.stringify({ sent: res.ok, id: (data as any)?.data?.id, from, to, thread_id: args?.thread_id ?? null }, null, 2)
     }
 
     case 'chat_read': {
-      const limit = Math.min(Number(input?.limit ?? 20), 100)
+      const limit = Math.min(Number(args?.limit ?? 20), 100)
       const { config } = await import('../config.js')
       const res = await fetch(`http://localhost:${config.port}/chat/history?limit=${limit}`, {
         headers: {
@@ -2130,8 +2130,8 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       })
       const data = await res.json().catch(() => ({}))
       let messages: any[] = (data as any)?.data?.messages ?? []
-      if (input?.from_agent) messages = messages.filter((m: any) => m.from === input.from_agent)
-      if (input?.thread_id) messages = messages.filter((m: any) => m.thread_id === String(input.thread_id))
+      if (args?.from_agent) messages = messages.filter((m: any) => m.from === args.from_agent)
+      if (args?.thread_id) messages = messages.filter((m: any) => m.thread_id === String(args.thread_id))
       return JSON.stringify(messages.slice(0, limit), null, 2)
     }
 
@@ -2144,7 +2144,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'model_route': {
       const { LlmMatrix } = await import('@widgetdc/contracts/llm')
-      const taskType = input?.task_type ?? 'chat_standard'
+      const taskType = args?.task_type ?? 'chat_standard'
       const chain = LlmMatrix.resolve(taskType as any)
       return JSON.stringify({ task: taskType, models: chain.models, source: chain.source }, null, 2)
     }
@@ -2283,9 +2283,9 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'governance_plan_create': {
       const { createPlan } = await import('../hyperagent/hyperagent.js')
-      const description = String(input?.description ?? '')
-      const scope = String(input?.scope ?? 'staged_write')
-      const targetService = String(input?.target_service ?? '')
+      const description = String(args?.description ?? '')
+      const scope = String(args?.scope ?? 'staged_write')
+      const targetService = String(args?.target_service ?? '')
 
       if (!description) throw new Error('description is required')
       if (!['read_only', 'staged_write', 'production_write'].includes(scope)) {
@@ -2317,8 +2317,8 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'governance_plan_approve': {
       const { approvePlan } = await import('../hyperagent/hyperagent.js')
-      const planId = String(input?.plan_id ?? '')
-      const approver = String(input?.approver ?? '')
+      const planId = String(args?.plan_id ?? '')
+      const approver = String(args?.approver ?? '')
       if (!planId) throw new Error('plan_id is required')
       if (!approver) throw new Error('approver is required')
 
@@ -2334,7 +2334,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'governance_plan_execute': {
       const { executePlan, getPlan } = await import('../hyperagent/hyperagent.js')
-      const planId = String(input?.plan_id ?? '')
+      const planId = String(args?.plan_id ?? '')
       if (!planId) throw new Error('plan_id is required')
 
       // Verify plan exists and is approved before execution
@@ -2357,9 +2357,9 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'governance_plan_evaluate': {
       const { evaluatePlan, getPlan } = await import('../hyperagent/hyperagent.js')
-      const planId = String(input?.plan_id ?? '')
-      const outcome = String(input?.outcome ?? 'partial')
-      const kpiImpact = typeof input?.kpi_impact === 'number' ? input.kpi_impact : 0
+      const planId = String(args?.plan_id ?? '')
+      const outcome = String(args?.outcome ?? 'partial')
+      const kpiImpact = typeof args?.kpi_impact === 'number' ? args.kpi_impact : 0
 
       if (!planId) throw new Error('plan_id is required')
 
@@ -2382,17 +2382,17 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'governance_audit_query': {
       const { callMcpTool: callMcp } = await import('../mcp-caller.js')
-      const result = await callMcp({ toolName: 'failure_harvest', args: { window_hours: input?.window_hours ?? 24 }, callId: `governance-audit-${Date.now()}` })
+      const result = await callMcp({ toolName: 'failure_harvest', args: { window_hours: args?.window_hours ?? 24 }, callId: `governance-audit-${Date.now()}` })
       return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
     }
 
     case 'governance_policy_decide': {
-      const action = input?.action ?? 'get'
-      const key = input?.policy_key ?? ''
+      const action = args?.action ?? 'get'
+      const key = args?.policy_key ?? ''
       if (action === 'get') {
         return JSON.stringify({ policy_key: key, value: 'default', description: 'Governance policy for ' + key }, null, 2)
       }
-      return `Policy ${key} updated to ${JSON.stringify(input?.policy_value)}. Audit log entry created.`
+      return `Policy ${key} updated to ${JSON.stringify(args?.policy_value)}. Audit log entry created.`
     }
 
     default:
