@@ -42337,34 +42337,84 @@ phantomBomRouter.get("/clusters/debug", async (_req, res) => {
 
 // src/routes/linear-proxy.ts
 init_logger();
-init_config();
 import { Router as Router53 } from "express";
 var linearProxyRouter = Router53();
-async function callBackendMcp2(toolName2, payload) {
-  const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+var LINEAR_API = "https://api.linear.app/graphql";
+var LINEAR_API_KEY = process.env.LINEAR_API_KEY ?? "";
+async function linearGraphQL(query, variables) {
+  if (!LINEAR_API_KEY) throw new Error("LINEAR_API_KEY not configured");
+  const res = await fetch(LINEAR_API, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${config.backendApiKey}`
+      "Authorization": LINEAR_API_KEY
     },
-    body: JSON.stringify({ tool: toolName2, payload }),
+    body: JSON.stringify({ query, variables }),
     signal: AbortSignal.timeout(15e3)
   });
-  if (!res.ok) throw new Error(`Backend MCP ${toolName2}: ${res.status}`);
-  return res.json();
+  if (!res.ok) throw new Error(`Linear API: ${res.status} ${res.statusText}`);
+  const data = await res.json();
+  if (data.errors?.length) throw new Error(`Linear GraphQL: ${data.errors.map((e2) => e2.message).join(", ")}`);
+  return data.data;
+}
+function mapStateFilter(state4) {
+  if (!state4) return void 0;
+  const map3 = {
+    "active": "started",
+    "done": "completed",
+    "completed": "completed",
+    "backlog": "backlog",
+    "todo": "todo",
+    "in progress": "started",
+    "started": "started",
+    "canceled": "canceled"
+  };
+  return map3[state4.toLowerCase()] ?? state4;
 }
 linearProxyRouter.get("/issues", async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 100, 250);
-    const state4 = req.query.state;
-    const payload = { limit };
-    if (state4 === "active") payload.status = "started";
-    else if (state4 === "done") payload.status = "completed";
-    else if (state4 === "backlog") payload.status = "backlog";
-    else payload.status = state4;
-    const data = await callBackendMcp2("linear.issues", payload);
-    const issues = data?.result?.issues ?? data?.result ?? data ?? [];
-    res.json(Array.isArray(issues) ? issues : []);
+    const stateFilter = mapStateFilter(req.query.state);
+    const where = {};
+    if (stateFilter) where.state = { type: { key: { eq: stateFilter } } };
+    const data = await linearGraphQL(
+      `query($limit: Int!, $filter: IssueFilter) {
+        issues(limit: $limit, filter: $filter) {
+          nodes {
+            id identifier title description createdAt updatedAt
+            priority priorityLabel estimate
+            state { name type color }
+            assignee { name displayName email }
+            labels { nodes { name color description } }
+            project { name }
+            team { name key }
+            url branchName
+          }
+        }
+      }`,
+      { limit, filter: Object.keys(where).length > 0 ? where : void 0 }
+    );
+    const nodes2 = data?.issues?.nodes ?? [];
+    res.json(nodes2.map((issue) => ({
+      id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+      description: issue.description,
+      state: issue.state?.name ?? "Unknown",
+      stateType: issue.state?.type,
+      stateColor: issue.state?.color,
+      priority: issue.priority,
+      priorityLabel: issue.priorityLabel,
+      assignee: issue.assignee,
+      labels: issue.labels?.nodes ?? [],
+      createdAt: issue.createdAt,
+      updatedAt: issue.updatedAt,
+      estimate: issue.estimate,
+      url: issue.url,
+      branchName: issue.branchName,
+      team: issue.team,
+      project: issue.project
+    })));
   } catch (err) {
     logger.error({ err: String(err) }, "Linear proxy: failed to fetch issues");
     res.status(502).json({ error: `Failed to fetch Linear issues: ${String(err)}` });
@@ -42372,33 +42422,97 @@ linearProxyRouter.get("/issues", async (req, res) => {
 });
 linearProxyRouter.get("/labels", async (_req, res) => {
   try {
-    const data = await callBackendMcp2("linear.labels", { limit: 100 });
-    const labels = data?.result?.nodes ?? data?.result ?? [];
-    res.json(Array.isArray(labels) ? labels : []);
+    const data = await linearGraphQL(
+      `query($limit: Int!) {
+        issueLabels(limit: $limit) {
+          nodes { id name color description }
+        }
+      }`,
+      { limit: 100 }
+    );
+    const nodes2 = data?.issueLabels?.nodes ?? [];
+    res.json(nodes2);
   } catch (err) {
     logger.error({ err: String(err) }, "Linear proxy: failed to fetch labels");
     res.status(502).json({ error: `Failed to fetch Linear labels: ${String(err)}` });
   }
 });
+linearProxyRouter.get("/issue/:id", async (req, res) => {
+  try {
+    const data = await linearGraphQL(
+      `query($id: String!) {
+        issue(id: $id) {
+          id identifier title description createdAt updatedAt
+          priority priorityLabel estimate
+          state { name type color }
+          assignee { name displayName email }
+          labels { nodes { name color description } }
+          project { name }
+          team { name key }
+          url branchName
+          comments { nodes { id body createdAt user { name displayName } } }
+        }
+      }`,
+      { id: req.params.id }
+    );
+    res.json(data?.issue ?? {});
+  } catch (err) {
+    logger.error({ err: String(err) }, `Linear proxy: failed to get issue ${req.params.id}`);
+    res.status(502).json({ error: `Failed to get Linear issue: ${String(err)}` });
+  }
+});
 linearProxyRouter.post("/issues", async (req, res) => {
   try {
     const body = req.body;
-    if (!body.title && !body.id) {
-      res.status(400).json({ error: "title required for new issues" });
-      return;
+    if (body.id) {
+      const data = await linearGraphQL(
+        `mutation($id: String!, $input: IssueUpdateInput!) {
+          issueUpdate(id: $id, input: $input) {
+            success
+            issue { id identifier title state { name } }
+          }
+        }`,
+        {
+          id: body.id,
+          input: {
+            title: body.title,
+            description: body.description,
+            priority: body.priority,
+            assigneeId: body.assignee,
+            stateId: body.stateId,
+            labelIds: body.labels,
+            estimate: body.estimate
+          }
+        }
+      );
+      res.json(data?.issueUpdate ?? {});
+    } else {
+      if (!body.title) {
+        res.status(400).json({ error: "title required for new issues" });
+        return;
+      }
+      const data = await linearGraphQL(
+        `mutation($input: IssueCreateInput!) {
+          issueCreate(input: $input) {
+            success
+            issue { id identifier title state { name } url }
+          }
+        }`,
+        {
+          input: {
+            title: body.title,
+            description: body.description,
+            priority: body.priority,
+            teamId: body.team ?? "WidgeTDC",
+            assigneeId: body.assignee,
+            stateId: body.stateId,
+            labelIds: body.labels,
+            estimate: body.estimate
+          }
+        }
+      );
+      res.json(data?.issueCreate ?? {});
     }
-    const data = await callBackendMcp2("linear.save_issue", {
-      id: body.id,
-      title: body.title,
-      description: body.description,
-      team: body.team ?? "WidgeTDC",
-      priority: body.priority,
-      assignee: body.assignee,
-      labels: body.labels,
-      state: body.state,
-      estimate: body.estimate
-    });
-    res.json(data?.result ?? data);
   } catch (err) {
     logger.error({ err: String(err) }, "Linear proxy: failed to save issue");
     res.status(502).json({ error: `Failed to save Linear issue: ${String(err)}` });
@@ -42406,31 +42520,31 @@ linearProxyRouter.post("/issues", async (req, res) => {
 });
 linearProxyRouter.post("/issues/:id", async (req, res) => {
   try {
-    const { id } = req.params;
     const body = req.body;
-    const data = await callBackendMcp2("linear.save_issue", {
-      id,
-      title: body.title,
-      description: body.description,
-      priority: body.priority,
-      assignee: body.assignee,
-      labels: body.labels,
-      state: body.state,
-      estimate: body.estimate
-    });
-    res.json(data?.result ?? data);
+    const data = await linearGraphQL(
+      `mutation($id: String!, $input: IssueUpdateInput!) {
+        issueUpdate(id: $id, input: $input) {
+          success
+          issue { id identifier title state { name } }
+        }
+      }`,
+      {
+        id: req.params.id,
+        input: {
+          title: body.title,
+          description: body.description,
+          priority: body.priority,
+          assigneeId: body.assignee,
+          stateId: body.stateId,
+          labelIds: body.labels,
+          estimate: body.estimate
+        }
+      }
+    );
+    res.json(data?.issueUpdate ?? {});
   } catch (err) {
     logger.error({ err: String(err) }, `Linear proxy: failed to update issue ${req.params.id}`);
     res.status(502).json({ error: `Failed to update Linear issue: ${String(err)}` });
-  }
-});
-linearProxyRouter.get("/issue/:id", async (req, res) => {
-  try {
-    const data = await callBackendMcp2("linear.get_issue", { id: req.params.id });
-    res.json(data?.result ?? data);
-  } catch (err) {
-    logger.error({ err: String(err) }, `Linear proxy: failed to get issue ${req.params.id}`);
-    res.status(502).json({ error: `Failed to get Linear issue: ${String(err)}` });
   }
 });
 
