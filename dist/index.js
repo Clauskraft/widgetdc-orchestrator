@@ -33924,12 +33924,208 @@ knowledgeRouter.get("/briefing", async (_req, res) => {
   }
 });
 
+// src/routes/neural-bus.ts
+init_logger();
+init_redis();
+import { Router as Router15 } from "express";
+import { v4 as uuid27 } from "uuid";
+var neuralBusRouter = Router15();
+var BUS_MESSAGES_KEY = "neural-bus:messages";
+var BUS_AGENTS_KEY = "neural-bus:agents";
+var BUS_INBOX_KEY = "neural-bus:inbox";
+var BUS_TTL = 86400;
+async function getRedisClient() {
+  const redis2 = getRedis();
+  if (!redis2) throw new Error("Redis not available");
+  return redis2;
+}
+neuralBusRouter.post("/broadcast", async (req, res) => {
+  try {
+    const redis2 = await getRedisClient();
+    const msg = {
+      ...req.body,
+      id: uuid27(),
+      acknowledgedBy: []
+    };
+    await redis2.hset(BUS_MESSAGES_KEY, msg.id, JSON.stringify(msg));
+    await redis2.expire(BUS_MESSAGES_KEY, BUS_TTL);
+    const agents = await redis2.hkeys(BUS_AGENTS_KEY);
+    for (const agentId of agents) {
+      await redis2.lpush(`${BUS_INBOX_KEY}:${agentId}`, JSON.stringify(msg));
+      await redis2.ltrim(`${BUS_INBOX_KEY}:${agentId}`, 0, 99);
+    }
+    logger.info({ messageId: msg.id, type: "broadcast", domain: msg.domain, agents: agents.length }, "Bus broadcast");
+    res.json({ success: true, messageId: msg.id, deliveredTo: agents.length });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Bus broadcast failed");
+    res.status(502).json({ error: `Broadcast failed: ${String(err)}` });
+  }
+});
+neuralBusRouter.post("/send", async (req, res) => {
+  try {
+    const redis2 = await getRedisClient();
+    const msg = {
+      ...req.body,
+      id: uuid27(),
+      acknowledgedBy: []
+    };
+    if (!msg.to) {
+      res.status(400).json({ error: "to (agentId) is required for direct messages" });
+      return;
+    }
+    await redis2.hset(BUS_MESSAGES_KEY, msg.id, JSON.stringify(msg));
+    await redis2.lpush(`${BUS_INBOX_KEY}:${msg.to}`, JSON.stringify(msg));
+    await redis2.ltrim(`${BUS_INBOX_KEY}:${msg.to}`, 0, 99);
+    logger.info({ messageId: msg.id, type: "direct", from: msg.from, to: msg.to }, "Bus direct message");
+    res.json({ success: true, messageId: msg.id, deliveredTo: msg.to });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Bus send failed");
+    res.status(502).json({ error: `Send failed: ${String(err)}` });
+  }
+});
+neuralBusRouter.post("/publish", async (req, res) => {
+  try {
+    const redis2 = await getRedisClient();
+    const msg = {
+      ...req.body,
+      id: uuid27(),
+      acknowledgedBy: []
+    };
+    await redis2.hset(BUS_MESSAGES_KEY, msg.id, JSON.stringify(msg));
+    const agents = await redis2.hgetall(BUS_AGENTS_KEY);
+    let deliveredTo = 0;
+    for (const [agentId, agentJson] of Object.entries(agents)) {
+      try {
+        const agent = JSON.parse(agentJson);
+        if (agent.domain === msg.domain || agent.domain === "all" || agent.capabilities?.includes(msg.domain)) {
+          await redis2.lpush(`${BUS_INBOX_KEY}:${agentId}`, JSON.stringify(msg));
+          await redis2.ltrim(`${BUS_INBOX_KEY}:${agentId}`, 0, 99);
+          deliveredTo++;
+        }
+      } catch {
+      }
+    }
+    logger.info({ messageId: msg.id, type: "publish", domain: msg.domain, deliveredTo }, "Bus publish");
+    res.json({ success: true, messageId: msg.id, deliveredTo });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Bus publish failed");
+    res.status(502).json({ error: `Publish failed: ${String(err)}` });
+  }
+});
+neuralBusRouter.get("/inbox", async (req, res) => {
+  try {
+    const redis2 = await getRedisClient();
+    const agentId = req.query.agentId;
+    const domain = req.query.domain;
+    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+    if (!agentId) {
+      res.status(400).json({ error: "agentId is required" });
+      return;
+    }
+    const messages = await redis2.lrange(`${BUS_INBOX_KEY}:${agentId}`, 0, limit - 1);
+    const parsed = messages.map((m) => {
+      try {
+        return JSON.parse(m);
+      } catch {
+        return null;
+      }
+    }).filter(Boolean);
+    const filtered = domain ? parsed.filter((m) => m.domain === domain || m.type === "broadcast") : parsed;
+    res.json({ success: true, messages: filtered, count: filtered.length, agentId });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Bus inbox failed");
+    res.status(502).json({ error: `Inbox failed: ${String(err)}` });
+  }
+});
+neuralBusRouter.post("/ack", async (req, res) => {
+  try {
+    const redis2 = await getRedisClient();
+    const { messageId, from: agentId } = req.body;
+    if (!messageId || !agentId) {
+      res.status(400).json({ error: "messageId and from (agentId) are required" });
+      return;
+    }
+    const msgJson = await redis2.hget(BUS_MESSAGES_KEY, messageId);
+    if (!msgJson) {
+      res.status(404).json({ error: `Message ${messageId} not found` });
+      return;
+    }
+    const msg = JSON.parse(msgJson);
+    if (!msg.acknowledgedBy.includes(agentId)) {
+      msg.acknowledgedBy.push(agentId);
+      await redis2.hset(BUS_MESSAGES_KEY, messageId, JSON.stringify(msg));
+    }
+    const inboxKey = `${BUS_INBOX_KEY}:${agentId}`;
+    const messages = await redis2.lrange(inboxKey, 0, -1);
+    const filtered = messages.filter((m) => {
+      try {
+        const parsed = JSON.parse(m);
+        return parsed.id !== messageId;
+      } catch {
+        return true;
+      }
+    });
+    await redis2.del(inboxKey);
+    if (filtered.length > 0) {
+      await redis2.rpush(inboxKey, ...filtered);
+    }
+    res.json({ success: true, messageId, acknowledgedBy: agentId });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Bus ack failed");
+    res.status(502).json({ error: `Ack failed: ${String(err)}` });
+  }
+});
+neuralBusRouter.get("/agents", async (_req, res) => {
+  try {
+    const redis2 = await getRedisClient();
+    const agents = await redis2.hgetall(BUS_AGENTS_KEY);
+    const parsed = Object.entries(agents).map(([id, json]) => {
+      try {
+        return { id, ...JSON.parse(json) };
+      } catch {
+        return { id };
+      }
+    });
+    res.json({ success: true, agents: parsed, count: parsed.length });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Bus agents failed");
+    res.status(502).json({ error: `Agents failed: ${String(err)}` });
+  }
+});
+neuralBusRouter.post("/register", async (req, res) => {
+  try {
+    const redis2 = await getRedisClient();
+    const { agentId, name, capabilities = [], domain = "general", source = "unknown" } = req.body;
+    if (!agentId) {
+      res.status(400).json({ error: "agentId is required" });
+      return;
+    }
+    const agentData = {
+      agentId,
+      name: name ?? agentId,
+      capabilities,
+      domain,
+      source,
+      registeredAt: (/* @__PURE__ */ new Date()).toISOString(),
+      lastSeenAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    await redis2.hset(BUS_AGENTS_KEY, agentId, JSON.stringify(agentData));
+    await redis2.expire(BUS_AGENTS_KEY, BUS_TTL);
+    await redis2.lrange(`${BUS_INBOX_KEY}:${agentId}`, 0, 0);
+    logger.info({ agentId, name, domain, source }, "Agent registered on Neural Bus");
+    res.json({ success: true, agentId, ...agentData });
+  } catch (err) {
+    logger.error({ err: String(err) }, "Bus register failed");
+    res.status(502).json({ error: `Register failed: ${String(err)}` });
+  }
+});
+
 // src/routes/artifacts.ts
 init_redis();
 init_logger();
-import { Router as Router15 } from "express";
+import { Router as Router16 } from "express";
 import { randomUUID } from "crypto";
-var artifactRouter = Router15();
+var artifactRouter = Router16();
 var ARTIFACT_PREFIX = "orchestrator:artifact:";
 var ARTIFACT_INDEX = "orchestrator:artifacts:index";
 var TTL_SECONDS6 = 2592e3;
@@ -34255,10 +34451,10 @@ init_redis();
 init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
-import { Router as Router16 } from "express";
+import { Router as Router17 } from "express";
 import { randomUUID as randomUUID2 } from "crypto";
-import { v4 as uuid27 } from "uuid";
-var notebookRouter = Router16();
+import { v4 as uuid28 } from "uuid";
+var notebookRouter = Router17();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
 var TTL_SECONDS7 = 2592e3;
@@ -34297,7 +34493,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query, params: {} },
-        callId: uuid27(),
+        callId: uuid28(),
         timeoutMs: 15e3
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -34305,7 +34501,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "kg_rag.query",
         args: { question: query, max_evidence: 10 },
-        callId: uuid27(),
+        callId: uuid28(),
         timeoutMs: 2e4
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -34513,9 +34709,9 @@ async function renderNotebookMarkdown(_req, res, id) {
 init_redis();
 init_config();
 init_logger();
-import { Router as Router17 } from "express";
+import { Router as Router18 } from "express";
 import { randomUUID as randomUUID3 } from "crypto";
-var drillRouter = Router17();
+var drillRouter = Router18();
 var DRILL_PREFIX = "orchestrator:drill:";
 var SESSION_TTL = 3600;
 var MCP_TIMEOUT_MS2 = 12e3;
@@ -34855,7 +35051,7 @@ function trendArrow(trend) {
 
 // src/routes/monitor.ts
 init_mcp_caller();
-import { Router as Router18 } from "express";
+import { Router as Router19 } from "express";
 
 // src/memory/context-compress.ts
 init_cognitive_proxy();
@@ -34981,13 +35177,13 @@ ${compressed}`,
 init_chain_engine();
 init_cognitive_proxy();
 init_logger();
-import { v4 as uuid28 } from "uuid";
-var monitorRouter = Router18();
+import { v4 as uuid29 } from "uuid";
+var monitorRouter = Router19();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid28(),
+    callId: uuid29(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];
@@ -35265,9 +35461,9 @@ init_redis();
 init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
-import { Router as Router19 } from "express";
-import { v4 as uuid29 } from "uuid";
-var assemblyRouter = Router19();
+import { Router as Router20 } from "express";
+import { v4 as uuid30 } from "uuid";
+var assemblyRouter = Router20();
 var REDIS_PREFIX10 = "orchestrator:assembly:";
 var REDIS_INDEX4 = "orchestrator:assemblies:index";
 var TTL_SECONDS8 = 2592e3;
@@ -35330,7 +35526,7 @@ ORDER BY b.domain, b.name LIMIT 50`;
     const graphResult = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params },
-      callId: uuid29(),
+      callId: uuid30(),
       timeoutMs: 15e3
     });
     if (graphResult.status === "success" && graphResult.result) {
@@ -35396,7 +35592,7 @@ Reply as JSON:
   const assemblies = [];
   const now = (/* @__PURE__ */ new Date()).toISOString();
   for (const candidate of analysis.candidates.slice(0, maxCandidates)) {
-    const assemblyId = `widgetdc:assembly:${uuid29()}`;
+    const assemblyId = `widgetdc:assembly:${uuid30()}`;
     const selectedBlocks = blocks.filter((b) => candidate.block_ids.includes(b.block_id));
     const conflictCount = candidate.conflicts?.length ?? 0;
     const coherence = Math.max(0, Math.min(1, candidate.coherence ?? 0.5));
@@ -35455,7 +35651,7 @@ MERGE (a)-[:COMPOSED_OF]->(b)`,
             blockIds: selectedBlocks.map((b) => b.block_id)
           }
         },
-        callId: uuid29(),
+        callId: uuid30(),
         timeoutMs: 1e4
       });
     } catch (err) {
@@ -35545,7 +35741,7 @@ assemblyRouter.put("/:id", async (req, res) => {
         query: "MATCH (a:Assembly {id: $id}) SET a.status = $status, a.updated_at = datetime()",
         params: { id: assembly.$id, status: assembly.status }
       },
-      callId: uuid29(),
+      callId: uuid30(),
       timeoutMs: 5e3
     });
   } catch {
@@ -35559,9 +35755,9 @@ init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
 init_sse();
-import { Router as Router20 } from "express";
-import { v4 as uuid30 } from "uuid";
-var decisionsRouter = Router20();
+import { Router as Router21 } from "express";
+import { v4 as uuid31 } from "uuid";
+var decisionsRouter = Router21();
 var REDIS_PREFIX11 = "orchestrator:decision:";
 var REDIS_INDEX5 = "orchestrator:decisions:index";
 var TTL_SECONDS9 = 7776e3;
@@ -35613,7 +35809,7 @@ RETURN a.id AS asm_id, a.name AS asm_name, a.created_at AS asm_ts,
 ORDER BY b.name`,
         params: { assemblyId }
       },
-      callId: uuid30(),
+      callId: uuid31(),
       timeoutMs: 15e3
     });
     if (result.status === "success") {
@@ -35672,7 +35868,7 @@ decisionsRouter.post("/certify", async (req, res) => {
   const assemblyId = String(body.assembly_id);
   const title = String(body.title);
   const now = (/* @__PURE__ */ new Date()).toISOString();
-  const decisionId = `widgetdc:decision:${uuid30()}`;
+  const decisionId = `widgetdc:decision:${uuid31()}`;
   const lineageChain = await buildLineageChain(assemblyId);
   let rationale = String(body.rationale ?? "");
   let summary = String(body.summary ?? "");
@@ -35775,7 +35971,7 @@ CREATE (d)-[:CERTIFIED_BY_EVIDENCE]->(e)`,
           // Cap for query size
         }
       },
-      callId: uuid30(),
+      callId: uuid31(),
       timeoutMs: 15e3
     });
   } catch (err) {
@@ -35877,8 +36073,8 @@ decisionsRouter.get("/:id/lineage", async (req, res) => {
 // src/routes/s1-s4.ts
 init_chain_engine();
 init_logger();
-import { Router as Router21 } from "express";
-var s1s4Router = Router21();
+import { Router as Router22 } from "express";
+var s1s4Router = Router22();
 s1s4Router.post("/trigger", async (req, res) => {
   const { url, source_type, topic, weights } = req.body;
   if (!url) {
@@ -35999,9 +36195,9 @@ async function listPlans() {
 // src/flywheel/harvest-pipeline.ts
 init_logger();
 init_mcp_caller();
-import { v4 as uuid31 } from "uuid";
+import { v4 as uuid32 } from "uuid";
 async function extract(domain) {
-  const callId = `harvest-extract-${uuid31().substring(0, 8)}`;
+  const callId = `harvest-extract-${uuid32().substring(0, 8)}`;
   try {
     const result = await callMcpTool({
       toolName: "srag.query",
@@ -36027,7 +36223,7 @@ function generalize(items, domain) {
     if (content.length > 2e3 || name.toLowerCase().includes("framework")) tier = "framework";
     else if (content.length > 500 || name.toLowerCase().includes("template")) tier = "template";
     return {
-      id: `harvest-${uuid31().substring(0, 12)}`,
+      id: `harvest-${uuid32().substring(0, 12)}`,
       name,
       tier,
       description: content.substring(0, 300),
@@ -36044,7 +36240,7 @@ function generalize(items, domain) {
 }
 async function store(components) {
   if (components.length === 0) return 0;
-  const callId = `harvest-store-${uuid31().substring(0, 8)}`;
+  const callId = `harvest-store-${uuid32().substring(0, 8)}`;
   const labelMap = {
     framework: "Framework",
     template: "Template",
@@ -36096,7 +36292,7 @@ async function verify(components) {
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: `${comp.tier} for ${comp.industries[0]}: ${comp.name}` },
-        callId: `harvest-verify-${uuid31().substring(0, 8)}`,
+        callId: `harvest-verify-${uuid32().substring(0, 8)}`,
         timeoutMs: 15e3
       });
       const resultStr = JSON.stringify(result).toLowerCase();
@@ -36151,8 +36347,8 @@ init_llm_proxy();
 init_tool_executor();
 init_logger();
 init_config();
-import { Router as Router22 } from "express";
-import { v4 as uuid32 } from "uuid";
+import { Router as Router23 } from "express";
+import { v4 as uuid33 } from "uuid";
 var MATRIX_ALIAS_TARGETS = {
   "claude-sonnet": "claude-sonnet-4-20250514",
   "claude-opus": "claude-sonnet-4-20250514",
@@ -36203,7 +36399,7 @@ function recordMetrics(model, toolCalls, toolRounds, totalTokens, toolsOffered) 
   metricsBuffer.push({ model, tool_calls: toolCalls, tool_rounds: toolRounds, total_tokens: totalTokens, timestamp: Date.now() });
   if (metricsBuffer.length > MAX_METRICS) metricsBuffer.splice(0, metricsBuffer.length - MAX_METRICS);
 }
-var openaiCompatRouter = Router22();
+var openaiCompatRouter = Router23();
 var rateLimitMap = /* @__PURE__ */ new Map();
 var RATE_LIMIT_WINDOW_MS = 6e4;
 var RATE_LIMIT_MAX = 30;
@@ -36383,7 +36579,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     return;
   }
   const { model, messages, stream: stream3, temperature, max_tokens } = req.body;
-  const requestId = `chatcmpl-${uuid32().substring(0, 12)}`;
+  const requestId = `chatcmpl-${uuid33().substring(0, 12)}`;
   const assistant = ASSISTANT_MAP.get(model);
   const resolvedModel = assistant ? assistant.baseModel : model;
   const mapping = resolveModelToProvider(resolvedModel) ?? resolveModelToProvider("gemini-flash");
@@ -36536,8 +36732,8 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
 
 // src/routes/prompt-generator.ts
 init_logger();
-import { Router as Router23 } from "express";
-var promptGeneratorRouter = Router23();
+import { Router as Router24 } from "express";
+var promptGeneratorRouter = Router24();
 var intentRules = [
   {
     keywords: ["pr\xE6sentation", "praesentation", "presentation", "slides", "deck", "slide"],
@@ -36761,7 +36957,7 @@ promptGeneratorRouter.get("/skills", (_req, res) => {
 
 // src/openapi.ts
 init_tool_registry();
-import { Router as Router24 } from "express";
+import { Router as Router25 } from "express";
 import swaggerUi from "swagger-ui-express";
 function buildOpenAPISpec() {
   return {
@@ -37512,7 +37708,7 @@ function buildChatGPTSpec() {
     }
   };
 }
-var openapiRouter = Router24();
+var openapiRouter = Router25();
 var spec = buildOpenAPISpec();
 var gptSpec = buildChatGPTSpec();
 openapiRouter.get("/openapi.json", (_req, res) => {
@@ -37538,9 +37734,9 @@ init_tool_registry();
 init_mcp_caller();
 init_config();
 init_logger();
-import { Router as Router25 } from "express";
-import { v4 as uuid33 } from "uuid";
-var mcpGatewayRouter = Router25();
+import { Router as Router26 } from "express";
+import { v4 as uuid34 } from "uuid";
+var mcpGatewayRouter = Router26();
 var backendToolsCache = [];
 var backendToolsCacheTime = 0;
 var CACHE_TTL_MS2 = 3e5;
@@ -37625,7 +37821,7 @@ async function handleToolsCall(id, params) {
   if (isOrchestratorTool) {
     try {
       const results = await executeToolCalls([{
-        id: uuid33(),
+        id: uuid34(),
         function: { name: toolName2, arguments: JSON.stringify(args) }
       }]);
       const result = results[0];
@@ -37653,7 +37849,7 @@ async function handleToolsCall(id, params) {
     const mcpResult = await callMcpTool({
       toolName: backendName,
       args,
-      callId: uuid33(),
+      callId: uuid34(),
       timeoutMs: 3e4
     });
     if (mcpResult.status !== "success") {
@@ -37771,9 +37967,9 @@ init_tool_executor();
 init_tool_registry();
 init_logger();
 init_adoption_telemetry();
-import { Router as Router26 } from "express";
-import { v4 as uuid34 } from "uuid";
-var toolGatewayRouter = Router26();
+import { Router as Router27 } from "express";
+import { v4 as uuid35 } from "uuid";
+var toolGatewayRouter = Router27();
 toolGatewayRouter.post("/:name", async (req, res) => {
   const { name } = req.params;
   const tool = getTool(name);
@@ -37789,7 +37985,7 @@ toolGatewayRouter.post("/:name", async (req, res) => {
     });
     return;
   }
-  const callId = req.body?.call_id ?? uuid34();
+  const callId = req.body?.call_id ?? uuid35();
   const args = req.body ?? {};
   logger.info({ tool: name, call_id: callId }, "REST tool gateway call");
   const result = await executeToolUnified(name, args, {
@@ -38156,8 +38352,8 @@ init_chat_store();
 init_failure_harvester();
 init_redis();
 init_logger();
-import { Router as Router27 } from "express";
-var failuresRouter = Router27();
+import { Router as Router28 } from "express";
+var failuresRouter = Router28();
 failuresRouter.get("/summary", async (_req, res) => {
   try {
     const redis2 = getRedis();
@@ -38199,8 +38395,8 @@ failuresRouter.post("/harvest", async (req, res) => {
 init_competitive_crawler();
 init_redis();
 init_logger();
-import { Router as Router28 } from "express";
-var competitiveRouter = Router28();
+import { Router as Router29 } from "express";
+var competitiveRouter = Router29();
 var crawlInProgress = false;
 var lastCrawlAt = 0;
 var CRAWL_COOLDOWN_MS = 36e5;
@@ -38267,8 +38463,8 @@ competitiveRouter.get("/targets", (_req, res) => {
 init_cognitive_proxy();
 init_redis();
 init_logger();
-import { Router as Router29 } from "express";
-var foldRouter = Router29();
+import { Router as Router30 } from "express";
+var foldRouter = Router30();
 var DAILY_LIMIT = 100;
 var REDIS_PREFIX12 = "caas:usage:";
 async function getUsageCount(apiKey) {
@@ -38422,18 +38618,18 @@ foldRouter.get("/usage", async (req, res) => {
 });
 
 // src/routes/graph-hygiene.ts
-import { Router as Router30 } from "express";
+import { Router as Router31 } from "express";
 
 // src/graph/graph-hygiene.ts
 init_mcp_caller();
 init_logger();
 init_sse();
-import { v4 as uuid35 } from "uuid";
+import { v4 as uuid36 } from "uuid";
 async function graphRead3(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid35(),
+    callId: uuid36(),
     timeoutMs: 3e4
   });
   if (result.status !== "success") return [];
@@ -38444,7 +38640,7 @@ async function graphWrite2(cypher, params) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {} },
-    callId: uuid35(),
+    callId: uuid36(),
     timeoutMs: 6e4
   });
   return result.status === "success";
@@ -38654,7 +38850,7 @@ async function runGraphHygiene2() {
 
 // src/routes/graph-hygiene.ts
 init_logger();
-var graphHygieneRouter = Router30();
+var graphHygieneRouter = Router31();
 var hygieneInProgress = false;
 graphHygieneRouter.post("/run", async (_req, res) => {
   if (hygieneInProgress) {
@@ -38702,8 +38898,8 @@ graphHygieneRouter.post("/fix/:op", async (req, res) => {
 // src/routes/deliverables.ts
 init_deliverable_engine();
 init_logger();
-import { Router as Router31 } from "express";
-var deliverablesRouter = Router31();
+import { Router as Router32 } from "express";
+var deliverablesRouter = Router32();
 var VALID_TYPES = ["analysis", "roadmap", "assessment"];
 var VALID_FORMATS = ["pdf", "markdown"];
 var rateLimitMap2 = /* @__PURE__ */ new Map();
@@ -38840,8 +39036,8 @@ deliverablesRouter.get("/:id/markdown", async (req, res) => {
 init_similarity_engine();
 init_compound_hooks();
 init_logger();
-import { Router as Router32 } from "express";
-var similarityRouter = Router32();
+import { Router as Router33 } from "express";
+var similarityRouter = Router33();
 var VALID_DIMENSIONS = [
   "industry",
   "service",
@@ -38965,8 +39161,8 @@ similarityRouter.get("/client/:id", async (req, res) => {
 // src/routes/engagements.ts
 init_engagement_engine();
 init_logger();
-import { Router as Router33 } from "express";
-var engagementsRouter = Router33();
+import { Router as Router34 } from "express";
+var engagementsRouter = Router34();
 var VALID_GRADES = ["exceeded", "met", "partial", "missed"];
 var rateLimitMap3 = /* @__PURE__ */ new Map();
 var RATE_LIMIT2 = 20;
@@ -39213,8 +39409,8 @@ init_write_gate();
 init_adaptive_rag();
 init_engagement_engine();
 init_logger();
-import { Router as Router34 } from "express";
-var intelligenceRouter = Router34();
+import { Router as Router35 } from "express";
+var intelligenceRouter = Router35();
 intelligenceRouter.post("/ingest", async (req, res) => {
   const body = req.body;
   const content = body.content;
@@ -39291,7 +39487,7 @@ intelligenceRouter.post("/adaptive-rag/retrain", async (_req, res) => {
 });
 intelligenceRouter.post("/extract-test", async (req, res) => {
   const { callMcpTool: callMcpTool2 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
-  const { v4: uuid37 } = await import("uuid");
+  const { v4: uuid38 } = await import("uuid");
   const content = req.body?.content ?? "CSRD regulation, ATP pension fund, GRI framework";
   try {
     const llmResult = await callMcpTool2({
@@ -39301,7 +39497,7 @@ intelligenceRouter.post("/extract-test", async (req, res) => {
 
 Content: ${content.slice(0, 2e3)}`
       },
-      callId: uuid37(),
+      callId: uuid38(),
       timeoutMs: 3e4
     });
     const raw = llmResult.result;
@@ -39390,9 +39586,9 @@ intelligenceRouter.post("/engagement/plan", async (req, res) => {
 init_manifesto_governance();
 init_mcp_caller();
 init_logger();
-import { Router as Router35 } from "express";
-import { v4 as uuid36 } from "uuid";
-var governanceRouter = Router35();
+import { Router as Router36 } from "express";
+import { v4 as uuid37 } from "uuid";
+var governanceRouter = Router36();
 governanceRouter.get("/matrix", (_req, res) => {
   res.json({
     success: true,
@@ -39449,7 +39645,7 @@ RETURN p.name as name, p.status as status`,
               gap_remediation: p.gap_remediation ?? ""
             }
           },
-          callId: uuid36(),
+          callId: uuid37(),
           timeoutMs: 15e3
         });
         results.push({
@@ -39482,8 +39678,8 @@ RETURN p.name as name, p.status as status`,
 // src/routes/osint.ts
 init_osint_scanner();
 init_logger();
-import { Router as Router36 } from "express";
-var osintRouter = Router36();
+import { Router as Router37 } from "express";
+var osintRouter = Router37();
 osintRouter.post("/scan", async (req, res) => {
   try {
     const body = req.body;
@@ -39618,8 +39814,8 @@ osintRouter.get("/domains", (_req, res) => {
 // src/routes/evolution.ts
 init_evolution_loop();
 init_logger();
-import { Router as Router37 } from "express";
-var evolutionRouter = Router37();
+import { Router as Router38 } from "express";
+var evolutionRouter = Router38();
 evolutionRouter.post("/run", async (req, res) => {
   const { focus_area, dry_run } = req.body ?? {};
   try {
@@ -39686,8 +39882,8 @@ evolutionRouter.get("/history", async (req, res) => {
 // src/routes/memory.ts
 init_working_memory();
 init_logger();
-import { Router as Router38 } from "express";
-var memoryRouter = Router38();
+import { Router as Router39 } from "express";
+var memoryRouter = Router39();
 memoryRouter.post("/store", async (req, res) => {
   const body = req.body;
   const agentId = body.agent_id;
@@ -39746,8 +39942,8 @@ memoryRouter.delete("/:agent_id", async (req, res) => {
 init_tool_registry();
 init_tool_executor();
 init_logger();
-import { Router as Router39 } from "express";
-var abiDocsRouter = Router39();
+import { Router as Router40 } from "express";
+var abiDocsRouter = Router40();
 abiDocsRouter.get("/docs", (_req, res) => {
   const namespace = _req.query.namespace ?? void 0;
   const category = _req.query.category ?? void 0;
@@ -39889,12 +40085,12 @@ var CURATED_EXAMPLES = {
 // src/routes/abi-health.ts
 init_tool_registry();
 init_logger();
-import { Router as Router40 } from "express";
+import { Router as Router41 } from "express";
 import { readFileSync as readFileSync2, writeFileSync, existsSync, mkdirSync } from "fs";
 import path from "path";
 import { fileURLToPath as fileURLToPath2 } from "url";
 var __dirname2 = path.dirname(fileURLToPath2(import.meta.url));
-var abiHealthRouter = Router40();
+var abiHealthRouter = Router41();
 function getSnapshotPath() {
   const testPath = path.resolve(__dirname2, "..", "..", "test", "snapshots", "abi-snapshot.json");
   if (existsSync(testPath)) return testPath;
@@ -40083,8 +40279,8 @@ abiHealthRouter.post("/snapshot", (_req, res) => {
 
 // src/routes/abi-versioning.ts
 init_tool_registry();
-import { Router as Router41 } from "express";
-var abiVersioningRouter = Router41();
+import { Router as Router42 } from "express";
+var abiVersioningRouter = Router42();
 abiVersioningRouter.get("/versions", (_req, res) => {
   const tools = TOOL_REGISTRY.map((t) => ({
     name: t.name,
@@ -40194,8 +40390,8 @@ abiVersioningRouter.get("/changelog", (_req, res) => {
 // src/routes/hyperagent.ts
 init_hyperagent();
 init_logger();
-import { Router as Router42 } from "express";
-var hyperagentRouter = Router42();
+import { Router as Router43 } from "express";
+var hyperagentRouter = Router43();
 hyperagentRouter.post("/plan", async (req, res) => {
   const { goal, sessionId, profile } = req.body;
   if (!goal || typeof goal !== "string") {
@@ -40355,8 +40551,8 @@ hyperagentRouter.get("/health", (_req, res) => {
 init_hyperagent_autonomous();
 init_redis();
 init_logger();
-import { Router as Router43 } from "express";
-var hyperagentAutoRouter = Router43();
+import { Router as Router44 } from "express";
+var hyperagentAutoRouter = Router44();
 hyperagentAutoRouter.post("/run", async (req, res) => {
   const { phase, maxTargets } = req.body;
   try {
@@ -40523,8 +40719,8 @@ data: ${JSON.stringify({
 init_chat_broadcaster();
 init_inventor_loop();
 init_logger();
-import { Router as Router44 } from "express";
-var inventorRouter = Router44();
+import { Router as Router45 } from "express";
+var inventorRouter = Router45();
 inventorRouter.post("/run", async (req, res) => {
   const { config: config2, resume } = req.body;
   if (!config2 || !config2.experimentName || !config2.taskDescription) {
@@ -40672,9 +40868,9 @@ inventorRouter.get("/history", async (req, res) => {
 });
 
 // src/routes/anomaly-watcher.ts
-import { Router as Router45 } from "express";
+import { Router as Router46 } from "express";
 init_logger();
-var anomalyWatcherRouter = Router45();
+var anomalyWatcherRouter = Router46();
 anomalyWatcherRouter.get("/status", (_req, res) => {
   const state4 = getWatcherState();
   res.json({
@@ -40766,8 +40962,8 @@ anomalyWatcherRouter.post("/scan", async (_req, res) => {
 // src/routes/pheromone.ts
 init_pheromone_layer();
 init_logger();
-import { Router as Router46 } from "express";
-var pheromoneRouter = Router46();
+import { Router as Router47 } from "express";
+var pheromoneRouter = Router47();
 pheromoneRouter.get("/status", (_req, res) => {
   res.json({ success: true, data: getPheromoneState() });
 });
@@ -40841,8 +41037,8 @@ pheromoneRouter.post("/decay", async (_req, res) => {
 // src/routes/peer-eval.ts
 init_peer_eval();
 init_logger();
-import { Router as Router47 } from "express";
-var peerEvalRouter = Router47();
+import { Router as Router48 } from "express";
+var peerEvalRouter = Router48();
 peerEvalRouter.get("/status", (_req, res) => {
   res.json({ success: true, data: getPeerEvalState() });
 });
@@ -40915,10 +41111,10 @@ peerEvalRouter.post("/analyze", async (_req, res) => {
 });
 
 // src/routes/flywheel.ts
-import { Router as Router48 } from "express";
+import { Router as Router49 } from "express";
 init_cost_optimizer();
 init_logger();
-var flywheelRouter = Router48();
+var flywheelRouter = Router49();
 flywheelRouter.get("/metrics", async (_req, res) => {
   try {
     const data = await getFlywheelMetrics();
@@ -40964,7 +41160,7 @@ flywheelRouter.get("/cost-summary", (_req, res) => {
 });
 
 // src/routes/benchmark.ts
-import { Router as Router49 } from "express";
+import { Router as Router50 } from "express";
 
 // src/benchmark-runner.ts
 init_redis();
@@ -41353,7 +41549,7 @@ function buildRecommendation(results, taskId) {
 
 // src/routes/benchmark.ts
 init_logger();
-var benchmarkRouter = Router49();
+var benchmarkRouter = Router50();
 benchmarkRouter.get("/tasks", (_req, res) => {
   const tasks = listBenchmarkTasks();
   res.json({ success: true, tasks });
@@ -41449,8 +41645,8 @@ benchmarkRouter.get("/ablation/:taskId/report", (req, res) => {
 // src/routes/obsidian.ts
 init_config();
 init_logger();
-import { Router as Router50 } from "express";
-var obsidianRouter = Router50();
+import { Router as Router51 } from "express";
+var obsidianRouter = Router51();
 var TIMEOUT_MS = 8e3;
 function isLiveMode() {
   return !!config.obsidianUrl;
@@ -41706,8 +41902,8 @@ obsidianRouter.get("/tags", async (_req, res) => {
 // src/routes/grafana-proxy.ts
 init_logger();
 init_config();
-import { Router as Router51 } from "express";
-var grafanaProxyRouter = Router51();
+import { Router as Router52 } from "express";
+var grafanaProxyRouter = Router52();
 var GRAFANA_URL = "https://clauskraft.grafana.net";
 var GRAFANA_API_KEY = config.grafanaApiKey;
 var PROM_URL = "https://prometheus-prod-39-prod-eu-north-0.grafana.net/api/prom";
@@ -41803,7 +41999,7 @@ grafanaProxyRouter.get("/alerts", async (_req, res) => {
 });
 
 // src/routes/phantom-bom.ts
-import { Router as Router52 } from "express";
+import { Router as Router53 } from "express";
 
 // src/phantom-bom.ts
 init_config();
@@ -42361,7 +42557,7 @@ async function getProviderRegistry() {
 // src/routes/phantom-bom.ts
 init_logger();
 init_config();
-var phantomBomRouter = Router52();
+var phantomBomRouter = Router53();
 var activeExtractions = 0;
 var MAX_CONCURRENT3 = 3;
 phantomBomRouter.post("/extract", async (req, res) => {
@@ -42525,8 +42721,8 @@ phantomBomRouter.get("/clusters/debug", async (_req, res) => {
 // src/routes/linear-proxy.ts
 init_logger();
 init_config();
-import { Router as Router53 } from "express";
-var linearProxyRouter = Router53();
+import { Router as Router54 } from "express";
+var linearProxyRouter = Router54();
 async function callBackendMcp2(toolName2, payload) {
   const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
     method: "POST",
@@ -42625,8 +42821,8 @@ linearProxyRouter.post("/issues/:id", async (req, res) => {
 
 // src/routes/prometheus-metrics.ts
 init_logger();
-import { Router as Router54 } from "express";
-var prometheusMetricsRouter = Router54();
+import { Router as Router55 } from "express";
+var prometheusMetricsRouter = Router55();
 var samples = [];
 function collectMetrics(health) {
   const now = Date.now();
@@ -43059,6 +43255,8 @@ app.post("/api/heartbeat/update", requireApiKey, async (req, res) => {
     res.status(502).json({ error: `Heartbeat update error: ${String(err)}` });
   }
 });
+app.use("/api/bus", requireApiKey, apiRateLimiter, neuralBusRouter);
+app.use("/api/pheromone", requireApiKey, apiRateLimiter, pheromoneRouter);
 app.use("/api/prompt-generator", promptGeneratorRouter);
 app.use(openapiRouter);
 app.use("/mcp", apiRateLimiter, mcpGatewayRouter);

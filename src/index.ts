@@ -41,6 +41,8 @@ import { llmRouter } from './routes/llm.js'
 import { auditRouter } from './routes/audit.js'
 import { toolOutputRouter } from './routes/tool-output.js'
 import { knowledgeRouter } from './routes/knowledge.js'
+import { neuralBusRouter } from './routes/neural-bus.js'
+import { pheromoneRouter } from './routes/pheromone.js'
 import { adoptionRouter } from './routes/adoption.js'
 import { artifactRouter } from './routes/artifacts.js'
 import { notebookRouter } from './routes/notebooks.js'
@@ -452,6 +454,13 @@ app.post('/api/heartbeat/update', requireApiKey, async (req, res) => {
     res.status(502).json({ error: `Heartbeat update error: ${String(err)}` });
   }
 });
+
+// Neural Bus — unified agent-to-agent communication (internal + external)
+// All agents use the SAME endpoints — OpenClaw = Orchestrator
+app.use('/api/bus', requireApiKey, apiRateLimiter, neuralBusRouter)
+
+// Pheromone layer — for OpenClaw agents to sense/follow/deposit pheromones
+app.use('/api/pheromone', requireApiKey, apiRateLimiter, pheromoneRouter)
 
 // Prompt Generator (no auth — utility endpoint)
 app.use('/api/prompt-generator', promptGeneratorRouter)
