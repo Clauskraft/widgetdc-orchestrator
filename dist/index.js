@@ -21123,7 +21123,9 @@ RULES:
   try {
     let result = null;
     let lastRlmErr = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    const rlmAvailable = isRlmAvailable();
+    const maxAttempts = rlmAvailable ? 3 : 0;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       if (attempt > 0) {
         const delayMs = 3e3 * attempt;
         logger.warn({ attempt, delayMs }, "Inventor: researcher retrying after RLM null response");
@@ -21141,6 +21143,21 @@ RULES:
       }, config2.pipeline.engineerTimeoutMs);
       if (result) break;
       lastRlmErr = new Error("RLM returned null (non-OK response)");
+    }
+    if (!result) {
+      logger.warn({ attempts: 3 }, "Inventor: RLM unavailable, falling back to direct LLM call");
+      const { chatLLM: chatLLM2 } = await Promise.resolve().then(() => (init_llm_proxy(), llm_proxy_exports));
+      const llmResult = await chatLLM2({
+        provider: "deepseek",
+        messages: [
+          { role: "system", content: 'You are an AI researcher generating solutions for an evolutionary optimization system. Respond in EXACT JSON with "motivation" and "artifact" fields. No markdown, no explanation.' },
+          { role: "user", content: prompt }
+        ],
+        model: "deepseek-chat",
+        max_tokens: 4e3,
+        temperature: 0.7
+      });
+      result = { answer: llmResult.content, content: llmResult.content };
     }
     if (!result) throw lastRlmErr ?? new Error("RLM returned null after 3 attempts");
     const r = result;

@@ -208,7 +208,10 @@ RULES:
     // Retry up to 3 attempts with backoff to handle cold-start transient failures
     let result = null
     let lastRlmErr: Error | null = null
-    for (let attempt = 0; attempt < 3; attempt++) {
+    // If RLM is not available, skip retries and go directly to LLM fallback
+    const rlmAvailable = isRlmAvailable()
+    const maxAttempts = rlmAvailable ? 3 : 0
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       if (attempt > 0) {
         const delayMs = 3000 * attempt
         logger.warn({ attempt, delayMs }, 'Inventor: researcher retrying after RLM null response')
@@ -226,6 +229,23 @@ RULES:
       }, config.pipeline.engineerTimeoutMs)
       if (result) break
       lastRlmErr = new Error('RLM returned null (non-OK response)')
+    }
+
+    if (!result) {
+      // RLM unavailable or consistently failing — use LLM direct as fallback
+      logger.warn({ attempts: 3 }, 'Inventor: RLM unavailable, falling back to direct LLM call')
+      const { chatLLM } = await import('../llm/llm-proxy.js')
+      const llmResult = await chatLLM({
+        provider: 'deepseek',
+        messages: [
+          { role: 'system', content: 'You are an AI researcher generating solutions for an evolutionary optimization system. Respond in EXACT JSON with "motivation" and "artifact" fields. No markdown, no explanation.' },
+          { role: 'user', content: prompt },
+        ],
+        model: 'deepseek-chat',
+        max_tokens: 4000,
+        temperature: 0.7,
+      })
+      result = { answer: llmResult.content, content: llmResult.content }
     }
 
     if (!result) throw lastRlmErr ?? new Error('RLM returned null after 3 attempts')
