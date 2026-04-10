@@ -23365,7 +23365,17 @@ ${lines.join("\n")}`;
         messages = data?.data?.messages ?? [];
         if (args?.from_agent) messages = messages.filter((m) => m.from === args.from_agent);
       }
-      return JSON.stringify(messages.slice(0, limit), null, 2);
+      const sliced = messages.slice(0, limit);
+      const compact = sliced.map((m) => {
+        const ts = (m.timestamp || "").slice(11, 19);
+        const to = m.to && m.to !== "All" ? `\u2192${m.to}` : "";
+        const msg = (m.message || "").slice(0, 200);
+        return `[${ts}] ${m.from}${to}: ${msg}`;
+      }).join("\n");
+      const header = `thread: ${args?.thread_id ?? "general"} | ${sliced.length} messages
+---
+`;
+      return header + compact;
     }
     // ─── model.* ─────────────────────────────────────────────────────
     case "model_providers": {

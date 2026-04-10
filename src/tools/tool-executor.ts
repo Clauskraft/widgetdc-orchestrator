@@ -2143,7 +2143,17 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
         messages = (data as any)?.data?.messages ?? []
         if (args?.from_agent) messages = messages.filter((m: any) => m.from === args.from_agent)
       }
-      return JSON.stringify(messages.slice(0, limit), null, 2)
+      const sliced = messages.slice(0, limit)
+      // Return compact format so results stay under fold threshold (800 chars)
+      // Format: one message per line — readable for LLMs without JSON overhead
+      const compact = sliced.map((m: any) => {
+        const ts = (m.timestamp || '').slice(11, 19)
+        const to = m.to && m.to !== 'All' ? `→${m.to}` : ''
+        const msg = (m.message || '').slice(0, 200)
+        return `[${ts}] ${m.from}${to}: ${msg}`
+      }).join('\n')
+      const header = `thread: ${args?.thread_id ?? 'general'} | ${sliced.length} messages\n---\n`
+      return header + compact
     }
 
     // ─── model.* ─────────────────────────────────────────────────────
