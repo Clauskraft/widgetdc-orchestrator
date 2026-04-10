@@ -42337,24 +42337,34 @@ phantomBomRouter.get("/clusters/debug", async (_req, res) => {
 
 // src/routes/linear-proxy.ts
 init_logger();
-init_mcp_caller();
+init_config();
 import { Router as Router53 } from "express";
 var linearProxyRouter = Router53();
+async function callBackendMcp2(toolName2, payload) {
+  const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${config.backendApiKey}`
+    },
+    body: JSON.stringify({ tool: toolName2, payload }),
+    signal: AbortSignal.timeout(15e3)
+  });
+  if (!res.ok) throw new Error(`Backend MCP ${toolName2}: ${res.status}`);
+  return res.json();
+}
 linearProxyRouter.get("/issues", async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 100, 250);
     const state4 = req.query.state;
-    const result = await callMcpTool({
-      toolName: "linear_issues",
-      args: {
-        limit,
-        state: state4 ?? void 0,
-        orderBy: "updatedAt"
-      },
-      callId: `linear-issues-${Date.now()}`
-    });
-    const issues = Array.isArray(result) ? result : result && typeof result === "object" && "issues" in result ? result.issues : result && typeof result === "object" && "nodes" in result ? result.nodes : [];
-    res.json(issues);
+    const payload = { limit };
+    if (state4 === "active") payload.status = "started";
+    else if (state4 === "done") payload.status = "completed";
+    else if (state4 === "backlog") payload.status = "backlog";
+    else payload.status = state4;
+    const data = await callBackendMcp2("linear.issues", payload);
+    const issues = data?.result?.issues ?? data?.result ?? data ?? [];
+    res.json(Array.isArray(issues) ? issues : []);
   } catch (err) {
     logger.error({ err: String(err) }, "Linear proxy: failed to fetch issues");
     res.status(502).json({ error: `Failed to fetch Linear issues: ${String(err)}` });
@@ -42362,13 +42372,9 @@ linearProxyRouter.get("/issues", async (req, res) => {
 });
 linearProxyRouter.get("/labels", async (_req, res) => {
   try {
-    const result = await callMcpTool({
-      toolName: "linear_labels",
-      args: { limit: 100 },
-      callId: `linear-labels-${Date.now()}`
-    });
-    const labels = Array.isArray(result) ? result : result && typeof result === "object" && "nodes" in result ? result.nodes : [];
-    res.json(labels);
+    const data = await callBackendMcp2("linear.labels", { limit: 100 });
+    const labels = data?.result?.nodes ?? data?.result ?? [];
+    res.json(Array.isArray(labels) ? labels : []);
   } catch (err) {
     logger.error({ err: String(err) }, "Linear proxy: failed to fetch labels");
     res.status(502).json({ error: `Failed to fetch Linear labels: ${String(err)}` });
@@ -42381,22 +42387,18 @@ linearProxyRouter.post("/issues", async (req, res) => {
       res.status(400).json({ error: "title required for new issues" });
       return;
     }
-    const result = await callMcpTool({
-      toolName: "linear_save_issue",
-      args: {
-        id: body.id,
-        title: body.title,
-        description: body.description,
-        team: body.team ?? "WidgeTDC",
-        priority: body.priority,
-        assignee: body.assignee,
-        labels: body.labels,
-        state: body.state,
-        estimate: body.estimate
-      },
-      callId: `linear-save-${body.id ?? "new"}-${Date.now()}`
+    const data = await callBackendMcp2("linear.save_issue", {
+      id: body.id,
+      title: body.title,
+      description: body.description,
+      team: body.team ?? "WidgeTDC",
+      priority: body.priority,
+      assignee: body.assignee,
+      labels: body.labels,
+      state: body.state,
+      estimate: body.estimate
     });
-    res.json(result);
+    res.json(data?.result ?? data);
   } catch (err) {
     logger.error({ err: String(err) }, "Linear proxy: failed to save issue");
     res.status(502).json({ error: `Failed to save Linear issue: ${String(err)}` });
@@ -42406,21 +42408,17 @@ linearProxyRouter.post("/issues/:id", async (req, res) => {
   try {
     const { id } = req.params;
     const body = req.body;
-    const result = await callMcpTool({
-      toolName: "linear_save_issue",
-      args: {
-        id,
-        title: body.title,
-        description: body.description,
-        priority: body.priority,
-        assignee: body.assignee,
-        labels: body.labels,
-        state: body.state,
-        estimate: body.estimate
-      },
-      callId: `linear-update-${id}-${Date.now()}`
+    const data = await callBackendMcp2("linear.save_issue", {
+      id,
+      title: body.title,
+      description: body.description,
+      priority: body.priority,
+      assignee: body.assignee,
+      labels: body.labels,
+      state: body.state,
+      estimate: body.estimate
     });
-    res.json(result);
+    res.json(data?.result ?? data);
   } catch (err) {
     logger.error({ err: String(err) }, `Linear proxy: failed to update issue ${req.params.id}`);
     res.status(502).json({ error: `Failed to update Linear issue: ${String(err)}` });
@@ -42428,12 +42426,8 @@ linearProxyRouter.post("/issues/:id", async (req, res) => {
 });
 linearProxyRouter.get("/issue/:id", async (req, res) => {
   try {
-    const result = await callMcpTool({
-      toolName: "linear_get_issue",
-      args: { id: req.params.id },
-      callId: `linear-detail-${req.params.id}-${Date.now()}`
-    });
-    res.json(result);
+    const data = await callBackendMcp2("linear.get_issue", { id: req.params.id });
+    res.json(data?.result ?? data);
   } catch (err) {
     logger.error({ err: String(err) }, `Linear proxy: failed to get issue ${req.params.id}`);
     res.status(502).json({ error: `Failed to get Linear issue: ${String(err)}` });
