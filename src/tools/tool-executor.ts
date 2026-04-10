@@ -2120,22 +2120,29 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'chat_read': {
       const limit = Math.min(Number(args?.limit ?? 20), 100)
-      // When filtering by thread_id/from_agent, fetch 500 so old threads are reachable
-      const fetchLimit = (args?.thread_id || args?.from_agent) ? 500 : limit
       const { config } = await import('../config.js')
-      const res = await fetch(`http://localhost:${config.port}/chat/history?limit=${fetchLimit}`, {
-        headers: {
-          'Authorization': `Bearer ${config.orchestratorApiKey}`,
-          'Accept': 'application/json',
-        },
-        signal: AbortSignal.timeout(10000),
-      })
-      const data = await res.json().catch(() => ({}))
-      let messages: any[] = (data as any)?.data?.messages ?? []
-      if (args?.from_agent) messages = messages.filter((m: any) => m.from === args.from_agent)
-      if (args?.thread_id) messages = messages.filter((m: any) => m.thread_id === String(args.thread_id))
-      // Return in chronological order for thread readability
-      if (args?.thread_id) messages = messages.reverse()
+      const headers = { 'Authorization': `Bearer ${config.orchestratorApiKey}`, 'Accept': 'application/json' }
+      let messages: any[] = []
+
+      if (args?.thread_id) {
+        // Use dedicated thread endpoint — reads all 2000 Redis entries, not just recent N
+        const res = await fetch(`http://localhost:${config.port}/chat/threads/${encodeURIComponent(String(args.thread_id))}`, {
+          headers,
+          signal: AbortSignal.timeout(10000),
+        })
+        const data = await res.json().catch(() => ({}))
+        messages = (data as any)?.data?.messages ?? []
+      } else {
+        // General history — newest first
+        const fetchLimit = args?.from_agent ? 500 : limit
+        const res = await fetch(`http://localhost:${config.port}/chat/history?limit=${fetchLimit}`, {
+          headers,
+          signal: AbortSignal.timeout(10000),
+        })
+        const data = await res.json().catch(() => ({}))
+        messages = (data as any)?.data?.messages ?? []
+        if (args?.from_agent) messages = messages.filter((m: any) => m.from === args.from_agent)
+      }
       return JSON.stringify(messages.slice(0, limit), null, 2)
     }
 

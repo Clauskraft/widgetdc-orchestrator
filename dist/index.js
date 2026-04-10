@@ -23345,20 +23345,26 @@ ${lines.join("\n")}`;
     }
     case "chat_read": {
       const limit = Math.min(Number(args?.limit ?? 20), 100);
-      const fetchLimit = args?.thread_id || args?.from_agent ? 500 : limit;
       const { config: config2 } = await Promise.resolve().then(() => (init_config(), config_exports));
-      const res = await fetch(`http://localhost:${config2.port}/chat/history?limit=${fetchLimit}`, {
-        headers: {
-          "Authorization": `Bearer ${config2.orchestratorApiKey}`,
-          "Accept": "application/json"
-        },
-        signal: AbortSignal.timeout(1e4)
-      });
-      const data = await res.json().catch(() => ({}));
-      let messages = data?.data?.messages ?? [];
-      if (args?.from_agent) messages = messages.filter((m) => m.from === args.from_agent);
-      if (args?.thread_id) messages = messages.filter((m) => m.thread_id === String(args.thread_id));
-      if (args?.thread_id) messages = messages.reverse();
+      const headers = { "Authorization": `Bearer ${config2.orchestratorApiKey}`, "Accept": "application/json" };
+      let messages = [];
+      if (args?.thread_id) {
+        const res = await fetch(`http://localhost:${config2.port}/chat/threads/${encodeURIComponent(String(args.thread_id))}`, {
+          headers,
+          signal: AbortSignal.timeout(1e4)
+        });
+        const data = await res.json().catch(() => ({}));
+        messages = data?.data?.messages ?? [];
+      } else {
+        const fetchLimit = args?.from_agent ? 500 : limit;
+        const res = await fetch(`http://localhost:${config2.port}/chat/history?limit=${fetchLimit}`, {
+          headers,
+          signal: AbortSignal.timeout(1e4)
+        });
+        const data = await res.json().catch(() => ({}));
+        messages = data?.data?.messages ?? [];
+        if (args?.from_agent) messages = messages.filter((m) => m.from === args.from_agent);
+      }
       return JSON.stringify(messages.slice(0, limit), null, 2);
     }
     // ─── model.* ─────────────────────────────────────────────────────
