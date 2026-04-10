@@ -47,7 +47,6 @@ import { adoptionRouter } from './routes/adoption.js'
 import { artifactRouter } from './routes/artifacts.js'
 import { notebookRouter } from './routes/notebooks.js'
 import { drillRouter } from './routes/drill.js'
-import { chainsRouter } from './routes/chains.js'
 import { monitorRouter } from './routes/monitor.js'
 import { assemblyRouter } from './routes/assembly.js'
 import { looseEndsRouter } from './routes/loose-ends.js'
@@ -247,13 +246,9 @@ app.use((req, res, next) => {
   if (req.path.startsWith('/ws') || req.path.startsWith('/sse') ||
       req.path.startsWith('/health') || req.path.startsWith('/api/') ||
       req.path.startsWith('/metrics') || req.path.match(/\.\w+$/)) return next()
-  // SPA routes that also have API routes at same path:
-  // Serve SPA for browser nav (Accept: html), skip to API for API calls (Accept: json)
-  const apiOverlapPaths = ['/agents', '/tools', '/chains', '/chat', '/cognitive', '/cron']
-  if (apiOverlapPaths.some(p => req.path.startsWith(p))) {
-    if (req.accepts('html', 'json') === 'json') return next()
-    // Accept: html → fall through to SPA
-  }
+  // API-only paths — no SPA pages exist at these paths, always pass to API
+  const apiOnlyPaths = ['/agents', '/tools', '/chains', '/chat', '/cognitive', '/cron']
+  if (apiOnlyPaths.some((p) => req.path.startsWith(p))) return next()
   // Serve SPA for browser navigation, let API calls through
   if (req.accepts('html', 'json') === 'html') {
     return res.sendFile(spaIndexPath)
