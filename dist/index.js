@@ -14495,16 +14495,41 @@ async function executeStep(step, previousOutput) {
       if (typeof args.context === "string") {
         args.context = { instruction: args.context };
       }
-      const result = await callMcpTool({
-        toolName: backendToolName,
-        args,
-        callId: uuid8(),
-        timeoutMs: step.timeout_ms ?? toolDef?.timeoutMs ?? 3e4
-      });
-      if (result.status !== "success") {
-        throw new Error(result.error_message ?? `Tool ${step.tool_name} failed: ${result.status}`);
+      if (backendToolName.startsWith("rlm.")) {
+        const action = backendToolName.replace("rlm.", "");
+        const prompt = args.question ?? args.prompt ?? prevStr;
+        const result = await callCognitive(action, {
+          prompt,
+          context: args,
+          agent_id: step.agent_id,
+          llm_provider: step.llm_provider,
+          llm_model: step.llm_model
+        }, step.timeout_ms ?? toolDef?.timeoutMs ?? 3e4);
+        output = result;
+      } else if (backendToolName.includes("+")) {
+        const firstTool = backendToolName.split("+")[0].trim();
+        const result = await callMcpTool({
+          toolName: firstTool,
+          args,
+          callId: uuid8(),
+          timeoutMs: step.timeout_ms ?? toolDef?.timeoutMs ?? 3e4
+        });
+        if (result.status !== "success") {
+          throw new Error(result.error_message ?? `Tool ${firstTool} failed: ${result.status}`);
+        }
+        output = result.result;
+      } else {
+        const result = await callMcpTool({
+          toolName: backendToolName,
+          args,
+          callId: uuid8(),
+          timeoutMs: step.timeout_ms ?? toolDef?.timeoutMs ?? 3e4
+        });
+        if (result.status !== "success") {
+          throw new Error(result.error_message ?? `Tool ${backendToolName} failed: ${result.status}`);
+        }
+        output = result.result;
       }
-      output = result.result;
     } else {
       throw new Error("Step must have either tool_name or cognitive_action");
     }

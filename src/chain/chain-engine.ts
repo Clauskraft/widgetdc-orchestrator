@@ -185,16 +185,43 @@ async function executeStep(step: ChainStep, previousOutput: unknown): Promise<St
       if (typeof args.context === 'string') {
         args.context = { instruction: args.context }
       }
-      const result = await callMcpTool({
-        toolName: backendToolName,
-        args,
-        callId: uuid(),
-        timeoutMs: step.timeout_ms ?? toolDef?.timeoutMs ?? 30000,
-      })
-      if (result.status !== 'success') {
-        throw new Error(result.error_message ?? `Tool ${step.tool_name} failed: ${result.status}`)
+      // Handle RLM tools directly (backend doesn't have rlm.* tools)
+      if (backendToolName.startsWith('rlm.')) {
+        const action = backendToolName.replace('rlm.', '')
+        const prompt = (args.question as string) ?? (args.prompt as string) ?? prevStr
+        const result = await callCognitive(action, {
+          prompt,
+          context: args,
+          agent_id: step.agent_id,
+          llm_provider: step.llm_provider,
+          llm_model: step.llm_model,
+        }, step.timeout_ms ?? toolDef?.timeoutMs ?? 30000)
+        output = result
+      } else if (backendToolName.includes('+')) {
+        // Multi-tool (e.g., 'srag.query + graph.read_cypher') — call first one
+        const firstTool = backendToolName.split('+')[0].trim()
+        const result = await callMcpTool({
+          toolName: firstTool,
+          args,
+          callId: uuid(),
+          timeoutMs: step.timeout_ms ?? toolDef?.timeoutMs ?? 30000,
+        })
+        if (result.status !== 'success') {
+          throw new Error(result.error_message ?? `Tool ${firstTool} failed: ${result.status}`)
+        }
+        output = result.result
+      } else {
+        const result = await callMcpTool({
+          toolName: backendToolName,
+          args,
+          callId: uuid(),
+          timeoutMs: step.timeout_ms ?? toolDef?.timeoutMs ?? 30000,
+        })
+        if (result.status !== 'success') {
+          throw new Error(result.error_message ?? `Tool ${backendToolName} failed: ${result.status}`)
+        }
+        output = result.result
       }
-      output = result.result
     } else {
       throw new Error('Step must have either tool_name or cognitive_action')
     }
