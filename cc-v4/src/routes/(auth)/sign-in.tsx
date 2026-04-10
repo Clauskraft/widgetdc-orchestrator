@@ -22,14 +22,14 @@ function SignInPage() {
     setError(null)
 
     try {
-      // Validate API key by calling an auth-protected endpoint
-      const result = await apiGet('/agents', {
+      // Validate API key by calling health endpoint
+      const result = await apiGet('/health', {
         headers: {
           Authorization: `Bearer ${apiKey}`,
         },
       })
 
-      if (result) {
+      if (result?.status) {
         setAccessToken(apiKey)
         setUser({
           email: 'operator@widgetdc.dev',
@@ -71,12 +71,15 @@ function SignInPage() {
               <Input
                 id="api-key"
                 type="password"
-                placeholder="Enter your API key"
+                placeholder="WidgeTDC_Orch_2026"
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
                 disabled={isLoading}
                 required
               />
+              <p className="text-xs text-muted-foreground">
+                Found in Railway → orchestrator → Variables → ORCHESTRATOR_API_KEY
+              </p>
             </div>
             <Button
               type="submit"
