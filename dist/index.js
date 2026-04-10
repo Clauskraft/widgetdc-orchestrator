@@ -21527,6 +21527,64 @@ async function runStep(config2) {
     durationMs: Date.now() - t0
   };
   stream2("step_complete", { ...stepResult });
+  const LINEAR_PRODUCTION_THRESHOLD = 0.7;
+  if (result.score >= LINEAR_PRODUCTION_THRESHOLD) {
+    try {
+      const urgency = result.score >= 0.8 ? 1 : 2;
+      const title = `[Inventor] ${config2.experimentName} \u2014 score ${result.score.toFixed(2)} (step ${currentStep2})`;
+      const neo4jUrl = `https://neo4j.widgetdc.io`;
+      const description = `## \u{1F9EC} Inventor Proposal \u2014 Auto-Generated
+
+**Experiment:** ${config2.experimentName}
+**Step:** ${currentStep2} | **Score:** ${result.score.toFixed(3)} | **Success:** ${result.success}
+
+### Artifact
+\`\`\`
+${node.artifact.slice(0, 2e3)}
+\`\`\`
+
+### Analysis
+${node.analysis}
+
+### Motivation
+${node.motivation}
+
+### Metrics
+\`\`\`json
+${JSON.stringify(result.metrics, null, 2)}
+\`\`\`
+
+### Lineage
+- **Node ID:** ${nodeId}
+- **Parent:** ${parentId || "seed (initial solution)"}
+- **Chain Mode:** ${config2.chainMode || "sequential"}
+- **Island:** ${node.island}
+
+### Source
+- **Neo4j Trial:** MATCH (t:InventorTrial {id: '${nodeId}'}) RETURN t
+- **Experiment:** MATCH (e:InventorExperiment {name: '${config2.experimentName}'}) RETURN e
+- **Lineage:** MATCH path = (t:InventorTrial {id: '${nodeId}'})-[:EVOLVED_FROM*0..]->(ancestor) RETURN path
+
+---
+*Auto-created by Inventor evolution engine. Score threshold: ${LINEAR_PRODUCTION_THRESHOLD}*`;
+      await callMcpTool({
+        toolName: "linear_save_issue",
+        args: {
+          title,
+          description,
+          team: "e7e882f6-d598-4dc4-8766-eaa76dcf140f",
+          // WidgeTDC team
+          priority: urgency,
+          labels: ["inventor", `score-${(result.score * 10).toFixed(0)}`, result.score >= 0.8 ? "urgent" : "high-priority"]
+        },
+        callId: `inventor-linear-${nodeId}`
+      });
+      stream2("linear_issue_created", { nodeId, score: result.score, title });
+      logger.info({ nodeId, score: result.score, title }, "Inventor: Linear issue created for production candidate");
+    } catch (linearErr) {
+      logger.warn({ error: String(linearErr) }, "Inventor: Failed to create Linear issue (non-critical)");
+    }
+  }
   return stepResult;
 }
 async function runInventor(config2, resume = false) {
