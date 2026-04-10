@@ -240,13 +240,17 @@ app.use(express.static(path.join(__dirname, 'public'), {
 const spaIndexPath = path.join(__dirname, 'public', 'index.html')
 app.use((req, res, next) => {
   if (req.method !== 'GET' && req.method !== 'HEAD') return next()
-  // Skip WebSocket, SSE, health, metrics, API routes, static assets, and all API paths
+  // Always skip: WebSocket, SSE, health, /api/*, metrics, static assets
   if (req.path.startsWith('/ws') || req.path.startsWith('/sse') ||
       req.path.startsWith('/health') || req.path.startsWith('/api/') ||
-      req.path.startsWith('/metrics') || req.path.startsWith('/agents') ||
-      req.path.startsWith('/tools') || req.path.startsWith('/chains') ||
-      req.path.startsWith('/chat') || req.path.startsWith('/cognitive') ||
-      req.path.startsWith('/cron') || req.path.match(/\.\w+$/)) return next()
+      req.path.startsWith('/metrics') || req.path.match(/\.\w+$/)) return next()
+  // SPA routes that also have API routes at same path:
+  // Serve SPA for browser nav (Accept: html), skip to API for API calls (Accept: json)
+  const apiOverlapPaths = ['/agents', '/tools', '/chains', '/chat', '/cognitive', '/cron']
+  if (apiOverlapPaths.some(p => req.path.startsWith(p))) {
+    if (req.accepts('html', 'json') === 'json') return next()
+    // Accept: html → fall through to SPA
+  }
   // Serve SPA for browser navigation, let API calls through
   if (req.accepts('html', 'json') === 'html') {
     return res.sendFile(spaIndexPath)
