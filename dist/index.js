@@ -21309,31 +21309,6 @@ Provide:
     return `Score: ${result.score.toFixed(3)}. ${result.success ? "Passed" : "Failed"}. ${result.error || ""}`;
   }
 }
-async function persistNodes(experimentName) {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  const data = JSON.stringify([...nodes.values()]);
-  await redis2.set(nodeKey(experimentName), data).catch(() => {
-  });
-}
-async function persistState2(experimentName) {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  const state4 = {
-    currentStep: currentStep2,
-    bestScore,
-    bestNodeId,
-    startedAt,
-    lastStepAt,
-    lastError
-  };
-  await redis2.set(stateKey(experimentName), JSON.stringify(state4)).catch(() => {
-  });
-  if (sampler) {
-    await redis2.set(samplerKey(experimentName), JSON.stringify(sampler.getState())).catch(() => {
-    });
-  }
-}
 async function loadState2(experimentName) {
   const redis2 = getRedis();
   if (!redis2) return false;
@@ -21431,8 +21406,78 @@ async function runStep(config2) {
     stream2("new_best", { step: currentStep2, nodeId, score: result.score });
   }
   lastStepAt = (/* @__PURE__ */ new Date()).toISOString();
-  await persistNodes(config2.experimentName);
-  await persistState2(config2.experimentName);
+  try {
+    if (currentStep2 === 1) {
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `
+            MERGE (e:InventorExperiment {name: $experiment})
+            SET e.taskDescription = $taskDescription,
+                e.samplingAlgorithm = $sampling,
+                e.maxSteps = $maxSteps,
+                e.chainMode = $chainMode,
+                e.startedAt = datetime(),
+                e.status = 'running'
+          `,
+          params: {
+            experiment: config2.experimentName,
+            taskDescription: config2.taskDescription,
+            sampling: config2.sampling.algorithm,
+            maxSteps: config2.pipeline.maxSteps,
+            chainMode: config2.chainMode || "sequential"
+          }
+        },
+        callId: `inventor-neo4j-exp-${config2.experimentName}`
+      });
+    }
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `
+          MERGE (t:InventorTrial {id: $nodeId})
+          SET t.experiment = $experiment,
+              t.step = $step,
+              t.score = $score,
+              t.success = $success,
+              t.artifact = $artifact,
+              t.motivation = $motivation,
+              t.analysis = $analysis,
+              t.parentId = $parentId,
+              t.island = $island,
+              t.chainMode = $chainMode,
+              t.metrics = $metrics,
+              t.createdAt = datetime(),
+              t.taskDescription = $taskDescription
+          WITH t
+          MATCH (e:InventorExperiment {name: $experiment})
+          MERGE (t)-[:BELONGS_TO]->(e)
+          WITH t, $parentId AS pid
+          OPTIONAL MATCH (p:InventorTrial {id: pid})
+          FOREACH (_ IN CASE WHEN p IS NOT NULL THEN [1] ELSE [] END |
+            MERGE (t)-[:EVOLVED_FROM]->(p))
+        `,
+        params: {
+          nodeId,
+          experiment: config2.experimentName,
+          step: currentStep2,
+          score: result.score,
+          success: result.success,
+          artifact: node.artifact.slice(0, 5e3),
+          motivation: node.motivation.slice(0, 500),
+          analysis: node.analysis.slice(0, 1e3),
+          parentId: parentId || "seed",
+          island: node.island,
+          chainMode: config2.chainMode || "sequential",
+          metrics: JSON.stringify(result.metrics),
+          taskDescription: config2.taskDescription.slice(0, 500)
+        }
+      },
+      callId: `inventor-neo4j-${nodeId}`
+    });
+  } catch (neoErr) {
+    logger.warn({ error: String(neoErr) }, "Inventor: Neo4j persistence failed (non-critical)");
+  }
   if (node.analysis.length > 20) {
     try {
       await callMcpTool({
@@ -31409,7 +31454,7 @@ async function runAnomalyScan() {
       critical: critCount,
       duration_ms: Date.now() - t0
     }, "Anomaly scan complete");
-    await persistState3();
+    await persistState2();
     return { anomalies, health, analysis, patterns: state3.patterns };
   }
   broadcastSSE("anomaly-watcher", {
@@ -31419,10 +31464,10 @@ async function runAnomalyScan() {
     critical: 0,
     duration_ms: Date.now() - t0
   });
-  await persistState3();
+  await persistState2();
   return { anomalies: [], health, analysis: "", patterns: state3.patterns };
 }
-async function persistState3() {
+async function persistState2() {
   const redis2 = getRedis();
   if (!redis2) return;
   try {
@@ -31528,7 +31573,7 @@ async function initAnomalyWatcher() {
   await loadState3();
   if (state3.patterns.length === 0) {
     state3.patterns = [...KNOWN_FAILURE_PATTERNS];
-    await persistState3();
+    await persistState2();
     logger.info(
       { seeded: state3.patterns.length },
       "Anomaly-watcher: seeded known failure patterns from production history"
@@ -40915,6 +40960,7 @@ data: ${JSON.stringify({
 
 // src/routes/inventor.ts
 init_chat_broadcaster();
+init_mcp_caller();
 init_inventor_loop();
 init_logger();
 import { Router as Router45 } from "express";
@@ -41060,6 +41106,106 @@ inventorRouter.get("/history", async (req, res) => {
     const limit = Math.min(Math.max(1, Number(req.query.limit) || 20), 50);
     const history = await getExperimentHistory(limit);
     res.json({ success: true, experiments: history, count: history.length });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+inventorRouter.get("/experiments", async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 20, 100);
+    const result = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: `
+          MATCH (e:InventorExperiment)
+          OPTIONAL MATCH (e)<-[:BELONGS_TO]-(t:InventorTrial)
+          WITH e, collect(t) AS trials
+          RETURN e.name AS name,
+                 e.taskDescription AS taskDescription,
+                 e.samplingAlgorithm AS samplingAlgorithm,
+                 e.maxSteps AS maxSteps,
+                 e.chainMode AS chainMode,
+                 e.status AS status,
+                 e.startedAt AS startedAt,
+                 size(trials) AS trialCount,
+                 coalesce(max([t IN trials | t.score]), 0) AS bestScore,
+                 coalesce([t IN trials | t.id][0], null) AS bestNodeId
+          ORDER BY e.startedAt DESC
+          LIMIT $limit
+        `,
+        params: { limit }
+      },
+      callId: "inventor-experiments-list"
+    });
+    const experiments = result?.result ?? result ?? [];
+    res.json({ success: true, experiments, count: experiments.length });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+inventorRouter.get("/experiment/:name", async (req, res) => {
+  try {
+    const name = req.params.name;
+    const result = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: `
+          MATCH (e:InventorExperiment {name: $name})
+          OPTIONAL MATCH (e)<-[:BELONGS_TO]-(t:InventorTrial)
+          OPTIONAL MATCH (t)-[:EVOLVED_FROM]->(parent:InventorTrial)
+          RETURN e.name AS experimentName,
+                 e.taskDescription AS taskDescription,
+                 e.status AS status,
+                 e.startedAt AS startedAt,
+                 collect({
+                   id: t.id,
+                   step: t.step,
+                   score: t.score,
+                   success: t.success,
+                   artifact: t.artifact,
+                   motivation: t.motivation,
+                   analysis: t.analysis,
+                   parentId: t.parentId,
+                   parentStep: parent.step,
+                   metrics: t.metrics,
+                   createdAt: t.createdAt
+                 }) AS trials
+        `,
+        params: { name }
+      },
+      callId: `inventor-experiment-${name}`
+    });
+    const data = result?.result?.[0] ?? result?.[0] ?? null;
+    if (!data) {
+      res.status(404).json({ success: false, error: { code: "NOT_FOUND", message: `Experiment '${name}' not found` } });
+      return;
+    }
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+inventorRouter.get("/export/:name", async (req, res) => {
+  try {
+    const name = req.params.name;
+    const result = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: `
+          MATCH (e:InventorExperiment {name: $name})
+          OPTIONAL MATCH (e)<-[:BELONGS_TO]-(t:InventorTrial)
+          RETURN e, collect(t {.*}) AS trials
+        `,
+        params: { name }
+      },
+      callId: `inventor-export-${name}`
+    });
+    const data = result?.result?.[0] ?? result?.[0] ?? null;
+    if (!data) {
+      res.status(404).json({ success: false, error: { code: "NOT_FOUND", message: `Experiment '${name}' not found` } });
+      return;
+    }
+    res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

@@ -6,6 +6,7 @@
  */
 import { Router, Request, Response } from 'express'
 import { broadcastMessage } from '../chat-broadcaster.js'
+import { callMcpTool } from '../mcp-caller.js'
 import {
   runInventor,
   getInventorStatus,
@@ -204,6 +205,119 @@ inventorRouter.get('/history', async (req: Request, res: Response) => {
     const limit = Math.min(Math.max(1, Number(req.query.limit) || 20), 50)
     const history = await getExperimentHistory(limit)
     res.json({ success: true, experiments: history, count: history.length })
+  } catch (err) {
+    res.status(500).json({ error: String(err) })
+  }
+})
+
+/**
+ * GET /api/inventor/experiments — List all experiments from Neo4j.
+ * Query: ?limit=20&sort=createdAt|score
+ */
+inventorRouter.get('/experiments', async (req: Request, res: Response) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 20, 100)
+    const result = await callMcpTool({
+      toolName: 'graph.read_cypher',
+      args: {
+        query: `
+          MATCH (e:InventorExperiment)
+          OPTIONAL MATCH (e)<-[:BELONGS_TO]-(t:InventorTrial)
+          WITH e, collect(t) AS trials
+          RETURN e.name AS name,
+                 e.taskDescription AS taskDescription,
+                 e.samplingAlgorithm AS samplingAlgorithm,
+                 e.maxSteps AS maxSteps,
+                 e.chainMode AS chainMode,
+                 e.status AS status,
+                 e.startedAt AS startedAt,
+                 size(trials) AS trialCount,
+                 coalesce(max([t IN trials | t.score]), 0) AS bestScore,
+                 coalesce([t IN trials | t.id][0], null) AS bestNodeId
+          ORDER BY e.startedAt DESC
+          LIMIT $limit
+        `,
+        params: { limit },
+      },
+      callId: 'inventor-experiments-list',
+    })
+    const experiments = (result as any)?.result ?? result ?? []
+    res.json({ success: true, experiments, count: experiments.length })
+  } catch (err) {
+    res.status(500).json({ error: String(err) })
+  }
+})
+
+/**
+ * GET /api/inventor/experiment/:name — Get full experiment with trials from Neo4j.
+ */
+inventorRouter.get('/experiment/:name', async (req: Request, res: Response) => {
+  try {
+    const name = req.params.name
+    const result = await callMcpTool({
+      toolName: 'graph.read_cypher',
+      args: {
+        query: `
+          MATCH (e:InventorExperiment {name: $name})
+          OPTIONAL MATCH (e)<-[:BELONGS_TO]-(t:InventorTrial)
+          OPTIONAL MATCH (t)-[:EVOLVED_FROM]->(parent:InventorTrial)
+          RETURN e.name AS experimentName,
+                 e.taskDescription AS taskDescription,
+                 e.status AS status,
+                 e.startedAt AS startedAt,
+                 collect({
+                   id: t.id,
+                   step: t.step,
+                   score: t.score,
+                   success: t.success,
+                   artifact: t.artifact,
+                   motivation: t.motivation,
+                   analysis: t.analysis,
+                   parentId: t.parentId,
+                   parentStep: parent.step,
+                   metrics: t.metrics,
+                   createdAt: t.createdAt
+                 }) AS trials
+        `,
+        params: { name },
+      },
+      callId: `inventor-experiment-${name}`,
+    })
+    const data = (result as any)?.result?.[0] ?? result?.[0] ?? null
+    if (!data) {
+      res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: `Experiment '${name}' not found` } })
+      return
+    }
+    res.json({ success: true, data })
+  } catch (err) {
+    res.status(500).json({ error: String(err) })
+  }
+})
+
+/**
+ * GET /api/inventor/export/:name — Export experiment as JSON document.
+ */
+inventorRouter.get('/export/:name', async (req: Request, res: Response) => {
+  try {
+    const name = req.params.name
+    const result = await callMcpTool({
+      toolName: 'graph.read_cypher',
+      args: {
+        query: `
+          MATCH (e:InventorExperiment {name: $name})
+          OPTIONAL MATCH (e)<-[:BELONGS_TO]-(t:InventorTrial)
+          RETURN e, collect(t {.*}) AS trials
+        `,
+        params: { name },
+      },
+      callId: `inventor-export-${name}`,
+    })
+    const data = (result as any)?.result?.[0] ?? result?.[0] ?? null
+    if (!data) {
+      res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: `Experiment '${name}' not found` } })
+      return
+    }
+    res.json({ success: true, data })
   } catch (err) {
     res.status(500).json({ error: String(err) })
   }

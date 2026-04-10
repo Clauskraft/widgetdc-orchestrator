@@ -596,9 +596,82 @@ async function runStep(config: InventorConfig): Promise<InventorStepResult> {
 
   lastStepAt = new Date().toISOString()
 
-  // Persist
-  await persistNodes(config.experimentName)
-  await persistState(config.experimentName)
+  // ── Neo4j Persistence: Create InventorExperiment node + trials ──
+  try {
+    // Create experiment node on first step
+    if (currentStep === 1) {
+      await callMcpTool({
+        toolName: 'graph.write_cypher',
+        args: {
+          query: `
+            MERGE (e:InventorExperiment {name: $experiment})
+            SET e.taskDescription = $taskDescription,
+                e.samplingAlgorithm = $sampling,
+                e.maxSteps = $maxSteps,
+                e.chainMode = $chainMode,
+                e.startedAt = datetime(),
+                e.status = 'running'
+          `,
+          params: {
+            experiment: config.experimentName,
+            taskDescription: config.taskDescription,
+            sampling: config.sampling.algorithm,
+            maxSteps: config.pipeline.maxSteps,
+            chainMode: config.chainMode || 'sequential',
+          },
+        },
+        callId: `inventor-neo4j-exp-${config.experimentName}`,
+      })
+    }
+
+    // Store trial with lineage
+    await callMcpTool({
+      toolName: 'graph.write_cypher',
+      args: {
+        query: `
+          MERGE (t:InventorTrial {id: $nodeId})
+          SET t.experiment = $experiment,
+              t.step = $step,
+              t.score = $score,
+              t.success = $success,
+              t.artifact = $artifact,
+              t.motivation = $motivation,
+              t.analysis = $analysis,
+              t.parentId = $parentId,
+              t.island = $island,
+              t.chainMode = $chainMode,
+              t.metrics = $metrics,
+              t.createdAt = datetime(),
+              t.taskDescription = $taskDescription
+          WITH t
+          MATCH (e:InventorExperiment {name: $experiment})
+          MERGE (t)-[:BELONGS_TO]->(e)
+          WITH t, $parentId AS pid
+          OPTIONAL MATCH (p:InventorTrial {id: pid})
+          FOREACH (_ IN CASE WHEN p IS NOT NULL THEN [1] ELSE [] END |
+            MERGE (t)-[:EVOLVED_FROM]->(p))
+        `,
+        params: {
+          nodeId,
+          experiment: config.experimentName,
+          step: currentStep,
+          score: result.score,
+          success: result.success,
+          artifact: node.artifact.slice(0, 5000),
+          motivation: node.motivation.slice(0, 500),
+          analysis: node.analysis.slice(0, 1000),
+          parentId: parentId || 'seed',
+          island: node.island,
+          chainMode: config.chainMode || 'sequential',
+          metrics: JSON.stringify(result.metrics),
+          taskDescription: config.taskDescription.slice(0, 500),
+        },
+      },
+      callId: `inventor-neo4j-${nodeId}`,
+    })
+  } catch (neoErr) {
+    logger.warn({ error: String(neoErr) }, 'Inventor: Neo4j persistence failed (non-critical)')
+  }
 
   // ── RLM Memory Layer: always store insights (not just success) ──
   if (node.analysis.length > 20) {
