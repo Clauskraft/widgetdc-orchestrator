@@ -410,8 +410,13 @@ async function runAnalyzer(
   config: InventorConfig,
 ): Promise<string> {
   try {
-    const analyzeResult = await callCognitiveRaw('analyze', {
-      prompt: `Analyze this evolutionary trial result.
+    // Use LLM direct for analysis (RLM returns strategy, not content)
+    const { chatLLM } = await import('../llm/llm-proxy.js')
+    const analyzeResult = await chatLLM({
+      provider: 'deepseek',
+      messages: [
+        { role: 'system', content: 'You are an AI analyzer evaluating evolutionary trial results. Provide concise, actionable analysis.' },
+        { role: 'user', content: `Analyze this evolutionary trial result.
 
 TASK: ${config.taskDescription}
 TRIAL NODE: ${node.id} (score: ${result.score.toFixed(3)})
@@ -423,12 +428,15 @@ METRICS: ${JSON.stringify(result.metrics)}
 Provide:
 1. Why this solution scored as it did
 2. What the key improvement/regression was vs parent
-3. One actionable insight for the next iteration`,
-      agent_id: 'inventor-analyzer',
-    }, 15000)
+3. One actionable insight for the next iteration` },
+      ],
+      model: 'deepseek-chat',
+      max_tokens: 1000,
+      temperature: 0.3,
+    })
 
     const ar = analyzeResult as Record<string, unknown> | null
-    return String(ar?.answer ?? ar?.result ?? ar?.reasoning ?? 'Analysis unavailable')
+    return String(ar?.content ?? ar?.answer ?? ar?.result ?? 'Analysis unavailable')
   } catch {
     return `Score: ${result.score.toFixed(3)}. ${result.success ? 'Passed' : 'Failed'}. ${result.error || ''}`
   }

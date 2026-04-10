@@ -21280,8 +21280,12 @@ async function runEngineer(node, config2) {
 }
 async function runAnalyzer(node, result, parentNode, config2) {
   try {
-    const analyzeResult = await callCognitiveRaw("analyze", {
-      prompt: `Analyze this evolutionary trial result.
+    const { chatLLM: chatLLM2 } = await Promise.resolve().then(() => (init_llm_proxy(), llm_proxy_exports));
+    const analyzeResult = await chatLLM2({
+      provider: "deepseek",
+      messages: [
+        { role: "system", content: "You are an AI analyzer evaluating evolutionary trial results. Provide concise, actionable analysis." },
+        { role: "user", content: `Analyze this evolutionary trial result.
 
 TASK: ${config2.taskDescription}
 TRIAL NODE: ${node.id} (score: ${result.score.toFixed(3)})
@@ -21293,11 +21297,14 @@ METRICS: ${JSON.stringify(result.metrics)}
 Provide:
 1. Why this solution scored as it did
 2. What the key improvement/regression was vs parent
-3. One actionable insight for the next iteration`,
-      agent_id: "inventor-analyzer"
-    }, 15e3);
+3. One actionable insight for the next iteration` }
+      ],
+      model: "deepseek-chat",
+      max_tokens: 1e3,
+      temperature: 0.3
+    });
     const ar = analyzeResult;
-    return String(ar?.answer ?? ar?.result ?? ar?.reasoning ?? "Analysis unavailable");
+    return String(ar?.content ?? ar?.answer ?? ar?.result ?? "Analysis unavailable");
   } catch {
     return `Score: ${result.score.toFixed(3)}. ${result.success ? "Passed" : "Failed"}. ${result.error || ""}`;
   }
