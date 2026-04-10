@@ -41511,7 +41511,7 @@ app.use(express.static(path2.join(__dirname3, "public"), {
 var spaIndexPath = path2.join(__dirname3, "public", "index.html");
 app.use((req, res, next) => {
   if (req.method !== "GET" && req.method !== "HEAD") return next();
-  if (req.path.startsWith("/ws") || req.path.startsWith("/sse") || req.path.startsWith("/health") || req.path.startsWith("/api/") || req.path.startsWith("/metrics") || req.path.match(/\.\w+$/)) return next();
+  if (req.path.startsWith("/ws") || req.path.startsWith("/sse") || req.path.startsWith("/health") || req.path.startsWith("/api/") || req.path.startsWith("/metrics") || req.path.startsWith("/agents") || req.path.startsWith("/tools") || req.path.startsWith("/chains") || req.path.startsWith("/chat") || req.path.startsWith("/cognitive") || req.path.startsWith("/cron") || req.path.match(/\.\w+$/)) return next();
   if (req.accepts("html", "json") === "html") {
     return res.sendFile(spaIndexPath);
   }
