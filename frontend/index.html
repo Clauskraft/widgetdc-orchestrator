@@ -251,6 +251,24 @@
     .msg-file { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; background: var(--bg4); border: 1px solid var(--border); border-radius: var(--radius-md); font-size: 0.75rem; color: var(--text2); }
     .msg-file img { max-width: 300px; max-height: 200px; border-radius: var(--radius-md); margin-top: 6px; }
 
+    /* A2A Toolbar */
+    .a2a-toolbar { border-top: 1px solid var(--border); background: var(--bg3); padding: 0; overflow: hidden; transition: max-height 0.2s ease; max-height: 0; }
+    .a2a-toolbar.open { max-height: 200px; }
+    .a2a-toolbar-inner { padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+    .a2a-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .a2a-label { font-size: 0.7rem; font-weight: 600; color: var(--text3); white-space: nowrap; min-width: 48px; }
+    .a2a-vs { font-size: 0.75rem; color: var(--text4); font-weight: 700; }
+    .a2a-thread-badge { font-size: 0.68rem; color: var(--accent2); background: var(--accent-muted); padding: 2px 8px; border-radius: 10px; font-family: monospace; cursor: pointer; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .a2a-thread-badge:hover { background: var(--accent2); color: #fff; }
+    .a2a-btn { padding: 5px 12px; font-size: 0.72rem; font-weight: 600; border-radius: var(--radius-md); border: none; cursor: pointer; transition: background 0.12s; }
+    .a2a-btn-launch { background: var(--accent); color: #fff; }
+    .a2a-btn-launch:hover { background: var(--accent2); }
+    .a2a-btn-read { background: var(--bg4); color: var(--text2); border: 1px solid var(--border); }
+    .a2a-btn-read:hover { background: var(--bg5, var(--bg4)); color: var(--text1); }
+    .a2a-toggle { font-size: 0.7rem; padding: 3px 8px; background: var(--accent-muted); color: var(--accent2); border: 1px solid var(--border2); border-radius: var(--radius-sm); cursor: pointer; font-weight: 600; transition: all 0.12s; }
+    .a2a-toggle:hover, .a2a-toggle.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .a2a-inject-label { font-size: 0.68rem; padding: 2px 8px; background: var(--purple-muted, #2d1f4e); color: var(--purple, #a78bfa); border-radius: 10px; font-weight: 600; }
+
     /* Chat Compose */
     .chat-compose { padding: var(--sp-3) var(--sp-4); border-top: 1px solid var(--border); background: var(--bg2); display: flex; flex-direction: column; gap: var(--sp-2); }
     .chat-compose-row { display: flex; gap: var(--sp-2); align-items: flex-end; }
@@ -530,11 +548,74 @@
           </div>
           <div class="chat-drop-overlay" id="chat-drop-overlay"><span>Drop files to attach</span></div>
           <div class="chat-feed" id="chat-feed" role="log" aria-label="Chat messages"></div>
+          <!-- A2A Toolbar -->
+          <div class="a2a-toolbar" id="a2a-toolbar">
+            <div class="a2a-toolbar-inner">
+              <!-- Debate row -->
+              <div class="a2a-row" id="a2a-debate-row">
+                <span class="a2a-label">Debate</span>
+                <input id="a2a-topic" placeholder="Topic..." style="flex:1;min-width:120px;font-size:0.78rem;padding:5px 8px" aria-label="Debate topic">
+                <select id="a2a-agent1" style="font-size:0.72rem;padding:5px 8px" aria-label="Agent 1">
+                  <option value="chatgpt">ChatGPT</option>
+                  <option value="qwen">Qwen</option>
+                  <option value="omega">Omega</option>
+                  <option value="consulting">Consulting</option>
+                </select>
+                <span class="a2a-vs">vs</span>
+                <select id="a2a-agent2" style="font-size:0.72rem;padding:5px 8px" aria-label="Agent 2">
+                  <option value="qwen">Qwen</option>
+                  <option value="chatgpt">ChatGPT</option>
+                  <option value="omega">Omega</option>
+                  <option value="consulting">Consulting</option>
+                </select>
+                <select id="a2a-judge" style="font-size:0.72rem;padding:5px 8px" aria-label="Judge">
+                  <option value="">No judge</option>
+                  <option value="omega">Omega judge</option>
+                  <option value="command-center">Me (judge)</option>
+                </select>
+                <button class="a2a-btn a2a-btn-launch" onclick="launchA2ADebate()" aria-label="Launch debate">&#128640; Launch</button>
+                <button class="a2a-btn a2a-btn-read" onclick="readDebateThread()" aria-label="Read thread">&#128260; Read thread</button>
+              </div>
+              <!-- Inject row -->
+              <div class="a2a-row" id="a2a-inject-row" style="display:none">
+                <span class="a2a-label">Inject as</span>
+                <select id="a2a-inject-from" style="font-size:0.72rem;padding:5px 8px" aria-label="Send as agent" onchange="updateInjectLabel()">
+                  <option value="chatgpt">ChatGPT</option>
+                  <option value="qwen">Qwen</option>
+                  <option value="omega">Omega</option>
+                  <option value="consulting">Consulting</option>
+                  <option value="command-center">Myself</option>
+                </select>
+                <span class="a2a-vs">&#8594;</span>
+                <select id="a2a-inject-to" style="font-size:0.72rem;padding:5px 8px" aria-label="Send to agent">
+                  <option value="All">All</option>
+                  <option value="chatgpt">ChatGPT</option>
+                  <option value="qwen">Qwen</option>
+                  <option value="omega">Omega</option>
+                  <option value="command-center">Me</option>
+                </select>
+                <span id="a2a-inject-label" class="a2a-inject-label">as ChatGPT</span>
+              </div>
+              <!-- Thread tracker -->
+              <div class="a2a-row">
+                <span class="a2a-label">Thread</span>
+                <span id="a2a-thread-badge" class="a2a-thread-badge" onclick="copyThreadId()" title="Click to copy thread ID">none</span>
+                <button class="a2a-btn a2a-btn-read" style="font-size:0.68rem;padding:3px 8px" onclick="clearThread()" aria-label="Clear thread">&#10005; Clear</button>
+              </div>
+            </div>
+          </div>
+
           <div class="chat-compose">
             <div class="chat-attachments" id="chat-attachments" aria-label="File attachments"></div>
             <div class="chat-compose-row" style="position:relative">
               <div class="ac-popup" id="ac-popup" role="listbox"></div>
               <div class="chat-compose-actions">
+                <button class="a2a-toggle" id="a2a-toggle-btn" onclick="toggleA2AToolbar()" title="A2A Agent Controls" aria-label="Toggle A2A toolbar">&#129302; A2A</button>
+                <select id="a2a-mode-select" style="font-size:0.72rem;padding:5px 8px;width:auto" aria-label="Chat mode" onchange="onA2AModeChange()">
+                  <option value="normal">&#128172; Normal</option>
+                  <option value="debate">&#9876; Debate</option>
+                  <option value="inject">&#128137; Inject</option>
+                </select>
                 <select id="chat-type" aria-label="Message type" style="padding:6px 24px 6px 8px;font-size:0.72rem;width:auto">
                   <option value="Message">Message</option>
                   <option value="Command">Command</option>
@@ -1654,6 +1735,24 @@ async function sendChat() {
     return
   }
 
+  // A2A inject mode override
+  var a2aMode = document.getElementById('a2a-mode-select') && document.getElementById('a2a-mode-select').value
+  if (a2aMode === 'inject') {
+    var injectFrom = document.getElementById('a2a-inject-from').value
+    var injectTo   = document.getElementById('a2a-inject-to').value
+    var injectMsg  = { from: injectFrom, to: injectTo, source: 'agent', type: document.getElementById('chat-type').value, message: text, timestamp: new Date().toISOString() }
+    if (a2aThreadId) { injectMsg.thread_id = a2aThreadId; injectMsg.parent_id = a2aThreadId }
+    try {
+      await api('/chat/message', { method: 'POST', body: JSON.stringify(injectMsg) })
+      input.value = ''
+    } catch(err) { addLocalMsg('System', 'Inject failed: ' + err.message, 'Alert') }
+    return
+  }
+  // Debate mode: auto-attach thread
+  if (a2aMode === 'debate' && a2aThreadId) {
+    activeThread = a2aThreadId
+  }
+
   // @agent or plain message
   var target = parsed.type === 'mention' ? parsed.agent : chatTarget
   var message = parsed.type === 'mention' ? (parsed.message || '@' + parsed.agent) : parsed.message || text
@@ -1688,6 +1787,108 @@ function addLocalMsg(from, message, type) {
   chatMessages.push({ from: from, to: 'All', source: from === 'command-center' ? 'human' : 'system', type: type, message: message, timestamp: new Date().toISOString() })
   if (chatMessages.length > 500) chatMessages = chatMessages.slice(-400)
   renderChat()
+}
+
+// ─── A2A Toolbar ────────────────────────────────────────────────────────────
+var a2aThreadId = null
+var a2aToolbarOpen = false
+
+function toggleA2AToolbar() {
+  var toolbar = document.getElementById('a2a-toolbar')
+  var btn = document.getElementById('a2a-toggle-btn')
+  a2aToolbarOpen = !a2aToolbarOpen
+  toolbar.classList.toggle('open', a2aToolbarOpen)
+  btn.classList.toggle('active', a2aToolbarOpen)
+}
+
+function onA2AModeChange() {
+  var mode = document.getElementById('a2a-mode-select').value
+  var toolbar = document.getElementById('a2a-toolbar')
+  var debateRow = document.getElementById('a2a-debate-row')
+  var injectRow = document.getElementById('a2a-inject-row')
+  // Auto-open toolbar when mode changes away from normal
+  if (mode !== 'normal' && !a2aToolbarOpen) toggleA2AToolbar()
+  debateRow.style.display = (mode === 'debate' || mode === 'normal') ? '' : 'none'
+  injectRow.style.display = mode === 'inject' ? '' : 'none'
+  // Update placeholder
+  var input = document.getElementById('chat-input')
+  if (mode === 'inject') {
+    updateInjectLabel()
+    input.placeholder = 'Message to inject as selected agent...'
+  } else if (mode === 'debate') {
+    input.placeholder = 'Send steering message to debate thread...'
+  } else {
+    input.placeholder = '@agent /command or type a message...'
+  }
+}
+
+function updateInjectLabel() {
+  var from = document.getElementById('a2a-inject-from').value
+  var label = document.getElementById('a2a-inject-label')
+  if (label) label.textContent = 'as ' + from
+}
+
+function updateThreadBadge() {
+  var badge = document.getElementById('a2a-thread-badge')
+  if (badge) badge.textContent = a2aThreadId || 'none'
+}
+
+function copyThreadId() {
+  if (!a2aThreadId) return
+  navigator.clipboard.writeText(a2aThreadId).then(function() { showToast('Thread ID copied', 'success') })
+}
+
+function clearThread() {
+  a2aThreadId = null
+  activeThread = null
+  updateThreadBadge()
+  showToast('Thread cleared', 'info')
+}
+
+async function launchA2ADebate() {
+  var topic = document.getElementById('a2a-topic').value.trim()
+  if (!topic) { showToast('Enter a debate topic first', 'warning'); return }
+  var agent1 = document.getElementById('a2a-agent1').value
+  var agent2 = document.getElementById('a2a-agent2').value
+  var judge  = document.getElementById('a2a-judge').value
+  if (agent1 === agent2) { showToast('Pick two different agents', 'warning'); return }
+
+  a2aThreadId = 'debate-' + Date.now().toString(36)
+  activeThread = a2aThreadId
+  updateThreadBadge()
+
+  // System kickoff message visible to all
+  var kickoff = '🤖 A2A Debate started\nTopic: ' + topic + '\n' + agent1 + ' argues first → ' + agent2 + ' rebuts' + (judge ? ' → ' + judge + ' judges' : '') + '\nThread: ' + a2aThreadId
+  try {
+    await api('/chat/message', { method: 'POST', body: JSON.stringify({
+      from: 'command-center', to: 'All', source: 'system', type: 'Alert',
+      message: kickoff, thread_id: a2aThreadId
+    }) })
+  } catch(e) {}
+
+  // Instruction to agent1
+  var msg1 = 'DEBATE TASK — Thread: ' + a2aThreadId + '\nTopic: ' + topic + '\nYour role: Argue your position on this topic. Use your tools if needed. When done, call chat_send with from="' + agent1 + '", to="' + agent2 + '", thread_id="' + a2aThreadId + '" to send your argument.'
+  try {
+    await api('/chat/message', { method: 'POST', body: JSON.stringify({
+      from: 'command-center', to: agent1, source: 'system', type: 'Command',
+      message: msg1, thread_id: a2aThreadId
+    }) })
+  } catch(e) {}
+
+  addLocalMsg('System', '✅ Debate launched on thread ' + a2aThreadId + '\n\nNow go to ' + agent1.toUpperCase() + ' and say:\n"Check chat_read (from_agent: command-center) and respond to your debate task via chat_send"', 'Alert')
+  showToast('Debate launched — ' + agent1 + ' vs ' + agent2, 'success')
+}
+
+async function readDebateThread() {
+  if (!a2aThreadId) { showToast('No active thread. Launch a debate first.', 'warning'); return }
+  try {
+    var res = await api('/api/tools/chat_read', { method: 'POST', body: JSON.stringify({ thread_id: a2aThreadId, limit: 50 }) })
+    var msgs = []
+    try { msgs = JSON.parse(res.data && res.data.result || '[]') } catch(e) { msgs = [] }
+    if (!msgs.length) { addLocalMsg('System', 'No messages in thread ' + a2aThreadId + ' yet', 'Message'); return }
+    var summary = msgs.map(function(m) { return '[' + m.from + ' → ' + m.to + '] ' + (m.message || '').slice(0, 300) }).join('\n\n')
+    addLocalMsg('Thread: ' + a2aThreadId, summary, 'Answer')
+  } catch(err) { addLocalMsg('System', 'Read thread failed: ' + err.message, 'Alert') }
 }
 
 // ─── Autocomplete ───────────────────────────────────────────────────────────
