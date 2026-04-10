@@ -99,6 +99,7 @@ import { obsidianRouter } from './routes/obsidian.js'
 import { grafanaProxyRouter } from './routes/grafana-proxy.js'
 import { phantomBomRouter } from './routes/phantom-bom.js'
 import { linearProxyRouter } from './routes/linear-proxy.js'
+import { prometheusMetricsRouter } from './routes/prometheus-metrics.js'
 import { initPheromoneLayer, getPheromoneState } from './swarm/pheromone-layer.js'
 import { initPeerEval, getPeerEvalState } from './swarm/peer-eval.js'
 
@@ -322,6 +323,9 @@ app.use('/api/flywheel', requireApiKey, flywheelRouter)
 
 // Benchmark: Inventor vs. research baselines (circle-packing / scheduler-opt / ablation)
 app.use('/api/benchmark', requireApiKey, benchmarkRouter)
+
+// Prometheus metrics — Grafana Cloud scraping (no auth needed for metrics)
+app.use(prometheusMetricsRouter)
 
 // PhantomBOM Extractor — repo → LLM → PhantomComponent nodes in Neo4j
 app.use('/api/phantom-bom', requireApiKey, apiRateLimiter, phantomBomRouter)

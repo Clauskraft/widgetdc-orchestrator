@@ -20990,9 +20990,9 @@ ${result.merged_context}`;
       try {
         const { retrainRoutingWeights: retrainRoutingWeights2 } = await Promise.resolve().then(() => (init_adaptive_rag(), adaptive_rag_exports));
         const result = await retrainRoutingWeights2();
-        const samples = result.weights.training_samples ?? 0;
+        const samples2 = result.weights.training_samples ?? 0;
         const summary = result.adjustments.length > 0 ? result.adjustments.slice(0, 3).join("; ") : "No adjustments needed";
-        return `Retrain complete (${samples} samples, ${result.stats.length} strategies): ${summary}`;
+        return `Retrain complete (${samples2} samples, ${result.stats.length} strategies): ${summary}`;
       } catch (err) {
         return `Retrain failed: ${err}`;
       }
@@ -40676,6 +40676,148 @@ phantomBomRouter.get("/clusters/debug", async (_req, res) => {
   }
 });
 
+// src/routes/prometheus-metrics.ts
+init_logger();
+import { Router as Router53 } from "express";
+var prometheusMetricsRouter = Router53();
+var samples = [];
+function collectMetrics(health) {
+  const now = Date.now();
+  const current = [];
+  current.push({
+    name: "widgetdc_health_status",
+    labels: { service: String(health.service ?? "orchestrator") },
+    value: health.status === "healthy" ? 1 : 0,
+    timestamp: now
+  });
+  current.push({
+    name: "widgetdc_uptime_seconds",
+    labels: {},
+    value: Number(health.uptime_seconds ?? 0),
+    timestamp: now
+  });
+  current.push({
+    name: "widgetdc_agents_registered",
+    labels: {},
+    value: Number(health.agents_registered ?? 0),
+    timestamp: now
+  });
+  current.push({
+    name: "widgetdc_ws_connections",
+    labels: {},
+    value: Number(health.ws_connections ?? 0),
+    timestamp: now
+  });
+  current.push({
+    name: "widgetdc_cron_jobs",
+    labels: {},
+    value: Number(health.cron_jobs ?? 0),
+    timestamp: now
+  });
+  current.push({
+    name: "widgetdc_active_chains",
+    labels: {},
+    value: Number(health.active_chains ?? 0),
+    timestamp: now
+  });
+  if (health.write_gate_stats) {
+    const wg = health.write_gate_stats;
+    current.push({ name: "widgetdc_writes_total", labels: {}, value: wg.writes_total ?? 0, timestamp: now });
+    current.push({ name: "widgetdc_writes_passed", labels: {}, value: wg.writes_passed ?? 0, timestamp: now });
+    current.push({ name: "widgetdc_writes_rejected", labels: {}, value: wg.writes_rejected ?? 0, timestamp: now });
+  }
+  if (health.backend_circuit_breaker) {
+    const cb = health.backend_circuit_breaker;
+    current.push({ name: "widgetdc_circuit_breaker_failures", labels: {}, value: Number(cb.failures ?? 0), timestamp: now });
+    current.push({ name: "widgetdc_circuit_breaker_open", labels: {}, value: cb.open ? 1 : 0, timestamp: now });
+  }
+  if (health.rate_limit_backpressure) {
+    const rl = health.rate_limit_backpressure;
+    current.push({ name: "widgetdc_rate_limit_delay_ms", labels: {}, value: rl.current_delay_ms ?? 0, timestamp: now });
+    current.push({ name: "widgetdc_rate_limit_hits", labels: {}, value: rl.hits_in_window ?? 0, timestamp: now });
+  }
+  if (health.anomaly_watcher) {
+    const aw = health.anomaly_watcher;
+    current.push({ name: "widgetdc_anomaly_scans_total", labels: {}, value: aw.totalScans ?? 0, timestamp: now });
+    current.push({ name: "widgetdc_active_anomalies", labels: {}, value: aw.activeAnomalies ?? 0, timestamp: now });
+    current.push({ name: "widgetdc_anomaly_patterns", labels: {}, value: aw.patterns ?? 0, timestamp: now });
+  }
+  if (health.pheromone_layer) {
+    const pl = health.pheromone_layer;
+    current.push({ name: "widgetdc_pheromone_total_deposits", labels: {}, value: pl.totalDeposits ?? 0, timestamp: now });
+    current.push({ name: "widgetdc_pheromone_active", labels: {}, value: pl.activePheromones ?? 0, timestamp: now });
+    current.push({ name: "widgetdc_pheromone_decays", labels: {}, value: pl.totalDecays ?? 0, timestamp: now });
+    current.push({ name: "widgetdc_pheromone_amplifications", labels: {}, value: pl.totalAmplifications ?? 0, timestamp: now });
+    current.push({ name: "widgetdc_pheromone_trails", labels: {}, value: pl.trailCount ?? 0, timestamp: now });
+  }
+  if (health.peer_eval) {
+    const pe = health.peer_eval;
+    current.push({ name: "widgetdc_peer_evals_total", labels: {}, value: pe.totalEvals ?? 0, timestamp: now });
+    current.push({ name: "widgetdc_peer_reviews", labels: {}, value: pe.totalPeerReviews ?? 0, timestamp: now });
+    current.push({ name: "widgetdc_best_practices", labels: {}, value: pe.totalBestPracticesShared ?? 0, timestamp: now });
+    current.push({ name: "widgetdc_task_types_tracked", labels: {}, value: pe.taskTypesTracked ?? 0, timestamp: now });
+  }
+  current.push({
+    name: "widgetdc_rlm_available",
+    labels: {},
+    value: health.rlm_available ? 1 : 0,
+    timestamp: now
+  });
+  current.push({
+    name: "widgetdc_redis_enabled",
+    labels: {},
+    value: health.redis_enabled ? 1 : 0,
+    timestamp: now
+  });
+  return [...samples, ...current];
+}
+function formatPrometheusText(samples2) {
+  const lines = [];
+  const byName = /* @__PURE__ */ new Map();
+  for (const s of samples2) {
+    if (!byName.has(s.name)) byName.set(s.name, []);
+    byName.get(s.name).push(s);
+  }
+  for (const [name, group] of byName) {
+    lines.push(`# HELP ${name} WidgeTDC platform metric`);
+    lines.push(`# TYPE ${name} gauge`);
+    for (const s of group) {
+      const labelParts = Object.entries(s.labels).map(([k, v]) => `${k}="${v}"`);
+      const labels = labelParts.length > 0 ? `{${labelParts.join(",")}}` : "";
+      lines.push(`${name}${labels} ${s.value} ${s.timestamp}`);
+    }
+  }
+  return lines.join("\n") + "\n";
+}
+prometheusMetricsRouter.get("/metrics", async (_req, res) => {
+  try {
+    const healthUrl = `${process.env.RAILWAY_PRIVATE_DOMAIN || "localhost"}/health`;
+    const resp = await fetch(`http://${healthUrl}`);
+    const health = await resp.json();
+    const currentSamples = collectMetrics(health);
+    res.set("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+    res.send(formatPrometheusText(currentSamples));
+  } catch (err) {
+    logger.error({ err: String(err) }, "Prometheus metrics collection failed");
+    res.status(500).set("Content-Type", "text/plain").send(`# Error: ${String(err)}
+`);
+  }
+});
+prometheusMetricsRouter.get("/api/grafana/prometheus", async (req, res) => {
+  try {
+    const healthUrl = `${process.env.RAILWAY_PRIVATE_DOMAIN || "localhost"}/health`;
+    const resp = await fetch(`http://${healthUrl}`);
+    const health = await resp.json();
+    const currentSamples = collectMetrics(health);
+    res.set("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+    res.send(formatPrometheusText(currentSamples));
+  } catch (err) {
+    logger.error({ err: String(err) }, "Grafana Prometheus endpoint failed");
+    res.status(500).set("Content-Type", "text/plain").send(`# Error: ${String(err)}
+`);
+  }
+});
+
 // src/index.ts
 init_pheromone_layer();
 init_peer_eval();
@@ -40840,6 +40982,7 @@ app.use("/api/pheromone", requireApiKey, pheromoneRouter);
 app.use("/api/peer-eval", requireApiKey, peerEvalRouter);
 app.use("/api/flywheel", requireApiKey, flywheelRouter);
 app.use("/api/benchmark", requireApiKey, benchmarkRouter);
+app.use(prometheusMetricsRouter);
 app.use("/api/phantom-bom", requireApiKey, apiRateLimiter, phantomBomRouter);
 app.use("/api/obsidian", requireApiKey, obsidianRouter);
 app.use("/api/hyperagent/auto", requireApiKey, apiRateLimiter, hyperagentAutoRouter);
