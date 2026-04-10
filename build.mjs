@@ -119,6 +119,10 @@ await esbuild.build({
 // Copy frontend to dist/public/
 // CC v4: React SPA built with Vite (frontend-v4/ contains pre-built output)
 // Fallback: legacy single-file frontend/index.html
+import { rmSync } from 'fs'
+
+// Clean dist/public before copying to prevent stale asset accumulation
+rmSync('dist/public', { recursive: true, force: true })
 mkdirSync('dist/public', { recursive: true })
 if (existsSync('frontend-v4/index.html')) {
   // Recursively copy Vite build output (index.html + assets/ + images/)
