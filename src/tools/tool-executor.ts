@@ -2101,7 +2101,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       const to = String(args?.to ?? 'All')
       const message = String(args?.message ?? '')
       if (!message) throw new Error('message is required')
-      const payload: Record<string, unknown> = { from, to, message, type: 'Text', source: 'agent' }
+      const payload: Record<string, unknown> = { from, to, message, type: 'Message', source: 'agent' }
       if (args?.thread_id) payload.thread_id = String(args.thread_id)
       const { config } = await import('../config.js')
       const res = await fetch(`http://localhost:${config.port}/chat/message`, {
