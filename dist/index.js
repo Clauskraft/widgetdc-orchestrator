@@ -42378,8 +42378,8 @@ linearProxyRouter.get("/issues", async (req, res) => {
     const where = {};
     if (stateFilter) where.state = { type: { key: { eq: stateFilter } } };
     const data = await linearGraphQL(
-      `query($limit: Int!, $filter: IssueFilter) {
-        issues(limit: $limit, filter: $filter) {
+      `query($first: Int!, $filter: IssueFilter) {
+        issues(first: $first, filter: $filter) {
           nodes {
             id identifier title description createdAt updatedAt
             priority priorityLabel estimate
@@ -42392,7 +42392,7 @@ linearProxyRouter.get("/issues", async (req, res) => {
           }
         }
       }`,
-      { limit, filter: Object.keys(where).length > 0 ? where : void 0 }
+      { first: limit, filter: Object.keys(where).length > 0 ? where : void 0 }
     );
     const nodes2 = data?.issues?.nodes ?? [];
     res.json(nodes2.map((issue) => ({
