@@ -37331,9 +37331,8 @@ function buildOpenAPISpec() {
 }
 function buildChatGPTSpec() {
   const BASE = "https://orchestrator-production-c27e.up.railway.app";
-  const bearer = { BearerAuth: [{ type: "http", scheme: "bearer", description: "API key as Bearer token. Use: WidgeTDC_Orch_2026" }] };
   return {
-    openapi: "3.0.3",
+    openapi: "3.1.0",
     info: {
       title: "WidgeTDC Neural Bridge",
       version: "1.0.0",
@@ -37342,6 +37341,7 @@ function buildChatGPTSpec() {
     servers: [{ url: BASE, description: "WidgeTDC Orchestrator (Railway)" }],
     security: [{ BearerAuth: [] }],
     components: {
+      schemas: {},
       securitySchemes: { BearerAuth: { type: "http", scheme: "bearer" } }
     },
     paths: {
@@ -37350,7 +37350,6 @@ function buildChatGPTSpec() {
           operationId: "searchKnowledge",
           summary: "Search the WidgeTDC knowledge graph",
           description: "Search the knowledge graph and semantic vector store. Use for ANY question about platform data, consulting knowledge, patterns, documents, or entities.",
-          security: [bearer],
           requestBody: { required: true, content: { "application/json": { schema: {
             type: "object",
             required: ["query"],
@@ -37367,7 +37366,6 @@ function buildChatGPTSpec() {
           operationId: "reasonDeeply",
           summary: "Deep multi-step reasoning via RLM engine",
           description: "Send a complex question to the RLM reasoning engine. Use for strategy questions, architecture analysis, comparisons, evaluations, and planning.",
-          security: [bearer],
           requestBody: { required: true, content: { "application/json": { schema: {
             type: "object",
             required: ["question"],
@@ -37384,7 +37382,6 @@ function buildChatGPTSpec() {
           operationId: "queryGraph",
           summary: "Execute a Cypher query against Neo4j",
           description: "Run a read-only Cypher query against the Neo4j knowledge graph (475K+ nodes, 3.8M+ relationships).",
-          security: [bearer],
           requestBody: { required: true, content: { "application/json": { schema: {
             type: "object",
             required: ["cypher"],
@@ -37401,7 +37398,6 @@ function buildChatGPTSpec() {
           operationId: "checkTasks",
           summary: "Get active tasks and project status",
           description: "Get active tasks, issues, and project status. Use when asked about project status, next steps, blockers, sprints, or Linear issues.",
-          security: [bearer],
           requestBody: { required: true, content: { "application/json": { schema: {
             type: "object",
             properties: {
@@ -37417,7 +37413,6 @@ function buildChatGPTSpec() {
           operationId: "linearIssues",
           summary: "Get Linear issues and project status",
           description: "Get issues from Linear. Use for project status, sprint progress, blockers, or looking up specific issues (LIN-xxx).",
-          security: [bearer],
           requestBody: { required: true, content: { "application/json": { schema: {
             type: "object",
             properties: {
@@ -37434,7 +37429,6 @@ function buildChatGPTSpec() {
           operationId: "linearSaveIssue",
           summary: "Create or update a Linear issue",
           description: "Create a new Linear issue or update an existing one. Provide id to update, omit to create. Title and team required for new issues.",
-          security: [bearer],
           requestBody: { required: true, content: { "application/json": { schema: {
             type: "object",
             properties: {
@@ -37454,7 +37448,6 @@ function buildChatGPTSpec() {
           operationId: "getPlatformHealth",
           summary: "Get platform health status",
           description: "Check current health of all WidgeTDC services (backend, RLM engine, Neo4j, Redis). Use when asked about system status or uptime.",
-          security: [bearer],
           requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: {} } } } },
           responses: { "200": { description: "Health status for all services" } }
         }
@@ -37464,7 +37457,6 @@ function buildChatGPTSpec() {
           operationId: "investigate",
           summary: "Deep multi-agent investigation",
           description: "Run a comprehensive multi-agent investigation on any topic. Returns analysis with graph data, compliance, strategy, and reasoning. Slower but very thorough.",
-          security: [bearer],
           requestBody: { required: true, content: { "application/json": { schema: {
             type: "object",
             required: ["topic"],
@@ -37478,7 +37470,6 @@ function buildChatGPTSpec() {
           operationId: "callMcpTool",
           summary: "Call any of the 449+ MCP tools directly",
           description: "Direct access to all WidgeTDC MCP tools. Use for specific operations: srag.query, graph.health, audit.dashboard, embedding.embed, compliance.check, etc.",
-          security: [bearer],
           requestBody: { required: true, content: { "application/json": { schema: {
             type: "object",
             required: ["tool_name"],
@@ -37495,7 +37486,6 @@ function buildChatGPTSpec() {
           operationId: "runChain",
           summary: "Execute a multi-agent chain",
           description: "Run a coordinated multi-step agent chain in sequential, parallel, debate, or loop mode.",
-          security: [bearer],
           requestBody: { required: true, content: { "application/json": { schema: {
             type: "object",
             required: ["name", "mode", "steps"],
