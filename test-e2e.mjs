@@ -1670,6 +1670,22 @@ await test('191. POST /api/tools/linear_get_issue responds', async () => {
   assert(r.body?.data?.tool_name === 'linear_get_issue', `wrong tool_name: ${r.body?.data?.tool_name}`)
 })
 
+// ── 192. chat_send — broadcast message ──
+await test('192. POST /api/tools/chat_send sends message', async () => {
+  const r = await api('/api/tools/chat_send', { method: 'POST', body: JSON.stringify({ from: 'test-agent', to: 'All', message: 'A2A test ping' }) })
+  assert(r.status !== 404, `chat_send not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'chat_send', `wrong tool_name: ${r.body?.data?.tool_name}`)
+})
+
+// ── 193. chat_read — read messages ──
+await test('193. POST /api/tools/chat_read returns messages', async () => {
+  const r = await api('/api/tools/chat_read', { method: 'POST', body: JSON.stringify({ limit: 5 }) })
+  assert(r.status !== 404, `chat_read not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'chat_read', `wrong tool_name: ${r.body?.data?.tool_name}`)
+})
+
 // ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped

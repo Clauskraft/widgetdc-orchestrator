@@ -13246,6 +13246,32 @@ var init_tool_registry = __esm({
         backendTool: "graph.read_cypher",
         timeoutMs: 1e4
       }),
+      // ─── chat.* — A2A real-time messaging ─────────────────────────────
+      defineTool({
+        name: "chat_send",
+        namespace: "agent",
+        description: 'Send a message to another agent or broadcast to all agents via the orchestrator chat bus. Use for A2A coordination: share findings, request review, trigger debate. to="All" broadcasts to everyone.',
+        input: z.object({
+          from: z.string().describe('Sender agent ID (e.g. "chatgpt", "qwen", "omega")'),
+          to: z.string().describe('Recipient agent ID or "All" for broadcast'),
+          message: z.string().describe("Message content"),
+          thread_id: z.string().optional().describe("Thread ID for conversation grouping")
+        }),
+        timeoutMs: 1e4,
+        riskLevel: "read_only"
+      }),
+      defineTool({
+        name: "chat_read",
+        namespace: "agent",
+        description: "Read recent messages from the orchestrator chat bus. Use to see what other agents have said, check for replies, or follow an ongoing A2A debate thread.",
+        input: z.object({
+          limit: z.number().optional().describe("Number of messages to fetch (default 20, max 100)"),
+          from_agent: z.string().optional().describe("Filter messages by sender agent ID"),
+          thread_id: z.string().optional().describe("Filter to specific thread")
+        }),
+        timeoutMs: 1e4,
+        riskLevel: "read_only"
+      }),
       // ─── model.* — LLM routing, cost governance, budget controls ──────
       defineTool({
         name: "model_providers",
@@ -23285,6 +23311,40 @@ ${lines.join("\n")}`;
       const result = await callMcp3({ toolName: "memory_retrieve", args: { agent_id: input?.agent_id, key: input?.key }, callId: `agent-memory-${Date.now()}` });
       return typeof result === "string" ? result : JSON.stringify(result, null, 2);
     }
+    // ─── chat.* — A2A messaging ──────────────────────────────────────
+    case "chat_send": {
+      const from = String(input?.from ?? "unknown");
+      const to = String(input?.to ?? "All");
+      const message = String(input?.message ?? "");
+      if (!message) throw new Error("message is required");
+      const payload = { from, to, message, type: "Text", source: "agent" };
+      if (input?.thread_id) payload.thread_id = String(input.thread_id);
+      const { config: config2 } = await Promise.resolve().then(() => (init_config(), config_exports));
+      const res = await fetch(`http://localhost:${config2.port}/api/chat/message`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${config2.orchestratorApiKey}`
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(8e3)
+      });
+      const data = await res.json().catch(() => ({}));
+      return JSON.stringify({ sent: res.ok, id: data?.data?.id, from, to }, null, 2);
+    }
+    case "chat_read": {
+      const limit = Math.min(Number(input?.limit ?? 20), 100);
+      const { config: config2 } = await Promise.resolve().then(() => (init_config(), config_exports));
+      const res = await fetch(`http://localhost:${config2.port}/api/chat/history?limit=${limit}`, {
+        headers: { "Authorization": `Bearer ${config2.orchestratorApiKey}` },
+        signal: AbortSignal.timeout(8e3)
+      });
+      const data = await res.json().catch(() => ({ messages: [] }));
+      let messages = data?.messages ?? [];
+      if (input?.from_agent) messages = messages.filter((m) => m.from === input.from_agent);
+      if (input?.thread_id) messages = messages.filter((m) => m.thread_id === input.thread_id);
+      return JSON.stringify(messages.slice(0, limit), null, 2);
+    }
     // ─── model.* ─────────────────────────────────────────────────────
     case "model_providers": {
       const { listProviders: listProviders2 } = await Promise.resolve().then(() => (init_llm_proxy(), llm_proxy_exports));
@@ -23949,6 +24009,8 @@ var init_mcp_caller = __esm({
       "agent_dispatch",
       "agent_memory",
       "agent_capabilities",
+      "chat_send",
+      "chat_read",
       "model_providers",
       "model_route",
       "model_cost_estimate",

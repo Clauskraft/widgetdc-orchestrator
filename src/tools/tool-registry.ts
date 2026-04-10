@@ -1425,6 +1425,35 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     timeoutMs: 10000,
   }),
 
+  // ─── chat.* — A2A real-time messaging ─────────────────────────────
+
+  defineTool({
+    name: 'chat_send',
+    namespace: 'agent',
+    description: 'Send a message to another agent or broadcast to all agents via the orchestrator chat bus. Use for A2A coordination: share findings, request review, trigger debate. to="All" broadcasts to everyone.',
+    input: z.object({
+      from: z.string().describe('Sender agent ID (e.g. "chatgpt", "qwen", "omega")'),
+      to: z.string().describe('Recipient agent ID or "All" for broadcast'),
+      message: z.string().describe('Message content'),
+      thread_id: z.string().optional().describe('Thread ID for conversation grouping'),
+    }),
+    timeoutMs: 10000,
+    riskLevel: 'read_only',
+  }),
+
+  defineTool({
+    name: 'chat_read',
+    namespace: 'agent',
+    description: 'Read recent messages from the orchestrator chat bus. Use to see what other agents have said, check for replies, or follow an ongoing A2A debate thread.',
+    input: z.object({
+      limit: z.number().optional().describe('Number of messages to fetch (default 20, max 100)'),
+      from_agent: z.string().optional().describe('Filter messages by sender agent ID'),
+      thread_id: z.string().optional().describe('Filter to specific thread'),
+    }),
+    timeoutMs: 10000,
+    riskLevel: 'read_only',
+  }),
+
   // ─── model.* — LLM routing, cost governance, budget controls ──────
 
   defineTool({

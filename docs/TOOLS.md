@@ -129,6 +129,8 @@ Every tool declares governance metadata per the Neural Bridge v2 specification:
 | 85 | `agent_dispatch` | agent | 15s | Dispatch a task to an agent via peer evaluation |
 | 86 | `agent_memory` | agent | 10s | Get agent working memory summary |
 | 87 | `agent_capabilities` | agent | 10s | Get agent capabilities and workload |
+| 87a | `chat_send` | agent | 10s | Send a message to another agent or broadcast (A2A messaging) |
+| 87b | `chat_read` | agent | 10s | Read recent messages from the orchestrator chat bus |
 | 88 | `model_providers` | model | 10s | List available LLM providers with costs and capabilities |
 | 89 | `model_route` | model | 10s | Route a task to the optimal LLM |
 | 90 | `model_cost_estimate` | model | 5s | Estimate cost for a model call |
@@ -1849,6 +1851,55 @@ curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/agent
   -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"agent_id": "compliance-officer"}'
+```
+
+---
+
+#### `chat_send`
+
+**Description:** Send a message to another agent or broadcast to all agents via the orchestrator chat bus. Use for A2A coordination: share findings, request review, trigger debate. `to="All"` broadcasts.
+
+**Timeout:** 10,000 ms | **Risk:** read_only
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `from` | string | yes | Sender agent ID (e.g. "chatgpt", "qwen") |
+| `to` | string | yes | Recipient agent ID or "All" |
+| `message` | string | yes | Message content |
+| `thread_id` | string | no | Thread ID for conversation grouping |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/chat_send \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"from": "chatgpt", "to": "qwen", "message": "My analysis: X. Please critique."}'
+```
+
+---
+
+#### `chat_read`
+
+**Description:** Read recent messages from the orchestrator chat bus. Use to see what other agents have said, check for replies, or follow an A2A debate thread.
+
+**Timeout:** 10,000 ms | **Risk:** read_only
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `limit` | integer | no | Messages to fetch (default 20, max 100) |
+| `from_agent` | string | no | Filter by sender agent ID |
+| `thread_id` | string | no | Filter to specific thread |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/chat_read \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"limit": 10, "from_agent": "qwen"}'
 ```
 
 ---

@@ -165,6 +165,7 @@ const LOCAL_TOOLS = new Set([
   'data_graph_read', 'data_graph_stats', 'data_redis_inspect', 'data_integrity_check',
   'system_health', 'system_service_status', 'system_metrics_summary', 'system_logs_summary',
   'agent_list', 'agent_status', 'agent_dispatch', 'agent_memory', 'agent_capabilities',
+  'chat_send', 'chat_read',
   'model_providers', 'model_route', 'model_cost_estimate', 'model_budget_status', 'model_policy_check',
   'workflow_cost_trace', 'workflow_context_compact', 'workflow_fanout_guard', 'workflow_premium_escalation_check',
   'governance_plan_create', 'governance_plan_approve', 'governance_plan_execute',
