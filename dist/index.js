@@ -9262,6 +9262,10 @@ var init_LlmMatrix = __esm({
 });
 
 // ../widgetdc-contracts/dist/llm/index.js
+var llm_exports = {};
+__export(llm_exports, {
+  LlmMatrix: () => LlmMatrix
+});
 var init_llm = __esm({
   "../widgetdc-contracts/dist/llm/index.js"() {
     "use strict";
@@ -11896,8 +11900,12 @@ __export(tool_registry_exports, {
   TOOL_REGISTRY: () => TOOL_REGISTRY,
   defineTool: () => defineTool,
   getCategories: () => getCategories,
+  getRiskSummary: () => getRiskSummary,
   getTool: () => getTool,
   getToolsByCategory: () => getToolsByCategory,
+  getToolsByCostTier: () => getToolsByCostTier,
+  getToolsByRiskLevel: () => getToolsByRiskLevel,
+  getToolsRequiringApproval: () => getToolsRequiringApproval,
   toMCPTools: () => toMCPTools,
   toOpenAITools: () => toOpenAITools,
   toOpenAPIPaths: () => toOpenAPIPaths
@@ -11924,7 +11932,7 @@ function inferCategory(namespace) {
     pheromone: "monitor",
     peereval: "monitor",
     grafana: "monitor",
-    railway: "deploy",
+    railway: "monitor",
     // Governed control plane domains (Neural Bridge v2)
     data: "data",
     system: "system",
@@ -11984,8 +11992,90 @@ function zodToJsonSchemaSimple(schema) {
   if (required2.length > 0) result.required = required2;
   return result;
 }
+function inferAuditCategory(namespace, riskLevel) {
+  if (riskLevel === "production_write") return "production_mutation";
+  if (riskLevel === "staged_write") return "staged_write";
+  const map3 = {
+    data: "data_access",
+    system: "system_observability",
+    agent: "agent_coordination",
+    model: "model_routing",
+    governance: "governance_audit",
+    grafana: "observability",
+    railway: "deployment",
+    memory: "memory_operation",
+    engagement: "engagement_lifecycle",
+    pheromone: "stigmergic_communication",
+    intelligence: "cognitive_intelligence",
+    cognitive: "cognitive_intelligence",
+    llm: "model_proxy",
+    chains: "chain_execution",
+    inventor: "evolution_engine",
+    hyperagent: "autonomous_execution",
+    peereval: "fleet_learning",
+    graph: "graph_operation",
+    linear: "project_tracking",
+    knowledge: "knowledge_retrieval",
+    monitor: "platform_monitoring",
+    mcp: "mcp_proxy",
+    compliance: "compliance_check",
+    assembly: "artifact_generation",
+    decisions: "decision_provenance",
+    adoption: "adoption_tracking"
+  };
+  return map3[namespace] ?? "general";
+}
+function inferRiskDefaults(opts) {
+  const ns = opts.namespace;
+  const timeout = opts.timeoutMs ?? 3e4;
+  const risk = opts.riskLevel ?? "read_only";
+  const namespaceDefaults = {
+    // Read-only domains
+    data: { costTier: "micro" },
+    system: { costTier: "micro" },
+    agent: { costTier: "micro" },
+    grafana: { costTier: "micro" },
+    // Governance & deployment — high risk
+    governance: { riskLevel: "staged_write", requiresPlan: true, requiresApproval: true, costTier: "standard" },
+    railway: { riskLevel: "production_write", requiresPlan: true, requiresApproval: true, costTier: "standard" },
+    // Write-capable domains
+    memory: { riskLevel: "staged_write", costTier: "micro" },
+    engagement: { riskLevel: "staged_write", costTier: "standard" },
+    pheromone: { costTier: "micro" },
+    // deposit is staged_write handled per-tool
+    // LLM & cognitive — cost-sensitive
+    llm: { costTier: "standard" },
+    cognitive: { costTier: timeout > 3e4 ? "premium" : "standard" },
+    intelligence: { costTier: timeout > 6e4 ? "premium" : "standard" },
+    // Chain execution
+    chains: { costTier: "standard" },
+    inventor: { costTier: "standard" },
+    hyperagent: { costTier: timeout > 6e4 ? "premium" : "standard" },
+    peereval: { costTier: "standard" },
+    // Knowledge & graph
+    knowledge: { costTier: "standard" },
+    graph: { costTier: "micro" },
+    linear: { costTier: "micro" },
+    monitor: { costTier: "micro" },
+    mcp: { costTier: "standard" },
+    compliance: { costTier: "micro" },
+    assembly: { costTier: "standard" },
+    decisions: { costTier: "micro" }
+  };
+  const nsDefaults = namespaceDefaults[ns] ?? {};
+  const finalRisk = nsDefaults.riskLevel ?? risk;
+  const finalCost = nsDefaults.costTier ?? (timeout > 6e4 ? "premium" : timeout > 2e4 ? "standard" : "micro");
+  return {
+    riskLevel: finalRisk,
+    requiresPlan: nsDefaults.requiresPlan ?? false,
+    requiresApproval: nsDefaults.requiresApproval ?? false,
+    costTier: finalCost,
+    auditCategory: inferAuditCategory(ns, finalRisk)
+  };
+}
 function defineTool(opts) {
   const inputSchema = zodToJsonSchemaSimple(opts.input);
+  const risk = inferRiskDefaults({ namespace: opts.namespace, timeoutMs: opts.timeoutMs, riskLevel: opts.riskLevel });
   return {
     name: opts.name,
     namespace: opts.namespace,
@@ -12000,6 +12090,11 @@ function defineTool(opts) {
     authRequired: opts.authRequired ?? true,
     availableVia: opts.availableVia ?? ["openai", "openapi", "mcp"],
     tags: inferTags(opts.name),
+    riskLevel: opts.riskLevel ?? risk.riskLevel,
+    requiresPlan: opts.requiresPlan ?? risk.requiresPlan,
+    requiresApproval: opts.requiresApproval ?? risk.requiresApproval,
+    costTier: opts.costTier ?? risk.costTier,
+    auditCategory: opts.auditCategory ?? risk.auditCategory,
     deprecated: opts.deprecated ?? false,
     deprecatedSince: opts.deprecatedSince,
     deprecatedMessage: opts.deprecatedMessage,
@@ -12014,7 +12109,10 @@ function toOpenAITools() {
       name: t.name,
       description: t.description,
       parameters: t.inputSchema,
-      ...t.deprecated ? { deprecated: true } : {}
+      ...t.deprecated ? { deprecated: true } : {},
+      // FR-3 risk metadata passthrough
+      "x-risk-level": t.riskLevel,
+      "x-cost-tier": t.costTier
     }
   }));
 }
@@ -12028,7 +12126,14 @@ function toMCPTools() {
       if (t.sunsetDate) parts.push(`Sunset: ${t.sunsetDate}.`);
       description = `${parts.join(" ")} \u2014 ${description}`;
     }
-    return { name: t.name, description, inputSchema: t.inputSchema };
+    return {
+      name: t.name,
+      description,
+      inputSchema: t.inputSchema,
+      riskLevel: t.riskLevel,
+      costTier: t.costTier,
+      requiresApproval: t.requiresApproval
+    };
   });
 }
 function toOpenAPIPaths() {
@@ -12043,6 +12148,10 @@ function toOpenAPIPaths() {
         tags: [tool.category.charAt(0).toUpperCase() + tool.category.slice(1)],
         security: tool.authRequired ? [{ BearerAuth: [] }] : [],
         ...tool.deprecated ? { deprecated: true } : {},
+        // FR-3 risk metadata
+        "x-risk-level": tool.riskLevel,
+        "x-cost-tier": tool.costTier,
+        "x-requires-approval": tool.requiresApproval,
         requestBody: {
           required: true,
           content: { "application/json": { schema: tool.inputSchema } }
@@ -12073,6 +12182,27 @@ function getCategories() {
   }
   return [...counts.entries()].map(([category, count]) => ({ category, count })).sort((a, b) => b.count - a.count);
 }
+function getToolsByRiskLevel(level) {
+  return TOOL_REGISTRY.filter((t) => t.riskLevel === level);
+}
+function getToolsRequiringApproval() {
+  return TOOL_REGISTRY.filter((t) => t.requiresApproval);
+}
+function getToolsByCostTier(tier) {
+  return TOOL_REGISTRY.filter((t) => t.costTier === tier);
+}
+function getRiskSummary() {
+  return {
+    read_only: TOOL_REGISTRY.filter((t) => t.riskLevel === "read_only").length,
+    staged_write: TOOL_REGISTRY.filter((t) => t.riskLevel === "staged_write").length,
+    production_write: TOOL_REGISTRY.filter((t) => t.riskLevel === "production_write").length,
+    requiringApproval: TOOL_REGISTRY.filter((t) => t.requiresApproval).length,
+    costMicro: TOOL_REGISTRY.filter((t) => t.costTier === "micro").length,
+    costStandard: TOOL_REGISTRY.filter((t) => t.costTier === "standard").length,
+    costPremium: TOOL_REGISTRY.filter((t) => t.costTier === "premium").length,
+    total: TOOL_REGISTRY.length
+  };
+}
 var TOOL_REGISTRY;
 var init_tool_registry = __esm({
   "src/tools/tool-registry.ts"() {
@@ -12098,7 +12228,8 @@ var init_tool_registry = __esm({
           mode: z.enum(["reason", "analyze", "plan"]).optional().describe("Reasoning mode (default: reason)")
         }),
         backendTool: "rlm.reason",
-        timeoutMs: 45e3
+        timeoutMs: 45e3,
+        costTier: "standard"
       }),
       defineTool({
         name: "query_graph",
@@ -12809,6 +12940,7 @@ var init_tool_registry = __esm({
           metadata: z.record(z.number()).optional().describe("Numeric metrics (e.g., { score: 0.9, latency_ms: 50 })")
         }),
         timeoutMs: 5e3,
+        riskLevel: "staged_write",
         outputDescription: "Deposited pheromone with assigned ID and TTL"
       }),
       defineTool({
@@ -13188,8 +13320,12 @@ var init_tool_registry = __esm({
           scope: z.enum(["read_only", "staged_write", "production_write"]).describe("Risk scope"),
           target_service: z.string().describe("Target service")
         }),
-        backendTool: "hyperagent_auto_run",
-        timeoutMs: 3e4
+        timeoutMs: 3e4,
+        riskLevel: "staged_write",
+        requiresPlan: false,
+        // this IS the plan creation — no nested plan needed
+        requiresApproval: false,
+        costTier: "standard"
       }),
       defineTool({
         name: "governance_plan_approve",
@@ -13199,8 +13335,11 @@ var init_tool_registry = __esm({
           plan_id: z.string().describe("Plan identifier"),
           approver: z.string().describe("Approver identity")
         }),
-        backendTool: "hyperagent_auto_memory",
-        timeoutMs: 1e4
+        timeoutMs: 1e4,
+        riskLevel: "staged_write",
+        requiresPlan: false,
+        requiresApproval: false,
+        costTier: "micro"
       }),
       defineTool({
         name: "governance_plan_execute",
@@ -13209,8 +13348,12 @@ var init_tool_registry = __esm({
         input: z.object({
           plan_id: z.string().describe("Approved plan identifier")
         }),
-        backendTool: "hyperagent_auto_run",
-        timeoutMs: 6e4
+        timeoutMs: 6e4,
+        riskLevel: "production_write",
+        requiresPlan: true,
+        // requires a prior plan
+        requiresApproval: true,
+        costTier: "standard"
       }),
       defineTool({
         name: "governance_plan_evaluate",
@@ -13221,8 +13364,11 @@ var init_tool_registry = __esm({
           outcome: z.enum(["success", "partial", "failed"]).describe("Execution outcome"),
           kpi_impact: z.number().optional().describe("KPI impact score (-1 to 1)")
         }),
-        backendTool: "hyperagent_auto_memory",
-        timeoutMs: 1e4
+        timeoutMs: 1e4,
+        riskLevel: "staged_write",
+        requiresPlan: false,
+        requiresApproval: false,
+        costTier: "micro"
       }),
       defineTool({
         name: "governance_audit_query",
@@ -13272,7 +13418,11 @@ var init_tool_registry = __esm({
           action: z.enum(["deploy", "status", "restart", "logs"]).optional().describe("Action to perform (default: status)")
         }),
         backendTool: "railway.deploy",
-        timeoutMs: 3e4
+        timeoutMs: 3e4,
+        riskLevel: "production_write",
+        requiresPlan: true,
+        requiresApproval: true,
+        costTier: "standard"
       }),
       defineTool({
         name: "railway_env",
@@ -13285,7 +13435,11 @@ var init_tool_registry = __esm({
           value: z.string().optional().describe("Variable value (for set)")
         }),
         backendTool: "railway.env",
-        timeoutMs: 15e3
+        timeoutMs: 15e3,
+        riskLevel: "production_write",
+        requiresPlan: true,
+        requiresApproval: true,
+        costTier: "standard"
       })
       // ─── Universal Agent Communication ───────────────────────────────────
     ];
@@ -13710,6 +13864,545 @@ var init_cost_optimizer = __esm({
   }
 });
 
+// src/llm/cost-governance.ts
+var cost_governance_exports = {};
+__export(cost_governance_exports, {
+  BUDGET_LANE_MICRO_MAX: () => BUDGET_LANE_MICRO_MAX,
+  BUDGET_LANE_STANDARD_MAX: () => BUDGET_LANE_STANDARD_MAX,
+  CONTEXT_COMPACTION_THRESHOLD: () => CONTEXT_COMPACTION_THRESHOLD,
+  MAX_AGENT_FANOUT_DEBATE: () => MAX_AGENT_FANOUT_DEBATE,
+  MAX_AGENT_FANOUT_PARALLEL: () => MAX_AGENT_FANOUT_PARALLEL,
+  MAX_RECURSION_DEPTH: () => MAX_RECURSION_DEPTH,
+  checkModelPolicy: () => checkModelPolicy,
+  compactContext: () => compactContext,
+  default: () => cost_governance_default,
+  enforceMaxFanOut: () => enforceMaxFanOut,
+  enforceMaxRecursionDepth: () => enforceMaxRecursionDepth,
+  estimateModelCost: () => estimateModelCost,
+  estimateTokenCount: () => estimateTokenCount,
+  getAggregateWorkflowCosts: () => getAggregateWorkflowCosts,
+  getBudgetLane: () => getBudgetLane,
+  getWorkflowCostTrace: () => getWorkflowCostTrace,
+  inferBudgetLaneFromTask: () => inferBudgetLaneFromTask,
+  isClaudeEscalationAllowed: () => isClaudeEscalationAllowed,
+  recordPriorFailure: () => recordPriorFailure,
+  recordWorkflowCost: () => recordWorkflowCost,
+  shouldCompactContext: () => shouldCompactContext
+});
+async function getBudgetLane(task, estimatedTokens) {
+  let lane;
+  if (isRlmAvailable()) {
+    try {
+      const costKnowledge = await queryCostKnowledge(task);
+      const raw = await callCognitiveRaw("analyze", {
+        prompt: `Classify the cost budget lane for this task: ${task}${costKnowledge ? `
+
+Relevant cost knowledge from prior engagements: ${costKnowledge}` : ""}`,
+        context: {
+          task,
+          estimatedTokens: estimatedTokens ?? 0,
+          cost_knowledge: costKnowledge ?? null,
+          classification_dimensions: ["cost_complexity", "reasoning_depth", "token_budget"]
+        },
+        agent_id: "cost-governance"
+      }, 15e3);
+      if (raw?.routing?.cost) {
+        const rlmCost = raw.routing.cost;
+        if (rlmCost < 0.1) lane = "micro";
+        else if (rlmCost < 1) lane = "standard";
+        else lane = "deep";
+      } else if (raw?.routing?.domain) {
+        const domain = String(raw.routing.domain).toLowerCase();
+        if (domain.includes("simple") || domain.includes("lookup") || domain.includes("format")) lane = "micro";
+        else if (domain.includes("deep") || domain.includes("complex") || domain.includes("strategic")) lane = "deep";
+        else lane = "standard";
+      } else if (typeof raw?.analysis?.budget_lane === "string") {
+        lane = raw.analysis.budget_lane;
+      } else if (typeof raw?.result === "string") {
+        const text = raw.result.toLowerCase();
+        if (/\b(micro|simple|trivial|lookup)\b/.test(text)) lane = "micro";
+        else if (/\b(deep|complex|investigation|strategic)\b/.test(text)) lane = "deep";
+        else lane = "standard";
+      } else {
+        lane = classifyByTokenCount(estimatedTokens ?? 0);
+      }
+      logger.info({ task: task.slice(0, 80), lane, rlmRouting: raw?.routing }, "Budget lane classified (RLM)");
+    } catch (err) {
+      logger.warn({ error: String(err) }, "RLM budget classification failed \u2014 falling back to heuristics");
+      lane = classifyByTokenCount(estimatedTokens ?? 0);
+    }
+  } else {
+    lane = estimatedTokens ? classifyByTokenCount(estimatedTokens) : inferBudgetLaneFromTask(task);
+  }
+  const tokens = estimatedTokens ?? 0;
+  const recommendedMaxCostDKK = lane === "micro" ? 0.1 : lane === "standard" ? 1 : 5;
+  return { lane, estimatedTokens: tokens, recommendedMaxCostDKK };
+}
+function classifyByTokenCount(tokens) {
+  if (tokens < BUDGET_LANE_MICRO_MAX) return "micro";
+  if (tokens <= BUDGET_LANE_STANDARD_MAX) return "standard";
+  return "deep";
+}
+async function queryCostKnowledge(task) {
+  try {
+    const result = await callMcpTool({
+      toolName: "srag.query",
+      args: { query: `workflow cost estimates for task: ${task}`, max_results: 3 },
+      callId: `cost-srag-${Date.now()}`,
+      timeoutMs: 1e4
+    });
+    if (result.status === "success" && result.result) {
+      return typeof result.result === "string" ? result.result : JSON.stringify(result.result).slice(0, 2e3);
+    }
+  } catch (err) {
+    logger.debug({ error: String(err) }, "SRAG cost knowledge query failed");
+  }
+  return null;
+}
+function inferBudgetLaneFromTask(task) {
+  const lower = task.toLowerCase();
+  if (/\b(investigate|deep|complex|synthesize|comprehensive|multi-hop|strategic|architecture)\b/.test(lower)) {
+    return "deep";
+  }
+  if (/\b(analyze|reason|explain|compare|evaluate|review|summary|report)\b/.test(lower)) {
+    return "standard";
+  }
+  if (/\b(format|list|count|lookup|route|classify|status|health|ping)\b/.test(lower)) {
+    return "micro";
+  }
+  return "standard";
+}
+async function isClaudeEscalationAllowed(provider, task, opts) {
+  const providerLower = provider.toLowerCase();
+  const isPremiumProvider = providerLower.includes("claude") || providerLower.includes("anthropic") || providerLower.includes("opus");
+  if (!isPremiumProvider) {
+    return {
+      allowed: true,
+      reason: "Non-premium provider \u2014 no escalation check needed",
+      priorFailures: opts?.priorFailures ?? 0,
+      requiresPremiumFlag: false
+    };
+  }
+  if (isRlmAvailable()) {
+    try {
+      const priorFailures2 = opts?.priorFailures ?? await getPriorFailures(provider, task);
+      const lane2 = opts?.estimatedTokens ? (await getBudgetLane(task, opts.estimatedTokens)).lane : inferBudgetLaneFromTask(task);
+      const raw = await callCognitiveRaw("analyze", {
+        prompt: `Evaluate whether premium model (Claude) escalation is justified for this task: ${task}. Budget lane: ${lane2}. Prior failures: ${priorFailures2}. Premium explicitly allowed: ${opts?.premiumAllowed ?? false}.`,
+        context: {
+          provider,
+          task,
+          budget_lane: lane2,
+          prior_failures: priorFailures2,
+          premium_explicitly_allowed: opts?.premiumAllowed ?? false,
+          analysis_dimensions: ["cost_efficiency", "necessity", "alternative_availability"]
+        },
+        agent_id: "cost-governance"
+      }, 15e3);
+      if (raw) {
+        const analysis = raw.analysis ?? raw.result;
+        const analysisStr = typeof analysis === "string" ? analysis : JSON.stringify(analysis);
+        const analysisLower = analysisStr.toLowerCase();
+        const approved = /\b(approved|justified|allowed|recommended)\b/.test(analysisLower) && !/\b(not\s+(approved|justified)|reject|denied|not\s+recommended|cheaper\s+first)\b/.test(analysisLower);
+        const rejected = /\b(not\s+(approved|justified)|reject|denied|not\s+recommended|cheaper\s+first|retry\s+(with|using))\b/.test(analysisLower);
+        if (rejected) {
+          return {
+            allowed: false,
+            reason: `RLM analysis rejected escalation: ${analysisStr.slice(0, 300)}`,
+            priorFailures: priorFailures2,
+            requiresPremiumFlag: !opts?.premiumAllowed
+          };
+        }
+        if (approved) {
+          return {
+            allowed: true,
+            reason: `RLM analysis approved escalation: ${analysisStr.slice(0, 300)}`,
+            priorFailures: priorFailures2,
+            requiresPremiumFlag: false
+          };
+        }
+        logger.warn({ provider, task: task.slice(0, 80) }, "RLM escalation analysis ambiguous \u2014 falling back to deterministic check");
+      }
+    } catch (err) {
+      logger.warn({ error: String(err) }, "RLM escalation analysis failed \u2014 falling back to deterministic check");
+    }
+  }
+  const priorFailures = opts?.priorFailures ?? await getPriorFailures(provider, task);
+  const lane = opts?.estimatedTokens ? (await getBudgetLane(task, opts.estimatedTokens)).lane : inferBudgetLaneFromTask(task);
+  const requiresPremiumReasoning = lane === "deep";
+  const hasSufficientFailures = priorFailures >= 2;
+  const premiumAllowed = opts?.premiumAllowed ?? false;
+  if (!requiresPremiumReasoning) {
+    return {
+      allowed: false,
+      reason: `Task does not require premium reasoning (budget lane: ${lane}). Use cheaper models first.`,
+      priorFailures,
+      requiresPremiumFlag: false
+    };
+  }
+  if (!hasSufficientFailures) {
+    return {
+      allowed: false,
+      reason: `Insufficient cheaper model failures (${priorFailures}/2 required). Retry with deepseek/qwen/gemini first.`,
+      priorFailures,
+      requiresPremiumFlag: false
+    };
+  }
+  if (!premiumAllowed) {
+    return {
+      allowed: false,
+      reason: "Premium model not explicitly allowed in execution plan. Set premium_allowed=true.",
+      priorFailures,
+      requiresPremiumFlag: true
+    };
+  }
+  return {
+    allowed: true,
+    reason: `Escalation justified: deep lane task, ${priorFailures} cheaper model failures, premium explicitly allowed.`,
+    priorFailures,
+    requiresPremiumFlag: false
+  };
+}
+async function recordPriorFailure(provider, task) {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  const key = `${ESCALATION_PREFIX}${provider}:${hashTask(task)}`;
+  try {
+    const current = parseInt(await redis2.get(key) ?? "0", 10);
+    await redis2.incr(key);
+    await redis2.expire(key, 3600);
+    logger.warn({ provider, failures: current + 1 }, "Prior failure recorded for escalation tracking");
+  } catch {
+  }
+}
+async function getPriorFailures(provider, task) {
+  const redis2 = getRedis();
+  if (!redis2) return 0;
+  const key = `${ESCALATION_PREFIX}${provider}:${hashTask(task)}`;
+  try {
+    const val = await redis2.get(key);
+    return val ? parseInt(val, 10) : 0;
+  } catch {
+    return 0;
+  }
+}
+function hashTask(task) {
+  let hash = 0;
+  const str = task.slice(0, 100);
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash << 5) - hash + str.charCodeAt(i) | 0;
+  }
+  return Math.abs(hash).toString(36);
+}
+function enforceMaxRecursionDepth(currentDepth) {
+  if (currentDepth >= MAX_RECURSION_DEPTH) {
+    return {
+      allowed: false,
+      error: `Max recursion depth exceeded (${currentDepth}/${MAX_RECURSION_DEPTH}). Chain nesting must not exceed ${MAX_RECURSION_DEPTH} levels. Refactor to flatten chain structure.`
+    };
+  }
+  return { allowed: true };
+}
+function enforceMaxFanOut(parallelSteps, mode = "parallel", agentIds) {
+  const maxAllowed = mode === "debate" ? MAX_AGENT_FANOUT_DEBATE : MAX_AGENT_FANOUT_PARALLEL;
+  if (parallelSteps > maxAllowed) {
+    return {
+      allowed: false,
+      error: `Agent fan-out exceeded: requested ${parallelSteps}, max ${maxAllowed} for ${mode} mode. Reduce parallel steps or increase MAX_AGENT_FANOUT_PARALLEL/MAX_AGENT_FANOUT_DEBATE constant.`,
+      maxAllowed,
+      requested: parallelSteps
+    };
+  }
+  if (agentIds && agentIds.length > maxAllowed) {
+    return {
+      allowed: false,
+      error: `Agent list exceeds max fan-out: ${agentIds.length} > ${maxAllowed}`,
+      maxAllowed,
+      requested: agentIds.length
+    };
+  }
+  return { allowed: true, maxAllowed, requested: parallelSteps };
+}
+async function recordWorkflowCost(workflowId, provider, model, tokensIn, tokensOut, costDKK) {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  const key = `${COST_TRACE_PREFIX}${workflowId}`;
+  const callRecord = {
+    provider,
+    model,
+    tokensIn,
+    tokensOut,
+    costDKK,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  try {
+    const existing = await redis2.get(key);
+    let trace2;
+    if (existing) {
+      trace2 = JSON.parse(existing);
+      trace2.totalCostDKK += costDKK;
+      trace2.totalTokens += tokensIn + tokensOut;
+      trace2.modelCalls.push(callRecord);
+      trace2.lastUpdatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    } else {
+      trace2 = {
+        workflowId,
+        totalCostDKK: costDKK,
+        totalTokens: tokensIn + tokensOut,
+        modelCalls: [callRecord],
+        startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        lastUpdatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+    await redis2.set(key, JSON.stringify(trace2), "EX", COST_TRACE_TTL_SECONDS);
+  } catch (err) {
+    logger.warn({ workflowId, error: String(err) }, "Cost trace recording failed (non-fatal)");
+  }
+}
+async function getWorkflowCostTrace(workflowId) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  const key = `${COST_TRACE_PREFIX}${workflowId}`;
+  try {
+    const raw = await redis2.get(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+async function getAggregateWorkflowCosts(windowHours = 24) {
+  const redis2 = getRedis();
+  if (!redis2) {
+    return { totalCostDKK: 0, totalWorkflows: 0, totalModelCalls: 0, workflows: [] };
+  }
+  try {
+    const keys = await redis2.keys(`${COST_TRACE_PREFIX}*`);
+    const traces = [];
+    for (const key of keys) {
+      const raw = await redis2.get(key);
+      if (raw) {
+        traces.push(JSON.parse(raw));
+      }
+    }
+    const cutoff = new Date(Date.now() - windowHours * 60 * 60 * 1e3).toISOString();
+    const filtered = traces.filter((t) => t.startedAt >= cutoff);
+    return {
+      totalCostDKK: filtered.reduce((sum, t) => sum + t.totalCostDKK, 0),
+      totalWorkflows: filtered.length,
+      totalModelCalls: filtered.reduce((sum, t) => sum + t.modelCalls.length, 0),
+      workflows: filtered
+    };
+  } catch {
+    return { totalCostDKK: 0, totalWorkflows: 0, totalModelCalls: 0, workflows: [] };
+  }
+}
+function estimateModelCost(provider, model, estimatedTokens, outputRatio = 0.3) {
+  const USD_TO_DKK = 7;
+  let modelConfig = null;
+  try {
+    modelConfig = LlmMatrix.getModel(model);
+  } catch {
+    modelConfig = null;
+  }
+  let costPer1KInputUSD;
+  let costPer1KOutputUSD;
+  if (modelConfig) {
+    costPer1KInputUSD = modelConfig.cost_per_1k_input_usd;
+    costPer1KOutputUSD = modelConfig.cost_per_1k_output_usd ?? modelConfig.cost_per_1k_input_usd;
+  } else {
+    const providerLower = provider.toLowerCase();
+    if (providerLower.includes("claude") || providerLower.includes("anthropic")) {
+      costPer1KInputUSD = 0.015;
+      costPer1KOutputUSD = 0.075;
+    } else if (providerLower.includes("openai")) {
+      costPer1KInputUSD = 0.01;
+      costPer1KOutputUSD = 0.03;
+    } else if (providerLower.includes("gemini")) {
+      costPer1KInputUSD = 125e-5;
+      costPer1KOutputUSD = 375e-5;
+    } else if (providerLower.includes("deepseek")) {
+      costPer1KInputUSD = 27e-5;
+      costPer1KOutputUSD = 11e-4;
+    } else {
+      costPer1KInputUSD = 5e-4;
+      costPer1KOutputUSD = 15e-4;
+    }
+  }
+  const estimatedInputTokens = Math.ceil(estimatedTokens * (1 - outputRatio));
+  const estimatedOutputTokens = Math.ceil(estimatedTokens * outputRatio);
+  const inputCostDKK = estimatedInputTokens / 1e3 * costPer1KInputUSD * USD_TO_DKK;
+  const outputCostDKK = estimatedOutputTokens / 1e3 * costPer1KOutputUSD * USD_TO_DKK;
+  const totalCostDKK = inputCostDKK + outputCostDKK;
+  return {
+    provider,
+    model,
+    estimatedTokens,
+    costPer1KInputDKK: costPer1KInputUSD * USD_TO_DKK,
+    costPer1KOutputDKK: costPer1KOutputUSD * USD_TO_DKK,
+    totalCostDKK: Math.round(totalCostDKK * 1e4) / 1e4,
+    currency: "DKK"
+  };
+}
+async function checkModelPolicy(provider, model, opts) {
+  const providerLower = provider.toLowerCase();
+  const isPremium = providerLower.includes("claude") || providerLower.includes("anthropic") || providerLower.includes("opus") || providerLower.includes("openai");
+  const dailySpend = opts?.currentDailySpendDKK ?? (await getAggregateWorkflowCosts(24)).totalCostDKK;
+  const budgetRemaining = dailySpend < DAILY_BUDGET_CAP_DKK;
+  if (!budgetRemaining) {
+    return {
+      pass: false,
+      reason: `Daily budget cap exceeded (${dailySpend.toFixed(2)} DKK / ${DAILY_BUDGET_CAP_DKK} DKK). All model calls blocked until budget resets.`,
+      provider,
+      model,
+      isEscalation: opts?.isEscalation ?? false,
+      budgetRemaining: false
+    };
+  }
+  if (!isPremium) {
+    return {
+      pass: true,
+      reason: `Non-premium provider '${provider}' \u2014 allowed by default policy.`,
+      provider,
+      model,
+      isEscalation: false,
+      budgetRemaining: true
+    };
+  }
+  const isEscalation = opts?.isEscalation ?? false;
+  if (!isEscalation) {
+    return {
+      pass: false,
+      reason: `Premium provider '${provider}' used without escalation flag. Set isEscalation=true and ensure cheaper models failed first.`,
+      provider,
+      model,
+      isEscalation: false,
+      budgetRemaining: true
+    };
+  }
+  const escalationCheck = await isClaudeEscalationAllowed(provider, opts?.task ?? "", {
+    premiumAllowed: true,
+    // If caller got here, they're claiming escalation
+    estimatedTokens: opts?.estimatedTokens
+  });
+  if (!escalationCheck.allowed) {
+    return {
+      pass: false,
+      reason: `Claude escalation not justified: ${escalationCheck.reason}`,
+      provider,
+      model,
+      isEscalation: true,
+      budgetRemaining: true
+    };
+  }
+  return {
+    pass: true,
+    reason: `Premium escalation approved: ${escalationCheck.reason}`,
+    provider,
+    model,
+    isEscalation: true,
+    budgetRemaining: true
+  };
+}
+function estimateTokenCount(text) {
+  return Math.ceil(text.length / 4);
+}
+function shouldCompactContext(context) {
+  const estimatedTokens = estimateTokenCount(context);
+  return {
+    needsCompaction: estimatedTokens > CONTEXT_COMPACTION_THRESHOLD,
+    estimatedTokens
+  };
+}
+async function compactContext(context, targetTokens = 4e3, query, domain) {
+  const originalTokens = estimateTokenCount(context);
+  if (originalTokens <= CONTEXT_COMPACTION_THRESHOLD) {
+    return null;
+  }
+  if (isRlmAvailable()) {
+    try {
+      const result = await callCognitive("fold", {
+        prompt: query ?? "Compress and fold the following context while preserving key information",
+        context: {
+          text: context.slice(0, 3e4),
+          // Hard cap to avoid runaway costs
+          budget: targetTokens,
+          strategy: "semantic"
+        },
+        agent_id: "cost-governance"
+      }, 3e4);
+      const compacted2 = typeof result === "string" ? result : JSON.stringify(result);
+      const compactedTokens2 = estimateTokenCount(compacted2);
+      const ratio2 = originalTokens / Math.max(compactedTokens2, 1);
+      logger.info(
+        { originalTokens, compactedTokens: compactedTokens2, ratio: ratio2.toFixed(2), method: "rlm-fold" },
+        "Context compaction complete (RLM)"
+      );
+      return { compacted: compacted2, originalTokens, compactedTokens: compactedTokens2, ratio: ratio2 };
+    } catch (err) {
+      logger.warn({ error: String(err) }, "RLM context compaction failed \u2014 falling back to truncation");
+    }
+  }
+  const targetChars = targetTokens * 4;
+  const compacted = context.slice(0, targetChars);
+  const compactedTokens = estimateTokenCount(compacted);
+  const ratio = originalTokens / Math.max(compactedTokens, 1);
+  logger.warn(
+    { originalTokens, compactedTokens, ratio: ratio.toFixed(2), method: "truncation-fallback" },
+    "Context compaction via truncation (RLM unavailable)"
+  );
+  return { compacted, originalTokens, compactedTokens, ratio };
+}
+var BUDGET_LANE_MICRO_MAX, BUDGET_LANE_STANDARD_MAX, MAX_RECURSION_DEPTH, MAX_AGENT_FANOUT_PARALLEL, MAX_AGENT_FANOUT_DEBATE, CONTEXT_COMPACTION_THRESHOLD, COST_TRACE_TTL_SECONDS, COST_TRACE_PREFIX, ESCALATION_PREFIX, DAILY_BUDGET_CAP_DKK, cost_governance_default;
+var init_cost_governance = __esm({
+  "src/llm/cost-governance.ts"() {
+    "use strict";
+    init_llm();
+    init_cognitive_proxy();
+    init_mcp_caller();
+    init_redis();
+    init_logger();
+    BUDGET_LANE_MICRO_MAX = 4e3;
+    BUDGET_LANE_STANDARD_MAX = 16e3;
+    MAX_RECURSION_DEPTH = 3;
+    MAX_AGENT_FANOUT_PARALLEL = 5;
+    MAX_AGENT_FANOUT_DEBATE = 3;
+    CONTEXT_COMPACTION_THRESHOLD = 8e3;
+    COST_TRACE_TTL_SECONDS = 86400;
+    COST_TRACE_PREFIX = "orchestrator:cost-trace:";
+    ESCALATION_PREFIX = "orchestrator:escalation:";
+    DAILY_BUDGET_CAP_DKK = parseFloat(process.env.DAILY_BUDGET_CAP_DKK ?? "100");
+    cost_governance_default = {
+      // Constants
+      MAX_RECURSION_DEPTH,
+      MAX_AGENT_FANOUT_PARALLEL,
+      MAX_AGENT_FANOUT_DEBATE,
+      CONTEXT_COMPACTION_THRESHOLD,
+      // Budget lane classification
+      getBudgetLane,
+      inferBudgetLaneFromTask,
+      // Claude escalation
+      isClaudeEscalationAllowed,
+      recordPriorFailure,
+      // Recursion depth
+      enforceMaxRecursionDepth,
+      // Fan-out
+      enforceMaxFanOut,
+      // Cost trace
+      recordWorkflowCost,
+      getWorkflowCostTrace,
+      getAggregateWorkflowCosts,
+      // Cost estimation
+      estimateModelCost,
+      // Policy check
+      checkModelPolicy,
+      // Context compaction
+      shouldCompactContext,
+      compactContext,
+      estimateTokenCount
+    };
+  }
+});
+
 // src/chain/chain-engine.ts
 var chain_engine_exports = {};
 __export(chain_engine_exports, {
@@ -13848,7 +14541,12 @@ async function runSequential(steps) {
   }
   return results;
 }
-async function runParallel(steps) {
+async function runParallel(steps, chainName) {
+  const fanOutCheck = enforceMaxFanOut(steps.length, "parallel", steps.map((s) => s.agent_id));
+  if (!fanOutCheck.allowed) {
+    logger.error({ chain: chainName, fanOutCheck }, "Chain engine: fan-out limit exceeded");
+    throw new Error(fanOutCheck.error);
+  }
   return Promise.all(steps.map((step) => executeStep(step, null)));
 }
 async function runLoop(steps, maxIterations, exitCondition) {
@@ -13908,7 +14606,7 @@ async function runAdaptive(steps, query, judgeAgent, confidenceThreshold = 0.6) 
       break;
     case "complex":
       topology = "debate+verify";
-      results = await runDebateGVU(steps, judgeAgent, confidenceThreshold);
+      results = await runDebateGVU(steps, judgeAgent, void 0, confidenceThreshold);
       break;
     default:
       topology = "sequential";
@@ -13987,8 +14685,13 @@ async function runFunnel(steps, entryStage = "signal", preloadedContext, executi
   }
   return { results, funnel_state: state4 };
 }
-async function runDebateGVU(steps, judgeAgent, confidenceThreshold = 0.6) {
-  const debateResults = await runParallel(steps);
+async function runDebateGVU(steps, judgeAgent, chainName, confidenceThreshold = 0.6) {
+  const fanOutCheck = enforceMaxFanOut(steps.length, "debate", steps.map((s) => s.agent_id));
+  if (!fanOutCheck.allowed) {
+    logger.error({ chain: chainName, fanOutCheck }, "Chain engine: debate fan-out limit exceeded");
+    throw new Error(fanOutCheck.error);
+  }
+  const debateResults = await runParallel(steps, chainName);
   if (!judgeAgent) return debateResults;
   const positions = debateResults.map((r) => ({
     agent: r.agent_id,
@@ -14052,6 +14755,27 @@ async function executeChain(def) {
   const executionId = uuid8();
   const chainId = def.chain_id ?? uuid8().slice(0, 12);
   const t0 = Date.now();
+  const currentDepth = def.recursion_depth ?? 0;
+  const depthCheck = enforceMaxRecursionDepth(currentDepth);
+  if (!depthCheck.allowed) {
+    logger.error({ chain: def.name, depthCheck }, "Chain engine: recursion depth exceeded");
+    const execution2 = {
+      execution_id: executionId,
+      chain_id: chainId,
+      name: def.name,
+      mode: def.mode,
+      status: "failed",
+      steps_completed: 0,
+      steps_total: def.steps.length,
+      results: [],
+      started_at: (/* @__PURE__ */ new Date()).toISOString(),
+      completed_at: (/* @__PURE__ */ new Date()).toISOString(),
+      duration_ms: 0,
+      error: depthCheck.error
+    };
+    persistExecution(execution2);
+    return execution2;
+  }
   const execution = {
     execution_id: executionId,
     chain_id: chainId,
@@ -14064,7 +14788,7 @@ async function executeChain(def) {
     started_at: (/* @__PURE__ */ new Date()).toISOString()
   };
   persistExecution(execution);
-  logger.info({ execution_id: executionId, chain: def.name, mode: def.mode, steps: def.steps.length }, "Chain execution started");
+  logger.info({ execution_id: executionId, chain: def.name, mode: def.mode, steps: def.steps.length, recursion_depth: currentDepth }, "Chain execution started");
   broadcastMessage({
     from: "Orchestrator",
     to: "All",
@@ -14083,13 +14807,13 @@ async function executeChain(def) {
         results = await runSequential(resolvedSteps);
         break;
       case "parallel":
-        results = await runParallel(resolvedSteps);
+        results = await runParallel(resolvedSteps, def.name);
         break;
       case "loop":
         results = await runLoop(resolvedSteps, def.max_iterations ?? 5, def.exit_condition);
         break;
       case "debate":
-        results = await runDebateGVU(resolvedSteps, def.judge_agent, def.confidence_threshold);
+        results = await runDebateGVU(resolvedSteps, def.judge_agent, def.name, def.confidence_threshold);
         break;
       case "adaptive": {
         const adaptive = await runAdaptive(resolvedSteps, def.query, def.judge_agent, def.confidence_threshold);
@@ -14125,6 +14849,17 @@ async function executeChain(def) {
     execution.completed_at = (/* @__PURE__ */ new Date()).toISOString();
   }
   persistExecution(execution);
+  recordWorkflowCost(
+    executionId,
+    "chain-engine",
+    def.mode,
+    0,
+    // Token tracking done per-step in executeStep
+    0,
+    0
+    // Cost tracked via individual step telemetry
+  ).catch(() => {
+  });
   logger.info({
     execution_id: executionId,
     status: execution.status,
@@ -14167,6 +14902,7 @@ var init_chain_engine = __esm({
     init_adoption_telemetry();
     init_failure_harvester();
     init_cost_optimizer();
+    init_cost_governance();
     FUNNEL_STAGES = [
       "signal",
       "pattern",
@@ -14493,13 +15229,554 @@ var init_investigate_chain = __esm({
   }
 });
 
+// src/hyperagent/hyperagent.ts
+var hyperagent_exports = {};
+__export(hyperagent_exports, {
+  POLICY_PROFILES: () => POLICY_PROFILES,
+  approvePlan: () => approvePlan,
+  createPlan: () => createPlan,
+  evaluatePlan: () => evaluatePlan,
+  executePlan: () => executePlan,
+  getHyperAgentHealth: () => getHyperAgentHealth,
+  getKpis: () => getKpis,
+  getPlan: () => getPlan,
+  listHyperPlans: () => listHyperPlans,
+  onPlanEvent: () => onPlanEvent,
+  rejectPlan: () => rejectPlan,
+  validateWebhookSignature: () => validateWebhookSignature
+});
+import { v4 as uuid10 } from "uuid";
+import * as crypto from "crypto";
+function onPlanEvent(fn) {
+  planEventSubscribers.add(fn);
+  return () => {
+    planEventSubscribers.delete(fn);
+  };
+}
+function emitPlanEvent(event) {
+  for (const fn of planEventSubscribers) {
+    try {
+      fn(event);
+    } catch (err) {
+      logger.warn({ err, event: event.event }, "HyperAgent: event subscriber failed");
+    }
+  }
+  logger.info(event, `HyperAgent: plan lifecycle event \u2014 ${event.event}`);
+}
+function selectChainMode(steps, goal) {
+  const hasDependencies = steps.some(
+    (s) => s.prompt?.includes("{{prev}}") || JSON.stringify(s.arguments ?? {}).includes("{{prev}}")
+  );
+  if (hasDependencies) return "sequential";
+  const allReads = steps.every((s) => s.tool_name && !WRITE_TOOLS.includes(s.tool_name));
+  const multiSource = steps.length >= 3 && new Set(steps.map((s) => s.tool_name)).size >= 2;
+  if (allReads && multiSource) return "parallel";
+  const debateKeywords = /\b(compar|debate|versus|vs\.|pros.*cons|tradeoff|evaluate.*alternatives)\b/i;
+  if (debateKeywords.test(goal) && steps.length >= 2) return "debate";
+  const loopKeywords = /\b(iterat|refin|optimi[zs]|converg|improv.*until|repeat)\b/i;
+  if (loopKeywords.test(goal)) return "loop";
+  if (steps.length >= 5) return "funnel";
+  return steps.length >= 3 ? "adaptive" : "sequential";
+}
+function getSessionCircuit(sessionId) {
+  let c = sessionCircuits.get(sessionId);
+  if (!c) {
+    c = { consecutiveFailures: 0, circuitOpenUntil: 0, downgradedToReadOnly: false };
+    sessionCircuits.set(sessionId, c);
+  }
+  return c;
+}
+function recordSessionSuccess(sessionId) {
+  const c = getSessionCircuit(sessionId);
+  if (c.consecutiveFailures > 0) {
+    logger.info({ sessionId, previous_failures: c.consecutiveFailures }, "HyperAgent: session circuit CLOSED \u2014 recovered");
+  }
+  c.consecutiveFailures = 0;
+  c.circuitOpenUntil = 0;
+  c.downgradedToReadOnly = false;
+}
+function recordSessionFailure(sessionId) {
+  const c = getSessionCircuit(sessionId);
+  c.consecutiveFailures++;
+  if (c.consecutiveFailures >= SESSION_CIRCUIT_HARD_LIMIT && c.circuitOpenUntil === 0) {
+    const backoffMultiplier = Math.min(8, Math.pow(2, c.consecutiveFailures - SESSION_CIRCUIT_HARD_LIMIT));
+    const cooldownMs = SESSION_CIRCUIT_BASE_COOLDOWN_MS * backoffMultiplier;
+    c.circuitOpenUntil = Date.now() + cooldownMs;
+    logger.warn({ sessionId, failures: c.consecutiveFailures, cooldownMs }, "HyperAgent: session circuit OPEN \u2014 exponential backoff");
+  } else if (c.consecutiveFailures >= SESSION_CIRCUIT_THRESHOLD && !c.downgradedToReadOnly) {
+    c.downgradedToReadOnly = true;
+    logger.warn({ sessionId, failures: c.consecutiveFailures }, "HyperAgent: auto-downgraded session to read_only after 3 failures");
+  }
+}
+function isSessionCircuitOpen(sessionId) {
+  const c = getSessionCircuit(sessionId);
+  if (c.circuitOpenUntil === 0) return false;
+  if (Date.now() >= c.circuitOpenUntil) {
+    c.circuitOpenUntil = 0;
+    c.consecutiveFailures = 0;
+    c.downgradedToReadOnly = false;
+    logger.info({ sessionId }, "HyperAgent: session circuit auto-reset after cooldown");
+    return false;
+  }
+  return true;
+}
+function persistPlan(plan) {
+  plans.set(plan.planId, plan);
+  const redis2 = getRedis();
+  if (redis2) {
+    redis2.hset("orchestrator:hyperplans", plan.planId, JSON.stringify(plan)).catch(() => {
+    });
+    redis2.expire("orchestrator:hyperplans", 86400).catch(() => {
+    });
+  }
+}
+function getPlan(planId) {
+  return plans.get(planId);
+}
+function listHyperPlans() {
+  return Array.from(plans.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 50);
+}
+async function createPlan(goal, sessionId, profileId = "read_only", opts) {
+  if (isSessionCircuitOpen(sessionId)) {
+    throw new Error(`Session ${sessionId} circuit breaker OPEN \u2014 too many consecutive failures. Auto-resets in \u226460s.`);
+  }
+  const circuit = getSessionCircuit(sessionId);
+  const effectiveProfileId = circuit.downgradedToReadOnly ? "read_only" : profileId;
+  if (circuit.downgradedToReadOnly && profileId !== "read_only") {
+    logger.info({ sessionId, requested: profileId }, "HyperAgent: auto-downgraded to read_only due to consecutive failures");
+  }
+  const profile = POLICY_PROFILES[effectiveProfileId] ?? POLICY_PROFILES.read_only;
+  const planId = `hyp-${uuid10().slice(0, 12)}`;
+  let steps = [];
+  try {
+    const cogResult = await callCognitiveRaw("plan", {
+      prompt: goal,
+      context: { sessionId, profile: profile.id, maxSteps: profile.maxSteps },
+      agent_id: "hyperagent"
+    });
+    const rawSteps = cogResult?.execution_steps;
+    if (Array.isArray(rawSteps)) {
+      steps = rawSteps.slice(0, profile.maxSteps).map((s, i) => {
+        if (typeof s === "object" && s !== null) {
+          const step = s;
+          return {
+            id: `step-${i}`,
+            agent_id: String(step.agent_id ?? "qwen"),
+            tool_name: typeof step.tool === "string" ? step.tool : void 0,
+            cognitive_action: typeof step.cognitive_action === "string" ? step.cognitive_action : void 0,
+            arguments: typeof step.arguments === "object" ? step.arguments : void 0,
+            prompt: typeof step.prompt === "string" ? step.prompt : void 0
+          };
+        }
+        return {
+          id: `step-${i}`,
+          agent_id: "qwen",
+          cognitive_action: "analyze",
+          prompt: String(s)
+        };
+      });
+    }
+  } catch (err) {
+    if (profile.rejectOnCognitiveFailure) {
+      throw new Error(`Cognitive proxy failed and profile "${profile.id}" requires plan decomposition. Cannot create plan without RLM Engine.`);
+    }
+    logger.warn({ err, goal, profile: profile.id }, "HyperAgent: cognitive plan decomposition failed, using single-step fallback");
+    steps = [{
+      id: "step-0",
+      agent_id: "qwen",
+      cognitive_action: "analyze",
+      prompt: goal
+    }];
+  }
+  steps = steps.map((s) => {
+    if (s.tool_name && profile.blockedTools.includes(s.tool_name)) {
+      logger.info({ tool: s.tool_name, profile: profile.id }, "HyperAgent: tool blocked by policy, converting to analyze");
+      return { ...s, tool_name: void 0, cognitive_action: "analyze", prompt: `[BLOCKED] Cannot execute ${s.tool_name} under ${profile.id} profile. Analyze intent instead: ${s.prompt ?? ""}` };
+    }
+    return s;
+  });
+  const chainMode = selectChainMode(steps, goal);
+  const chainDef = {
+    chain_id: planId,
+    name: `hyperagent:${planId}`,
+    description: goal,
+    mode: chainMode,
+    steps
+  };
+  const budgetLane = profile.maxSteps <= 10 ? "micro" : profile.maxSteps <= 25 ? "standard" : "deep";
+  const plan = {
+    planId,
+    sessionId,
+    goal,
+    profile,
+    steps,
+    chainDef,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    status: profile.requiresApproval ? "pending_approval" : "approved",
+    // FR-4 governance fields
+    riskLevel: profile.mode,
+    budgetLane,
+    targetServices: opts?.targetServices ?? [],
+    successMetrics: opts?.successMetrics ?? "",
+    premiumAllowed: opts?.premiumAllowed ?? profile.allowedProviders.includes("anthropic"),
+    maxAgentFanout: opts?.maxAgentFanout ?? (profile.mode === "production_write" ? 1 : 3),
+    maxRecursionDepth: opts?.maxRecursionDepth ?? (profile.mode === "production_write" ? 1 : 3),
+    approvalStatus: profile.requiresApproval ? "pending" : "approved",
+    approvedBy: null,
+    evaluatedAt: null
+  };
+  persistPlan(plan);
+  logger.info({ planId, goal, profile: profile.id, steps: steps.length }, "HyperAgent: plan created");
+  emitPlanEvent({
+    event: "plan.created",
+    planId,
+    riskLevel: profile.mode,
+    createdAt: plan.createdAt
+  });
+  return plan;
+}
+async function approvePlan(planId, approvedBy) {
+  const plan = plans.get(planId);
+  if (!plan) throw new Error(`Plan ${planId} not found`);
+  if (plan.status !== "pending_approval") throw new Error(`Plan ${planId} is ${plan.status}, not pending_approval`);
+  const ttlSeconds = plan.profile.approvalTtlSeconds;
+  const approval = {
+    planId,
+    approvedBy,
+    approvedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    expiresAt: new Date(Date.now() + ttlSeconds * 1e3).toISOString(),
+    scope: plan.profile.id
+  };
+  const redis2 = getRedis();
+  if (redis2) {
+    await redis2.setex(`${APPROVAL_PREFIX}${planId}`, ttlSeconds, JSON.stringify(approval));
+  }
+  plan.status = "approved";
+  plan.approvalStatus = "approved";
+  plan.approvedBy = approvedBy;
+  persistPlan(plan);
+  broadcastMessage({
+    from: "HyperAgent",
+    to: "All",
+    source: "orchestrator",
+    type: "Message",
+    message: `Plan ${planId} approved by ${approvedBy}`
+  });
+  logger.info({ planId, approvedBy }, "HyperAgent: plan approved");
+  emitPlanEvent({
+    event: "plan.approved",
+    planId,
+    approvedBy,
+    approvedAt: approval.approvedAt
+  });
+  return approval;
+}
+async function rejectPlan(planId, rejectedBy) {
+  const plan = plans.get(planId);
+  if (!plan) throw new Error(`Plan ${planId} not found`);
+  const redis2 = getRedis();
+  if (redis2) {
+    await redis2.del(`${APPROVAL_PREFIX}${planId}`);
+  }
+  plan.status = "failed";
+  persistPlan(plan);
+  broadcastMessage({
+    from: "HyperAgent",
+    to: "All",
+    source: "orchestrator",
+    type: "Message",
+    message: `Plan ${planId} rejected by ${rejectedBy}`
+  });
+  logger.info({ planId, rejectedBy }, "HyperAgent: plan rejected");
+}
+async function checkApproval(planId) {
+  const t0 = Date.now();
+  const redis2 = getRedis();
+  if (!redis2) {
+    const plan = plans.get(planId);
+    return plan?.status === "approved" ? {
+      planId,
+      approvedBy: "in-memory",
+      approvedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      expiresAt: new Date(Date.now() + 36e5).toISOString(),
+      scope: plan.profile.id
+    } : null;
+  }
+  const raw = await redis2.get(`${APPROVAL_PREFIX}${planId}`);
+  if (!raw) return null;
+  const approval = JSON.parse(raw);
+  if (new Date(approval.expiresAt) < /* @__PURE__ */ new Date()) {
+    await redis2.del(`${APPROVAL_PREFIX}${planId}`);
+    logger.warn({ planId, latencyMs: Date.now() - t0 }, "HyperAgent: approval expired");
+    return null;
+  }
+  logger.debug({ planId, latencyMs: Date.now() - t0 }, "HyperAgent: approval check completed");
+  return approval;
+}
+function validateWebhookSignature(body, signature) {
+  const secret = process.env.APPROVAL_WEBHOOK_SECRET;
+  if (!secret) return true;
+  if (!signature) return false;
+  const expected = crypto.createHmac("sha256", secret).update(body).digest("hex");
+  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+}
+async function executePlan(planId) {
+  const plan = plans.get(planId);
+  if (!plan) throw new Error(`Plan ${planId} not found`);
+  if (plan.profile.requiresApproval) {
+    const approval = await checkApproval(planId);
+    if (!approval) {
+      throw new Error(`Plan ${planId} requires approval (profile: ${plan.profile.id})`);
+    }
+    logger.info({ planId, approvedBy: approval.approvedBy }, "HyperAgent: approval validated");
+  }
+  plan.status = "executing";
+  persistPlan(plan);
+  try {
+    const execution = await executeChain(plan.chainDef);
+    plan.status = execution.status === "completed" ? "completed" : "failed";
+    persistPlan(plan);
+    if (execution.status === "completed") {
+      recordSessionSuccess(plan.sessionId);
+    } else {
+      recordSessionFailure(plan.sessionId);
+    }
+    persistExecutionTrace(execution, planId).catch((err) => {
+      logger.warn({ err, planId }, "HyperAgent: trace persistence failed (non-blocking)");
+    });
+    logger.info({
+      planId,
+      executionId: execution.execution_id,
+      status: execution.status,
+      duration: execution.duration_ms
+    }, "HyperAgent: plan executed");
+    plan.approvalStatus = execution.status === "completed" ? "executed" : "rejected";
+    persistPlan(plan);
+    emitPlanEvent({
+      event: "plan.executed",
+      planId,
+      durationMs: execution.duration_ms ?? 0,
+      status: execution.status
+    });
+    return execution;
+  } catch (err) {
+    plan.status = "failed";
+    persistPlan(plan);
+    recordSessionFailure(plan.sessionId);
+    throw err;
+  }
+}
+async function persistExecutionTrace(exec, planId) {
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (t:ExecutionTrace {executionId: $executionId})
+                SET t.chainName = $chainName, t.mode = $mode,
+                    t.planId = $planId, t.status = $status,
+                    t.stepsCompleted = $stepsCompleted,
+                    t.stepsTotal = $stepsTotal,
+                    t.durationMs = $durationMs,
+                    t.completedAt = datetime()`,
+        params: {
+          executionId: exec.execution_id,
+          chainName: exec.name,
+          mode: exec.mode,
+          planId,
+          status: exec.status,
+          stepsCompleted: exec.steps_completed,
+          stepsTotal: exec.steps_total,
+          durationMs: exec.duration_ms ?? 0
+        }
+      },
+      callId: `hyp-trace-${exec.execution_id}`
+    });
+  } catch (err) {
+    logger.warn({ err, executionId: exec.execution_id }, "HyperAgent: ExecutionTrace write failed");
+  }
+}
+async function evaluatePlan(executionId, planId, score, agentId = "hyperagent") {
+  const plan = plans.get(planId);
+  const snapshot = {
+    traceId: `kpi-${executionId}`,
+    planId,
+    agentId,
+    score: Math.max(0, Math.min(100, score)),
+    outcome: plan?.status ?? "unknown",
+    stepsCompleted: plan?.steps.length ?? 0,
+    stepsTotal: plan?.steps.length ?? 0,
+    durationMs: 0
+  };
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (k:KpiSnapshot {traceId: $traceId})
+                SET k.planId = $planId, k.agentId = $agentId,
+                    k.score = $score, k.outcome = $outcome,
+                    k.stepsCompleted = $stepsCompleted,
+                    k.stepsTotal = $stepsTotal,
+                    k.durationMs = $durationMs,
+                    k.completedAt = datetime()`,
+        params: {
+          traceId: snapshot.traceId,
+          planId: snapshot.planId,
+          agentId: snapshot.agentId,
+          score: snapshot.score,
+          outcome: snapshot.outcome,
+          stepsCompleted: snapshot.stepsCompleted,
+          stepsTotal: snapshot.stepsTotal,
+          durationMs: snapshot.durationMs
+        }
+      },
+      callId: `hyp-kpi-${executionId}`
+    });
+    logger.info({ traceId: snapshot.traceId, score }, "HyperAgent: KPI snapshot persisted to Neo4j");
+  } catch (err) {
+    logger.warn({ err, traceId: snapshot.traceId }, "HyperAgent: KPI persistence failed (non-blocking)");
+  }
+  if (plan) {
+    plan.approvalStatus = "evaluated";
+    plan.evaluatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    persistPlan(plan);
+  }
+  const success = score >= 70;
+  emitPlanEvent({
+    event: "plan.evaluated",
+    planId,
+    kpiImpact: (score - 50) / 50,
+    // normalize 0-100 to -1..1
+    success
+  });
+  return snapshot;
+}
+function getHyperAgentHealth() {
+  const allPlans = Array.from(plans.values());
+  const circuits = Array.from(sessionCircuits.entries()).map(([sid, c]) => ({
+    sessionId: sid,
+    failures: c.consecutiveFailures,
+    circuitOpen: c.circuitOpenUntil > Date.now(),
+    downgraded: c.downgradedToReadOnly
+  })).filter((c) => c.failures > 0);
+  return {
+    total_plans: allPlans.length,
+    by_status: {
+      pending_approval: allPlans.filter((p) => p.status === "pending_approval").length,
+      approved: allPlans.filter((p) => p.status === "approved").length,
+      executing: allPlans.filter((p) => p.status === "executing").length,
+      completed: allPlans.filter((p) => p.status === "completed").length,
+      failed: allPlans.filter((p) => p.status === "failed").length
+    },
+    active_circuits: circuits
+  };
+}
+async function getKpis(windowHours = 24) {
+  try {
+    const result = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: `MATCH (k:KpiSnapshot)
+                WHERE k.completedAt > datetime() - duration({hours: $hours})
+                RETURN avg(k.score) AS avgScore,
+                       count(k) AS totalPlans,
+                       sum(CASE WHEN k.outcome = 'completed' THEN 1 ELSE 0 END) AS succeeded,
+                       sum(CASE WHEN k.outcome = 'failed' THEN 1 ELSE 0 END) AS failed`,
+        params: { hours: windowHours }
+      },
+      callId: `hyp-kpis-${Date.now()}`
+    });
+    return { source: "neo4j", window_hours: windowHours, ...result };
+  } catch {
+    const cutoff = new Date(Date.now() - windowHours * 36e5);
+    const recent = Array.from(plans.values()).filter((p) => new Date(p.createdAt) > cutoff);
+    return {
+      source: "in_memory_fallback",
+      window_hours: windowHours,
+      totalPlans: recent.length,
+      succeeded: recent.filter((p) => p.status === "completed").length,
+      failed: recent.filter((p) => p.status === "failed").length,
+      pending: recent.filter((p) => p.status === "pending_approval").length
+    };
+  }
+}
+var planEventSubscribers, WRITE_TOOLS, POLICY_PROFILES, SESSION_CIRCUIT_THRESHOLD, SESSION_CIRCUIT_HARD_LIMIT, SESSION_CIRCUIT_BASE_COOLDOWN_MS, sessionCircuits, plans, APPROVAL_PREFIX;
+var init_hyperagent = __esm({
+  "src/hyperagent/hyperagent.ts"() {
+    "use strict";
+    init_chain_engine();
+    init_cognitive_proxy();
+    init_mcp_caller();
+    init_redis();
+    init_chat_broadcaster();
+    init_logger();
+    planEventSubscribers = /* @__PURE__ */ new Set();
+    WRITE_TOOLS = [
+      "graph.write_cypher",
+      "graph.bulk_write",
+      "git.commit",
+      "git.push",
+      "railway.deploy",
+      "file.write",
+      "linear.create_issue",
+      "linear.update_issue"
+    ];
+    POLICY_PROFILES = {
+      read_only: {
+        id: "read_only",
+        mode: "read_only",
+        blockedTools: WRITE_TOOLS,
+        requiresApproval: false,
+        maxSteps: 25,
+        approvalTtlSeconds: 3600,
+        // 1h (irrelevant — no approval needed)
+        rejectOnCognitiveFailure: false,
+        // Safe to fallback to single-step analyze
+        allowedProviders: []
+        // DR18: all providers OK for reads
+      },
+      staged_write: {
+        id: "staged_write",
+        mode: "staged_write",
+        blockedTools: ["git.push", "railway.deploy"],
+        requiresApproval: true,
+        maxSteps: 25,
+        approvalTtlSeconds: 3600,
+        // 1h — reversible operations
+        rejectOnCognitiveFailure: false,
+        // Fallback acceptable
+        allowedProviders: ["anthropic", "openrouter"]
+        // DR18: no DeepSeek for writes
+      },
+      production_write: {
+        id: "production_write",
+        mode: "production_write",
+        blockedTools: [],
+        requiresApproval: true,
+        maxSteps: 15,
+        approvalTtlSeconds: 900,
+        // 15min — destructive operations (RLM insight)
+        rejectOnCognitiveFailure: true,
+        // MUST have proper plan decomposition
+        allowedProviders: ["anthropic"]
+        // DR18: production_write = Claude only
+      }
+    };
+    SESSION_CIRCUIT_THRESHOLD = 3;
+    SESSION_CIRCUIT_HARD_LIMIT = 5;
+    SESSION_CIRCUIT_BASE_COOLDOWN_MS = 15e3;
+    sessionCircuits = /* @__PURE__ */ new Map();
+    plans = /* @__PURE__ */ new Map();
+    APPROVAL_PREFIX = "orchestrator:approval:";
+  }
+});
+
 // src/engagement/document-intelligence.ts
 var document_intelligence_exports = {};
 __export(document_intelligence_exports, {
   batchIngest: () => batchIngest,
   ingestDocument: () => ingestDocument
 });
-import { v4 as uuid10 } from "uuid";
+import { v4 as uuid11 } from "uuid";
 async function persistResult(result) {
   const redis2 = getRedis();
   if (!redis2) return;
@@ -14510,7 +15787,7 @@ async function persistResult(result) {
 }
 async function ingestDocument(req) {
   const t0 = Date.now();
-  const ingestionId = `widgetdc:ingestion:${uuid10()}`;
+  const ingestionId = `widgetdc:ingestion:${uuid11()}`;
   logger.info({
     id: ingestionId,
     filename: req.filename,
@@ -14578,7 +15855,7 @@ async function ingestDocument(req) {
             source: req.source_url ?? req.filename,
             domain: req.domain ?? "general"
           },
-          callId: uuid10(),
+          callId: uuid11(),
           timeoutMs: 2e4
         });
       } catch {
@@ -14654,7 +15931,7 @@ async function tryMercuryExtract(prompt) {
     const result = await callMcpTool({
       toolName: "llm.generate",
       args: { prompt },
-      callId: uuid10(),
+      callId: uuid11(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return null;
@@ -14720,7 +15997,7 @@ MERGE (n)-[:EXTRACTED_FROM]->(d)`,
             filename: req.filename
           }
         },
-        callId: uuid10(),
+        callId: uuid11(),
         timeoutMs: 1e4
       });
       merged++;
@@ -14737,7 +16014,7 @@ MERGE (n)-[:EXTRACTED_FROM]->(d)`,
 MERGE (a)-[:${rel.type.replace(/[^A-Z_]/g, "_")}]->(b)`,
           params: { from: rel.from, to: rel.to }
         },
-        callId: uuid10(),
+        callId: uuid11(),
         timeoutMs: 5e3
       });
     } catch {
@@ -14775,7 +16052,7 @@ var graph_hygiene_cron_exports = {};
 __export(graph_hygiene_cron_exports, {
   runGraphHygiene: () => runGraphHygiene
 });
-import { v4 as uuid11 } from "uuid";
+import { v4 as uuid12 } from "uuid";
 function neo4jInt(val) {
   if (typeof val === "number") return val;
   if (val && typeof val === "object" && "low" in val) return val.low;
@@ -14785,7 +16062,7 @@ async function queryMetric(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid11(),
+    callId: uuid12(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -14896,7 +16173,7 @@ SET s.orphan_ratio = $orphan_ratio,
         _force: true
         // Infrastructure write — bypass validation
       },
-      callId: uuid11(),
+      callId: uuid12(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -14909,7 +16186,7 @@ SET s.orphan_ratio = $orphan_ratio,
         query: `MATCH (s:GraphHealthSnapshot) WHERE s.timestamp < datetime() - duration('P90D') DETACH DELETE s`,
         _force: true
       },
-      callId: uuid11(),
+      callId: uuid12(),
       timeoutMs: 1e4
     });
   } catch {
@@ -14956,7 +16233,7 @@ __export(similarity_engine_exports, {
   findSimilarClients: () => findSimilarClients,
   getClientDetails: () => getClientDetails
 });
-import { v4 as uuid12 } from "uuid";
+import { v4 as uuid13 } from "uuid";
 async function findSimilarClients(req) {
   const t0 = Date.now();
   const maxResults = Math.min(Math.max(req.max_results ?? 5, 1), 20);
@@ -15005,7 +16282,7 @@ RETURN n.id AS id, labels(n) AS labels, coalesce(n.name, n.title) AS name
 LIMIT 1`,
         params: { q: query }
       },
-      callId: uuid12(),
+      callId: uuid13(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -15054,7 +16331,7 @@ RETURN other.id AS client_id,
     const result = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params: { sourceId: nodeId, relTypes } },
-      callId: uuid12(),
+      callId: uuid13(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return [];
@@ -15100,7 +16377,7 @@ async function computeSemanticSimilarity(query, maxResults) {
     const result = await callMcpTool({
       toolName: "srag.query",
       args: { query },
-      callId: uuid12(),
+      callId: uuid13(),
       timeoutMs: 2e4
     });
     if (result.status !== "success") return [];
@@ -15159,7 +16436,7 @@ RETURN n AS client,
        collect(DISTINCT {rel: type(r), target: coalesce(related.name, related.title), target_type: labels(related)[0]}) AS relationships`,
         params: { id: clientId }
       },
-      callId: uuid12(),
+      callId: uuid13(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -15198,7 +16475,7 @@ __export(deliverable_engine_exports, {
   getDeliverable: () => getDeliverable,
   listDeliverables: () => listDeliverables
 });
-import { v4 as uuid13 } from "uuid";
+import { v4 as uuid14 } from "uuid";
 async function persist(d) {
   deliverableCache.set(d.$id, d);
   if (deliverableCache.size > CACHE_MAX_SIZE) {
@@ -15250,7 +16527,7 @@ async function generateDeliverable(req) {
   }
   activeGenerations++;
   const t0 = Date.now();
-  const deliverableId = `widgetdc:deliverable:${uuid13()}`;
+  const deliverableId = `widgetdc:deliverable:${uuid14()}`;
   const format = req.format ?? "markdown";
   const maxSections = Math.min(Math.max(req.max_sections ?? 5, 2), 8);
   const deliverable = {
@@ -15508,7 +16785,7 @@ async function renderPDF(deliverable) {
         content: deliverable.markdown,
         template: deliverable.type
       },
-      callId: uuid13(),
+      callId: uuid14(),
       timeoutMs: 45e3
     });
     if (result.status === "success" && result.result) {
@@ -15711,7 +16988,7 @@ __export(osint_scanner_exports, {
   getOsintStatus: () => getOsintStatus,
   runOsintScan: () => runOsintScan
 });
-import { v4 as uuid14 } from "uuid";
+import { v4 as uuid15 } from "uuid";
 async function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -15736,7 +17013,7 @@ async function checkToolAvailability() {
     const result = await callMcpTool({
       toolName: "the_snout.domain_intel",
       args: { domain: "borger.dk", type: "basic" },
-      callId: uuid14(),
+      callId: uuid15(),
       timeoutMs: 1e4
     });
     return result.status === "success";
@@ -15753,7 +17030,7 @@ async function scanCTForDomain(domain, toolsAvailable) {
       const result = await callMcpTool({
         toolName: "the_snout.ct_transparency",
         args: { domain },
-        callId: uuid14(),
+        callId: uuid15(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (result.status === "success" && result.result) {
@@ -15768,7 +17045,7 @@ async function scanCTForDomain(domain, toolsAvailable) {
       const fallbackResult = await callMcpTool({
         toolName: "the_snout.domain_intel",
         args: { domain, type: "ct" },
-        callId: uuid14(),
+        callId: uuid15(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (fallbackResult.status === "success" && fallbackResult.result) {
@@ -15813,7 +17090,7 @@ async function scanDMARCForDomain(domain, toolsAvailable) {
       const result = await callMcpTool({
         toolName: "the_snout.domain_intel",
         args: { domain, type: "dmarc" },
-        callId: uuid14(),
+        callId: uuid15(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (result.status === "success" && result.result) {
@@ -15896,7 +17173,7 @@ async function ingestCTResults(ctResults) {
             },
             _force: true
           },
-          callId: uuid14(),
+          callId: uuid15(),
           timeoutMs: 15e3
         });
         if (result.status === "success") {
@@ -15959,7 +17236,7 @@ async function ingestDMARCResults(dmarcResults) {
             },
             _force: true
           },
-          callId: uuid14(),
+          callId: uuid15(),
           timeoutMs: 15e3
         });
         if (result.status === "success") {
@@ -15994,7 +17271,7 @@ async function persistScanResult(result) {
   }
 }
 async function runOsintScan(options) {
-  const scanId = uuid14();
+  const scanId = uuid15();
   const startedAt2 = (/* @__PURE__ */ new Date()).toISOString();
   const t0 = Date.now();
   const domains = options?.domains ?? [...DK_PUBLIC_DOMAINS];
@@ -16139,7 +17416,7 @@ __export(evolution_loop_exports, {
   getEvolutionStatus: () => getEvolutionStatus,
   runEvolutionLoop: () => runEvolutionLoop
 });
-import { v4 as uuid15 } from "uuid";
+import { v4 as uuid16 } from "uuid";
 async function persistCycle(cycle) {
   const redis2 = getRedis();
   if (!redis2) return;
@@ -16188,7 +17465,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (n) RETURN labels(n)[0] AS label, count(*) AS count ORDER BY count DESC LIMIT 15"
       },
-      callId: uuid15(),
+      callId: uuid16(),
       timeoutMs: 1e4
     }),
     callMcpTool({
@@ -16196,7 +17473,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (f:FailureMemory) WHERE f.last_seen > datetime() - duration('P7D') RETURN f.category AS category, f.pattern AS pattern, f.hit_count AS hits ORDER BY f.hit_count DESC LIMIT 10"
       },
-      callId: uuid15(),
+      callId: uuid16(),
       timeoutMs: 1e4
     }),
     callMcpTool({
@@ -16204,7 +17481,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (l:Lesson) WHERE l.created_at > datetime() - duration('P7D') RETURN l.agent_id AS agent, l.lesson AS lesson, l.context AS context ORDER BY l.created_at DESC LIMIT 10"
       },
-      callId: uuid15(),
+      callId: uuid16(),
       timeoutMs: 1e4
     })
   ]);
@@ -16260,7 +17537,7 @@ async function stageOrient(observeResult, focusArea) {
         RETURN labels(b)[0] AS label, coalesce(b.name, b.title, b.id) AS name, b.status AS status, b.quality_score AS quality
         ORDER BY coalesce(b.quality_score, 0) ASC LIMIT 10`
     },
-    callId: uuid15(),
+    callId: uuid16(),
     timeoutMs: 1e4
   });
   const blocks = blocksResult.status === "success" ? Array.isArray(blocksResult.result) ? blocksResult.result : blocksResult.result?.results ?? [] : [];
@@ -16382,7 +17659,7 @@ async function stageLearn(cycleId, observeResult, orientResult, actResult) {
           estimated_impact: orientResult.estimated_impact
         }
       },
-      callId: uuid15(),
+      callId: uuid16(),
       timeoutMs: 15e3
     });
     if (writeResult.status === "success") {
@@ -16412,7 +17689,7 @@ async function stageLearn(cycleId, observeResult, orientResult, actResult) {
             cycle_id: cycleId
           }
         },
-        callId: uuid15(),
+        callId: uuid16(),
         timeoutMs: 1e4
       });
       if (lessonResult.status === "success") {
@@ -16429,7 +17706,7 @@ async function runEvolutionLoop(opts) {
     throw new Error("Evolution loop already running. Only 1 concurrent cycle allowed.");
   }
   isRunning = true;
-  const cycleId = uuid15();
+  const cycleId = uuid16();
   const startedAt2 = (/* @__PURE__ */ new Date()).toISOString();
   const t0 = Date.now();
   const focusArea = opts?.focus_area?.slice(0, 200);
@@ -16734,7 +18011,7 @@ var moa_router_exports = {};
 __export(moa_router_exports, {
   routeMoA: () => routeMoA
 });
-import { v4 as uuid16 } from "uuid";
+import { v4 as uuid17 } from "uuid";
 async function classifyQuery2(query, provider) {
   try {
     const result = await chatLLM({
@@ -16781,7 +18058,7 @@ function selectAgents(domains, maxAgents) {
 }
 async function dispatchAgents(query, agents) {
   const chainDef = {
-    name: `moa-${uuid16().slice(0, 8)}`,
+    name: `moa-${uuid17().slice(0, 8)}`,
     mode: "parallel",
     steps: agents.map((a) => ({
       agent_id: a.agent_id,
@@ -16836,7 +18113,7 @@ async function routeMoA(request) {
   const t0 = Date.now();
   const provider = request.provider ?? "deepseek";
   const maxAgents = request.max_agents ?? 3;
-  const taskId = `moa-${uuid16()}`;
+  const taskId = `moa-${uuid17()}`;
   const board = createBlackboard(taskId);
   const classification = await classifyQuery2(request.query, provider);
   await board.write("observations", {
@@ -17094,7 +18371,7 @@ __export(skill_forge_exports, {
   loadForgedTools: () => loadForgedTools,
   verifyForgedTool: () => verifyForgedTool
 });
-import { v4 as uuid17 } from "uuid";
+import { v4 as uuid18 } from "uuid";
 function getForgedTools() {
   return [...FORGED_TOOLS.values()];
 }
@@ -17181,7 +18458,7 @@ Handler type: ${handlerType}` }
   }
   const namespace = name.split("_")[0] || "custom";
   const spec2 = {
-    id: uuid17(),
+    id: uuid18(),
     name,
     namespace,
     description,
@@ -17217,7 +18494,7 @@ async function verifyForgedTool(name) {
       const result = await callMcpTool({
         toolName: spec2.handler_config.backend_tool,
         args: {},
-        callId: uuid17(),
+        callId: uuid18(),
         timeoutMs: 1e4
       });
       testResult = result.status === "success" ? "Backend tool reachable" : `Backend error: ${result.error_message}`;
@@ -17226,7 +18503,7 @@ async function verifyForgedTool(name) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: "RETURN 1 AS test" },
-        callId: uuid17(),
+        callId: uuid18(),
         timeoutMs: 5e3
       });
       testResult = result.status === "success" ? "Cypher engine reachable" : `Cypher error: ${result.error_message}`;
@@ -17258,7 +18535,7 @@ async function executeForgedTool(name, args) {
         const result = await callMcpTool({
           toolName: spec2.handler_config.backend_tool,
           args,
-          callId: uuid17(),
+          callId: uuid18(),
           timeoutMs: 3e4
         });
         return result.status === "success" ? JSON.stringify(result.result, null, 2).slice(0, 1e3) : `Error: ${result.error_message}`;
@@ -17268,7 +18545,7 @@ async function executeForgedTool(name, args) {
         const result = await callMcpTool({
           toolName: "graph.read_cypher",
           args: { query: spec2.handler_config.cypher_template, params: args },
-          callId: uuid17(),
+          callId: uuid18(),
           timeoutMs: 15e3
         });
         return result.status === "success" ? JSON.stringify(result.result, null, 2).slice(0, 1e3) : `Error: ${result.error_message}`;
@@ -17334,12 +18611,12 @@ __export(engagement_engine_exports, {
   generatePlan: () => generatePlan,
   getEngagement: () => getEngagement,
   getOutcome: () => getOutcome,
-  getPlan: () => getPlan,
+  getPlan: () => getPlan2,
   listEngagements: () => listEngagements,
   matchPrecedents: () => matchPrecedents,
   recordOutcome: () => recordOutcome
 });
-import { v4 as uuid18 } from "uuid";
+import { v4 as uuid19 } from "uuid";
 async function saveEngagement(e2) {
   engagementCache.set(e2.$id, e2);
   const redis2 = getRedis();
@@ -17416,7 +18693,7 @@ MERGE (eng)-[:USES_METHODOLOGY]->(m)`,
         },
         _force: true
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -17452,7 +18729,7 @@ SET eng.status = 'completed'`,
         },
         _force: true
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -17475,7 +18752,7 @@ async function indexEngagementForPrecedent(e2) {
         orgId: "default",
         _force: true
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 15e3
     });
   } catch (err) {
@@ -17485,7 +18762,7 @@ async function indexEngagementForPrecedent(e2) {
 async function createEngagement(req) {
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const e2 = {
-    $id: `eng-${uuid18()}`,
+    $id: `eng-${uuid19()}`,
     $schema: "https://widgetdc.io/schemas/engagement/v1",
     client: req.client.slice(0, 120),
     domain: req.domain.slice(0, 60),
@@ -17565,7 +18842,7 @@ ORDER BY
 LIMIT ${Math.floor(limit)}`,
         params: { domain: req.domain }
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return [];
@@ -17614,7 +18891,7 @@ async function queryKgRag(query, maxEvidence = 10) {
     const result = await callMcpTool({
       toolName: "kg_rag.query",
       args: { question: query, max_evidence: maxEvidence },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 45e3
     });
     if (result.status !== "success") return { answer: "", sources: [] };
@@ -17643,7 +18920,7 @@ async function foldContext(text, query, maxTokens = 1500) {
         max_tokens: maxTokens,
         domain: "consulting"
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 2e4
     });
     if (result.status !== "success") return null;
@@ -17678,7 +18955,7 @@ async function proposeViaConsensus(engagementId, req, planSummary) {
           budget_dkk: req.budget_dkk ?? 0
         }
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return { proposalId: null, quorum: 0 };
@@ -17704,7 +18981,7 @@ async function voteOnConsensus(proposalId, decision, confidence, reasoning) {
         confidence: Math.min(1, Math.max(0, confidence)),
         reasoning: reasoning.slice(0, 500)
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 1e4
     });
     if (result.status !== "success") return false;
@@ -17725,7 +19002,7 @@ async function planViaRlmMission(engagementId, req, maxSteps = 3) {
         maxSteps,
         maxDepth: 2
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 2e4
     });
     if (startResult.status !== "success") return { missionId: null, insights: [], stepsExecuted: 0 };
@@ -17739,7 +19016,7 @@ async function planViaRlmMission(engagementId, req, maxSteps = 3) {
       const stepResult = await callMcpTool({
         toolName: "rlm.execute_step",
         args: { missionId },
-        callId: uuid18(),
+        callId: uuid19(),
         timeoutMs: 6e4
       });
       if (stepResult.status !== "success") break;
@@ -17817,7 +19094,7 @@ async function enforceConsensusGate(engagementId, req) {
 }
 async function generatePlan(req) {
   const t0 = Date.now();
-  const engagementId = req.engagement_id ?? `eng-${uuid18()}`;
+  const engagementId = req.engagement_id ?? `eng-${uuid19()}`;
   enforceInputSanityGate(req);
   const highStakes = isHighStakesPlan(req);
   const complex = req.duration_weeks > GATE_DURATION_WEEKS;
@@ -17999,7 +19276,7 @@ Return ONLY JSON matching the schema, no prose.`;
       const r = await callMcpTool({
         toolName: "llm.generate",
         args: { prompt: mercuryPrompt },
-        callId: uuid18(),
+        callId: uuid19(),
         timeoutMs: 3e4
       });
       if (r.status === "success") {
@@ -18173,7 +19450,7 @@ async function getOutcome(engagementId) {
     return null;
   }
 }
-async function getPlan(engagementId) {
+async function getPlan2(engagementId) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
@@ -18314,7 +19591,7 @@ __export(competitive_crawler_exports, {
   COMPETITOR_TARGETS: () => COMPETITOR_TARGETS,
   runCompetitiveCrawl: () => runCompetitiveCrawl
 });
-import { v4 as uuid19 } from "uuid";
+import { v4 as uuid20 } from "uuid";
 async function fetchPageText(url) {
   const res = await fetch(url, {
     headers: {
@@ -18359,7 +19636,7 @@ async function extractCapabilities(target) {
         const cap = line.replace(/^[\s\-\*]+/, "").trim();
         if (cap.length > 10 && cap.length < 200) {
           capabilities.push({
-            $id: `capability:${target.slug}:${uuid19().slice(0, 8)}`,
+            $id: `capability:${target.slug}:${uuid20().slice(0, 8)}`,
             competitor: target.name,
             capability: cap,
             category: categorizeCapability(cap),
@@ -18409,7 +19686,7 @@ async function persistCapabilities(capabilities) {
             extracted_at: cap.extracted_at
           }
         },
-        callId: uuid19(),
+        callId: uuid20(),
         timeoutMs: 1e4
       });
       persisted++;
@@ -18433,7 +19710,7 @@ async function analyzeGaps(capabilities) {
     const result = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: "MATCH (t:Tool) RETURN t.name AS name LIMIT 200" },
-      callId: uuid19(),
+      callId: uuid20(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -18560,468 +19837,6 @@ Competitor: {competitor}
 URL: {url}
 Page content:
 {content}`;
-  }
-});
-
-// src/hyperagent/hyperagent.ts
-import { v4 as uuid20 } from "uuid";
-import * as crypto from "crypto";
-function selectChainMode(steps, goal) {
-  const hasDependencies = steps.some(
-    (s) => s.prompt?.includes("{{prev}}") || JSON.stringify(s.arguments ?? {}).includes("{{prev}}")
-  );
-  if (hasDependencies) return "sequential";
-  const allReads = steps.every((s) => s.tool_name && !WRITE_TOOLS.includes(s.tool_name));
-  const multiSource = steps.length >= 3 && new Set(steps.map((s) => s.tool_name)).size >= 2;
-  if (allReads && multiSource) return "parallel";
-  const debateKeywords = /\b(compar|debate|versus|vs\.|pros.*cons|tradeoff|evaluate.*alternatives)\b/i;
-  if (debateKeywords.test(goal) && steps.length >= 2) return "debate";
-  const loopKeywords = /\b(iterat|refin|optimi[zs]|converg|improv.*until|repeat)\b/i;
-  if (loopKeywords.test(goal)) return "loop";
-  if (steps.length >= 5) return "funnel";
-  return steps.length >= 3 ? "adaptive" : "sequential";
-}
-function getSessionCircuit(sessionId) {
-  let c = sessionCircuits.get(sessionId);
-  if (!c) {
-    c = { consecutiveFailures: 0, circuitOpenUntil: 0, downgradedToReadOnly: false };
-    sessionCircuits.set(sessionId, c);
-  }
-  return c;
-}
-function recordSessionSuccess(sessionId) {
-  const c = getSessionCircuit(sessionId);
-  if (c.consecutiveFailures > 0) {
-    logger.info({ sessionId, previous_failures: c.consecutiveFailures }, "HyperAgent: session circuit CLOSED \u2014 recovered");
-  }
-  c.consecutiveFailures = 0;
-  c.circuitOpenUntil = 0;
-  c.downgradedToReadOnly = false;
-}
-function recordSessionFailure(sessionId) {
-  const c = getSessionCircuit(sessionId);
-  c.consecutiveFailures++;
-  if (c.consecutiveFailures >= SESSION_CIRCUIT_HARD_LIMIT && c.circuitOpenUntil === 0) {
-    const backoffMultiplier = Math.min(8, Math.pow(2, c.consecutiveFailures - SESSION_CIRCUIT_HARD_LIMIT));
-    const cooldownMs = SESSION_CIRCUIT_BASE_COOLDOWN_MS * backoffMultiplier;
-    c.circuitOpenUntil = Date.now() + cooldownMs;
-    logger.warn({ sessionId, failures: c.consecutiveFailures, cooldownMs }, "HyperAgent: session circuit OPEN \u2014 exponential backoff");
-  } else if (c.consecutiveFailures >= SESSION_CIRCUIT_THRESHOLD && !c.downgradedToReadOnly) {
-    c.downgradedToReadOnly = true;
-    logger.warn({ sessionId, failures: c.consecutiveFailures }, "HyperAgent: auto-downgraded session to read_only after 3 failures");
-  }
-}
-function isSessionCircuitOpen(sessionId) {
-  const c = getSessionCircuit(sessionId);
-  if (c.circuitOpenUntil === 0) return false;
-  if (Date.now() >= c.circuitOpenUntil) {
-    c.circuitOpenUntil = 0;
-    c.consecutiveFailures = 0;
-    c.downgradedToReadOnly = false;
-    logger.info({ sessionId }, "HyperAgent: session circuit auto-reset after cooldown");
-    return false;
-  }
-  return true;
-}
-function persistPlan(plan) {
-  plans.set(plan.planId, plan);
-  const redis2 = getRedis();
-  if (redis2) {
-    redis2.hset("orchestrator:hyperplans", plan.planId, JSON.stringify(plan)).catch(() => {
-    });
-    redis2.expire("orchestrator:hyperplans", 86400).catch(() => {
-    });
-  }
-}
-function getPlan2(planId) {
-  return plans.get(planId);
-}
-function listHyperPlans() {
-  return Array.from(plans.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 50);
-}
-async function createPlan(goal, sessionId, profileId = "read_only") {
-  if (isSessionCircuitOpen(sessionId)) {
-    throw new Error(`Session ${sessionId} circuit breaker OPEN \u2014 too many consecutive failures. Auto-resets in \u226460s.`);
-  }
-  const circuit = getSessionCircuit(sessionId);
-  const effectiveProfileId = circuit.downgradedToReadOnly ? "read_only" : profileId;
-  if (circuit.downgradedToReadOnly && profileId !== "read_only") {
-    logger.info({ sessionId, requested: profileId }, "HyperAgent: auto-downgraded to read_only due to consecutive failures");
-  }
-  const profile = POLICY_PROFILES[effectiveProfileId] ?? POLICY_PROFILES.read_only;
-  const planId = `hyp-${uuid20().slice(0, 12)}`;
-  let steps = [];
-  try {
-    const cogResult = await callCognitiveRaw("plan", {
-      prompt: goal,
-      context: { sessionId, profile: profile.id, maxSteps: profile.maxSteps },
-      agent_id: "hyperagent"
-    });
-    const rawSteps = cogResult?.execution_steps;
-    if (Array.isArray(rawSteps)) {
-      steps = rawSteps.slice(0, profile.maxSteps).map((s, i) => {
-        if (typeof s === "object" && s !== null) {
-          const step = s;
-          return {
-            id: `step-${i}`,
-            agent_id: String(step.agent_id ?? "qwen"),
-            tool_name: typeof step.tool === "string" ? step.tool : void 0,
-            cognitive_action: typeof step.cognitive_action === "string" ? step.cognitive_action : void 0,
-            arguments: typeof step.arguments === "object" ? step.arguments : void 0,
-            prompt: typeof step.prompt === "string" ? step.prompt : void 0
-          };
-        }
-        return {
-          id: `step-${i}`,
-          agent_id: "qwen",
-          cognitive_action: "analyze",
-          prompt: String(s)
-        };
-      });
-    }
-  } catch (err) {
-    if (profile.rejectOnCognitiveFailure) {
-      throw new Error(`Cognitive proxy failed and profile "${profile.id}" requires plan decomposition. Cannot create plan without RLM Engine.`);
-    }
-    logger.warn({ err, goal, profile: profile.id }, "HyperAgent: cognitive plan decomposition failed, using single-step fallback");
-    steps = [{
-      id: "step-0",
-      agent_id: "qwen",
-      cognitive_action: "analyze",
-      prompt: goal
-    }];
-  }
-  steps = steps.map((s) => {
-    if (s.tool_name && profile.blockedTools.includes(s.tool_name)) {
-      logger.info({ tool: s.tool_name, profile: profile.id }, "HyperAgent: tool blocked by policy, converting to analyze");
-      return { ...s, tool_name: void 0, cognitive_action: "analyze", prompt: `[BLOCKED] Cannot execute ${s.tool_name} under ${profile.id} profile. Analyze intent instead: ${s.prompt ?? ""}` };
-    }
-    return s;
-  });
-  const chainMode = selectChainMode(steps, goal);
-  const chainDef = {
-    chain_id: planId,
-    name: `hyperagent:${planId}`,
-    description: goal,
-    mode: chainMode,
-    steps
-  };
-  const plan = {
-    planId,
-    sessionId,
-    goal,
-    profile,
-    steps,
-    chainDef,
-    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-    status: profile.requiresApproval ? "pending_approval" : "approved"
-  };
-  persistPlan(plan);
-  logger.info({ planId, goal, profile: profile.id, steps: steps.length }, "HyperAgent: plan created");
-  return plan;
-}
-async function approvePlan(planId, approvedBy) {
-  const plan = plans.get(planId);
-  if (!plan) throw new Error(`Plan ${planId} not found`);
-  if (plan.status !== "pending_approval") throw new Error(`Plan ${planId} is ${plan.status}, not pending_approval`);
-  const ttlSeconds = plan.profile.approvalTtlSeconds;
-  const approval = {
-    planId,
-    approvedBy,
-    approvedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    expiresAt: new Date(Date.now() + ttlSeconds * 1e3).toISOString(),
-    scope: plan.profile.id
-  };
-  const redis2 = getRedis();
-  if (redis2) {
-    await redis2.setex(`${APPROVAL_PREFIX}${planId}`, ttlSeconds, JSON.stringify(approval));
-  }
-  plan.status = "approved";
-  persistPlan(plan);
-  broadcastMessage({
-    from: "HyperAgent",
-    to: "All",
-    source: "orchestrator",
-    type: "Message",
-    message: `Plan ${planId} approved by ${approvedBy}`
-  });
-  logger.info({ planId, approvedBy }, "HyperAgent: plan approved");
-  return approval;
-}
-async function rejectPlan(planId, rejectedBy) {
-  const plan = plans.get(planId);
-  if (!plan) throw new Error(`Plan ${planId} not found`);
-  const redis2 = getRedis();
-  if (redis2) {
-    await redis2.del(`${APPROVAL_PREFIX}${planId}`);
-  }
-  plan.status = "failed";
-  persistPlan(plan);
-  broadcastMessage({
-    from: "HyperAgent",
-    to: "All",
-    source: "orchestrator",
-    type: "Message",
-    message: `Plan ${planId} rejected by ${rejectedBy}`
-  });
-  logger.info({ planId, rejectedBy }, "HyperAgent: plan rejected");
-}
-async function checkApproval(planId) {
-  const t0 = Date.now();
-  const redis2 = getRedis();
-  if (!redis2) {
-    const plan = plans.get(planId);
-    return plan?.status === "approved" ? {
-      planId,
-      approvedBy: "in-memory",
-      approvedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      expiresAt: new Date(Date.now() + 36e5).toISOString(),
-      scope: plan.profile.id
-    } : null;
-  }
-  const raw = await redis2.get(`${APPROVAL_PREFIX}${planId}`);
-  if (!raw) return null;
-  const approval = JSON.parse(raw);
-  if (new Date(approval.expiresAt) < /* @__PURE__ */ new Date()) {
-    await redis2.del(`${APPROVAL_PREFIX}${planId}`);
-    logger.warn({ planId, latencyMs: Date.now() - t0 }, "HyperAgent: approval expired");
-    return null;
-  }
-  logger.debug({ planId, latencyMs: Date.now() - t0 }, "HyperAgent: approval check completed");
-  return approval;
-}
-function validateWebhookSignature(body, signature) {
-  const secret = process.env.APPROVAL_WEBHOOK_SECRET;
-  if (!secret) return true;
-  if (!signature) return false;
-  const expected = crypto.createHmac("sha256", secret).update(body).digest("hex");
-  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
-}
-async function executePlan(planId) {
-  const plan = plans.get(planId);
-  if (!plan) throw new Error(`Plan ${planId} not found`);
-  if (plan.profile.requiresApproval) {
-    const approval = await checkApproval(planId);
-    if (!approval) {
-      throw new Error(`Plan ${planId} requires approval (profile: ${plan.profile.id})`);
-    }
-    logger.info({ planId, approvedBy: approval.approvedBy }, "HyperAgent: approval validated");
-  }
-  plan.status = "executing";
-  persistPlan(plan);
-  try {
-    const execution = await executeChain(plan.chainDef);
-    plan.status = execution.status === "completed" ? "completed" : "failed";
-    persistPlan(plan);
-    if (execution.status === "completed") {
-      recordSessionSuccess(plan.sessionId);
-    } else {
-      recordSessionFailure(plan.sessionId);
-    }
-    persistExecutionTrace(execution, planId).catch((err) => {
-      logger.warn({ err, planId }, "HyperAgent: trace persistence failed (non-blocking)");
-    });
-    logger.info({
-      planId,
-      executionId: execution.execution_id,
-      status: execution.status,
-      duration: execution.duration_ms
-    }, "HyperAgent: plan executed");
-    return execution;
-  } catch (err) {
-    plan.status = "failed";
-    persistPlan(plan);
-    recordSessionFailure(plan.sessionId);
-    throw err;
-  }
-}
-async function persistExecutionTrace(exec, planId) {
-  try {
-    await callMcpTool({
-      toolName: "graph.write_cypher",
-      args: {
-        query: `MERGE (t:ExecutionTrace {executionId: $executionId})
-                SET t.chainName = $chainName, t.mode = $mode,
-                    t.planId = $planId, t.status = $status,
-                    t.stepsCompleted = $stepsCompleted,
-                    t.stepsTotal = $stepsTotal,
-                    t.durationMs = $durationMs,
-                    t.completedAt = datetime()`,
-        params: {
-          executionId: exec.execution_id,
-          chainName: exec.name,
-          mode: exec.mode,
-          planId,
-          status: exec.status,
-          stepsCompleted: exec.steps_completed,
-          stepsTotal: exec.steps_total,
-          durationMs: exec.duration_ms ?? 0
-        }
-      },
-      callId: `hyp-trace-${exec.execution_id}`
-    });
-  } catch (err) {
-    logger.warn({ err, executionId: exec.execution_id }, "HyperAgent: ExecutionTrace write failed");
-  }
-}
-async function evaluatePlan(executionId, planId, score, agentId = "hyperagent") {
-  const plan = plans.get(planId);
-  const snapshot = {
-    traceId: `kpi-${executionId}`,
-    planId,
-    agentId,
-    score: Math.max(0, Math.min(100, score)),
-    outcome: plan?.status ?? "unknown",
-    stepsCompleted: plan?.steps.length ?? 0,
-    stepsTotal: plan?.steps.length ?? 0,
-    durationMs: 0
-  };
-  try {
-    await callMcpTool({
-      toolName: "graph.write_cypher",
-      args: {
-        query: `MERGE (k:KpiSnapshot {traceId: $traceId})
-                SET k.planId = $planId, k.agentId = $agentId,
-                    k.score = $score, k.outcome = $outcome,
-                    k.stepsCompleted = $stepsCompleted,
-                    k.stepsTotal = $stepsTotal,
-                    k.durationMs = $durationMs,
-                    k.completedAt = datetime()`,
-        params: {
-          traceId: snapshot.traceId,
-          planId: snapshot.planId,
-          agentId: snapshot.agentId,
-          score: snapshot.score,
-          outcome: snapshot.outcome,
-          stepsCompleted: snapshot.stepsCompleted,
-          stepsTotal: snapshot.stepsTotal,
-          durationMs: snapshot.durationMs
-        }
-      },
-      callId: `hyp-kpi-${executionId}`
-    });
-    logger.info({ traceId: snapshot.traceId, score }, "HyperAgent: KPI snapshot persisted to Neo4j");
-  } catch (err) {
-    logger.warn({ err, traceId: snapshot.traceId }, "HyperAgent: KPI persistence failed (non-blocking)");
-  }
-  return snapshot;
-}
-function getHyperAgentHealth() {
-  const allPlans = Array.from(plans.values());
-  const circuits = Array.from(sessionCircuits.entries()).map(([sid, c]) => ({
-    sessionId: sid,
-    failures: c.consecutiveFailures,
-    circuitOpen: c.circuitOpenUntil > Date.now(),
-    downgraded: c.downgradedToReadOnly
-  })).filter((c) => c.failures > 0);
-  return {
-    total_plans: allPlans.length,
-    by_status: {
-      pending_approval: allPlans.filter((p) => p.status === "pending_approval").length,
-      approved: allPlans.filter((p) => p.status === "approved").length,
-      executing: allPlans.filter((p) => p.status === "executing").length,
-      completed: allPlans.filter((p) => p.status === "completed").length,
-      failed: allPlans.filter((p) => p.status === "failed").length
-    },
-    active_circuits: circuits
-  };
-}
-async function getKpis(windowHours = 24) {
-  try {
-    const result = await callMcpTool({
-      toolName: "graph.read_cypher",
-      args: {
-        query: `MATCH (k:KpiSnapshot)
-                WHERE k.completedAt > datetime() - duration({hours: $hours})
-                RETURN avg(k.score) AS avgScore,
-                       count(k) AS totalPlans,
-                       sum(CASE WHEN k.outcome = 'completed' THEN 1 ELSE 0 END) AS succeeded,
-                       sum(CASE WHEN k.outcome = 'failed' THEN 1 ELSE 0 END) AS failed`,
-        params: { hours: windowHours }
-      },
-      callId: `hyp-kpis-${Date.now()}`
-    });
-    return { source: "neo4j", window_hours: windowHours, ...result };
-  } catch {
-    const cutoff = new Date(Date.now() - windowHours * 36e5);
-    const recent = Array.from(plans.values()).filter((p) => new Date(p.createdAt) > cutoff);
-    return {
-      source: "in_memory_fallback",
-      window_hours: windowHours,
-      totalPlans: recent.length,
-      succeeded: recent.filter((p) => p.status === "completed").length,
-      failed: recent.filter((p) => p.status === "failed").length,
-      pending: recent.filter((p) => p.status === "pending_approval").length
-    };
-  }
-}
-var WRITE_TOOLS, POLICY_PROFILES, SESSION_CIRCUIT_THRESHOLD, SESSION_CIRCUIT_HARD_LIMIT, SESSION_CIRCUIT_BASE_COOLDOWN_MS, sessionCircuits, plans, APPROVAL_PREFIX;
-var init_hyperagent = __esm({
-  "src/hyperagent/hyperagent.ts"() {
-    "use strict";
-    init_chain_engine();
-    init_cognitive_proxy();
-    init_mcp_caller();
-    init_redis();
-    init_chat_broadcaster();
-    init_logger();
-    WRITE_TOOLS = [
-      "graph.write_cypher",
-      "graph.bulk_write",
-      "git.commit",
-      "git.push",
-      "railway.deploy",
-      "file.write",
-      "linear.create_issue",
-      "linear.update_issue"
-    ];
-    POLICY_PROFILES = {
-      read_only: {
-        id: "read_only",
-        mode: "read_only",
-        blockedTools: WRITE_TOOLS,
-        requiresApproval: false,
-        maxSteps: 25,
-        approvalTtlSeconds: 3600,
-        // 1h (irrelevant — no approval needed)
-        rejectOnCognitiveFailure: false,
-        // Safe to fallback to single-step analyze
-        allowedProviders: []
-        // DR18: all providers OK for reads
-      },
-      staged_write: {
-        id: "staged_write",
-        mode: "staged_write",
-        blockedTools: ["git.push", "railway.deploy"],
-        requiresApproval: true,
-        maxSteps: 25,
-        approvalTtlSeconds: 3600,
-        // 1h — reversible operations
-        rejectOnCognitiveFailure: false,
-        // Fallback acceptable
-        allowedProviders: ["anthropic", "openrouter"]
-        // DR18: no DeepSeek for writes
-      },
-      production_write: {
-        id: "production_write",
-        mode: "production_write",
-        blockedTools: [],
-        requiresApproval: true,
-        maxSteps: 15,
-        approvalTtlSeconds: 900,
-        // 15min — destructive operations (RLM insight)
-        rejectOnCognitiveFailure: true,
-        // MUST have proper plan decomposition
-        allowedProviders: ["anthropic"]
-        // DR18: production_write = Claude only
-      }
-    };
-    SESSION_CIRCUIT_THRESHOLD = 3;
-    SESSION_CIRCUIT_HARD_LIMIT = 5;
-    SESSION_CIRCUIT_BASE_COOLDOWN_MS = 15e3;
-    sessionCircuits = /* @__PURE__ */ new Map();
-    plans = /* @__PURE__ */ new Map();
-    APPROVAL_PREFIX = "orchestrator:approval:";
   }
 });
 
@@ -20744,11 +21559,31 @@ var init_inventor_loop = __esm({
 var tool_executor_exports = {};
 __export(tool_executor_exports, {
   ORCHESTRATOR_TOOLS: () => ORCHESTRATOR_TOOLS,
+  enforceHyperAgentGate: () => enforceHyperAgentGate,
   executeToolCalls: () => executeToolCalls,
   executeToolUnified: () => executeToolUnified,
   getTokenSavings: () => getTokenSavings
 });
 import { v4 as uuid23 } from "uuid";
+async function enforceHyperAgentGate(toolName2, opts) {
+  const toolDef = getTool(toolName2);
+  if (!toolDef) return null;
+  if (toolDef.riskLevel === "read_only") return null;
+  const requiresPlan = toolDef.riskLevel === "staged_write" || toolDef.riskLevel === "production_write" || toolDef.requiresPlan === true || toolDef.requiresApproval === true;
+  if (!requiresPlan) return null;
+  if (!opts?.planId) {
+    return `Direct execution blocked: ${toolName2} (risk=${toolDef.riskLevel}) requires HyperAgent plan. Create plan via governance_plan_create, approve it, then execute.`;
+  }
+  const { getPlan: getPlan3 } = await Promise.resolve().then(() => (init_hyperagent(), hyperagent_exports));
+  const plan = getPlan3(opts.planId);
+  if (!plan) {
+    return `Direct execution blocked: plan ${opts.planId} not found. Create and approve a plan first.`;
+  }
+  if (plan.status !== "approved" && plan.approvalStatus !== "approved") {
+    return `Direct execution blocked: plan ${opts.planId} is ${plan.approvalStatus || plan.status}, not approved.`;
+  }
+  return null;
+}
 function getTokenSavings() {
   return { totalTokensSaved, totalFoldingCalls, avgSavingsPerFold: totalFoldingCalls > 0 ? Math.round(totalTokensSaved / totalFoldingCalls) : 0 };
 }
@@ -22346,50 +23181,211 @@ ${lines.join("\n")}`;
       return typeof result === "string" ? result : JSON.stringify(result, null, 2);
     }
     // ─── model.* ─────────────────────────────────────────────────────
-    case "model_providers":
-    case "model_route":
-    case "model_cost_estimate":
-    case "model_policy_check": {
-      const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
-      const result = await callMcp3({ toolName: "llm_providers", args: { provider: input?.provider }, callId: `model-${toolName}-${Date.now()}` });
-      return typeof result === "string" ? result : JSON.stringify(result, null, 2);
+    case "model_providers": {
+      const { listProviders: listProviders2 } = await Promise.resolve().then(() => (init_llm_proxy(), llm_proxy_exports));
+      return JSON.stringify(listProviders2(), null, 2);
+    }
+    case "model_route": {
+      const { LlmMatrix: LlmMatrix2 } = await Promise.resolve().then(() => (init_llm(), llm_exports));
+      const taskType = input?.task_type ?? "chat_standard";
+      const chain = LlmMatrix2.resolve(taskType);
+      return JSON.stringify({ task: taskType, models: chain.models, source: chain.source }, null, 2);
+    }
+    case "model_cost_estimate": {
+      const { estimateModelCost: estimateModelCost2 } = await Promise.resolve().then(() => (init_cost_governance(), cost_governance_exports));
+      const provider = String(args.provider ?? "");
+      const model = String(args.model ?? "");
+      const estimatedTokens = Number(args.estimated_tokens ?? 0);
+      if (!provider || !model || estimatedTokens <= 0) {
+        return "Error: provider, model, and estimated_tokens are required";
+      }
+      const estimate = estimateModelCost2(provider, model, estimatedTokens);
+      return JSON.stringify(estimate, null, 2);
     }
     case "model_budget_status": {
-      const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
-      const result = await callMcp3({ toolName: "get_platform_health", args: {}, callId: `model-budget-${Date.now()}` });
-      return typeof result === "string" ? result : JSON.stringify(result, null, 2);
+      const { getAggregateWorkflowCosts: getAggregateWorkflowCosts2 } = await Promise.resolve().then(() => (init_cost_governance(), cost_governance_exports));
+      const windowHours = Number(args.window_hours ?? 24);
+      const aggregate = await getAggregateWorkflowCosts2(windowHours);
+      return JSON.stringify({
+        window_hours: windowHours,
+        total_cost_dkk: aggregate.totalCostDKK,
+        total_workflows: aggregate.totalWorkflows,
+        total_model_calls: aggregate.totalModelCalls
+      }, null, 2);
+    }
+    case "model_policy_check": {
+      const { checkModelPolicy: checkModelPolicy2 } = await Promise.resolve().then(() => (init_cost_governance(), cost_governance_exports));
+      const provider = String(args.provider ?? "");
+      const model = String(args.model ?? "");
+      const isEscalation = Boolean(args.is_escalation);
+      if (!provider || !model) return "Error: provider and model are required";
+      const result = await checkModelPolicy2(provider, model, { isEscalation });
+      return JSON.stringify(result, null, 2);
     }
     // ─── workflow.* ──────────────────────────────────────────────────
-    case "workflow_cost_trace":
-    case "workflow_fanout_guard": {
-      const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
-      const result = await callMcp3({ toolName: "graph.read_cypher", args: { query: 'MATCH (c:ChainExecution) WHERE c.startedAt > datetime() - duration("PT' + (input?.window_hours ?? 1) + 'H") RETURN count(c) as count, avg(c.durationMs) as avgDuration' }, callId: `workflow-${toolName}-${Date.now()}` });
-      return typeof result === "string" ? result : JSON.stringify(result?.results ?? result, null, 2);
+    case "workflow_cost_trace": {
+      const { getWorkflowCostTrace: getWorkflowCostTrace2, getAggregateWorkflowCosts: getAggregateWorkflowCosts2 } = await Promise.resolve().then(() => (init_cost_governance(), cost_governance_exports));
+      const chainId = args.chain_id;
+      const windowHours = Number(args.window_hours ?? 1);
+      if (chainId) {
+        const trace2 = await getWorkflowCostTrace2(String(chainId));
+        if (!trace2) return `No cost trace found for workflow '${chainId}' (24h TTL may have expired)`;
+        return JSON.stringify(trace2, null, 2);
+      }
+      const aggregate = await getAggregateWorkflowCosts2(windowHours);
+      return JSON.stringify({ aggregate, workflows: aggregate.workflows.slice(0, 10) }, null, 2);
     }
     case "workflow_context_compact": {
-      const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
-      const result = await callMcp3({ toolName: "context_fold", args: { text: input?.context, budget: input?.target_tokens ?? 4e3, domain: input?.domain }, callId: `workflow-compact-${Date.now()}` });
-      return typeof result === "string" ? result : JSON.stringify(result, null, 2);
+      const { compactContext: compactContext3, shouldCompactContext: shouldCompactContext3 } = await Promise.resolve().then(() => (init_cost_governance(), cost_governance_exports));
+      const context = String(args.context ?? "");
+      if (!context) return "Error: context is required";
+      const check = shouldCompactContext3(context);
+      if (!check.needsCompaction) {
+        return JSON.stringify({
+          needs_compaction: false,
+          estimated_tokens: check.estimatedTokens,
+          threshold: 8e3,
+          message: "Context within threshold \u2014 no compaction needed"
+        }, null, 2);
+      }
+      const result = await compactContext3(context, Number(args.target_tokens ?? 4e3), void 0, args.domain);
+      if (!result) {
+        return JSON.stringify({
+          needs_compaction: true,
+          original_tokens: check.estimatedTokens,
+          compaction_failed: true,
+          message: "Compaction attempted but failed \u2014 returning original context"
+        }, null, 2);
+      }
+      return JSON.stringify({
+        needs_compaction: true,
+        original_tokens: result.originalTokens,
+        compacted_tokens: result.compactedTokens,
+        compaction_ratio: result.ratio,
+        compacted: result.compacted
+      }, null, 2);
+    }
+    case "workflow_fanout_guard": {
+      const { enforceMaxFanOut: enforceMaxFanOut2 } = await Promise.resolve().then(() => (init_cost_governance(), cost_governance_exports));
+      const parallelSteps = Number(args["parallel-steps"] ?? args.parallel_steps ?? 0);
+      const agents = Array.isArray(args.agents) ? args.agents : void 0;
+      const premiumCalls = Number(args["premium-calls"] ?? args.premium_calls ?? 0);
+      if (parallelSteps <= 0) return "Error: parallel_steps is required and must be > 0";
+      const check = enforceMaxFanOut2(parallelSteps, "parallel", agents);
+      return JSON.stringify({
+        ...check,
+        premium_calls: premiumCalls,
+        premium_calls_within_budget: premiumCalls <= 2,
+        // Max 2 premium calls per fan-out
+        recommendation: check.allowed ? "Fan-out within limits" : "Reduce parallel steps or agents"
+      }, null, 2);
     }
     case "workflow_premium_escalation_check": {
-      const provider = input?.provider ?? "";
-      const isPremium = provider.toLowerCase().includes("claude") || provider.toLowerCase().includes("openai");
-      const priorFailures = input?.prior_failures ?? 0;
-      const justified = isPremium && priorFailures >= 2;
-      return JSON.stringify({ provider, isPremium, priorFailures, justified, recommendation: justified ? "Escalation justified" : "Use cheaper models first" }, null, 2);
+      const { isClaudeEscalationAllowed: isClaudeEscalationAllowed2 } = await Promise.resolve().then(() => (init_cost_governance(), cost_governance_exports));
+      const provider = String(args.provider ?? "");
+      const task = String(args.task ?? "");
+      const priorFailures = Number(args.prior_failures ?? 0);
+      if (!provider || !task) {
+        return JSON.stringify({
+          provider,
+          task,
+          allowed: false,
+          reason: "provider and task are both required"
+        }, null, 2);
+      }
+      const result = await isClaudeEscalationAllowed2(provider, task, { priorFailures });
+      return JSON.stringify({
+        provider,
+        task,
+        allowed: result.allowed,
+        reason: result.reason,
+        prior_failures: result.priorFailures,
+        requires_premium_flag: result.requiresPremiumFlag,
+        recommendation: result.allowed ? "Escalation approved \u2014 proceed with premium model" : "Use cheaper models or retry with more failures"
+      }, null, 2);
     }
-    // ─── governance.* ────────────────────────────────────────────────
-    case "governance_plan_create":
+    // ─── governance.* — HyperAgent-governed approval gates ─────────────────
+    case "governance_plan_create": {
+      const { createPlan: createPlan2 } = await Promise.resolve().then(() => (init_hyperagent(), hyperagent_exports));
+      const description = String(input?.description ?? "");
+      const scope = String(input?.scope ?? "staged_write");
+      const targetService = String(input?.target_service ?? "");
+      if (!description) throw new Error("description is required");
+      if (!["read_only", "staged_write", "production_write"].includes(scope)) {
+        throw new Error("scope must be read_only, staged_write, or production_write");
+      }
+      const sessionId = `gov-${uuid23().slice(0, 8)}`;
+      const plan = await createPlan2(description, sessionId, scope, {
+        targetServices: targetService ? [targetService] : [],
+        successMetrics: `Plan approved and executed under ${scope} profile`,
+        premiumAllowed: scope === "production_write",
+        maxAgentFanout: scope === "production_write" ? 1 : 3,
+        maxRecursionDepth: scope === "production_write" ? 1 : 2
+      });
+      return JSON.stringify({
+        plan_id: plan.planId,
+        status: plan.status,
+        risk_level: plan.riskLevel,
+        budget_lane: plan.budgetLane,
+        target_services: plan.targetServices,
+        approval_status: plan.approvalStatus,
+        requires_approval: plan.profile.requiresApproval,
+        created_at: plan.createdAt,
+        steps_count: plan.steps.length
+      }, null, 2);
+    }
+    case "governance_plan_approve": {
+      const { approvePlan: approvePlan3 } = await Promise.resolve().then(() => (init_hyperagent(), hyperagent_exports));
+      const planId = String(input?.plan_id ?? "");
+      const approver = String(input?.approver ?? "");
+      if (!planId) throw new Error("plan_id is required");
+      if (!approver) throw new Error("approver is required");
+      const approval = await approvePlan3(planId, approver);
+      return JSON.stringify({
+        plan_id: approval.planId,
+        approved_by: approval.approvedBy,
+        approved_at: approval.approvedAt,
+        expires_at: approval.expiresAt,
+        scope: approval.scope
+      }, null, 2);
+    }
     case "governance_plan_execute": {
-      const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
-      const result = await callMcp3({ toolName: "hyperagent_auto_run", args: { max_targets: 1 }, callId: `governance-${toolName}-${Date.now()}` });
-      return typeof result === "string" ? result : JSON.stringify(result, null, 2);
+      const { executePlan: executePlan2, getPlan: getPlan3 } = await Promise.resolve().then(() => (init_hyperagent(), hyperagent_exports));
+      const planId = String(input?.plan_id ?? "");
+      if (!planId) throw new Error("plan_id is required");
+      const plan = getPlan3(planId);
+      if (!plan) throw new Error(`Plan ${planId} not found`);
+      if (plan.status !== "approved" && plan.approvalStatus !== "approved") {
+        throw new Error(`Plan ${planId} is ${plan.approvalStatus || plan.status}, not approved. Must approve before execution.`);
+      }
+      const execution = await executePlan2(planId);
+      return JSON.stringify({
+        plan_id: planId,
+        execution_id: execution.execution_id,
+        status: execution.status,
+        steps_completed: execution.steps_completed,
+        steps_total: execution.steps_total,
+        duration_ms: execution.duration_ms
+      }, null, 2);
     }
-    case "governance_plan_approve":
     case "governance_plan_evaluate": {
-      const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
-      const result = await callMcp3({ toolName: "hyperagent_auto_memory", args: { action: "write", key: input?.plan_id, value: JSON.stringify(input) }, callId: `governance-${toolName}-${Date.now()}` });
-      return typeof result === "string" ? result : JSON.stringify(result, null, 2);
+      const { evaluatePlan: evaluatePlan2, getPlan: getPlan3 } = await Promise.resolve().then(() => (init_hyperagent(), hyperagent_exports));
+      const planId = String(input?.plan_id ?? "");
+      const outcome = String(input?.outcome ?? "partial");
+      const kpiImpact = typeof input?.kpi_impact === "number" ? input.kpi_impact : 0;
+      if (!planId) throw new Error("plan_id is required");
+      const scoreMap = { success: 90, partial: 60, failed: 20 };
+      const score = scoreMap[outcome] ?? 50;
+      const plan = getPlan3(planId);
+      const kpi = await evaluatePlan2(`eval-${uuid23().slice(0, 8)}`, planId, score, "governance");
+      return JSON.stringify({
+        plan_id: planId,
+        outcome,
+        kpi_impact: kpiImpact,
+        score: kpi.score,
+        evaluated_at: (/* @__PURE__ */ new Date()).toISOString(),
+        success: outcome === "success"
+      }, null, 2);
     }
     case "governance_audit_query": {
       const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
@@ -37879,7 +38875,7 @@ engagementsRouter.get("/:id", async (req, res) => {
 });
 engagementsRouter.get("/:id/plan", async (req, res) => {
   const id = decodeURIComponent(req.params.id);
-  const plan = await getPlan(id);
+  const plan = await getPlan2(id);
   if (!plan) {
     res.status(404).json({
       success: false,
@@ -38980,7 +39976,7 @@ hyperagentRouter.get("/plans", (_req, res) => {
   });
 });
 hyperagentRouter.get("/plans/:planId", (req, res) => {
-  const plan = getPlan2(req.params.planId);
+  const plan = getPlan(req.params.planId);
   if (!plan) {
     res.status(404).json({ success: false, error: { code: "NOT_FOUND", message: `Plan ${req.params.planId} not found`, status_code: 404 } });
     return;

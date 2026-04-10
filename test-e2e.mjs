@@ -1426,6 +1426,227 @@ await test('157. POST /api/tools/inventor_history responds', async () => {
 })
 
 // ═══════════════════════════════════════════════════════════════
+// Section 22: Neural Bridge v2 — Data, System, Agent, Model, Workflow, Governance, Infra tools
+// ═══════════════════════════════════════════════════════════════
+
+// ── 158. data_graph_read — exists ──
+await test('158. POST /api/tools/data_graph_read responds', async () => {
+  const r = await api('/api/tools/data_graph_read', { method: 'POST', body: JSON.stringify({ cypher: 'RETURN 1' }) })
+  assert(r.status !== 404, `data_graph_read not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'data_graph_read', `wrong tool_name`)
+})
+
+// ── 159. data_graph_stats — exists ──
+await test('159. POST /api/tools/data_graph_stats responds', async () => {
+  const r = await api('/api/tools/data_graph_stats', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `data_graph_stats not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'data_graph_stats', `wrong tool_name`)
+})
+
+// ── 160. data_redis_inspect — exists ──
+await test('160. POST /api/tools/data_redis_inspect responds', async () => {
+  const r = await api('/api/tools/data_redis_inspect', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `data_redis_inspect not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'data_redis_inspect', `wrong tool_name`)
+})
+
+// ── 161. data_integrity_check — exists ──
+await test('161. POST /api/tools/data_integrity_check responds', async () => {
+  const r = await api('/api/tools/data_integrity_check', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `data_integrity_check not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'data_integrity_check', `wrong tool_name`)
+})
+
+// ── 162. system_health — exists ──
+await test('162. POST /api/tools/system_health responds', async () => {
+  const r = await api('/api/tools/system_health', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `system_health not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'system_health', `wrong tool_name`)
+})
+
+// ── 163. system_service_status — exists ──
+await test('163. POST /api/tools/system_service_status responds', async () => {
+  const r = await api('/api/tools/system_service_status', { method: 'POST', body: JSON.stringify({ service: 'backend' }) })
+  assert(r.status !== 404, `system_service_status not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'system_service_status', `wrong tool_name`)
+})
+
+// ── 164. system_metrics_summary — exists ──
+await test('164. POST /api/tools/system_metrics_summary responds', async () => {
+  const r = await api('/api/tools/system_metrics_summary', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `system_metrics_summary not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'system_metrics_summary', `wrong tool_name`)
+})
+
+// ── 165. system_logs_summary — exists ──
+await test('165. POST /api/tools/system_logs_summary responds', async () => {
+  const r = await api('/api/tools/system_logs_summary', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `system_logs_summary not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'system_logs_summary', `wrong tool_name`)
+})
+
+// ── 166. agent_list — exists ──
+await test('166. POST /api/tools/agent_list responds', async () => {
+  const r = await api('/api/tools/agent_list', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `agent_list not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'agent_list', `wrong tool_name`)
+})
+
+// ── 167. agent_status — exists ──
+await test('167. POST /api/tools/agent_status responds', async () => {
+  const r = await api('/api/tools/agent_status', { method: 'POST', body: JSON.stringify({ agent_id: 'test-e2e' }) })
+  assert(r.status !== 404, `agent_status not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'agent_status', `wrong tool_name`)
+})
+
+// ── 168. agent_dispatch — exists ──
+await test('168. POST /api/tools/agent_dispatch responds', async () => {
+  const r = await api('/api/tools/agent_dispatch', { method: 'POST', body: JSON.stringify({ agent_id: 'test-e2e', task_id: 'e2e', task_type: 'test', context: 'probe' }) })
+  assert(r.status !== 404, `agent_dispatch not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'agent_dispatch', `wrong tool_name`)
+})
+
+// ── 169. agent_memory — exists ──
+await test('169. POST /api/tools/agent_memory responds', async () => {
+  const r = await api('/api/tools/agent_memory', { method: 'POST', body: JSON.stringify({ agent_id: 'test-e2e' }) })
+  assert(r.status !== 404, `agent_memory not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'agent_memory', `wrong tool_name`)
+})
+
+// ── 170. agent_capabilities — exists ──
+await test('170. POST /api/tools/agent_capabilities responds', async () => {
+  const r = await api('/api/tools/agent_capabilities', { method: 'POST', body: JSON.stringify({ agent_id: 'test-e2e' }) })
+  assert(r.status !== 404, `agent_capabilities not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'agent_capabilities', `wrong tool_name`)
+})
+
+// ── 171. model_providers — exists ──
+await test('171. POST /api/tools/model_providers responds', async () => {
+  const r = await api('/api/tools/model_providers', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `model_providers not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'model_providers', `wrong tool_name`)
+})
+
+// ── 172. model_route — exists ──
+await test('172. POST /api/tools/model_route responds', async () => {
+  const r = await api('/api/tools/model_route', { method: 'POST', body: JSON.stringify({ task_type: 'reasoning' }) })
+  assert(r.status !== 404, `model_route not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'model_route', `wrong tool_name`)
+})
+
+// ── 173. model_cost_estimate — exists ──
+await test('173. POST /api/tools/model_cost_estimate responds', async () => {
+  const r = await api('/api/tools/model_cost_estimate', { method: 'POST', body: JSON.stringify({ provider: 'deepseek', model: 'deepseek-chat', estimated_tokens: 100 }) })
+  assert(r.status !== 404, `model_cost_estimate not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'model_cost_estimate', `wrong tool_name`)
+})
+
+// ── 174. model_budget_status — exists ──
+await test('174. POST /api/tools/model_budget_status responds', async () => {
+  const r = await api('/api/tools/model_budget_status', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `model_budget_status not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'model_budget_status', `wrong tool_name`)
+})
+
+// ── 175. model_policy_check — exists ──
+await test('175. POST /api/tools/model_policy_check responds', async () => {
+  const r = await api('/api/tools/model_policy_check', { method: 'POST', body: JSON.stringify({ provider: 'deepseek', model: 'deepseek-chat' }) })
+  assert(r.status !== 404, `model_policy_check not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'model_policy_check', `wrong tool_name`)
+})
+
+// ── 176. workflow_cost_trace — exists ──
+await test('176. POST /api/tools/workflow_cost_trace responds', async () => {
+  const r = await api('/api/tools/workflow_cost_trace', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `workflow_cost_trace not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'workflow_cost_trace', `wrong tool_name`)
+})
+
+// ── 177. workflow_context_compact — exists ──
+await test('177. POST /api/tools/workflow_context_compact responds', async () => {
+  const r = await api('/api/tools/workflow_context_compact', { method: 'POST', body: JSON.stringify({ context: 'test' }) })
+  assert(r.status !== 404, `workflow_context_compact not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'workflow_context_compact', `wrong tool_name`)
+})
+
+// ── 178. workflow_fanout_guard — exists ──
+await test('178. POST /api/tools/workflow_fanout_guard responds', async () => {
+  const r = await api('/api/tools/workflow_fanout_guard', { method: 'POST', body: JSON.stringify({ parallel_steps: 2 }) })
+  assert(r.status !== 404, `workflow_fanout_guard not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'workflow_fanout_guard', `wrong tool_name`)
+})
+
+// ── 179. workflow_premium_escalation_check — exists ──
+await test('179. POST /api/tools/workflow_premium_escalation_check responds', async () => {
+  const r = await api('/api/tools/workflow_premium_escalation_check', { method: 'POST', body: JSON.stringify({ provider: 'claude', task: 'test' }) })
+  assert(r.status !== 404, `workflow_premium_escalation_check not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'workflow_premium_escalation_check', `wrong tool_name`)
+})
+
+// ── 180. governance_plan_create — exists ──
+await test('180. POST /api/tools/governance_plan_create responds', async () => {
+  const r = await api('/api/tools/governance_plan_create', { method: 'POST', body: JSON.stringify({ description: 'e2e probe', scope: 'low', target_service: 'backend' }) })
+  assert(r.status !== 404, `governance_plan_create not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'governance_plan_create', `wrong tool_name`)
+})
+
+// ── 181. governance_plan_approve — exists ──
+await test('181. POST /api/tools/governance_plan_approve responds', async () => {
+  const r = await api('/api/tools/governance_plan_approve', { method: 'POST', body: JSON.stringify({ plan_id: 'nonexistent', approver: 'e2e-test' }) })
+  assert(r.status !== 404, `governance_plan_approve not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'governance_plan_approve', `wrong tool_name`)
+})
+
+// ── 182. governance_plan_execute — exists ──
+await test('182. POST /api/tools/governance_plan_execute responds', async () => {
+  const r = await api('/api/tools/governance_plan_execute', { method: 'POST', body: JSON.stringify({ plan_id: 'nonexistent' }) })
+  assert(r.status !== 404, `governance_plan_execute not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'governance_plan_execute', `wrong tool_name`)
+})
+
+// ── 183. governance_plan_evaluate — exists ──
+await test('183. POST /api/tools/governance_plan_evaluate responds', async () => {
+  const r = await api('/api/tools/governance_plan_evaluate', { method: 'POST', body: JSON.stringify({ plan_id: 'nonexistent', outcome: 'test' }) })
+  assert(r.status !== 404, `governance_plan_evaluate not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'governance_plan_evaluate', `wrong tool_name`)
+})
+
+// ── 184. governance_audit_query — exists ──
+await test('184. POST /api/tools/governance_audit_query responds', async () => {
+  const r = await api('/api/tools/governance_audit_query', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `governance_audit_query not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'governance_audit_query', `wrong tool_name`)
+})
+
+// ── 185. governance_policy_decide — exists ──
+await test('185. POST /api/tools/governance_policy_decide responds', async () => {
+  const r = await api('/api/tools/governance_policy_decide', { method: 'POST', body: JSON.stringify({ action: 'get', policy_key: 'max_tokens' }) })
+  assert(r.status !== 404, `governance_policy_decide not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'governance_policy_decide', `wrong tool_name`)
+})
+
+// ── 186. grafana_dashboard — exists ──
+await test('186. POST /api/tools/grafana_dashboard responds', async () => {
+  const r = await api('/api/tools/grafana_dashboard', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `grafana_dashboard not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'grafana_dashboard', `wrong tool_name`)
+})
+
+// ── 187. railway_deploy — exists ──
+await test('187. POST /api/tools/railway_deploy responds', async () => {
+  const r = await api('/api/tools/railway_deploy', { method: 'POST', body: JSON.stringify({ action: 'status' }) })
+  assert(r.status !== 404, `railway_deploy not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'railway_deploy', `wrong tool_name`)
+})
+
+// ── 188. railway_env — exists ──
+await test('188. POST /api/tools/railway_env responds', async () => {
+  const r = await api('/api/tools/railway_env', { method: 'POST', body: JSON.stringify({ service: 'backend', action: 'get' }) })
+  assert(r.status !== 404, `railway_env not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'railway_env', `wrong tool_name`)
+})
+
+// ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped
 console.log(`  RESULTS: ${passed} passed, ${failed} failed, ${skipped} skipped / ${total} total`)

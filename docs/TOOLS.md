@@ -1,45 +1,149 @@
-# WidgeTDC Orchestrator — Tool Reference (32 tools)
+# WidgeTDC Orchestrator — Tool Reference (105 tools)
 
-**Auto-generated from tool-registry.ts** | **Version:** 3.2.0
+**Auto-generated from tool-registry.ts** | **Version:** 4.2.0
+
+## FR-3 Risk Metadata
+
+Every tool declares governance metadata per the Neural Bridge v2 specification:
+
+| Field | Values | Description |
+|-------|--------|-------------|
+| `riskLevel` | `read_only` / `staged_write` / `production_write` | Mutation risk classification |
+| `requiresPlan` | `true` / `false` | Whether HyperAgent plan is required |
+| `requiresApproval` | `true` / `false` | Whether approval gate is required |
+| `costTier` | `micro` / `standard` / `premium` | LLM cost classification |
+| `auditCategory` | string | Audit trail category for compliance |
+
+### Risk Rules
+- **read_only**: Direct execution allowed (default for most tools)
+- **staged_write**: HyperAgent plan + approval required
+- **production_write**: HyperAgent plan + approval + policy profile + audit required
+
+### Quick Summary
+
+| Risk Level | Count |
+|------------|-------|
+| read_only | *auto-computed* |
+| staged_write | *auto-computed* |
+| production_write | *auto-computed* |
+
+| Cost Tier | Count |
+|-----------|-------|
+| micro | *auto-computed* |
+| standard | *auto-computed* |
+| premium | *auto-computed* |
 
 ---
 
 ## Quick Reference
 
-| # | Tool | Namespace | Timeout | Description |
-|---|------|-----------|---------|-------------|
+| # | Tool | Namespace | Risk | Cost | Timeout | Description |
+|---|------|-----------|------|------|---------|-------------|
 | 1 | `search_knowledge` | knowledge | 20s | Search the WidgeTDC knowledge graph and semantic vector store |
 | 2 | `search_documents` | knowledge | 20s | Search for specific documents, files, reports, or artifacts |
 | 3 | `create_notebook` | knowledge | 60s | Create an interactive consulting notebook with executed cells |
 | 4 | `precedent_search` | knowledge | 30s | Find similar clients, engagements, or use cases |
 | 5 | `ingest_document` | knowledge | 60s | Ingest a document into the knowledge graph |
 | 6 | `adaptive_rag_query` | knowledge | 30s | Query using adaptive RAG routing (canonical RAG endpoint) |
-| 7 | `reason_deeply` | cognitive | 45s | Deep multi-step analysis via RLM reasoning engine |
-| 8 | `investigate` | cognitive | 120s | Multi-agent deep investigation on a topic |
-| 9 | `query_graph` | graph | 15s | Execute a Cypher query against the Neo4j knowledge graph |
-| 10 | `build_communities` | graph | 120s | Build hierarchical community summaries via Leiden detection |
-| 11 | `check_tasks` | linear | 10s | Get active tasks, issues, and project status |
-| 12 | `linear_issues` | linear | 15s | Get issues from Linear project management |
-| 13 | `linear_issue_detail` | linear | 15s | Get detailed info about a specific Linear issue |
-| 14 | `call_mcp_tool` | mcp | 30s | Call any of the 449+ MCP tools on the WidgeTDC backend |
-| 15 | `get_platform_health` | monitor | 10s | Get health status of all platform services |
-| 16 | `list_tools` | monitor | 5s | List all available orchestrator tools |
-| 17 | `adaptive_rag_dashboard` | monitor | 10s | Get Adaptive RAG dashboard with routing weights and stats |
-| 18 | `graph_hygiene_run` | monitor | 30s | Run graph health check with 6 metrics |
-| 19 | `run_chain` | chains | 60s | Execute a multi-step agent chain |
-| 20 | `run_evolution` | chains | 300s | Trigger one cycle of the autonomous OODA evolution loop |
-| 21 | `verify_output` | compliance | 30s | Run verification checks on content or data |
-| 22 | `governance_matrix` | compliance | 5s | Get the WidgeTDC Manifesto enforcement matrix |
-| 23 | `generate_deliverable` | assembly | 120s | Generate a consulting deliverable (report, roadmap, assessment) |
-| 24 | `adaptive_rag_retrain` | intelligence | 60s | Trigger retraining of adaptive RAG routing weights |
-| 25 | `adaptive_rag_reward` | intelligence | 10s | Send a Q-learning reward signal to update RAG routing |
-| 26 | `critique_refine` | intelligence | 120s | Constitutional AI generate→critique→revise pipeline |
-| 27 | `judge_response` | intelligence | 60s | Score a response on 5 PRISM dimensions |
-| 28 | `moa_query` | intelligence | 120s | Mixture-of-Agents routing with parallel dispatch and consensus |
-| 29 | `forge_tool` | intelligence | 60s | Forge a new MCP tool at runtime via LLM |
-| 30 | `forge_analyze_gaps` | intelligence | 30s | Analyze usage patterns to identify missing tools |
-| 31 | `forge_list` | intelligence | 5s | List all dynamically forged tools |
-| 32 | `run_osint_scan` | knowledge | 600s | Run OSINT scanning pipeline on Danish public sector domains |
+| 7 | `run_osint_scan` | knowledge | 600s | Run OSINT scanning pipeline on Danish public sector domains |
+| 8 | `reason_deeply` | cognitive | 45s | Deep multi-step analysis via RLM reasoning engine |
+| 9 | `investigate` | cognitive | 120s | Multi-agent deep investigation on a topic |
+| 10 | `context_fold` | cognitive | 30s | Compress large context via RLM /cognitive/fold |
+| 11 | `query_graph` | graph | 15s | Execute a Cypher query against the Neo4j knowledge graph |
+| 12 | `build_communities` | graph | 120s | Build hierarchical community summaries via Leiden detection |
+| 13 | `drill_start` | graph | 15s | Start hierarchical drill-down session (G4.15) |
+| 14 | `drill_down` | graph | 15s | Drill into child level in active session (G4.16) |
+| 15 | `drill_up` | graph | 15s | Navigate up one level in drill session (G4.17) |
+| 16 | `drill_children` | graph | 10s | Fetch children at current drill position (G4.18) |
+| 17 | `check_tasks` | linear | 10s | Get active tasks, issues, and project status |
+| 18 | `linear_issues` | linear | 15s | Get issues from Linear project management |
+| 19 | `linear_issue_detail` | linear | 15s | Get detailed info about a specific Linear issue |
+| 20 | `call_mcp_tool` | mcp | 30s | Call any of the 449+ MCP tools on the WidgeTDC backend |
+| 21 | `get_platform_health` | monitor | 10s | Get health status of all platform services |
+| 22 | `list_tools` | monitor | 5s | List all available orchestrator tools |
+| 23 | `adaptive_rag_dashboard` | monitor | 10s | Get Adaptive RAG dashboard with routing weights and stats |
+| 24 | `graph_hygiene_run` | monitor | 30s | Run graph health check with 6 metrics |
+| 25 | `run_chain` | chains | 60s | Execute a multi-step agent chain |
+| 26 | `run_evolution` | chains | 300s | Trigger one cycle of the autonomous OODA evolution loop |
+| 27 | `verify_output` | compliance | 30s | Run verification checks on content or data |
+| 28 | `governance_matrix` | compliance | 5s | Get the WidgeTDC Manifesto enforcement matrix |
+| 29 | `generate_deliverable` | assembly | 120s | Generate a consulting deliverable (report, roadmap, assessment) |
+| 30 | `artifact_list` | assembly | 10s | List AnalysisArtifact objects from the broker |
+| 31 | `artifact_get` | assembly | 5s | Retrieve a specific AnalysisArtifact by ID |
+| 32 | `adaptive_rag_retrain` | intelligence | 60s | Trigger retraining of adaptive RAG routing weights |
+| 33 | `adaptive_rag_reward` | intelligence | 10s | Send a Q-learning reward signal to update RAG routing |
+| 34 | `critique_refine` | intelligence | 120s | Constitutional AI generate→critique→revise pipeline |
+| 35 | `judge_response` | intelligence | 60s | Score a response on 5 PRISM dimensions |
+| 36 | `moa_query` | intelligence | 120s | Mixture-of-Agents routing with parallel dispatch and consensus |
+| 37 | `forge_tool` | intelligence | 60s | Forge a new MCP tool at runtime via LLM |
+| 38 | `forge_analyze_gaps` | intelligence | 30s | Analyze usage patterns to identify missing tools |
+| 39 | `forge_list` | intelligence | 5s | List all dynamically forged tools |
+| 40 | `failure_harvest` | intelligence | 30s | Harvest recent orchestrator failures for Red Queen learning |
+| 41 | `competitive_crawl` | intelligence | 180s | Trigger competitive phagocytosis crawl |
+| 42 | `loose_ends_scan` | intelligence | 60s | Scan synthesis funnel for loose ends |
+| 43 | `research_harvest` | intelligence | 180s | Trigger S1-S4 research harvesting pipeline |
+| 44 | `engagement_create` | engagement | 15s | Create a first-class Engagement entity |
+| 45 | `engagement_match` | engagement | 30s | Find similar past engagements via Cypher + RAG |
+| 46 | `engagement_plan` | engagement | 120s | Generate structured consulting plan via RLM |
+| 47 | `engagement_outcome` | engagement | 15s | Record engagement completion outcome |
+| 48 | `engagement_list` | engagement | 10s | List recent engagements from Redis + Neo4j |
+| 49 | `memory_store` | memory | 5s | Store an entry in agent working memory |
+| 50 | `memory_retrieve` | memory | 5s | Retrieve a specific memory entry or list all for agent |
+| 51 | `llm_chat` | llm | 60s | Direct LLM chat proxy supporting 6 providers |
+| 52 | `llm_providers` | llm | 5s | List available LLM providers with default models |
+| 53 | `decision_certify` | decisions | 30s | Certify an assembly as an architecture decision |
+| 54 | `decision_list` | decisions | 10s | List all certified decisions from Redis store |
+| 55 | `decision_lineage` | decisions | 20s | Build full lineage chain for a decision or assembly |
+| 56 | `hyperagent_auto_run` | hyperagent | 300s | Trigger autonomous execution cycle |
+| 57 | `hyperagent_auto_status` | hyperagent | 10s | Get autonomous executor status |
+| 58 | `hyperagent_auto_memory` | hyperagent | 15s | Read/write persistent cross-repo memory |
+| 59 | `hyperagent_auto_issues` | hyperagent | 10s | List issues discovered during autonomous execution |
+| 60 | `pheromone_status` | pheromone | 5s | Get pheromone layer status |
+| 61 | `pheromone_sense` | pheromone | 5s | Sense pheromones in a domain |
+| 62 | `pheromone_deposit` | pheromone | 5s | Deposit a pheromone signal |
+| 63 | `pheromone_heatmap` | pheromone | 5s | Get cross-domain pheromone heatmap |
+| 64 | `peer_eval_status` | peereval | 5s | Get fleet learning status |
+| 65 | `peer_eval_fleet` | peereval | 10s | Get fleet learning data for task types |
+| 66 | `peer_eval_evaluate` | peereval | 15s | Trigger manual peer evaluation |
+| 67 | `peer_eval_analyze` | peereval | 45s | Run RLM-powered fleet analysis |
+| 68 | `inventor_run` | inventor | 30s | Start or resume Inventor evolution experiment |
+| 69 | `inventor_status` | inventor | 5s | Get Inventor experiment status |
+| 70 | `inventor_nodes` | inventor | 5s | List Inventor trial nodes |
+| 71 | `inventor_node` | inventor | 5s | Get specific Inventor trial node by ID |
+| 72 | `inventor_best` | inventor | 5s | Get best-scoring Inventor trial node |
+| 73 | `inventor_stop` | inventor | 5s | Stop running Inventor experiment |
+| 74 | `inventor_history` | inventor | 5s | List Inventor experiment history |
+| 75 | `data_graph_read` | data | 15s | Execute a read-only Cypher query against Neo4j |
+| 76 | `data_graph_stats` | data | 10s | Get Neo4j graph statistics |
+| 77 | `data_redis_inspect` | data | 10s | Inspect Redis state for cache health monitoring |
+| 78 | `data_integrity_check` | data | 30s | Run data integrity checks |
+| 79 | `system_health` | system | 10s | Get health status of all platform services |
+| 80 | `system_service_status` | system | 10s | Get service status: uptime, version, resource usage |
+| 81 | `system_metrics_summary` | system | 10s | Get Prometheus metrics summary |
+| 82 | `system_logs_summary` | system | 15s | Get recent log summary for troubleshooting |
+| 83 | `agent_list` | agent | 10s | List all registered agents with status |
+| 84 | `agent_status` | agent | 10s | Get detailed status of a specific agent |
+| 85 | `agent_dispatch` | agent | 15s | Dispatch a task to an agent via peer evaluation |
+| 86 | `agent_memory` | agent | 10s | Get agent working memory summary |
+| 87 | `agent_capabilities` | agent | 10s | Get agent capabilities and workload |
+| 88 | `model_providers` | model | 10s | List available LLM providers with costs and capabilities |
+| 89 | `model_route` | model | 10s | Route a task to the optimal LLM |
+| 90 | `model_cost_estimate` | model | 5s | Estimate cost for a model call |
+| 91 | `model_budget_status` | model | 10s | Get current budget status |
+| 92 | `model_policy_check` | model | 5s | Check if a model call complies with cost governance |
+| 93 | `workflow_cost_trace` | model | 10s | Get cost trace for a workflow |
+| 94 | `workflow_context_compact` | model | 30s | Compact context before delegation |
+| 95 | `workflow_fanout_guard` | model | 5s | Check if workflow fan-out exceeds limits |
+| 96 | `workflow_premium_escalation_check` | model | 5s | Check if premium model escalation is justified |
+| 97 | `governance_plan_create` | governance | 30s | Create a governance plan for cross-domain operations |
+| 98 | `governance_plan_approve` | governance | 10s | Approve a pending governance plan |
+| 99 | `governance_plan_execute` | governance | 60s | Execute an approved governance plan |
+| 100 | `governance_plan_evaluate` | governance | 10s | Evaluate a completed governance plan |
+| 101 | `governance_audit_query` | governance | 15s | Query audit log for governance events |
+| 102 | `governance_policy_decide` | governance | 10s | Query or update governance policy |
+| 103 | `grafana_dashboard` | grafana | 15s | Query Grafana Cloud dashboards and panels |
+| 104 | `railway_deploy` | railway | 30s | Trigger Railway deployment or check status |
+| 105 | `railway_env` | railway | 15s | Get or set Railway environment variables |
 
 ---
 
@@ -970,17 +1074,31 @@ curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/call_
 
 | Namespace | Count | Category |
 |-----------|-------|----------|
+| model | 9 | LLM routing, cost governance, budget controls, workflow guards |
+| intelligence | 8 | Self-improvement, critique, MoA, tool forging, failure harvesting |
 | knowledge | 7 | Semantic + graph search, RAG, document ingestion, OSINT |
-| intelligence | 8 | Self-improvement, critique, MoA, tool forging |
+| governance | 6 | Approval gates, policy management, audit logging |
 | engagement | 5 | First-class consulting engagement entities (v4.0.4 LIN-607) |
+| agent | 5 | Agent coordination, dispatch, memory, capabilities |
+| system | 4 | Service health, metrics, logs, observability |
+| data | 4 | Governed data access: Cypher, stats, Redis, integrity |
 | monitor | 4 | Platform health, RAG dashboard, hygiene, tool listing |
+| inventor | 7 | Evolution experiments: run, status, nodes, history |
+| pheromone | 4 | Stigmergic communication: status, sense, deposit, heatmap |
+| peereval | 4 | Fleet learning: status, fleet data, evaluate, analyze |
+| hyperagent | 4 | Autonomous executor: run, status, memory, issues |
+| decisions | 3 | Architecture decisions: certify, list, lineage |
 | linear | 3 | Project tasks and issue tracking |
-| cognitive | 2 | Deep reasoning, multi-agent investigation |
-| graph | 2 | Cypher queries, community detection |
+| cognitive | 3 | Deep reasoning, investigation, context folding |
+| graph | 6 | Cypher queries, community detection, drill navigation (4) |
 | chains | 2 | Agent chain execution, evolution loop |
 | compliance | 2 | Output verification, governance matrix |
+| assembly | 3 | Consulting deliverable generation, artifact list/get |
 | mcp | 1 | Dynamic MCP tool proxy (449+ backend tools) |
-| assembly | 1 | Consulting deliverable generation |
+| memory | 2 | Agent working memory: store, retrieve |
+| llm | 2 | LLM chat proxy, provider listing |
+| grafana | 1 | Grafana Cloud dashboard queries |
+| railway | 2 | Railway deployment and environment management |
 
 ---
 
@@ -1332,6 +1450,783 @@ Stop a running Inventor evolution experiment. Returns success status and confirm
 List evolution experiment history from the current or last session. Sortable and paginated results.
 
 **Optional:** `limit` (max results, default 50)
+
+---
+
+## Neural Bridge v2 — Governed Control Plane (LIN-620)
+
+31 tools across 7 new domains providing governed data access, system observability, agent coordination, model cost governance, workflow controls, governance approval gates, Grafana observability, and Railway deployment. Read-only by default. Writes require HyperAgent plan + approval.
+
+### data — Governed Data Access (4 tools)
+
+---
+
+#### `data_graph_read`
+
+**Description:** Execute a read-only Cypher query against Neo4j. Use for structured data queries, counting nodes, finding relationships, listing entities. No mutations allowed.
+
+**Timeout:** 15,000 ms
+**Handler:** mcp-proxy → `graph.read_cypher`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `cypher` | string | yes | Neo4j Cypher query (read-only, parameterized) |
+| `params` | object | no | Query parameters |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/data_graph_read \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"cypher": "MATCH (c:Client)-[:HAS_DOMAIN]->(d:Domain) WHERE d.name = $domain RETURN c.name LIMIT 10", "params": {"domain": "telecom"}}'
+```
+
+---
+
+#### `data_graph_stats`
+
+**Description:** Get Neo4j graph statistics: node counts by label, relationship counts, domain distribution. Use for data health monitoring.
+
+**Timeout:** 10,000 ms
+**Handler:** mcp-proxy → `graph.stats`
+
+**Input Parameters:** None
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/data_graph_stats \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+---
+
+#### `data_redis_inspect`
+
+**Description:** Inspect Redis state: key count, memory usage, connected clients. Use for cache health monitoring. No writes, no flush, no delete.
+
+**Timeout:** 10,000 ms
+**Handler:** mcp-proxy → `redis.inspect`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `key_pattern` | string | no | Key pattern to inspect (default: * for count only) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/data_redis_inspect \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"key_pattern": "agent:*"}'
+```
+
+---
+
+#### `data_integrity_check`
+
+**Description:** Run data integrity checks: orphaned nodes, stale relationships, schema violations, embedding coverage. Use for data quality monitoring.
+
+**Timeout:** 30,000 ms
+**Handler:** mcp-proxy → `graph.hintegrity_run`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `domain` | string | no | Domain to check (default: all) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/data_integrity_check \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"domain": "telecom"}'
+```
+
+---
+
+### system — Service Health, Metrics, Logs (4 tools)
+
+---
+
+#### `system_health`
+
+**Description:** Get current health status of all platform services: backend, orchestrator, RLM engine, Neo4j, Redis. Use for system status checks.
+
+**Timeout:** 10,000 ms
+**Handler:** mcp-proxy → `graph.health + graph.stats`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `service` | enum | no | Target service: all, backend, orchestrator, rlm, neo4j, redis (default: all) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/system_health \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"service": "all"}'
+```
+
+---
+
+#### `system_service_status`
+
+**Description:** Get service status: uptime, version, resource usage, connection counts. Use for operational monitoring.
+
+**Timeout:** 10,000 ms
+**Handler:** mcp-proxy → `graph.health`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `service` | string | yes | Service name (backend, orchestrator, rlm, neo4j, redis) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/system_service_status \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"service": "neo4j"}'
+```
+
+---
+
+#### `system_metrics_summary`
+
+**Description:** Get Prometheus metrics summary: health status, uptime, agents, pheromones, peer evals, circuit breakers, rate limits. Use for observability queries.
+
+**Timeout:** 10,000 ms
+**Handler:** mcp-proxy → `graph.health`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `metric_group` | enum | no | Metric group: all, health, agents, pheromones, peer_eval, circuit_breaker, rate_limit (default: all) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/system_metrics_summary \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"metric_group": "agents"}'
+```
+
+---
+
+#### `system_logs_summary`
+
+**Description:** Get recent log summary: error counts, warning patterns, service restarts. Use for operational troubleshooting.
+
+**Timeout:** 15,000 ms
+**Handler:** mcp-proxy → `failure_harvest`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `service` | string | no | Target service (default: all) |
+| `window_hours` | number | no | Time window in hours (default: 1) |
+| `level` | enum | no | Log level: error, warn, info (default: error) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/system_logs_summary \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"level": "warn", "window_hours": 2}'
+```
+
+---
+
+### agent — Agent Coordination and Dispatch (5 tools)
+
+---
+
+#### `agent_list`
+
+**Description:** List all registered agents with their status, capabilities, and last seen timestamp. Use for agent fleet overview.
+
+**Timeout:** 10,000 ms
+**Handler:** mcp-proxy → `graph.read_cypher`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `status` | enum | no | Filter by status: all, online, offline, busy (default: all) |
+| `namespace` | string | no | Filter by tool namespace |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/agent_list \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "online"}'
+```
+
+---
+
+#### `agent_status`
+
+**Description:** Get detailed status of a specific agent: capabilities, active tasks, error history, trust score. Use for agent health checks.
+
+**Timeout:** 10,000 ms
+**Handler:** mcp-proxy → `graph.read_cypher`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `agent_id` | string | yes | Agent identifier |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/agent_status \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id": "qwen"}'
+```
+
+---
+
+#### `agent_dispatch`
+
+**Description:** Dispatch a task to an agent via peer evaluation. Use for agent work assignment. Requires task type, agent ID, and context. Creates a peer eval entry.
+
+**Timeout:** 15,000 ms
+**Handler:** mcp-proxy → `peer_eval_evaluate`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `agent_id` | string | yes | Target agent identifier |
+| `task_id` | string | yes | Task identifier |
+| `task_type` | string | yes | Task type for peer evaluation tracking |
+| `context` | string | yes | Task context and instructions |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/agent_dispatch \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id": "compliance-officer", "task_id": "task-001", "task_type": "compliance_review", "context": "Review EU AI Act exposure for telecom client"}'
+```
+
+---
+
+#### `agent_memory`
+
+**Description:** Get agent working memory summary: stored keys, memory usage, TTL status. Use for agent state inspection.
+
+**Timeout:** 10,000 ms
+**Handler:** mcp-proxy → `memory_retrieve`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `agent_id` | string | yes | Agent identifier |
+| `key` | string | no | Specific memory key (default: list all) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/agent_memory \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id": "qwen"}'
+```
+
+---
+
+#### `agent_capabilities`
+
+**Description:** Get agent capabilities: registered tool namespaces, allowed tools, current workload. Use for agent routing decisions.
+
+**Timeout:** 10,000 ms
+**Handler:** mcp-proxy → `graph.read_cypher`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `agent_id` | string | yes | Agent identifier |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/agent_capabilities \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id": "compliance-officer"}'
+```
+
+---
+
+### model — LLM Routing, Cost Governance, Budget Controls (9 tools)
+
+---
+
+#### `model_providers`
+
+**Description:** List available LLM providers: models, costs, capabilities, rate limits. Use for model selection and routing decisions.
+
+**Timeout:** 10,000 ms
+**Handler:** mcp-proxy → `llm_providers`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `provider` | string | no | Filter by provider name |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/model_providers \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "deepseek"}'
+```
+
+---
+
+#### `model_route`
+
+**Description:** Route a task to the optimal LLM based on LLM Matrix: cost, capability, availability. Returns cheapest-first chain. Use for cost-aware model selection.
+
+**Timeout:** 10,000 ms
+**Handler:** mcp-proxy → `llm_providers`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_type` | string | yes | Task type for routing (e.g., code_generation, reasoning, folding) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/model_route \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"task_type": "reasoning"}'
+```
+
+---
+
+#### `model_cost_estimate`
+
+**Description:** Estimate cost for a model call: tokens, price per 1K tokens, total cost in DKK. Use for cost governance before executing expensive calls.
+
+**Timeout:** 5,000 ms
+**Handler:** mcp-proxy → `llm_providers`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `provider` | string | yes | LLM provider (deepseek, qwen, gemini, claude, openai) |
+| `model` | string | yes | Model name |
+| `estimated_tokens` | number | yes | Estimated input + output tokens |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/model_cost_estimate \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "deepseek", "model": "deepseek-chat", "estimated_tokens": 8000}'
+```
+
+---
+
+#### `model_budget_status`
+
+**Description:** Get current budget status: tokens consumed, cost incurred, remaining budget, rate limit status. Use for cost monitoring.
+
+**Timeout:** 10,000 ms
+**Handler:** mcp-proxy → `graph.health`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `service` | string | no | Target service (default: all) |
+| `window_hours` | number | no | Time window in hours (default: 24) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/model_budget_status \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"window_hours": 48}'
+```
+
+---
+
+#### `model_policy_check`
+
+**Description:** Check if a model call complies with cost governance policy: Claude escalation rules, premium model limits, budget caps. Use before expensive calls.
+
+**Timeout:** 5,000 ms
+**Handler:** mcp-proxy → `llm_providers`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `provider` | string | yes | LLM provider |
+| `model` | string | yes | Model name |
+| `is_escalation` | boolean | no | Whether this is an escalation call (default: false) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/model_policy_check \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "claude", "model": "claude-sonnet-4-20250514", "is_escalation": true}'
+```
+
+---
+
+#### `workflow_cost_trace`
+
+**Description:** Get cost trace for a workflow: token usage per step, model calls, total cost, budget remaining. Use for workflow cost auditing.
+
+**Timeout:** 10,000 ms
+**Handler:** mcp-proxy → `graph.read_cypher`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `chain_id` | string | no | Chain/workflow identifier |
+| `window_hours` | number | no | Time window in hours (default: 1) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/workflow_cost_trace \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"chain_id": "compliance-chain-001"}'
+```
+
+---
+
+#### `workflow_context_compact`
+
+**Description:** Compact context before delegation: reduce token count, remove redundancy, preserve key information. Use before expensive model calls to save cost.
+
+**Timeout:** 30,000 ms
+**Handler:** mcp-proxy → `context_fold`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `context` | string | yes | Context to compact |
+| `target_tokens` | number | no | Target token count (default: 4000) |
+| `domain` | string | no | Domain for attention-focused folding |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/workflow_context_compact \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"context": "Full regulatory document with 50 pages...", "target_tokens": 2000}'
+```
+
+---
+
+#### `workflow_fanout_guard`
+
+**Description:** Check if a workflow fan-out exceeds limits: max parallel steps, max agents, max premium model calls. Use before executing parallel chains.
+
+**Timeout:** 5,000 ms
+**Handler:** mcp-proxy → `graph.read_cypher`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `parallel_steps` | number | yes | Number of parallel steps |
+| `agents` | array of string | no | Agent list for fan-out |
+| `premium_calls` | number | no | Number of premium model calls |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/workflow_fanout_guard \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"parallel_steps": 5, "agents": ["qwen", "claude", "gemini"], "premium_calls": 2}'
+```
+
+---
+
+#### `workflow_premium_escalation_check`
+
+**Description:** Check if a Claude/premium model escalation is justified: task complexity, previous failures, cost budget, policy compliance. Use before premium calls.
+
+**Timeout:** 5,000 ms
+**Handler:** mcp-proxy → `llm_providers`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `provider` | string | yes | Premium provider (claude, openai) |
+| `task` | string | yes | Task description |
+| `prior_failures` | number | no | Number of prior failures with cheaper models |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/workflow_premium_escalation_check \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "claude", "task": "Complex regulatory analysis", "prior_failures": 2}'
+```
+
+---
+
+### governance — Approval Gates, Policy, Audit (6 tools)
+
+---
+
+#### `governance_plan_create`
+
+**Description:** Create a governance plan for a cross-domain or write-capable operation. Requires description, scope, risk assessment. Returns plan ID for approval.
+
+**Timeout:** 30,000 ms
+**Handler:** mcp-proxy → `hyperagent_auto_run`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `description` | string | yes | Plan description |
+| `scope` | enum | yes | Risk scope: read_only, staged_write, production_write |
+| `target_service` | string | yes | Target service |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/governance_plan_create \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"description": "Update Neo4j schema for new compliance framework", "scope": "staged_write", "target_service": "neo4j"}'
+```
+
+---
+
+#### `governance_plan_approve`
+
+**Description:** Approve a pending governance plan. Requires plan ID and approver identity. Use for approval gate enforcement.
+
+**Timeout:** 10,000 ms
+**Handler:** mcp-proxy → `hyperagent_auto_memory`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `plan_id` | string | yes | Plan identifier |
+| `approver` | string | yes | Approver identity |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/governance_plan_approve \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"plan_id": "plan-001", "approver": "qwen"}'
+```
+
+---
+
+#### `governance_plan_execute`
+
+**Description:** Execute an approved governance plan. Triggers the planned operation with policy profile enforcement. Use after approval gate.
+
+**Timeout:** 60,000 ms
+**Handler:** mcp-proxy → `hyperagent_auto_run`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `plan_id` | string | yes | Approved plan identifier |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/governance_plan_execute \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"plan_id": "plan-001"}'
+```
+
+---
+
+#### `governance_plan_evaluate`
+
+**Description:** Evaluate a completed governance plan: success, failure, KPI impact, lessons learned. Use for post-execution review.
+
+**Timeout:** 10,000 ms
+**Handler:** mcp-proxy → `hyperagent_auto_memory`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `plan_id` | string | yes | Completed plan identifier |
+| `outcome` | enum | yes | Execution outcome: success, partial, failed |
+| `kpi_impact` | number | no | KPI impact score (-1 to 1) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/governance_plan_evaluate \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"plan_id": "plan-001", "outcome": "success", "kpi_impact": 0.3}'
+```
+
+---
+
+#### `governance_audit_query`
+
+**Description:** Query audit log for governance events: plan approvals, write operations, policy violations, deployment changes. Use for compliance auditing.
+
+**Timeout:** 15,000 ms
+**Handler:** mcp-proxy → `failure_harvest`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `event_type` | enum | no | Filter by event type: plan_approved, write_operation, policy_violation, deployment |
+| `window_hours` | number | no | Time window in hours (default: 24) |
+| `limit` | number | no | Max results (default: 50) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/governance_audit_query \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"event_type": "plan_approved", "window_hours": 48}'
+```
+
+---
+
+#### `governance_policy_decide`
+
+**Description:** Query or update governance policy: tool risk classes, allowed providers, cost limits, approval thresholds. Use for policy management.
+
+**Timeout:** 10,000 ms
+**Handler:** mcp-proxy → `graph.read_cypher`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `action` | enum | yes | Action: get current policy or update |
+| `policy_key` | string | yes | Policy key (e.g., max_tokens, claude_escalation_allowed) |
+| `policy_value` | any | no | New policy value (for update action) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/governance_policy_decide \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"action": "get", "policy_key": "max_tokens"}'
+```
+
+---
+
+### grafana — Observability (1 tool)
+
+---
+
+#### `grafana_dashboard`
+
+**Description:** Query Grafana Cloud dashboards and panels. Use for platform observability, metrics visualization, and alert status.
+
+**Timeout:** 15,000 ms
+**Handler:** mcp-proxy → `grafana.dashboard`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `dashboard_uid` | string | no | Dashboard UID (default: widgetdc-platform-monitor) |
+| `panel_id` | number | no | Specific panel ID |
+| `from` | string | no | Time range from (default: now-6h) |
+| `to` | string | no | Time range to (default: now) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/grafana_dashboard \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"dashboard_uid": "widgetdc-platform-monitor", "from": "now-24h"}'
+```
+
+---
+
+### railway — Deployment & Infrastructure (2 tools)
+
+---
+
+#### `railway_deploy`
+
+**Description:** Trigger a Railway deployment or check deployment status. Use for deploy verification, health checks, and service restarts.
+
+**Timeout:** 30,000 ms
+**Handler:** mcp-proxy → `railway.deploy`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `service` | enum | no | Target service: backend, orchestrator, rlm-engine (default: current) |
+| `action` | enum | no | Action to perform: deploy, status, restart, logs (default: status) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/railway_deploy \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"service": "orchestrator", "action": "status"}'
+```
+
+---
+
+#### `railway_env`
+
+**Description:** Get or set Railway environment variables for any service. Use for configuration changes, API key updates, and feature flags.
+
+**Timeout:** 15,000 ms
+**Handler:** mcp-proxy → `railway.env`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `service` | string | yes | Target service name |
+| `action` | enum | yes | Action: get, set, or list env vars |
+| `key` | string | no | Variable key (for get/set) |
+| `value` | string | no | Variable value (for set) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/railway_env \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"service": "orchestrator", "action": "get", "key": "NEO4J_URI"}'
+```
 
 ---
 

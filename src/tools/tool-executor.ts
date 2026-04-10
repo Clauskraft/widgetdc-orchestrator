@@ -20,6 +20,48 @@ import { v4 as uuid } from 'uuid'
 import { getRedis } from '../redis.js'
 import { toOpenAITools, getTool } from './tool-registry.js'
 
+// ─── FR-4 HyperAgent Enforcement Gate ──────────────────────────────────────
+
+/**
+ * Check whether a tool call requires HyperAgent plan approval.
+ * Returns an error string if direct execution is blocked, or null if allowed.
+ */
+export async function enforceHyperAgentGate(
+  toolName: string,
+  opts?: { planId?: string },
+): Promise<string | null> {
+  const toolDef = getTool(toolName)
+  if (!toolDef) return null // unknown tool — no gating
+
+  // read_only tools execute directly — no gating needed
+  if (toolDef.riskLevel === 'read_only') return null
+
+  // staged_write or production_write require HyperAgent plan
+  const requiresPlan = toolDef.riskLevel === 'staged_write'
+    || toolDef.riskLevel === 'production_write'
+    || toolDef.requiresPlan === true
+    || toolDef.requiresApproval === true
+
+  if (!requiresPlan) return null
+
+  // If no plan_id provided, reject
+  if (!opts?.planId) {
+    return `Direct execution blocked: ${toolName} (risk=${toolDef.riskLevel}) requires HyperAgent plan. Create plan via governance_plan_create, approve it, then execute.`
+  }
+
+  // Validate plan exists and is approved
+  const { getPlan } = await import('../hyperagent/hyperagent.js')
+  const plan = getPlan(opts.planId)
+  if (!plan) {
+    return `Direct execution blocked: plan ${opts.planId} not found. Create and approve a plan first.`
+  }
+  if (plan.status !== 'approved' && plan.approvalStatus !== 'approved') {
+    return `Direct execution blocked: plan ${opts.planId} is ${plan.approvalStatus || plan.status}, not approved.`
+  }
+
+  return null // gate passed
+}
+
 // ─── OpenAI-format tool definitions (compiled from canonical registry) ──────
 
 export const ORCHESTRATOR_TOOLS = toOpenAITools()
@@ -2014,58 +2056,247 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     // ─── model.* ─────────────────────────────────────────────────────
 
-    case 'model_providers':
-    case 'model_route':
-    case 'model_cost_estimate':
-    case 'model_policy_check': {
-      const { callMcpTool: callMcp } = await import('../mcp-caller.js')
-      const result = await callMcp({ toolName: 'llm_providers', args: { provider: input?.provider }, callId: `model-${toolName}-${Date.now()}` })
-      return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+    case 'model_providers': {
+      const { listProviders } = await import('../llm/llm-proxy.js')
+      return JSON.stringify(listProviders(), null, 2)
+    }
+
+    case 'model_route': {
+      const { LlmMatrix } = await import('@widgetdc/contracts/llm')
+      const taskType = input?.task_type ?? 'chat_standard'
+      const chain = LlmMatrix.resolve(taskType as any)
+      return JSON.stringify({ task: taskType, models: chain.models, source: chain.source }, null, 2)
+    }
+
+    case 'model_cost_estimate': {
+      const { estimateModelCost } = await import('../llm/cost-governance.js')
+      const provider = String(args.provider ?? '')
+      const model = String(args.model ?? '')
+      const estimatedTokens = Number(args.estimated_tokens ?? 0)
+      if (!provider || !model || estimatedTokens <= 0) {
+        return 'Error: provider, model, and estimated_tokens are required'
+      }
+      const estimate = estimateModelCost(provider, model, estimatedTokens)
+      return JSON.stringify(estimate, null, 2)
     }
 
     case 'model_budget_status': {
-      const { callMcpTool: callMcp } = await import('../mcp-caller.js')
-      const result = await callMcp({ toolName: 'get_platform_health', args: {}, callId: `model-budget-${Date.now()}` })
-      return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+      const { getAggregateWorkflowCosts } = await import('../llm/cost-governance.js')
+      const windowHours = Number(args.window_hours ?? 24)
+      const aggregate = await getAggregateWorkflowCosts(windowHours)
+      return JSON.stringify({
+        window_hours: windowHours,
+        total_cost_dkk: aggregate.totalCostDKK,
+        total_workflows: aggregate.totalWorkflows,
+        total_model_calls: aggregate.totalModelCalls,
+      }, null, 2)
+    }
+
+    case 'model_policy_check': {
+      const { checkModelPolicy } = await import('../llm/cost-governance.js')
+      const provider = String(args.provider ?? '')
+      const model = String(args.model ?? '')
+      const isEscalation = Boolean(args.is_escalation)
+      if (!provider || !model) return 'Error: provider and model are required'
+      const result = await checkModelPolicy(provider, model, { isEscalation })
+      return JSON.stringify(result, null, 2)
     }
 
     // ─── workflow.* ──────────────────────────────────────────────────
 
-    case 'workflow_cost_trace':
-    case 'workflow_fanout_guard': {
-      const { callMcpTool: callMcp } = await import('../mcp-caller.js')
-      const result = await callMcp({ toolName: 'graph.read_cypher', args: { query: 'MATCH (c:ChainExecution) WHERE c.startedAt > datetime() - duration("PT' + (input?.window_hours ?? 1) + 'H") RETURN count(c) as count, avg(c.durationMs) as avgDuration' }, callId: `workflow-${toolName}-${Date.now()}` })
-      return typeof result === 'string' ? result : JSON.stringify((result as any)?.results ?? result, null, 2)
+    case 'workflow_cost_trace': {
+      const { getWorkflowCostTrace, getAggregateWorkflowCosts } = await import('../llm/cost-governance.js')
+      const chainId = args.chain_id
+      const windowHours = Number(args.window_hours ?? 1)
+
+      if (chainId) {
+        const trace = await getWorkflowCostTrace(String(chainId))
+        if (!trace) return `No cost trace found for workflow '${chainId}' (24h TTL may have expired)`
+        return JSON.stringify(trace, null, 2)
+      }
+
+      // No chain_id — return aggregate
+      const aggregate = await getAggregateWorkflowCosts(windowHours)
+      return JSON.stringify({ aggregate, workflows: aggregate.workflows.slice(0, 10) }, null, 2)
     }
 
     case 'workflow_context_compact': {
-      const { callMcpTool: callMcp } = await import('../mcp-caller.js')
-      const result = await callMcp({ toolName: 'context_fold', args: { text: input?.context, budget: input?.target_tokens ?? 4000, domain: input?.domain }, callId: `workflow-compact-${Date.now()}` })
-      return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+      const { compactContext, shouldCompactContext } = await import('../llm/cost-governance.js')
+      const context = String(args.context ?? '')
+      if (!context) return 'Error: context is required'
+
+      const check = shouldCompactContext(context)
+      if (!check.needsCompaction) {
+        return JSON.stringify({
+          needs_compaction: false,
+          estimated_tokens: check.estimatedTokens,
+          threshold: 8000,
+          message: 'Context within threshold — no compaction needed',
+        }, null, 2)
+      }
+
+      const result = await compactContext(context, Number(args.target_tokens ?? 4000), undefined, args.domain as string | undefined)
+      if (!result) {
+        return JSON.stringify({
+          needs_compaction: true,
+          original_tokens: check.estimatedTokens,
+          compaction_failed: true,
+          message: 'Compaction attempted but failed — returning original context',
+        }, null, 2)
+      }
+
+      return JSON.stringify({
+        needs_compaction: true,
+        original_tokens: result.originalTokens,
+        compacted_tokens: result.compactedTokens,
+        compaction_ratio: result.ratio,
+        compacted: result.compacted,
+      }, null, 2)
+    }
+
+    case 'workflow_fanout_guard': {
+      const { enforceMaxFanOut } = await import('../llm/cost-governance.js')
+      const parallelSteps = Number(args['parallel-steps'] ?? args.parallel_steps ?? 0)
+      const agents = Array.isArray(args.agents) ? args.agents as string[] : undefined
+      const premiumCalls = Number(args['premium-calls'] ?? args.premium_calls ?? 0)
+
+      if (parallelSteps <= 0) return 'Error: parallel_steps is required and must be > 0'
+
+      const check = enforceMaxFanOut(parallelSteps, 'parallel', agents)
+      return JSON.stringify({
+        ...check,
+        premium_calls: premiumCalls,
+        premium_calls_within_budget: premiumCalls <= 2, // Max 2 premium calls per fan-out
+        recommendation: check.allowed ? 'Fan-out within limits' : 'Reduce parallel steps or agents',
+      }, null, 2)
     }
 
     case 'workflow_premium_escalation_check': {
-      const provider = input?.provider ?? ''
-      const isPremium = provider.toLowerCase().includes('claude') || provider.toLowerCase().includes('openai')
-      const priorFailures = input?.prior_failures ?? 0
-      const justified = isPremium && priorFailures >= 2
-      return JSON.stringify({ provider, isPremium, priorFailures, justified, recommendation: justified ? 'Escalation justified' : 'Use cheaper models first' }, null, 2)
+      const { isClaudeEscalationAllowed } = await import('../llm/cost-governance.js')
+      const provider = String(args.provider ?? '')
+      const task = String(args.task ?? '')
+      const priorFailures = Number(args.prior_failures ?? 0)
+
+      if (!provider || !task) {
+        return JSON.stringify({
+          provider,
+          task,
+          allowed: false,
+          reason: 'provider and task are both required',
+        }, null, 2)
+      }
+
+      const result = await isClaudeEscalationAllowed(provider, task, { priorFailures })
+      return JSON.stringify({
+        provider,
+        task,
+        allowed: result.allowed,
+        reason: result.reason,
+        prior_failures: result.priorFailures,
+        requires_premium_flag: result.requiresPremiumFlag,
+        recommendation: result.allowed ? 'Escalation approved — proceed with premium model' : 'Use cheaper models or retry with more failures',
+      }, null, 2)
     }
 
-    // ─── governance.* ────────────────────────────────────────────────
+    // ─── governance.* — HyperAgent-governed approval gates ─────────────────
 
-    case 'governance_plan_create':
+    case 'governance_plan_create': {
+      const { createPlan } = await import('../hyperagent/hyperagent.js')
+      const description = String(input?.description ?? '')
+      const scope = String(input?.scope ?? 'staged_write')
+      const targetService = String(input?.target_service ?? '')
+
+      if (!description) throw new Error('description is required')
+      if (!['read_only', 'staged_write', 'production_write'].includes(scope)) {
+        throw new Error('scope must be read_only, staged_write, or production_write')
+      }
+
+      // Build HyperAgent plan with governance metadata
+      const sessionId = `gov-${uuid().slice(0, 8)}`
+      const plan = await createPlan(description, sessionId, scope, {
+        targetServices: targetService ? [targetService] : [],
+        successMetrics: `Plan approved and executed under ${scope} profile`,
+        premiumAllowed: scope === 'production_write',
+        maxAgentFanout: scope === 'production_write' ? 1 : 3,
+        maxRecursionDepth: scope === 'production_write' ? 1 : 2,
+      })
+
+      return JSON.stringify({
+        plan_id: plan.planId,
+        status: plan.status,
+        risk_level: plan.riskLevel,
+        budget_lane: plan.budgetLane,
+        target_services: plan.targetServices,
+        approval_status: plan.approvalStatus,
+        requires_approval: plan.profile.requiresApproval,
+        created_at: plan.createdAt,
+        steps_count: plan.steps.length,
+      }, null, 2)
+    }
+
+    case 'governance_plan_approve': {
+      const { approvePlan } = await import('../hyperagent/hyperagent.js')
+      const planId = String(input?.plan_id ?? '')
+      const approver = String(input?.approver ?? '')
+      if (!planId) throw new Error('plan_id is required')
+      if (!approver) throw new Error('approver is required')
+
+      const approval = await approvePlan(planId, approver)
+      return JSON.stringify({
+        plan_id: approval.planId,
+        approved_by: approval.approvedBy,
+        approved_at: approval.approvedAt,
+        expires_at: approval.expiresAt,
+        scope: approval.scope,
+      }, null, 2)
+    }
+
     case 'governance_plan_execute': {
-      const { callMcpTool: callMcp } = await import('../mcp-caller.js')
-      const result = await callMcp({ toolName: 'hyperagent_auto_run', args: { max_targets: 1 }, callId: `governance-${toolName}-${Date.now()}` })
-      return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+      const { executePlan, getPlan } = await import('../hyperagent/hyperagent.js')
+      const planId = String(input?.plan_id ?? '')
+      if (!planId) throw new Error('plan_id is required')
+
+      // Verify plan exists and is approved before execution
+      const plan = getPlan(planId)
+      if (!plan) throw new Error(`Plan ${planId} not found`)
+      if (plan.status !== 'approved' && plan.approvalStatus !== 'approved') {
+        throw new Error(`Plan ${planId} is ${plan.approvalStatus || plan.status}, not approved. Must approve before execution.`)
+      }
+
+      const execution = await executePlan(planId)
+      return JSON.stringify({
+        plan_id: planId,
+        execution_id: execution.execution_id,
+        status: execution.status,
+        steps_completed: execution.steps_completed,
+        steps_total: execution.steps_total,
+        duration_ms: execution.duration_ms,
+      }, null, 2)
     }
 
-    case 'governance_plan_approve':
     case 'governance_plan_evaluate': {
-      const { callMcpTool: callMcp } = await import('../mcp-caller.js')
-      const result = await callMcp({ toolName: 'hyperagent_auto_memory', args: { action: 'write', key: input?.plan_id, value: JSON.stringify(input) }, callId: `governance-${toolName}-${Date.now()}` })
-      return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+      const { evaluatePlan, getPlan } = await import('../hyperagent/hyperagent.js')
+      const planId = String(input?.plan_id ?? '')
+      const outcome = String(input?.outcome ?? 'partial')
+      const kpiImpact = typeof input?.kpi_impact === 'number' ? input.kpi_impact : 0
+
+      if (!planId) throw new Error('plan_id is required')
+
+      // Map outcome to score
+      const scoreMap: Record<string, number> = { success: 90, partial: 60, failed: 20 }
+      const score = scoreMap[outcome] ?? 50
+
+      const plan = getPlan(planId)
+      const kpi = await evaluatePlan(`eval-${uuid().slice(0, 8)}`, planId, score, 'governance')
+
+      return JSON.stringify({
+        plan_id: planId,
+        outcome,
+        kpi_impact: kpiImpact,
+        score: kpi.score,
+        evaluated_at: new Date().toISOString(),
+        success: outcome === 'success',
+      }, null, 2)
     }
 
     case 'governance_audit_query': {

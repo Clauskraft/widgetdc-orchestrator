@@ -50,6 +50,17 @@ export interface HyperPlan {
   chainDef: ChainDefinition
   createdAt: string
   status: 'pending_approval' | 'approved' | 'executing' | 'completed' | 'failed'
+  // FR-4 governance fields (Neural Bridge v2)
+  riskLevel: 'read_only' | 'staged_write' | 'production_write'
+  budgetLane: 'micro' | 'standard' | 'deep'
+  targetServices: string[]
+  successMetrics: string
+  premiumAllowed: boolean
+  maxAgentFanout: number
+  maxRecursionDepth: number
+  approvalStatus: 'pending' | 'approved' | 'rejected' | 'executed' | 'evaluated'
+  approvedBy: string | null
+  evaluatedAt: string | null
 }
 
 export interface Approval {
@@ -69,6 +80,33 @@ export interface KpiSnapshot {
   stepsCompleted: number
   stepsTotal: number
   durationMs: number
+}
+
+// ─── Plan Lifecycle Events (FR-4) ─────────────────────────────────────────
+
+export type PlanLifecycleEvent =
+  | { event: 'plan.created'; planId: string; riskLevel: string; createdAt: string }
+  | { event: 'plan.approved'; planId: string; approvedBy: string; approvedAt: string }
+  | { event: 'plan.executed'; planId: string; durationMs: number; status: string }
+  | { event: 'plan.evaluated'; planId: string; kpiImpact: number; success: boolean }
+
+type PlanEventSubscriber = (event: PlanLifecycleEvent) => void
+
+const planEventSubscribers = new Set<PlanEventSubscriber>()
+
+export function onPlanEvent(fn: PlanEventSubscriber): () => void {
+  planEventSubscribers.add(fn)
+  return () => { planEventSubscribers.delete(fn) }
+}
+
+function emitPlanEvent(event: PlanLifecycleEvent): void {
+  for (const fn of planEventSubscribers) {
+    try { fn(event) } catch (err) {
+      logger.warn({ err, event: event.event }, 'HyperAgent: event subscriber failed')
+    }
+  }
+  // Also log for observability
+  logger.info(event, `HyperAgent: plan lifecycle event — ${event.event}`)
 }
 
 // ─── Policy Profiles ────────────────────────────────────────────────────────
@@ -235,6 +273,13 @@ export async function createPlan(
   goal: string,
   sessionId: string,
   profileId: string = 'read_only',
+  opts?: {
+    targetServices?: string[]
+    successMetrics?: string
+    premiumAllowed?: boolean
+    maxAgentFanout?: number
+    maxRecursionDepth?: number
+  },
 ): Promise<HyperPlan> {
   // Circuit breaker: reject if session has too many consecutive failures (RLM insight)
   if (isSessionCircuitOpen(sessionId)) {
@@ -318,6 +363,8 @@ export async function createPlan(
     steps,
   }
 
+  const budgetLane = profile.maxSteps <= 10 ? 'micro' : profile.maxSteps <= 25 ? 'standard' : 'deep'
+
   const plan: HyperPlan = {
     planId,
     sessionId,
@@ -327,10 +374,29 @@ export async function createPlan(
     chainDef,
     createdAt: new Date().toISOString(),
     status: profile.requiresApproval ? 'pending_approval' : 'approved',
+    // FR-4 governance fields
+    riskLevel: profile.mode,
+    budgetLane,
+    targetServices: opts?.targetServices ?? [],
+    successMetrics: opts?.successMetrics ?? '',
+    premiumAllowed: opts?.premiumAllowed ?? profile.allowedProviders.includes('anthropic'),
+    maxAgentFanout: opts?.maxAgentFanout ?? (profile.mode === 'production_write' ? 1 : 3),
+    maxRecursionDepth: opts?.maxRecursionDepth ?? (profile.mode === 'production_write' ? 1 : 3),
+    approvalStatus: profile.requiresApproval ? 'pending' : 'approved',
+    approvedBy: null,
+    evaluatedAt: null,
   }
 
   persistPlan(plan)
   logger.info({ planId, goal, profile: profile.id, steps: steps.length }, 'HyperAgent: plan created')
+
+  // FR-4: emit plan.created event
+  emitPlanEvent({
+    event: 'plan.created',
+    planId,
+    riskLevel: profile.mode,
+    createdAt: plan.createdAt,
+  })
 
   return plan
 }
@@ -364,6 +430,8 @@ export async function approvePlan(
   }
 
   plan.status = 'approved'
+  plan.approvalStatus = 'approved'
+  plan.approvedBy = approvedBy
   persistPlan(plan)
 
   // Broadcast approval event for Command Center
@@ -376,6 +444,15 @@ export async function approvePlan(
   } as AgentMessage)
 
   logger.info({ planId, approvedBy }, 'HyperAgent: plan approved')
+
+  // FR-4: emit plan.approved event
+  emitPlanEvent({
+    event: 'plan.approved',
+    planId,
+    approvedBy,
+    approvedAt: approval.approvedAt,
+  })
+
   return approval
 }
 
@@ -485,6 +562,17 @@ export async function executePlan(planId: string): Promise<ChainExecution> {
       duration: execution.duration_ms,
     }, 'HyperAgent: plan executed')
 
+    plan.approvalStatus = execution.status === 'completed' ? 'executed' : 'rejected'
+    persistPlan(plan)
+
+    // FR-4: emit plan.executed event
+    emitPlanEvent({
+      event: 'plan.executed',
+      planId,
+      durationMs: execution.duration_ms ?? 0,
+      status: execution.status,
+    })
+
     return execution
   } catch (err) {
     plan.status = 'failed'
@@ -575,6 +663,22 @@ export async function evaluatePlan(
   } catch (err) {
     logger.warn({ err, traceId: snapshot.traceId }, 'HyperAgent: KPI persistence failed (non-blocking)')
   }
+
+  // FR-4: update plan governance state
+  if (plan) {
+    plan.approvalStatus = 'evaluated'
+    plan.evaluatedAt = new Date().toISOString()
+    persistPlan(plan)
+  }
+
+  // FR-4: emit plan.evaluated event
+  const success = score >= 70
+  emitPlanEvent({
+    event: 'plan.evaluated',
+    planId,
+    kpiImpact: (score - 50) / 50, // normalize 0-100 to -1..1
+    success,
+  })
 
   return snapshot
 }

@@ -21,6 +21,9 @@ export type ToolCategory =
   | 'data' | 'system' | 'pheromone' | 'agent' | 'model' | 'governance'
   | 'grafana' | 'railway'
 
+export type ToolRiskLevel = 'read_only' | 'staged_write' | 'production_write'
+export type ToolCostTier = 'micro' | 'standard' | 'premium'
+
 export interface CanonicalTool {
   name: string
   namespace: string
@@ -35,6 +38,13 @@ export interface CanonicalTool {
   authRequired: boolean
   availableVia: Array<'openai' | 'openapi' | 'mcp'>
   tags: string[]
+  // FR-3 Risk metadata (Neural Bridge v2)
+  riskLevel: ToolRiskLevel
+  requiresPlan: boolean
+  requiresApproval: boolean
+  costTier: ToolCostTier
+  auditCategory: string
+  // Deprecation
   deprecated?: boolean
   deprecatedSince?: string
   deprecatedMessage?: string
@@ -57,6 +67,12 @@ interface DefineToolOpts {
   authRequired?: boolean
   availableVia?: Array<'openai' | 'openapi' | 'mcp'>
   outputDescription?: string
+  // FR-3 Risk metadata (optional — smart defaults applied)
+  riskLevel?: ToolRiskLevel
+  requiresPlan?: boolean
+  requiresApproval?: boolean
+  costTier?: ToolCostTier
+  auditCategory?: string
   deprecated?: boolean
   deprecatedSince?: string
   deprecatedMessage?: string
@@ -72,7 +88,7 @@ function inferCategory(namespace: string): ToolCategory {
     compliance: 'compliance', llm: 'llm', monitor: 'monitor', mcp: 'mcp',
     engagement: 'engagement', memory: 'memory', inventor: 'inventor',
     pheromone: 'monitor', peereval: 'monitor', grafana: 'monitor',
-    railway: 'deploy',
+    railway: 'monitor',
     // Governed control plane domains (Neural Bridge v2)
     data: 'data', system: 'system', agent: 'agent',
     model: 'model', governance: 'governance',
@@ -140,8 +156,106 @@ function zodToJsonSchemaSimple(schema: z.ZodObject<ZodShape>): Record<string, un
   return result
 }
 
+function inferAuditCategory(namespace: string, riskLevel: ToolRiskLevel): string {
+  if (riskLevel === 'production_write') return 'production_mutation'
+  if (riskLevel === 'staged_write') return 'staged_write'
+  const map: Record<string, string> = {
+    data: 'data_access',
+    system: 'system_observability',
+    agent: 'agent_coordination',
+    model: 'model_routing',
+    governance: 'governance_audit',
+    grafana: 'observability',
+    railway: 'deployment',
+    memory: 'memory_operation',
+    engagement: 'engagement_lifecycle',
+    pheromone: 'stigmergic_communication',
+    intelligence: 'cognitive_intelligence',
+    cognitive: 'cognitive_intelligence',
+    llm: 'model_proxy',
+    chains: 'chain_execution',
+    inventor: 'evolution_engine',
+    hyperagent: 'autonomous_execution',
+    peereval: 'fleet_learning',
+    graph: 'graph_operation',
+    linear: 'project_tracking',
+    knowledge: 'knowledge_retrieval',
+    monitor: 'platform_monitoring',
+    mcp: 'mcp_proxy',
+    compliance: 'compliance_check',
+    assembly: 'artifact_generation',
+    decisions: 'decision_provenance',
+    adoption: 'adoption_tracking',
+  }
+  return map[namespace] ?? 'general'
+}
+
+function inferRiskDefaults(opts: Pick<DefineToolOpts, 'namespace' | 'timeoutMs'> & { riskLevel?: ToolRiskLevel }): {
+  riskLevel: ToolRiskLevel
+  requiresPlan: boolean
+  requiresApproval: boolean
+  costTier: ToolCostTier
+  auditCategory: string
+} {
+  const ns = opts.namespace
+  const timeout = opts.timeoutMs ?? 30000
+  const risk = opts.riskLevel ?? 'read_only'
+
+  // Namespace-level defaults
+  const namespaceDefaults: Record<string, Partial<{ riskLevel: ToolRiskLevel; requiresPlan: boolean; requiresApproval: boolean; costTier: ToolCostTier }>> = {
+    // Read-only domains
+    data: { costTier: 'micro' },
+    system: { costTier: 'micro' },
+    agent: { costTier: 'micro' },
+    grafana: { costTier: 'micro' },
+
+    // Governance & deployment — high risk
+    governance: { riskLevel: 'staged_write', requiresPlan: true, requiresApproval: true, costTier: 'standard' },
+    railway: { riskLevel: 'production_write', requiresPlan: true, requiresApproval: true, costTier: 'standard' },
+
+    // Write-capable domains
+    memory: { riskLevel: 'staged_write', costTier: 'micro' },
+    engagement: { riskLevel: 'staged_write', costTier: 'standard' },
+    pheromone: { costTier: 'micro' }, // deposit is staged_write handled per-tool
+
+    // LLM & cognitive — cost-sensitive
+    llm: { costTier: 'standard' },
+    cognitive: { costTier: timeout > 30000 ? 'premium' : 'standard' },
+    intelligence: { costTier: timeout > 60000 ? 'premium' : 'standard' },
+
+    // Chain execution
+    chains: { costTier: 'standard' },
+    inventor: { costTier: 'standard' },
+    hyperagent: { costTier: timeout > 60000 ? 'premium' : 'standard' },
+    peereval: { costTier: 'standard' },
+
+    // Knowledge & graph
+    knowledge: { costTier: 'standard' },
+    graph: { costTier: 'micro' },
+    linear: { costTier: 'micro' },
+    monitor: { costTier: 'micro' },
+    mcp: { costTier: 'standard' },
+    compliance: { costTier: 'micro' },
+    assembly: { costTier: 'standard' },
+    decisions: { costTier: 'micro' },
+  }
+
+  const nsDefaults = namespaceDefaults[ns] ?? {}
+  const finalRisk = nsDefaults.riskLevel ?? risk
+  const finalCost = nsDefaults.costTier ?? (timeout > 60000 ? 'premium' : timeout > 20000 ? 'standard' : 'micro')
+
+  return {
+    riskLevel: finalRisk,
+    requiresPlan: nsDefaults.requiresPlan ?? false,
+    requiresApproval: nsDefaults.requiresApproval ?? false,
+    costTier: finalCost,
+    auditCategory: inferAuditCategory(ns, finalRisk),
+  }
+}
+
 export function defineTool(opts: DefineToolOpts): CanonicalTool {
   const inputSchema = zodToJsonSchemaSimple(opts.input)
+  const risk = inferRiskDefaults({ namespace: opts.namespace, timeoutMs: opts.timeoutMs, riskLevel: opts.riskLevel })
 
   return {
     name: opts.name,
@@ -157,6 +271,11 @@ export function defineTool(opts: DefineToolOpts): CanonicalTool {
     authRequired: opts.authRequired ?? true,
     availableVia: opts.availableVia ?? ['openai', 'openapi', 'mcp'],
     tags: inferTags(opts.name),
+    riskLevel: opts.riskLevel ?? risk.riskLevel,
+    requiresPlan: opts.requiresPlan ?? risk.requiresPlan,
+    requiresApproval: opts.requiresApproval ?? risk.requiresApproval,
+    costTier: opts.costTier ?? risk.costTier,
+    auditCategory: opts.auditCategory ?? risk.auditCategory,
     deprecated: opts.deprecated ?? false,
     deprecatedSince: opts.deprecatedSince,
     deprecatedMessage: opts.deprecatedMessage,
@@ -190,6 +309,7 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     }),
     backendTool: 'rlm.reason',
     timeoutMs: 45000,
+    costTier: 'standard',
   }),
 
   defineTool({
@@ -964,6 +1084,7 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
       metadata: z.record(z.number()).optional().describe('Numeric metrics (e.g., { score: 0.9, latency_ms: 50 })'),
     }),
     timeoutMs: 5000,
+    riskLevel: 'staged_write',
     outputDescription: 'Deposited pheromone with assigned ID and TTL',
   }),
 
@@ -1387,8 +1508,11 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
       scope: z.enum(['read_only', 'staged_write', 'production_write']).describe('Risk scope'),
       target_service: z.string().describe('Target service'),
     }),
-    backendTool: 'hyperagent_auto_run',
     timeoutMs: 30000,
+    riskLevel: 'staged_write',
+    requiresPlan: false, // this IS the plan creation — no nested plan needed
+    requiresApproval: false,
+    costTier: 'standard',
   }),
 
   defineTool({
@@ -1399,8 +1523,11 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
       plan_id: z.string().describe('Plan identifier'),
       approver: z.string().describe('Approver identity'),
     }),
-    backendTool: 'hyperagent_auto_memory',
     timeoutMs: 10000,
+    riskLevel: 'staged_write',
+    requiresPlan: false,
+    requiresApproval: false,
+    costTier: 'micro',
   }),
 
   defineTool({
@@ -1410,8 +1537,11 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     input: z.object({
       plan_id: z.string().describe('Approved plan identifier'),
     }),
-    backendTool: 'hyperagent_auto_run',
     timeoutMs: 60000,
+    riskLevel: 'production_write',
+    requiresPlan: true, // requires a prior plan
+    requiresApproval: true,
+    costTier: 'standard',
   }),
 
   defineTool({
@@ -1423,8 +1553,11 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
       outcome: z.enum(['success', 'partial', 'failed']).describe('Execution outcome'),
       kpi_impact: z.number().optional().describe('KPI impact score (-1 to 1)'),
     }),
-    backendTool: 'hyperagent_auto_memory',
     timeoutMs: 10000,
+    riskLevel: 'staged_write',
+    requiresPlan: false,
+    requiresApproval: false,
+    costTier: 'micro',
   }),
 
   defineTool({
@@ -1481,6 +1614,10 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     }),
     backendTool: 'railway.deploy',
     timeoutMs: 30000,
+    riskLevel: 'production_write',
+    requiresPlan: true,
+    requiresApproval: true,
+    costTier: 'standard',
   }),
 
   defineTool({
@@ -1495,6 +1632,10 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     }),
     backendTool: 'railway.env',
     timeoutMs: 15000,
+    riskLevel: 'production_write',
+    requiresPlan: true,
+    requiresApproval: true,
+    costTier: 'standard',
   }),
 
   // ─── Universal Agent Communication ───────────────────────────────────
@@ -1513,6 +1654,9 @@ export function toOpenAITools() {
         description: t.description,
         parameters: t.inputSchema,
         ...(t.deprecated ? { deprecated: true } : {}),
+        // FR-3 risk metadata passthrough
+        'x-risk-level': t.riskLevel,
+        'x-cost-tier': t.costTier,
       },
     }))
 }
@@ -1530,7 +1674,14 @@ export function toMCPTools() {
         if (t.sunsetDate) parts.push(`Sunset: ${t.sunsetDate}.`)
         description = `${parts.join(' ')} — ${description}`
       }
-      return { name: t.name, description, inputSchema: t.inputSchema }
+      return {
+        name: t.name,
+        description,
+        inputSchema: t.inputSchema,
+        riskLevel: t.riskLevel,
+        costTier: t.costTier,
+        requiresApproval: t.requiresApproval,
+      }
     })
 }
 
@@ -1548,6 +1699,10 @@ export function toOpenAPIPaths(): Record<string, object> {
         tags: [tool.category.charAt(0).toUpperCase() + tool.category.slice(1)],
         security: tool.authRequired ? [{ BearerAuth: [] }] : [],
         ...(tool.deprecated ? { deprecated: true } : {}),
+        // FR-3 risk metadata
+        'x-risk-level': tool.riskLevel,
+        'x-cost-tier': tool.costTier,
+        'x-requires-approval': tool.requiresApproval,
         requestBody: {
           required: true,
           content: { 'application/json': { schema: tool.inputSchema } },
@@ -1585,4 +1740,40 @@ export function getCategories(): Array<{ category: ToolCategory; count: number }
   return [...counts.entries()]
     .map(([category, count]) => ({ category, count }))
     .sort((a, b) => b.count - a.count)
+}
+
+// ─── FR-3 Risk Metadata Helpers ─────────────────────────────────────────────
+
+export function getToolsByRiskLevel(level: ToolRiskLevel): CanonicalTool[] {
+  return TOOL_REGISTRY.filter(t => t.riskLevel === level)
+}
+
+export function getToolsRequiringApproval(): CanonicalTool[] {
+  return TOOL_REGISTRY.filter(t => t.requiresApproval)
+}
+
+export function getToolsByCostTier(tier: ToolCostTier): CanonicalTool[] {
+  return TOOL_REGISTRY.filter(t => t.costTier === tier)
+}
+
+export function getRiskSummary(): {
+  read_only: number
+  staged_write: number
+  production_write: number
+  requiringApproval: number
+  costMicro: number
+  costStandard: number
+  costPremium: number
+  total: number
+} {
+  return {
+    read_only: TOOL_REGISTRY.filter(t => t.riskLevel === 'read_only').length,
+    staged_write: TOOL_REGISTRY.filter(t => t.riskLevel === 'staged_write').length,
+    production_write: TOOL_REGISTRY.filter(t => t.riskLevel === 'production_write').length,
+    requiringApproval: TOOL_REGISTRY.filter(t => t.requiresApproval).length,
+    costMicro: TOOL_REGISTRY.filter(t => t.costTier === 'micro').length,
+    costStandard: TOOL_REGISTRY.filter(t => t.costTier === 'standard').length,
+    costPremium: TOOL_REGISTRY.filter(t => t.costTier === 'premium').length,
+    total: TOOL_REGISTRY.length,
+  }
 }

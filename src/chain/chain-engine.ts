@@ -19,6 +19,14 @@ import { hookIntoExecution } from '../swarm/peer-eval.js'
 import { recordToolCall } from '../flywheel/adoption-telemetry.js'
 import { runFailureHarvest } from '../flywheel/failure-harvester.js'
 import { updateCostProfile } from '../flywheel/cost-optimizer.js'
+import {
+  enforceMaxRecursionDepth,
+  enforceMaxFanOut,
+  recordWorkflowCost,
+  estimateTokenCount,
+  shouldCompactContext,
+  compactContext,
+} from '../llm/cost-governance.js'
 import type {
   AgentWorkflowEnvelope,
   RoutingCapability,
@@ -71,6 +79,8 @@ export interface ChainDefinition {
   funnel_entry?: FunnelStage
   /** For funnel: pre-loaded context for entry stage */
   funnel_context?: Record<string, unknown>
+  /** Cost governance: current recursion depth (auto-incremented on nested calls) */
+  recursion_depth?: number
 }
 
 export interface ChainExecution {
@@ -272,7 +282,13 @@ async function runSequential(steps: ChainStep[]): Promise<StepResult[]> {
   return results
 }
 
-async function runParallel(steps: ChainStep[]): Promise<StepResult[]> {
+async function runParallel(steps: ChainStep[], chainName?: string): Promise<StepResult[]> {
+  // Cost governance: enforce max agent fan-out
+  const fanOutCheck = enforceMaxFanOut(steps.length, 'parallel', steps.map(s => s.agent_id))
+  if (!fanOutCheck.allowed) {
+    logger.error({ chain: chainName, fanOutCheck }, 'Chain engine: fan-out limit exceeded')
+    throw new Error(fanOutCheck.error)
+  }
   return Promise.all(steps.map(step => executeStep(step, null)))
 }
 
@@ -376,7 +392,7 @@ async function runAdaptive(
       break
     case 'complex':
       topology = 'debate+verify'
-      results = await runDebateGVU(steps, judgeAgent, confidenceThreshold)
+      results = await runDebateGVU(steps, judgeAgent, undefined, confidenceThreshold)
       break
     default:
       topology = 'sequential'
@@ -505,10 +521,18 @@ async function runFunnel(
 async function runDebateGVU(
   steps: ChainStep[],
   judgeAgent?: string,
+  chainName?: string,
   confidenceThreshold = 0.6,
 ): Promise<StepResult[]> {
+  // Cost governance: enforce max debate fan-out
+  const fanOutCheck = enforceMaxFanOut(steps.length, 'debate', steps.map(s => s.agent_id))
+  if (!fanOutCheck.allowed) {
+    logger.error({ chain: chainName, fanOutCheck }, 'Chain engine: debate fan-out limit exceeded')
+    throw new Error(fanOutCheck.error)
+  }
+
   // Phase 1: GENERATE — all debaters run in parallel
-  const debateResults = await runParallel(steps)
+  const debateResults = await runParallel(steps, chainName)
 
   if (!judgeAgent) return debateResults
 
@@ -597,6 +621,29 @@ export async function executeChain(def: ChainDefinition): Promise<ChainExecution
   const chainId = def.chain_id ?? uuid().slice(0, 12)
   const t0 = Date.now()
 
+  // Cost governance: enforce max recursion depth
+  const currentDepth = def.recursion_depth ?? 0
+  const depthCheck = enforceMaxRecursionDepth(currentDepth)
+  if (!depthCheck.allowed) {
+    logger.error({ chain: def.name, depthCheck }, 'Chain engine: recursion depth exceeded')
+    const execution: ChainExecution = {
+      execution_id: executionId,
+      chain_id: chainId,
+      name: def.name,
+      mode: def.mode,
+      status: 'failed',
+      steps_completed: 0,
+      steps_total: def.steps.length,
+      results: [],
+      started_at: new Date().toISOString(),
+      completed_at: new Date().toISOString(),
+      duration_ms: 0,
+      error: depthCheck.error,
+    }
+    persistExecution(execution)
+    return execution
+  }
+
   const execution: ChainExecution = {
     execution_id: executionId,
     chain_id: chainId,
@@ -610,7 +657,7 @@ export async function executeChain(def: ChainDefinition): Promise<ChainExecution
   }
   persistExecution(execution)
 
-  logger.info({ execution_id: executionId, chain: def.name, mode: def.mode, steps: def.steps.length }, 'Chain execution started')
+  logger.info({ execution_id: executionId, chain: def.name, mode: def.mode, steps: def.steps.length, recursion_depth: currentDepth }, 'Chain execution started')
 
   // Broadcast chain start
   broadcastMessage({
@@ -638,13 +685,13 @@ export async function executeChain(def: ChainDefinition): Promise<ChainExecution
         results = await runSequential(resolvedSteps)
         break
       case 'parallel':
-        results = await runParallel(resolvedSteps)
+        results = await runParallel(resolvedSteps, def.name)
         break
       case 'loop':
         results = await runLoop(resolvedSteps, def.max_iterations ?? 5, def.exit_condition)
         break
       case 'debate':
-        results = await runDebateGVU(resolvedSteps, def.judge_agent, def.confidence_threshold)
+        results = await runDebateGVU(resolvedSteps, def.judge_agent, def.name, def.confidence_threshold)
         break
       case 'adaptive': {
         const adaptive = await runAdaptive(resolvedSteps, def.query, def.judge_agent, def.confidence_threshold)
@@ -682,6 +729,16 @@ export async function executeChain(def: ChainDefinition): Promise<ChainExecution
   }
 
   persistExecution(execution)
+
+  // Cost governance: record workflow cost trace (non-blocking)
+  recordWorkflowCost(
+    executionId,
+    'chain-engine',
+    def.mode,
+    0, // Token tracking done per-step in executeStep
+    0,
+    0, // Cost tracked via individual step telemetry
+  ).catch(() => {})
 
   logger.info({
     execution_id: executionId,
