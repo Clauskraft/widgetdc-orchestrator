@@ -23330,29 +23330,33 @@ ${lines.join("\n")}`;
       const payload = { from, to, message, type: "Text", source: "agent" };
       if (input?.thread_id) payload.thread_id = String(input.thread_id);
       const { config: config2 } = await Promise.resolve().then(() => (init_config(), config_exports));
-      const res = await fetch(`http://localhost:${config2.port}/api/chat/message`, {
+      const res = await fetch(`http://localhost:${config2.port}/chat/message`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${config2.orchestratorApiKey}`
+          "Authorization": `Bearer ${config2.orchestratorApiKey}`,
+          "Accept": "application/json"
         },
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(8e3)
       });
       const data = await res.json().catch(() => ({}));
-      return JSON.stringify({ sent: res.ok, id: data?.data?.id, from, to }, null, 2);
+      return JSON.stringify({ sent: res.ok, id: data?.data?.id, from, to, thread_id: input?.thread_id ?? null }, null, 2);
     }
     case "chat_read": {
       const limit = Math.min(Number(input?.limit ?? 20), 100);
       const { config: config2 } = await Promise.resolve().then(() => (init_config(), config_exports));
-      const res = await fetch(`http://localhost:${config2.port}/api/chat/history?limit=${limit}`, {
-        headers: { "Authorization": `Bearer ${config2.orchestratorApiKey}` },
+      const res = await fetch(`http://localhost:${config2.port}/chat/history?limit=${limit}`, {
+        headers: {
+          "Authorization": `Bearer ${config2.orchestratorApiKey}`,
+          "Accept": "application/json"
+        },
         signal: AbortSignal.timeout(8e3)
       });
-      const data = await res.json().catch(() => ({ messages: [] }));
-      let messages = data?.messages ?? [];
+      const data = await res.json().catch(() => ({}));
+      let messages = data?.data?.messages ?? [];
       if (input?.from_agent) messages = messages.filter((m) => m.from === input.from_agent);
-      if (input?.thread_id) messages = messages.filter((m) => m.thread_id === input.thread_id);
+      if (input?.thread_id) messages = messages.filter((m) => m.thread_id === String(input.thread_id));
       return JSON.stringify(messages.slice(0, limit), null, 2);
     }
     // ─── model.* ─────────────────────────────────────────────────────
@@ -37803,6 +37807,40 @@ function buildChatGPTSpec() {
             }
           } } } },
           responses: { "200": { description: "Chain result" } }
+        }
+      },
+      "/api/tools/chat_send": {
+        post: {
+          operationId: "chatSend",
+          summary: "Send a message to the WidgeTDC agent chat bus",
+          description: "Post a message to the orchestrator chat bus. Use for A2A communication: send replies to debate threads, broadcast to all agents, or DM a specific agent. Always include thread_id when replying to a thread.",
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object",
+            required: ["from", "message"],
+            properties: {
+              from: { type: "string", description: 'Your agent identity (e.g. "chatgpt", "qwen")' },
+              to: { type: "string", description: 'Recipient agent ID or "All" for broadcast', default: "All" },
+              message: { type: "string", description: "Message content (markdown supported)" },
+              thread_id: { type: "string", description: "Thread ID to reply in an existing conversation thread" }
+            }
+          } } } },
+          responses: { "200": { description: "Message sent confirmation with message ID" } }
+        }
+      },
+      "/api/tools/chat_read": {
+        post: {
+          operationId: "chatRead",
+          summary: "Read messages from the WidgeTDC agent chat bus",
+          description: "Read recent messages from the orchestrator chat bus. Use thread_id to read a specific conversation thread (e.g. a debate). Call this first to catch up on what others have said, then respond with chat_send.",
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object",
+            properties: {
+              thread_id: { type: "string", description: "Filter by thread ID to read a specific conversation" },
+              from_agent: { type: "string", description: "Filter messages from a specific agent" },
+              limit: { type: "integer", description: "Max messages to return (default 20, max 100)", default: 20 }
+            }
+          } } } },
+          responses: { "200": { description: "Array of messages with from, to, message, timestamp, thread_id" } }
         }
       }
     }

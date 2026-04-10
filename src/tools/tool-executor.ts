@@ -2104,30 +2104,34 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       const payload: Record<string, unknown> = { from, to, message, type: 'Text', source: 'agent' }
       if (input?.thread_id) payload.thread_id = String(input.thread_id)
       const { config } = await import('../config.js')
-      const res = await fetch(`http://localhost:${config.port}/api/chat/message`, {
+      const res = await fetch(`http://localhost:${config.port}/chat/message`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${config.orchestratorApiKey}`,
+          'Accept': 'application/json',
         },
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(8000),
       })
       const data = await res.json().catch(() => ({}))
-      return JSON.stringify({ sent: res.ok, id: (data as any)?.data?.id, from, to }, null, 2)
+      return JSON.stringify({ sent: res.ok, id: (data as any)?.data?.id, from, to, thread_id: input?.thread_id ?? null }, null, 2)
     }
 
     case 'chat_read': {
       const limit = Math.min(Number(input?.limit ?? 20), 100)
       const { config } = await import('../config.js')
-      const res = await fetch(`http://localhost:${config.port}/api/chat/history?limit=${limit}`, {
-        headers: { 'Authorization': `Bearer ${config.orchestratorApiKey}` },
+      const res = await fetch(`http://localhost:${config.port}/chat/history?limit=${limit}`, {
+        headers: {
+          'Authorization': `Bearer ${config.orchestratorApiKey}`,
+          'Accept': 'application/json',
+        },
         signal: AbortSignal.timeout(8000),
       })
-      const data = await res.json().catch(() => ({ messages: [] }))
-      let messages = (data as any)?.messages ?? []
+      const data = await res.json().catch(() => ({}))
+      let messages: any[] = (data as any)?.data?.messages ?? []
       if (input?.from_agent) messages = messages.filter((m: any) => m.from === input.from_agent)
-      if (input?.thread_id) messages = messages.filter((m: any) => m.thread_id === input.thread_id)
+      if (input?.thread_id) messages = messages.filter((m: any) => m.thread_id === String(input.thread_id))
       return JSON.stringify(messages.slice(0, limit), null, 2)
     }
 

@@ -782,6 +782,39 @@ function buildChatGPTSpec(): object {
           responses: { '200': { description: 'Chain result' } },
         },
       },
+      '/api/tools/chat_send': {
+        post: {
+          operationId: 'chatSend',
+          summary: 'Send a message to the WidgeTDC agent chat bus',
+          description: 'Post a message to the orchestrator chat bus. Use for A2A communication: send replies to debate threads, broadcast to all agents, or DM a specific agent. Always include thread_id when replying to a thread.',
+          requestBody: { required: true, content: { 'application/json': { schema: {
+            type: 'object', required: ['from', 'message'],
+            properties: {
+              from: { type: 'string', description: 'Your agent identity (e.g. "chatgpt", "qwen")' },
+              to: { type: 'string', description: 'Recipient agent ID or "All" for broadcast', default: 'All' },
+              message: { type: 'string', description: 'Message content (markdown supported)' },
+              thread_id: { type: 'string', description: 'Thread ID to reply in an existing conversation thread' },
+            },
+          } } } },
+          responses: { '200': { description: 'Message sent confirmation with message ID' } },
+        },
+      },
+      '/api/tools/chat_read': {
+        post: {
+          operationId: 'chatRead',
+          summary: 'Read messages from the WidgeTDC agent chat bus',
+          description: 'Read recent messages from the orchestrator chat bus. Use thread_id to read a specific conversation thread (e.g. a debate). Call this first to catch up on what others have said, then respond with chat_send.',
+          requestBody: { required: true, content: { 'application/json': { schema: {
+            type: 'object',
+            properties: {
+              thread_id: { type: 'string', description: 'Filter by thread ID to read a specific conversation' },
+              from_agent: { type: 'string', description: 'Filter messages from a specific agent' },
+              limit: { type: 'integer', description: 'Max messages to return (default 20, max 100)', default: 20 },
+            },
+          } } } },
+          responses: { '200': { description: 'Array of messages with from, to, message, timestamp, thread_id' } },
+        },
+      },
     },
   }
 }
