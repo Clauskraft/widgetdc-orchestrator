@@ -29597,119 +29597,11 @@ chatRouter.get("/ws-stats", (_req, res) => {
   res.json({ success: true, data: getConnectionStats() });
 });
 
-// src/routes/chains.ts
-init_chain_engine();
-init_logger();
-import { Router as Router4 } from "express";
-var chainsRouter = Router4();
-chainsRouter.post("/execute", async (req, res) => {
-  const body = req.body;
-  const validModes = ["sequential", "parallel", "loop", "debate", "adaptive", "funnel"];
-  if (!body.name || !body.mode || !Array.isArray(body.steps) || body.steps.length === 0) {
-    res.status(400).json({
-      success: false,
-      error: {
-        code: "VALIDATION_ERROR",
-        message: `Required: name, mode (${validModes.join("|")}), steps[] (non-empty)`,
-        status_code: 400
-      }
-    });
-    return;
-  }
-  if (!validModes.includes(body.mode)) {
-    res.status(400).json({
-      success: false,
-      error: {
-        code: "VALIDATION_ERROR",
-        message: `Invalid mode '${body.mode}'. Valid: ${validModes.join(", ")}`,
-        status_code: 400
-      }
-    });
-    return;
-  }
-  if (body.mode === "funnel" && body.funnel_entry) {
-    if (!FUNNEL_STAGES.includes(body.funnel_entry)) {
-      res.status(400).json({
-        success: false,
-        error: {
-          code: "VALIDATION_ERROR",
-          message: `Invalid funnel_entry '${body.funnel_entry}'. Valid stages: ${FUNNEL_STAGES.join(", ")}`,
-          status_code: 400
-        }
-      });
-      return;
-    }
-  }
-  for (const step of body.steps) {
-    if (!step.agent_id) {
-      res.status(400).json({
-        success: false,
-        error: { code: "VALIDATION_ERROR", message: "Each step must have agent_id", status_code: 400 }
-      });
-      return;
-    }
-    if (!step.tool_name && !step.cognitive_action) {
-      res.status(400).json({
-        success: false,
-        error: { code: "VALIDATION_ERROR", message: "Each step needs tool_name or cognitive_action", status_code: 400 }
-      });
-      return;
-    }
-    if (step.agent_id === "auto" && !step.capability) {
-      res.status(400).json({
-        success: false,
-        error: { code: "VALIDATION_ERROR", message: "Auto-routed steps require capability", status_code: 400 }
-      });
-      return;
-    }
-  }
-  try {
-    const execution = executeChain(body);
-    const result = await Promise.race([
-      execution,
-      new Promise((r) => setTimeout(() => r(null), 100))
-    ]);
-    if (result) {
-      res.json({ success: true, data: result });
-    } else {
-      res.status(202).json({
-        success: true,
-        data: {
-          message: "Chain execution started",
-          execution_id: (await execution).execution_id,
-          poll_url: `/chains/status/${(await execution).execution_id}`
-        }
-      });
-    }
-  } catch (err) {
-    logger.error({ err: String(err) }, "Chain execution failed");
-    res.status(500).json({
-      success: false,
-      error: { code: "CHAIN_ERROR", message: String(err), status_code: 500 }
-    });
-  }
-});
-chainsRouter.get("/status/:id", (req, res) => {
-  const exec = getExecution(req.params.id);
-  if (!exec) {
-    res.status(404).json({
-      success: false,
-      error: { code: "NOT_FOUND", message: `Execution '${req.params.id}' not found`, status_code: 404 }
-    });
-    return;
-  }
-  res.json({ success: true, data: exec });
-});
-chainsRouter.get("/", (_req, res) => {
-  const executions2 = listExecutions();
-  res.json({ success: true, data: { executions: executions2, total: executions2.length } });
-});
-
 // src/routes/cognitive.ts
 init_cognitive_proxy();
 init_logger();
-import { Router as Router5 } from "express";
-var cognitiveRouter = Router5();
+import { Router as Router4 } from "express";
+var cognitiveRouter = Router4();
 cognitiveRouter.post("/:action", async (req, res) => {
   const { action } = req.params;
   const body = req.body;
@@ -29759,7 +29651,7 @@ cognitiveRouter.get("/health", async (_req, res) => {
 });
 
 // src/routes/cron.ts
-import { Router as Router8 } from "express";
+import { Router as Router7 } from "express";
 
 // src/cron-scheduler.ts
 init_chain_engine();
@@ -30249,9 +30141,9 @@ init_redis();
 init_logger();
 init_mcp_caller();
 init_adoption_telemetry();
-import { Router as Router6 } from "express";
+import { Router as Router5 } from "express";
 import { v4 as uuid25 } from "uuid";
-var adoptionRouter = Router6();
+var adoptionRouter = Router5();
 var REDIS_KEY3 = "orchestrator:adoption-metrics";
 var REDIS_TRENDS_KEY = "orchestrator:adoption-trends";
 var DEFAULT_METRICS = {
@@ -30516,9 +30408,9 @@ init_redis();
 init_logger();
 init_mcp_caller();
 init_sse();
-import { Router as Router7 } from "express";
+import { Router as Router6 } from "express";
 import { v4 as uuid26 } from "uuid";
-var looseEndsRouter = Router7();
+var looseEndsRouter = Router6();
 var REDIS_KEY4 = "orchestrator:loose-ends:latest";
 var REDIS_HISTORY = "orchestrator:loose-ends:history";
 var DETECTION_QUERIES = [
@@ -33162,7 +33054,7 @@ function registerDefaultLoops() {
 }
 
 // src/routes/cron.ts
-var cronRouter = Router8();
+var cronRouter = Router7();
 cronRouter.get("/", (_req, res) => {
   const jobs2 = listCronJobs();
   res.json({ success: true, data: { jobs: jobs2, total: jobs2.length } });
@@ -33231,14 +33123,14 @@ cronRouter.delete("/:id", (req, res) => {
 init_agent_registry();
 init_chat_broadcaster();
 init_chain_engine();
-import { Router as Router10 } from "express";
+import { Router as Router9 } from "express";
 init_cognitive_proxy();
 
 // src/routes/openclaw.ts
 init_config();
 init_logger();
-import { Router as Router9 } from "express";
-var openclawRouter = Router9();
+import { Router as Router8 } from "express";
+var openclawRouter = Router8();
 var healthStatus = {
   healthy: false,
   checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -33414,7 +33306,7 @@ openclawRouter.all("/proxy/*", async (req, res) => {
 init_config();
 init_routing_engine();
 init_redis();
-var dashboardRouter = Router10();
+var dashboardRouter = Router9();
 var CACHE_KEY = "orchestrator:dashboard-cache";
 var CACHE_TTL = 15;
 dashboardRouter.get("/data", async (_req, res) => {
@@ -33502,8 +33394,8 @@ init_llm_proxy();
 init_chat_broadcaster();
 init_chat_store();
 init_logger();
-import { Router as Router11 } from "express";
-var llmRouter = Router11();
+import { Router as Router10 } from "express";
+var llmRouter = Router10();
 llmRouter.get("/providers", (_req, res) => {
   res.json({ success: true, data: { providers: listProviders() } });
 });
@@ -33594,7 +33486,7 @@ llmRouter.post("/conversation", async (req, res) => {
 });
 
 // src/routes/audit.ts
-import { Router as Router12 } from "express";
+import { Router as Router11 } from "express";
 
 // src/audit.ts
 init_redis();
@@ -33676,7 +33568,7 @@ function auditMiddleware(req, res, next) {
 }
 
 // src/routes/audit.ts
-var auditRouter = Router12();
+var auditRouter = Router11();
 auditRouter.get("/log", async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 100, 500);
   const offset = parseInt(req.query.offset) || 0;
@@ -33694,8 +33586,8 @@ auditRouter.get("/log", async (req, res) => {
 // src/routes/tool-output.ts
 init_redis();
 init_logger();
-import { Router as Router13 } from "express";
-var toolOutputRouter = Router13();
+import { Router as Router12 } from "express";
+var toolOutputRouter = Router12();
 var TOOL_OUTPUT_PREFIX2 = "orchestrator:tool-output:";
 var ID_PATTERN = /^[a-f0-9-]{36}$/;
 toolOutputRouter.get("/:id", async (req, res) => {
@@ -33770,8 +33662,8 @@ toolOutputRouter.get("/:id/raw", async (req, res) => {
 init_config();
 init_redis();
 init_logger();
-import { Router as Router14 } from "express";
-var knowledgeRouter = Router14();
+import { Router as Router13 } from "express";
+var knowledgeRouter = Router13();
 var FEED_CACHE_KEY = "orchestrator:knowledge-feed";
 var BRIEFING_CACHE_KEY = "orchestrator:knowledge-briefing-prompt";
 var FEED_TTL_SECONDS = 86400;
@@ -33930,9 +33822,9 @@ knowledgeRouter.get("/briefing", async (_req, res) => {
 // src/routes/neural-bus.ts
 init_logger();
 init_redis();
-import { Router as Router15 } from "express";
+import { Router as Router14 } from "express";
 import { v4 as uuid27 } from "uuid";
-var neuralBusRouter = Router15();
+var neuralBusRouter = Router14();
 var BUS_MESSAGES_KEY = "neural-bus:messages";
 var BUS_AGENTS_KEY = "neural-bus:agents";
 var BUS_INBOX_KEY = "neural-bus:inbox";
@@ -34126,9 +34018,9 @@ neuralBusRouter.post("/register", async (req, res) => {
 // src/routes/artifacts.ts
 init_redis();
 init_logger();
-import { Router as Router16 } from "express";
+import { Router as Router15 } from "express";
 import { randomUUID } from "crypto";
-var artifactRouter = Router16();
+var artifactRouter = Router15();
 var ARTIFACT_PREFIX = "orchestrator:artifact:";
 var ARTIFACT_INDEX = "orchestrator:artifacts:index";
 var TTL_SECONDS6 = 2592e3;
@@ -34454,10 +34346,10 @@ init_redis();
 init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
-import { Router as Router17 } from "express";
+import { Router as Router16 } from "express";
 import { randomUUID as randomUUID2 } from "crypto";
 import { v4 as uuid28 } from "uuid";
-var notebookRouter = Router17();
+var notebookRouter = Router16();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
 var TTL_SECONDS7 = 2592e3;
@@ -34712,9 +34604,9 @@ async function renderNotebookMarkdown(_req, res, id) {
 init_redis();
 init_config();
 init_logger();
-import { Router as Router18 } from "express";
+import { Router as Router17 } from "express";
 import { randomUUID as randomUUID3 } from "crypto";
-var drillRouter = Router18();
+var drillRouter = Router17();
 var DRILL_PREFIX = "orchestrator:drill:";
 var SESSION_TTL = 3600;
 var MCP_TIMEOUT_MS2 = 12e3;
@@ -35051,6 +34943,114 @@ function trendArrow(trend) {
   if (t === "down" || t === "falling" || t === "decreasing") return "\u2193";
   return "\u2192";
 }
+
+// src/routes/chains.ts
+init_chain_engine();
+init_logger();
+import { Router as Router18 } from "express";
+var chainsRouter = Router18();
+chainsRouter.post("/execute", async (req, res) => {
+  const body = req.body;
+  const validModes = ["sequential", "parallel", "loop", "debate", "adaptive", "funnel"];
+  if (!body.name || !body.mode || !Array.isArray(body.steps) || body.steps.length === 0) {
+    res.status(400).json({
+      success: false,
+      error: {
+        code: "VALIDATION_ERROR",
+        message: `Required: name, mode (${validModes.join("|")}), steps[] (non-empty)`,
+        status_code: 400
+      }
+    });
+    return;
+  }
+  if (!validModes.includes(body.mode)) {
+    res.status(400).json({
+      success: false,
+      error: {
+        code: "VALIDATION_ERROR",
+        message: `Invalid mode '${body.mode}'. Valid: ${validModes.join(", ")}`,
+        status_code: 400
+      }
+    });
+    return;
+  }
+  if (body.mode === "funnel" && body.funnel_entry) {
+    if (!FUNNEL_STAGES.includes(body.funnel_entry)) {
+      res.status(400).json({
+        success: false,
+        error: {
+          code: "VALIDATION_ERROR",
+          message: `Invalid funnel_entry '${body.funnel_entry}'. Valid stages: ${FUNNEL_STAGES.join(", ")}`,
+          status_code: 400
+        }
+      });
+      return;
+    }
+  }
+  for (const step of body.steps) {
+    if (!step.agent_id) {
+      res.status(400).json({
+        success: false,
+        error: { code: "VALIDATION_ERROR", message: "Each step must have agent_id", status_code: 400 }
+      });
+      return;
+    }
+    if (!step.tool_name && !step.cognitive_action) {
+      res.status(400).json({
+        success: false,
+        error: { code: "VALIDATION_ERROR", message: "Each step needs tool_name or cognitive_action", status_code: 400 }
+      });
+      return;
+    }
+    if (step.agent_id === "auto" && !step.capability) {
+      res.status(400).json({
+        success: false,
+        error: { code: "VALIDATION_ERROR", message: "Auto-routed steps require capability", status_code: 400 }
+      });
+      return;
+    }
+  }
+  try {
+    const execution = executeChain(body);
+    const result = await Promise.race([
+      execution,
+      new Promise((r) => setTimeout(() => r(null), 100))
+    ]);
+    if (result) {
+      res.json({ success: true, data: result });
+    } else {
+      res.status(202).json({
+        success: true,
+        data: {
+          message: "Chain execution started",
+          execution_id: (await execution).execution_id,
+          poll_url: `/chains/status/${(await execution).execution_id}`
+        }
+      });
+    }
+  } catch (err) {
+    logger.error({ err: String(err) }, "Chain execution failed");
+    res.status(500).json({
+      success: false,
+      error: { code: "CHAIN_ERROR", message: String(err), status_code: 500 }
+    });
+  }
+});
+chainsRouter.get("/status/:id", (req, res) => {
+  const exec = getExecution(req.params.id);
+  if (!exec) {
+    res.status(404).json({
+      success: false,
+      error: { code: "NOT_FOUND", message: `Execution '${req.params.id}' not found`, status_code: 404 }
+    });
+    return;
+  }
+  res.json({ success: true, data: exec });
+});
+chainsRouter.get("/", (_req, res) => {
+  const executions2 = listExecutions();
+  res.json({ success: true, data: { executions: executions2, total: executions2.length } });
+});
 
 // src/routes/monitor.ts
 init_mcp_caller();
