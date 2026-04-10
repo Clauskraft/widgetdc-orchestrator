@@ -709,21 +709,25 @@ export async function generatePhantomClusters(): Promise<PhantomCluster[]> {
   logger.info('Generating PhantomClusters')
 
   // Fetch all providers from Neo4j
+  // Note: WHERE hitlRequired = false has a Neo4j MCP parameter binding bug,
+  // so we fetch all and filter in JS.
   const res = await callBackendMcp('graph.read_cypher', {
-    query: `MATCH (p:PhantomProvider) WHERE p.hitlRequired = false RETURN p.providerId as id, p.geoRestriction as geo, p.capabilities as caps, p.costModel as cost, p.confidence as conf`,
+    query: `MATCH (p:PhantomProvider) RETURN p.providerId as id, p.geoRestriction as geo, p.capabilities as caps, p.costModel as cost, p.confidence as conf, p.hitlRequired as hitl`,
     params: {},
-  }) as { results?: Array<{ id: string; geo: string; caps: string[]; cost: string; conf: number | { low: number; high: number } }> }
+  }) as { results?: Array<{ id: string; geo: string; caps: string[]; cost: string; conf: number | { low: number; high: number }; hitl: boolean }> }
 
   const providers = res?.results ?? []
   if (providers.length === 0) return []
 
-  // Unwrap Neo4j integer objects {low, high} → plain numbers
-  const normalizedProviders = providers.map(p => ({
-    ...p,
-    conf: typeof p.conf === 'object' && p.conf !== null ? (p.conf as { low: number }).low : (p.conf ?? 0),
-  }))
+  // Unwrap Neo4j integer objects {low, high} → plain numbers and filter HITL-blocked
+  const normalizedProviders = providers
+    .filter(p => !p.hitl)  // Skip HITL-blocked providers
+    .map(p => ({
+      ...p,
+      conf: typeof p.conf === 'object' && p.conf !== null ? (p.conf as { low: number }).low : (p.conf ?? 0),
+    }))
 
-  logger.info({ totalProviders: normalizedProviders.length, sample: normalizedProviders[0] }, 'PhantomCluster: loaded providers')
+  logger.info({ totalProviders: normalizedProviders.length, rawCount: providers.length }, 'PhantomCluster: loaded providers')
 
   const clusters: PhantomCluster[] = []
 

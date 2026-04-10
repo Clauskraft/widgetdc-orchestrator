@@ -40437,16 +40437,16 @@ async function extractProvider(opts) {
 async function generatePhantomClusters() {
   logger.info("Generating PhantomClusters");
   const res = await callBackendMcp("graph.read_cypher", {
-    query: `MATCH (p:PhantomProvider) WHERE p.hitlRequired = false RETURN p.providerId as id, p.geoRestriction as geo, p.capabilities as caps, p.costModel as cost, p.confidence as conf`,
+    query: `MATCH (p:PhantomProvider) RETURN p.providerId as id, p.geoRestriction as geo, p.capabilities as caps, p.costModel as cost, p.confidence as conf, p.hitlRequired as hitl`,
     params: {}
   });
   const providers = res?.results ?? [];
   if (providers.length === 0) return [];
-  const normalizedProviders = providers.map((p) => ({
+  const normalizedProviders = providers.filter((p) => !p.hitl).map((p) => ({
     ...p,
     conf: typeof p.conf === "object" && p.conf !== null ? p.conf.low : p.conf ?? 0
   }));
-  logger.info({ totalProviders: normalizedProviders.length, sample: normalizedProviders[0] }, "PhantomCluster: loaded providers");
+  logger.info({ totalProviders: normalizedProviders.length, rawCount: providers.length }, "PhantomCluster: loaded providers");
   const clusters = [];
   for (const [strategy, def] of Object.entries(CLUSTER_STRATEGIES)) {
     const members = normalizedProviders.filter((p) => {
