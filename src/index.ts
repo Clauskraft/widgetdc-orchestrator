@@ -426,6 +426,33 @@ app.post('/api/tasks/:taskId/fail', requireApiKey, async (req, res) => {
   }
 });
 
+// Update HEARTBEAT.md in OpenClaw workspace
+// Called to update Omega Sentinel heartbeat instructions
+app.post('/api/heartbeat/update', requireApiKey, async (req, res) => {
+  try {
+    const openclawUrl = config.openclawUrl || 'https://openclaw-production-9570.up.railway.app';
+    const content = req.body?.content;
+    if (!content) {
+      res.status(400).json({ error: 'content is required' });
+      return;
+    }
+    const fetchRes = await fetch(`${openclawUrl}/api/heartbeat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!fetchRes.ok) {
+      res.status(fetchRes.status).json({ error: `OpenClaw heartbeat update failed: ${fetchRes.status}` });
+      return;
+    }
+    const data = await fetchRes.json();
+    res.json({ success: true, ...data });
+  } catch (err) {
+    res.status(502).json({ error: `Heartbeat update error: ${String(err)}` });
+  }
+});
+
 // Prompt Generator (no auth — utility endpoint)
 app.use('/api/prompt-generator', promptGeneratorRouter)
 
