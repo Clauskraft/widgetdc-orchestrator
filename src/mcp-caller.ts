@@ -161,6 +161,15 @@ async function ensureAuditLessonsRead(): Promise<void> {
 const LOCAL_TOOLS = new Set([
   'memory_store', 'memory_retrieve', 'adaptive_rag_reward',
   'critique_refine', 'context_fold', 'failure_harvest',
+  'linear_issues', 'linear_issue_detail',
+  'data_graph_read', 'data_graph_stats', 'data_redis_inspect', 'data_integrity_check',
+  'system_health', 'system_service_status', 'system_metrics_summary', 'system_logs_summary',
+  'agent_list', 'agent_status', 'agent_dispatch', 'agent_memory', 'agent_capabilities',
+  'model_providers', 'model_route', 'model_cost_estimate', 'model_budget_status', 'model_policy_check',
+  'workflow_cost_trace', 'workflow_context_compact', 'workflow_fanout_guard', 'workflow_premium_escalation_check',
+  'governance_plan_create', 'governance_plan_approve', 'governance_plan_execute',
+  'governance_plan_evaluate', 'governance_audit_query', 'governance_policy_decide',
+  'grafana_dashboard', 'railway_deploy', 'railway_env',
 ])
 
 export async function callMcpTool(opts: McpCallOptions): Promise<OrchestratorToolResult> {
