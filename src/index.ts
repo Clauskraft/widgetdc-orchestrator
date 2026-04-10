@@ -354,6 +354,78 @@ app.use('/api/hyperagent', requireApiKey, apiRateLimiter, hyperagentRouter)
 // v4.0.10: uses shared apiRateLimiter (same budget shared across /tools, /chains, /api/tools, /mcp, etc.)
 app.use('/api/tools', requireApiKey, apiRateLimiter, toolGatewayRouter)
 
+// Agent Task REST API — for OpenClaw agents (Omega Sentinel) to fetch/claim/complete tasks
+// This allows agents without MCP access to interact with the task system via REST
+app.get('/api/tasks', requireApiKey, async (req, res) => {
+  try {
+    const agentId = (req.query.agentId as string) ?? 'omega_sentinel';
+    const { config } = await import('./config.js');
+    const fetchRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.backendApiKey}`,
+      },
+      body: JSON.stringify({ tool: 'agent.task.fetch', payload: { agentId } }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!fetchRes.ok) {
+      res.status(fetchRes.status).json({ error: `Task fetch failed: ${fetchRes.status}` });
+      return;
+    }
+    const data = await fetchRes.json();
+    res.json({ success: true, tasks: data?.result ?? data ?? [] });
+  } catch (err) {
+    res.status(502).json({ error: `Task fetch error: ${String(err)}` });
+  }
+});
+
+app.post('/api/tasks/:taskId/complete', requireApiKey, async (req, res) => {
+  try {
+    const { config } = await import('./config.js');
+    const fetchRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.backendApiKey}`,
+      },
+      body: JSON.stringify({ tool: 'agent.task.complete', payload: { taskId: req.params.taskId, result: req.body } }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!fetchRes.ok) {
+      res.status(fetchRes.status).json({ error: `Task complete failed: ${fetchRes.status}` });
+      return;
+    }
+    const data = await fetchRes.json();
+    res.json({ success: true, result: data?.result ?? data });
+  } catch (err) {
+    res.status(502).json({ error: `Task complete error: ${String(err)}` });
+  }
+});
+
+app.post('/api/tasks/:taskId/fail', requireApiKey, async (req, res) => {
+  try {
+    const { config } = await import('./config.js');
+    const fetchRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.backendApiKey}`,
+      },
+      body: JSON.stringify({ tool: 'agent.task.fail', payload: { taskId: req.params.taskId, reason: req.body?.reason ?? 'Unknown' } }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!fetchRes.ok) {
+      res.status(fetchRes.status).json({ error: `Task fail failed: ${fetchRes.status}` });
+      return;
+    }
+    const data = await fetchRes.json();
+    res.json({ success: true, result: data?.result ?? data });
+  } catch (err) {
+    res.status(502).json({ error: `Task fail error: ${String(err)}` });
+  }
+});
+
 // Prompt Generator (no auth — utility endpoint)
 app.use('/api/prompt-generator', promptGeneratorRouter)
 
