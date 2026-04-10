@@ -12,13 +12,10 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
 import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
 import { Route as AuthenticatedSettingsRouteImport } from './routes/_authenticated/settings'
-import { Route as AuthenticatedProjectOverviewRouteImport } from './routes/_authenticated/project-overview'
-import { Route as AuthenticatedProjectBoardRouteImport } from './routes/_authenticated/project-board'
 import { Route as AuthenticatedPheromoneRouteImport } from './routes/_authenticated/pheromone'
 import { Route as AuthenticatedOpenclawRouteImport } from './routes/_authenticated/openclaw'
 import { Route as AuthenticatedOmegaRouteImport } from './routes/_authenticated/omega'
 import { Route as AuthenticatedObsidianRouteImport } from './routes/_authenticated/obsidian'
-import { Route as AuthenticatedObservabilityRouteImport } from './routes/_authenticated/observability'
 import { Route as AuthenticatedKnowledgeRouteImport } from './routes/_authenticated/knowledge'
 import { Route as AuthenticatedInventorRouteImport } from './routes/_authenticated/inventor'
 import { Route as AuthenticatedFlywheelRouteImport } from './routes/_authenticated/flywheel'
@@ -54,18 +51,6 @@ const AuthenticatedSettingsRoute = AuthenticatedSettingsRouteImport.update({
   path: '/settings',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
-const AuthenticatedProjectOverviewRoute =
-  AuthenticatedProjectOverviewRouteImport.update({
-    id: '/project-overview',
-    path: '/project-overview',
-    getParentRoute: () => AuthenticatedRoute,
-  } as any)
-const AuthenticatedProjectBoardRoute =
-  AuthenticatedProjectBoardRouteImport.update({
-    id: '/project-board',
-    path: '/project-board',
-    getParentRoute: () => AuthenticatedRoute,
-  } as any)
 const AuthenticatedPheromoneRoute = AuthenticatedPheromoneRouteImport.update({
   id: '/pheromone',
   path: '/pheromone',
@@ -86,12 +71,6 @@ const AuthenticatedObsidianRoute = AuthenticatedObsidianRouteImport.update({
   path: '/obsidian',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
-const AuthenticatedObservabilityRoute =
-  AuthenticatedObservabilityRouteImport.update({
-    id: '/observability',
-    path: '/observability',
-    getParentRoute: () => AuthenticatedRoute,
-  } as any)
 const AuthenticatedKnowledgeRoute = AuthenticatedKnowledgeRouteImport.update({
   id: '/knowledge',
   path: '/knowledge',
@@ -216,13 +195,10 @@ export interface FileRoutesByFullPath {
   '/flywheel': typeof AuthenticatedFlywheelRoute
   '/inventor': typeof AuthenticatedInventorRoute
   '/knowledge': typeof AuthenticatedKnowledgeRoute
-  '/observability': typeof AuthenticatedObservabilityRoute
   '/obsidian': typeof AuthenticatedObsidianRoute
   '/omega': typeof AuthenticatedOmegaRoute
   '/openclaw': typeof AuthenticatedOpenclawRoute
   '/pheromone': typeof AuthenticatedPheromoneRoute
-  '/project-board': typeof AuthenticatedProjectBoardRoute
-  '/project-overview': typeof AuthenticatedProjectOverviewRoute
   '/settings': typeof AuthenticatedSettingsRouteWithChildren
   '/settings/account': typeof AuthenticatedSettingsAccountRoute
   '/settings/activity': typeof AuthenticatedSettingsActivityRoute
@@ -246,13 +222,10 @@ export interface FileRoutesByTo {
   '/flywheel': typeof AuthenticatedFlywheelRoute
   '/inventor': typeof AuthenticatedInventorRoute
   '/knowledge': typeof AuthenticatedKnowledgeRoute
-  '/observability': typeof AuthenticatedObservabilityRoute
   '/obsidian': typeof AuthenticatedObsidianRoute
   '/omega': typeof AuthenticatedOmegaRoute
   '/openclaw': typeof AuthenticatedOpenclawRoute
   '/pheromone': typeof AuthenticatedPheromoneRoute
-  '/project-board': typeof AuthenticatedProjectBoardRoute
-  '/project-overview': typeof AuthenticatedProjectOverviewRoute
   '/settings': typeof AuthenticatedSettingsRouteWithChildren
   '/': typeof AuthenticatedIndexRoute
   '/settings/account': typeof AuthenticatedSettingsAccountRoute
@@ -279,13 +252,10 @@ export interface FileRoutesById {
   '/_authenticated/flywheel': typeof AuthenticatedFlywheelRoute
   '/_authenticated/inventor': typeof AuthenticatedInventorRoute
   '/_authenticated/knowledge': typeof AuthenticatedKnowledgeRoute
-  '/_authenticated/observability': typeof AuthenticatedObservabilityRoute
   '/_authenticated/obsidian': typeof AuthenticatedObsidianRoute
   '/_authenticated/omega': typeof AuthenticatedOmegaRoute
   '/_authenticated/openclaw': typeof AuthenticatedOpenclawRoute
   '/_authenticated/pheromone': typeof AuthenticatedPheromoneRoute
-  '/_authenticated/project-board': typeof AuthenticatedProjectBoardRoute
-  '/_authenticated/project-overview': typeof AuthenticatedProjectOverviewRoute
   '/_authenticated/settings': typeof AuthenticatedSettingsRouteWithChildren
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/_authenticated/settings/account': typeof AuthenticatedSettingsAccountRoute
@@ -313,13 +283,10 @@ export interface FileRouteTypes {
     | '/flywheel'
     | '/inventor'
     | '/knowledge'
-    | '/observability'
     | '/obsidian'
     | '/omega'
     | '/openclaw'
     | '/pheromone'
-    | '/project-board'
-    | '/project-overview'
     | '/settings'
     | '/settings/account'
     | '/settings/activity'
@@ -343,13 +310,10 @@ export interface FileRouteTypes {
     | '/flywheel'
     | '/inventor'
     | '/knowledge'
-    | '/observability'
     | '/obsidian'
     | '/omega'
     | '/openclaw'
     | '/pheromone'
-    | '/project-board'
-    | '/project-overview'
     | '/settings'
     | '/'
     | '/settings/account'
@@ -375,13 +339,10 @@ export interface FileRouteTypes {
     | '/_authenticated/flywheel'
     | '/_authenticated/inventor'
     | '/_authenticated/knowledge'
-    | '/_authenticated/observability'
     | '/_authenticated/obsidian'
     | '/_authenticated/omega'
     | '/_authenticated/openclaw'
     | '/_authenticated/pheromone'
-    | '/_authenticated/project-board'
-    | '/_authenticated/project-overview'
     | '/_authenticated/settings'
     | '/_authenticated/'
     | '/_authenticated/settings/account'
@@ -419,20 +380,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedSettingsRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
-    '/_authenticated/project-overview': {
-      id: '/_authenticated/project-overview'
-      path: '/project-overview'
-      fullPath: '/project-overview'
-      preLoaderRoute: typeof AuthenticatedProjectOverviewRouteImport
-      parentRoute: typeof AuthenticatedRoute
-    }
-    '/_authenticated/project-board': {
-      id: '/_authenticated/project-board'
-      path: '/project-board'
-      fullPath: '/project-board'
-      preLoaderRoute: typeof AuthenticatedProjectBoardRouteImport
-      parentRoute: typeof AuthenticatedRoute
-    }
     '/_authenticated/pheromone': {
       id: '/_authenticated/pheromone'
       path: '/pheromone'
@@ -459,13 +406,6 @@ declare module '@tanstack/react-router' {
       path: '/obsidian'
       fullPath: '/obsidian'
       preLoaderRoute: typeof AuthenticatedObsidianRouteImport
-      parentRoute: typeof AuthenticatedRoute
-    }
-    '/_authenticated/observability': {
-      id: '/_authenticated/observability'
-      path: '/observability'
-      fullPath: '/observability'
-      preLoaderRoute: typeof AuthenticatedObservabilityRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/knowledge': {
@@ -648,13 +588,10 @@ interface AuthenticatedRouteChildren {
   AuthenticatedFlywheelRoute: typeof AuthenticatedFlywheelRoute
   AuthenticatedInventorRoute: typeof AuthenticatedInventorRoute
   AuthenticatedKnowledgeRoute: typeof AuthenticatedKnowledgeRoute
-  AuthenticatedObservabilityRoute: typeof AuthenticatedObservabilityRoute
   AuthenticatedObsidianRoute: typeof AuthenticatedObsidianRoute
   AuthenticatedOmegaRoute: typeof AuthenticatedOmegaRoute
   AuthenticatedOpenclawRoute: typeof AuthenticatedOpenclawRoute
   AuthenticatedPheromoneRoute: typeof AuthenticatedPheromoneRoute
-  AuthenticatedProjectBoardRoute: typeof AuthenticatedProjectBoardRoute
-  AuthenticatedProjectOverviewRoute: typeof AuthenticatedProjectOverviewRoute
   AuthenticatedSettingsRoute: typeof AuthenticatedSettingsRouteWithChildren
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
 }
@@ -674,13 +611,10 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedFlywheelRoute: AuthenticatedFlywheelRoute,
   AuthenticatedInventorRoute: AuthenticatedInventorRoute,
   AuthenticatedKnowledgeRoute: AuthenticatedKnowledgeRoute,
-  AuthenticatedObservabilityRoute: AuthenticatedObservabilityRoute,
   AuthenticatedObsidianRoute: AuthenticatedObsidianRoute,
   AuthenticatedOmegaRoute: AuthenticatedOmegaRoute,
   AuthenticatedOpenclawRoute: AuthenticatedOpenclawRoute,
   AuthenticatedPheromoneRoute: AuthenticatedPheromoneRoute,
-  AuthenticatedProjectBoardRoute: AuthenticatedProjectBoardRoute,
-  AuthenticatedProjectOverviewRoute: AuthenticatedProjectOverviewRoute,
   AuthenticatedSettingsRoute: AuthenticatedSettingsRouteWithChildren,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
 }
