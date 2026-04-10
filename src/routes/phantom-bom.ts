@@ -204,6 +204,23 @@ phantomBomRouter.post('/clusters/generate', async (_req: Request, res: Response)
     })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    res.status(500).json({ success: false, error: { code: 'CLUSTER_GENERATION_FAILED', message: msg, status_code: 500 } })
+    res.status(500).json({ success: false, error: { code: 'CLUSTER_GENERATION_FAILED', message: msg, status_code: 500 }, stack: err instanceof Error ? err.stack : undefined })
+  }
+})
+
+/**
+ * GET /api/phantom-bom/clusters/debug
+ * Debug: return raw provider query results from Neo4j.
+ */
+phantomBomRouter.get('/clusters/debug', async (_req: Request, res: Response) => {
+  try {
+    const { callBackendMcp } = await import('../phantom-bom.js')
+    const result = await callBackendMcp('graph.read_cypher', {
+      query: `MATCH (p:PhantomProvider) RETURN p.providerId as id, p.geoRestriction as geo, p.capabilities as caps, p.costModel as cost, p.confidence as conf, p.hitlRequired as hitl`,
+      params: {},
+    })
+    res.json({ success: true, rawResult: result, count: (result as any)?.results?.length ?? 0 })
+  } catch (err) {
+    res.status(500).json({ success: false, error: String(err), stack: err instanceof Error ? err.stack : undefined })
   }
 })

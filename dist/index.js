@@ -22284,6 +22284,574 @@ var init_mcp_caller = __esm({
   }
 });
 
+// src/phantom-bom.ts
+var phantom_bom_exports = {};
+__export(phantom_bom_exports, {
+  extractPhantomBOM: () => extractPhantomBOM,
+  extractProvider: () => extractProvider,
+  generatePhantomClusters: () => generatePhantomClusters,
+  getProviderRegistry: () => getProviderRegistry,
+  getRunState: () => getRunState,
+  listRuns: () => listRuns
+});
+import { execSync } from "child_process";
+import { createHash } from "crypto";
+function phantomId(sourceRepo, name, type) {
+  const hash = createHash("sha256").update(sourceRepo + name + type).digest("hex").substring(0, 16);
+  return `phantom-${hash}`;
+}
+function runRepomix(repoUrl) {
+  const remoteArg = repoUrl.startsWith("http") ? repoUrl : repoUrl;
+  const cmd = `npx --yes repomix --remote "${remoteArg}" --stdout --style plain --quiet`;
+  logger.info({ cmd }, "Running repomix");
+  const raw = execSync(cmd, {
+    timeout: 12e4,
+    maxBuffer: 50 * 1024 * 1024,
+    // 50MB buffer
+    stdio: ["pipe", "pipe", "pipe"],
+    encoding: "utf8"
+  });
+  const text = typeof raw === "string" ? raw : raw.toString("utf8");
+  return text.substring(0, REPOMIX_MAX_CHARS);
+}
+function buildExtractionPrompt(repoUrl, packedRepo) {
+  return `You are a software intelligence analyst. Analyze this repository and extract a structured Bill of Materials (BOM).
+
+CRITICAL: Your entire response must be valid JSON only. No markdown, no explanation, no prose. Start with { and end with }.
+
+Repository: ${repoUrl}
+
+REPOSITORY CONTENTS (packed by repomix):
+${packedRepo}
+
+Return EXACTLY this JSON structure:
+
+{
+  "repo_meta": {
+    "name": "short repo name",
+    "description": "1-2 sentence description",
+    "primary_language": "main programming language",
+    "license": "license name or unknown",
+    "topics": ["topic1", "topic2"]
+  },
+  "confidence_score": 85,
+  "summary": "2-3 sentences on what this repo does and why it matters for AI/ML practitioners",
+  "components": [
+    {
+      "name": "component name",
+      "type": "tool",
+      "description": "what this component does",
+      "source_file": "path/to/file or null",
+      "capabilities": ["capability1", "capability2"],
+      "dependencies": ["dep1", "dep2"],
+      "confidence": 90,
+      "tags": ["tag1", "tag2"]
+    }
+  ]
+}
+
+type must be exactly one of: tool, api, model, dataset, pattern, agent, service, library
+Extract 5-20 meaningful components. confidence_score: 80+ if well-documented, 70-79 if partial, <70 if guessing.
+Return ONLY valid JSON.`;
+}
+async function callDeepSeekLlm(prompt) {
+  const apiKey = config.deepseekApiKey;
+  if (!apiKey) throw new Error("DEEPSEEK_API_KEY not configured");
+  const res = await fetch("https://api.deepseek.com/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: "deepseek-chat",
+      messages: [
+        { role: "system", content: "You are a precise JSON-only software analyst. Never output anything except valid JSON." },
+        { role: "user", content: prompt }
+      ],
+      temperature: 0.1,
+      max_tokens: 4096,
+      response_format: { type: "json_object" }
+    }),
+    signal: AbortSignal.timeout(LLM_TIMEOUT_MS)
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`DeepSeek LLM failed: ${res.status} \u2014 ${text.substring(0, 200)}`);
+  }
+  const data = await res.json();
+  const content = data?.choices?.[0]?.message?.content ?? "";
+  if (!content) throw new Error("DeepSeek returned empty content");
+  return content;
+}
+function parseLlmBom(raw, repoUrl) {
+  let json = raw.trim();
+  if (json.startsWith("```")) {
+    json = json.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "").trim();
+  }
+  if (!json.startsWith("{")) {
+    const match = json.match(/\{[\s\S]*\}/);
+    if (match) json = match[0];
+  }
+  const parsed = JSON.parse(json);
+  return {
+    repo_meta: {
+      name: String(parsed.repo_meta?.name ?? repoUrl.split("/").pop() ?? "unknown"),
+      description: String(parsed.repo_meta?.description ?? ""),
+      primary_language: String(parsed.repo_meta?.primary_language ?? "unknown"),
+      license: String(parsed.repo_meta?.license ?? "unknown"),
+      topics: Array.isArray(parsed.repo_meta?.topics) ? parsed.repo_meta.topics.map(String) : []
+    },
+    confidence_score: Math.max(0, Math.min(100, Number(parsed.confidence_score ?? 50))),
+    summary: String(parsed.summary ?? ""),
+    components: (Array.isArray(parsed.components) ? parsed.components : []).map((c) => ({
+      name: String(c.name ?? "unknown"),
+      type: ["tool", "api", "model", "dataset", "pattern", "agent", "service", "library"].includes(String(c.type)) ? String(c.type) : "library",
+      description: String(c.description ?? ""),
+      source_file: c.source_file ? String(c.source_file) : null,
+      capabilities: Array.isArray(c.capabilities) ? c.capabilities.map(String) : [],
+      dependencies: Array.isArray(c.dependencies) ? c.dependencies.map(String) : [],
+      confidence: Math.max(0, Math.min(100, Number(c.confidence ?? 50))),
+      tags: Array.isArray(c.tags) ? c.tags.map(String) : []
+    }))
+  };
+}
+async function callBackendMcp(tool, payload) {
+  const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${config.backendApiKey}`
+    },
+    body: JSON.stringify({ tool, payload }),
+    signal: AbortSignal.timeout(3e4)
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Backend MCP ${tool} failed: ${res.status} \u2014 ${text.substring(0, 200)}`);
+  }
+  return res.json();
+}
+async function writeToNeo4j(bom) {
+  const runCypher = `
+MERGE (r:PhantomBOMRun {runId: $runId})
+SET r.sourceRepo = $sourceRepo,
+    r.sourceType = $sourceType,
+    r.ingestionTimestamp = datetime($ingestionTimestamp),
+    r.confidenceScore = $confidenceScore,
+    r.summary = $summary,
+    r.repoName = $repoName,
+    r.repoDescription = $repoDescription,
+    r.primaryLanguage = $primaryLanguage,
+    r.license = $license,
+    r.topics = $topics,
+    r.componentCount = $componentCount,
+    r.updatedAt = datetime()
+RETURN r.runId as runId`;
+  await callBackendMcp("graph.write_cypher", {
+    query: runCypher,
+    params: {
+      runId: bom.run_id,
+      sourceRepo: bom.source_repo,
+      sourceType: bom.source_type,
+      ingestionTimestamp: bom.ingestion_timestamp,
+      confidenceScore: bom.confidence_score,
+      summary: bom.summary,
+      repoName: bom.repo_meta.name,
+      repoDescription: bom.repo_meta.description,
+      primaryLanguage: bom.repo_meta.primary_language,
+      license: bom.repo_meta.license,
+      topics: bom.repo_meta.topics,
+      componentCount: bom.components.length
+    }
+  });
+  for (const comp of bom.components) {
+    const compCypher = `
+MERGE (c:PhantomComponent {componentId: $componentId})
+SET c.name = $name,
+    c.type = $type,
+    c.description = $description,
+    c.sourceRepo = $sourceRepo,
+    c.sourceFile = $sourceFile,
+    c.capabilities = $capabilities,
+    c.dependencies = $dependencies,
+    c.confidence = $confidence,
+    c.tags = $tags,
+    c.needsEmbedding = true,
+    c.updatedAt = datetime()
+WITH c
+MATCH (r:PhantomBOMRun {runId: $runId})
+MERGE (r)-[:EXTRACTED]->(c)
+RETURN c.componentId as id`;
+    await callBackendMcp("graph.write_cypher", {
+      query: compCypher,
+      params: {
+        componentId: comp.id,
+        name: comp.name,
+        type: comp.type,
+        description: comp.description,
+        sourceRepo: bom.source_repo,
+        sourceFile: comp.source_file,
+        capabilities: comp.capabilities,
+        dependencies: comp.dependencies,
+        confidence: comp.confidence,
+        tags: comp.tags,
+        runId: bom.run_id
+      }
+    });
+  }
+}
+async function extractPhantomBOM(repoUrl, sourceType = "git", runId) {
+  const id = runId ?? `pbom-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+  runState.set(id, { status: "running", startedAt: (/* @__PURE__ */ new Date()).toISOString() });
+  logger.info({ runId: id, repoUrl }, "PhantomBOM extraction started");
+  try {
+    const packedRepo = runRepomix(repoUrl);
+    logger.info({ runId: id, chars: packedRepo.length }, "Repomix packed repo");
+    const prompt = buildExtractionPrompt(repoUrl, packedRepo);
+    let extracted;
+    let lastError2 = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const raw = await callDeepSeekLlm(prompt);
+        extracted = parseLlmBom(raw, repoUrl);
+        lastError2 = null;
+        logger.info({ runId: id, attempt, components: extracted.components.length }, "LLM extraction parsed");
+        break;
+      } catch (err) {
+        lastError2 = err instanceof Error ? err : new Error(String(err));
+        logger.warn({ runId: id, attempt, err: lastError2.message }, "LLM parse failed, retrying");
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 3e3 * (attempt + 1)));
+      }
+    }
+    if (!extracted) throw lastError2 ?? new Error("LLM extraction failed after 3 attempts");
+    const bom = {
+      bom_version: "1.0",
+      run_id: id,
+      source_repo: repoUrl,
+      source_type: sourceType,
+      ingestion_timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      confidence_score: extracted.confidence_score,
+      repo_meta: extracted.repo_meta,
+      summary: extracted.summary,
+      components: extracted.components.map((c) => ({
+        ...c,
+        id: phantomId(repoUrl, c.name, c.type)
+      }))
+    };
+    await writeToNeo4j(bom);
+    logger.info({ runId: id, components: bom.components.length }, "PhantomBOM written to Neo4j");
+    runState.set(id, { status: "completed", bom, startedAt: runState.get(id).startedAt });
+    return bom;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ runId: id, err: msg }, "PhantomBOM extraction failed");
+    runState.set(id, { status: "failed", error: msg, startedAt: runState.get(id).startedAt });
+    throw err;
+  }
+}
+function getRunState(runId) {
+  return runState.get(runId) ?? null;
+}
+function listRuns() {
+  return Array.from(runState.entries()).map(([id, state4]) => ({
+    run_id: id,
+    status: state4.status,
+    startedAt: state4.startedAt,
+    source_repo: state4.bom?.source_repo,
+    confidence_score: state4.bom?.confidence_score,
+    component_count: state4.bom?.components.length,
+    error: state4.error
+  }));
+}
+function regexProviderParse(rawDocs, sourceUrl) {
+  const result = {};
+  const ctxMatch = rawDocs.match(/(\d+)[Kk]\s*(?:token|context)|context.{0,20}:\s*(\d+)/i);
+  if (ctxMatch) {
+    const raw = ctxMatch[1] ? Number(ctxMatch[1]) * 1024 : Number(ctxMatch[2]);
+    result.context_window = raw > 0 ? raw : 0;
+  }
+  if (/free|open.?source|self.?host/i.test(rawDocs)) result.cost_model = "free";
+  else if (/per.?token|\$/i.test(rawDocs)) result.cost_model = "per_token";
+  else if (/subscri/i.test(rawDocs)) result.cost_model = "subscription";
+  if (/local|self.?host|offline/i.test(rawDocs)) result.geo_restriction = "local_only";
+  else if (/eu.only|gdpr|europe/i.test(rawDocs)) result.geo_restriction = "eu_only";
+  else if (/china|cn.region|\bcn\b/i.test(rawDocs)) result.geo_restriction = "cn_region";
+  const caps = [];
+  if (/reasoning|think|chain.of.thought/i.test(rawDocs)) caps.push("reasoning");
+  if (/code|program|develop/i.test(rawDocs)) caps.push("code");
+  if (/vision|image|visual/i.test(rawDocs)) caps.push("vision");
+  if (/embed/i.test(rawDocs)) caps.push("embedding");
+  if (/multimodal|multi.modal/i.test(rawDocs)) caps.push("multimodal");
+  if (caps.length === 0) caps.push("text_generation");
+  result.capabilities = caps;
+  const verMatch = rawDocs.match(/v(\d+\.\d+(?:\.\d+)?)|version\s+(\d+\.\d+)|-(\d+\.\d+)-/i);
+  result.version = verMatch ? verMatch[1] ?? verMatch[2] ?? verMatch[3] ?? "unknown" : "unknown";
+  return result;
+}
+async function llmProviderParse(name, sourceUrl, rawDocs) {
+  const prompt = `You are a precise JSON-only AI provider analyst. Extract structured metadata about this AI model/provider.
+
+Provider: ${name}
+Source: ${sourceUrl}
+
+DOCUMENTATION:
+${rawDocs.substring(0, 3e3)}
+
+Return EXACTLY this JSON (no prose, no markdown):
+{
+  "version": "version string or unknown",
+  "context_window": 128000,
+  "cost_model": "free",
+  "geo_restriction": "global",
+  "primary_capability": "reasoning",
+  "capabilities": ["reasoning", "code"],
+  "confidence": 85
+}
+
+cost_model: free | per_token | subscription | unknown
+geo_restriction: global | eu_only | local_only | cn_region
+primary_capability and capabilities items: reasoning | code | vision | text_generation | embedding | multimodal
+confidence: 80+ if well-documented, 70-79 partial, <70 if guessing`;
+  const raw = await callDeepSeekLlm(prompt);
+  try {
+    const parsed = JSON.parse(raw.trim());
+    return {
+      version: String(parsed.version ?? "unknown"),
+      context_window: Number(parsed.context_window ?? 0),
+      cost_model: ["free", "per_token", "subscription", "unknown"].includes(parsed.cost_model) ? parsed.cost_model : "unknown",
+      geo_restriction: ["global", "eu_only", "local_only", "cn_region"].includes(parsed.geo_restriction) ? parsed.geo_restriction : "global",
+      primary_capability: parsed.primary_capability ?? "text_generation",
+      capabilities: Array.isArray(parsed.capabilities) ? parsed.capabilities : [],
+      confidence: Math.max(0, Math.min(100, Number(parsed.confidence ?? 50)))
+    };
+  } catch {
+    return {};
+  }
+}
+async function cveCheck(providerName) {
+  try {
+    const res = await callBackendMcp("graph.read_cypher", {
+      query: `MATCH (c:CVE) WHERE toLower(c.description) CONTAINS toLower($name) OR toLower(c.id) CONTAINS toLower($name) RETURN c.id as cveId LIMIT 10`,
+      params: { name: providerName }
+    });
+    return (res?.results ?? []).map((r) => r.cveId).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+async function hitlGate(provider) {
+  if (provider.confidence >= HITL_THRESHOLD) return { blocked: false };
+  try {
+    const res = await callBackendMcp("linear.create_issue", {
+      title: `[HITL] PhantomProvider low confidence: ${provider.name} (${provider.confidence}%)`,
+      description: `PhantomProvider ingest blocked \u2014 confidence ${provider.confidence}% is below threshold ${HITL_THRESHOLD}%.
+
+Provider: ${provider.name}
+Source: ${provider.source_url}
+Capabilities: ${provider.capabilities.join(", ")}
+
+Manual review required before Neo4j ingest.`,
+      labels: ["HITL", "phantom-bom"],
+      priority: 2
+    });
+    return { blocked: true, issueId: res?.issueId };
+  } catch {
+    return { blocked: true };
+  }
+}
+async function writeProviderToNeo4j(provider) {
+  const cypher = `
+MERGE (p:PhantomProvider {providerId: $providerId})
+SET p.name = $name,
+    p.sourceUrl = $sourceUrl,
+    p.sourceType = $sourceType,
+    p.geoRestriction = $geoRestriction,
+    p.primaryCapability = $primaryCapability,
+    p.capabilities = $capabilities,
+    p.version = $version,
+    p.contextWindow = $contextWindow,
+    p.costModel = $costModel,
+    p.confidence = $confidence,
+    p.cveIds = $cveIds,
+    p.hitlRequired = $hitlRequired,
+    p.hitlLinearIssue = $hitlLinearIssue,
+    p.needsEmbedding = true,
+    p.updatedAt = datetime()
+RETURN p.providerId as id`;
+  await callBackendMcp("graph.write_cypher", {
+    query: cypher,
+    params: {
+      providerId: provider.id,
+      name: provider.name,
+      sourceUrl: provider.source_url,
+      sourceType: provider.source_type,
+      geoRestriction: provider.geo_restriction,
+      primaryCapability: provider.primary_capability,
+      capabilities: provider.capabilities,
+      version: provider.version,
+      contextWindow: provider.context_window,
+      costModel: provider.cost_model,
+      confidence: provider.confidence,
+      cveIds: provider.cve_ids,
+      hitlRequired: provider.hitl_required,
+      hitlLinearIssue: provider.hitl_linear_issue ?? null
+    }
+  });
+}
+async function extractProvider(opts) {
+  const providerId = "prov-" + createHash("sha256").update(opts.source_url + opts.name).digest("hex").substring(0, 16);
+  logger.info({ providerId, name: opts.name }, "PhantomProvider extraction started");
+  const [regexResult, llmResult] = await Promise.all([
+    Promise.resolve(regexProviderParse(opts.raw_docs, opts.source_url)),
+    llmProviderParse(opts.name, opts.source_url, opts.raw_docs)
+  ]);
+  const merged = { ...regexResult, ...llmResult };
+  const cve_ids = await cveCheck(opts.name);
+  const provider = {
+    id: providerId,
+    name: opts.name,
+    source_url: opts.source_url,
+    source_type: opts.source_type,
+    geo_restriction: opts.geo_restriction ?? merged.geo_restriction ?? "global",
+    primary_capability: opts.primary_capability ?? merged.primary_capability ?? "text_generation",
+    version: merged.version ?? "unknown",
+    context_window: merged.context_window ?? 0,
+    cost_model: merged.cost_model ?? "unknown",
+    confidence: merged.confidence ?? 50,
+    capabilities: merged.capabilities ?? [],
+    cve_ids,
+    raw_docs: opts.raw_docs.substring(0, 2e3),
+    hitl_required: (merged.confidence ?? 50) < HITL_THRESHOLD,
+    hitl_linear_issue: void 0
+  };
+  const hitl = await hitlGate(provider);
+  provider.hitl_required = hitl.blocked;
+  provider.hitl_linear_issue = hitl.issueId;
+  if (!hitl.blocked) {
+    await writeProviderToNeo4j(provider);
+    logger.info({ providerId, confidence: provider.confidence, cves: cve_ids.length }, "PhantomProvider written to Neo4j");
+  } else {
+    logger.warn({ providerId, confidence: provider.confidence, issue: hitl.issueId }, "PhantomProvider blocked by HITL gate");
+  }
+  return { provider, blocked: hitl.blocked, hitl_issue: hitl.issueId, cve_count: cve_ids.length };
+}
+async function generatePhantomClusters() {
+  logger.info("Generating PhantomClusters");
+  const res = await callBackendMcp("graph.read_cypher", {
+    query: `MATCH (p:PhantomProvider) RETURN p.providerId as id, p.geoRestriction as geo, p.capabilities as caps, p.costModel as cost, p.confidence as conf, p.hitlRequired as hitl`,
+    params: {}
+  });
+  const providers = res?.results ?? [];
+  if (providers.length === 0) return [];
+  const normalizedProviders = providers.filter((p) => !p.hitl).map((p) => ({
+    ...p,
+    conf: typeof p.conf === "object" && p.conf !== null ? p.conf.low : p.conf ?? 0
+  }));
+  logger.info({ totalProviders: normalizedProviders.length, rawCount: providers.length }, "PhantomCluster: loaded providers");
+  const clusters = [];
+  for (const [strategy, def] of Object.entries(CLUSTER_STRATEGIES)) {
+    const members = normalizedProviders.filter((p) => {
+      const geoOk = def.geoFilter.includes(p.geo);
+      const costOk = def.costFilter.includes(p.cost);
+      const capOk = (p.caps ?? []).some((c) => def.capabilityFilter.includes(c));
+      logger.info({ provider: p.id, strategy, geo: p.geo, geoOk, cost: p.cost, costOk, caps: p.caps, capOk }, "PhantomCluster: provider filter check");
+      return geoOk && costOk && capOk;
+    });
+    logger.info({ strategy, memberCount: members.length }, "PhantomCluster: strategy members");
+    if (members.length === 0) continue;
+    const avg_conf = members.reduce((s, p) => s + (p.conf ?? 0), 0) / members.length;
+    const score = Math.round((0.5 * (avg_conf / 100) + 0.3 * Math.min(members.length / 5, 1) + 0.2 * 0.8) * 100) / 100;
+    const clusterId = `cluster-${strategy}-${Date.now()}`;
+    const cluster = {
+      id: clusterId,
+      strategy,
+      score,
+      member_count: members.length,
+      avg_confidence: Math.round(avg_conf),
+      provider_ids: members.map((p) => p.id),
+      created_at: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    await callBackendMcp("graph.write_cypher", {
+      query: `
+MERGE (cl:PhantomCluster {clusterId: $clusterId})
+SET cl.strategy = $strategy,
+    cl.strategyLabel = $strategyLabel,
+    cl.score = $score,
+    cl.memberCount = $memberCount,
+    cl.avgConfidence = $avgConfidence,
+    cl.providerIds = $providerIds,
+    cl.createdAt = datetime($createdAt),
+    cl.updatedAt = datetime()
+RETURN cl.clusterId as id`,
+      params: {
+        clusterId,
+        strategy,
+        strategyLabel: def.label,
+        score,
+        memberCount: members.length,
+        avgConfidence: Math.round(avg_conf),
+        providerIds: members.map((p) => p.id),
+        createdAt: cluster.created_at
+      }
+    });
+    clusters.push(cluster);
+    logger.info({ clusterId, strategy, members: members.length, score }, "PhantomCluster created");
+  }
+  return clusters;
+}
+async function getProviderRegistry() {
+  const res = await callBackendMcp("graph.read_cypher", {
+    query: `MATCH (p:PhantomProvider) RETURN p.providerId as id, p.name as name, p.geoRestriction as geo, p.primaryCapability as cap, p.confidence as conf, size(p.cveIds) as cves, p.hitlRequired as hitl ORDER BY p.confidence DESC`,
+    params: {}
+  });
+  const rows = res?.results ?? [];
+  return {
+    total: rows.length,
+    active: rows.filter((r) => !r.hitl).length,
+    hitl_blocked: rows.filter((r) => r.hitl).length,
+    providers: rows.map((r) => ({ id: r.id, name: r.name, geo: r.geo, capability: r.cap, confidence: r.conf, cves: r.cves, hitl: r.hitl }))
+  };
+}
+var REPOMIX_MAX_CHARS, LLM_TIMEOUT_MS, runState, HITL_THRESHOLD, CLUSTER_STRATEGIES;
+var init_phantom_bom = __esm({
+  "src/phantom-bom.ts"() {
+    "use strict";
+    init_config();
+    init_logger();
+    REPOMIX_MAX_CHARS = 6e4;
+    LLM_TIMEOUT_MS = 12e4;
+    runState = /* @__PURE__ */ new Map();
+    HITL_THRESHOLD = 70;
+    CLUSTER_STRATEGIES = {
+      eu_safe_reasoning: {
+        label: "EU Safe Reasoning Pool",
+        geoFilter: ["eu_only", "global"],
+        capabilityFilter: ["reasoning", "text_generation"],
+        costFilter: ["free", "per_token", "subscription"]
+      },
+      cost_optimized_code: {
+        label: "Cost-Optimized Code Generation",
+        geoFilter: ["global", "eu_only", "local_only"],
+        capabilityFilter: ["code", "reasoning"],
+        costFilter: ["free"]
+      },
+      local_only_privacy: {
+        label: "Local-Only Privacy Pool",
+        geoFilter: ["local_only"],
+        capabilityFilter: ["reasoning", "code", "text_generation", "embedding"],
+        costFilter: ["free"]
+      },
+      open_source_eu: {
+        label: "Open Source EU Cluster",
+        geoFilter: ["eu_only", "global"],
+        capabilityFilter: ["reasoning", "code", "text_generation", "vision", "embedding", "multimodal"],
+        costFilter: ["free"]
+      }
+    };
+  }
+});
+
 // src/startup-validator.ts
 var startup_validator_exports = {};
 __export(startup_validator_exports, {
@@ -39957,563 +40525,9 @@ grafanaProxyRouter.get("/alerts", async (_req, res) => {
 });
 
 // src/routes/phantom-bom.ts
+init_phantom_bom();
+init_logger();
 import { Router as Router52 } from "express";
-
-// src/phantom-bom.ts
-init_config();
-init_logger();
-import { execSync } from "child_process";
-import { createHash } from "crypto";
-var REPOMIX_MAX_CHARS = 6e4;
-var LLM_TIMEOUT_MS = 12e4;
-var runState = /* @__PURE__ */ new Map();
-function phantomId(sourceRepo, name, type) {
-  const hash = createHash("sha256").update(sourceRepo + name + type).digest("hex").substring(0, 16);
-  return `phantom-${hash}`;
-}
-function runRepomix(repoUrl) {
-  const remoteArg = repoUrl.startsWith("http") ? repoUrl : repoUrl;
-  const cmd = `npx --yes repomix --remote "${remoteArg}" --stdout --style plain --quiet`;
-  logger.info({ cmd }, "Running repomix");
-  const raw = execSync(cmd, {
-    timeout: 12e4,
-    maxBuffer: 50 * 1024 * 1024,
-    // 50MB buffer
-    stdio: ["pipe", "pipe", "pipe"],
-    encoding: "utf8"
-  });
-  const text = typeof raw === "string" ? raw : raw.toString("utf8");
-  return text.substring(0, REPOMIX_MAX_CHARS);
-}
-function buildExtractionPrompt(repoUrl, packedRepo) {
-  return `You are a software intelligence analyst. Analyze this repository and extract a structured Bill of Materials (BOM).
-
-CRITICAL: Your entire response must be valid JSON only. No markdown, no explanation, no prose. Start with { and end with }.
-
-Repository: ${repoUrl}
-
-REPOSITORY CONTENTS (packed by repomix):
-${packedRepo}
-
-Return EXACTLY this JSON structure:
-
-{
-  "repo_meta": {
-    "name": "short repo name",
-    "description": "1-2 sentence description",
-    "primary_language": "main programming language",
-    "license": "license name or unknown",
-    "topics": ["topic1", "topic2"]
-  },
-  "confidence_score": 85,
-  "summary": "2-3 sentences on what this repo does and why it matters for AI/ML practitioners",
-  "components": [
-    {
-      "name": "component name",
-      "type": "tool",
-      "description": "what this component does",
-      "source_file": "path/to/file or null",
-      "capabilities": ["capability1", "capability2"],
-      "dependencies": ["dep1", "dep2"],
-      "confidence": 90,
-      "tags": ["tag1", "tag2"]
-    }
-  ]
-}
-
-type must be exactly one of: tool, api, model, dataset, pattern, agent, service, library
-Extract 5-20 meaningful components. confidence_score: 80+ if well-documented, 70-79 if partial, <70 if guessing.
-Return ONLY valid JSON.`;
-}
-async function callDeepSeekLlm(prompt) {
-  const apiKey = config.deepseekApiKey;
-  if (!apiKey) throw new Error("DEEPSEEK_API_KEY not configured");
-  const res = await fetch("https://api.deepseek.com/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model: "deepseek-chat",
-      messages: [
-        { role: "system", content: "You are a precise JSON-only software analyst. Never output anything except valid JSON." },
-        { role: "user", content: prompt }
-      ],
-      temperature: 0.1,
-      max_tokens: 4096,
-      response_format: { type: "json_object" }
-    }),
-    signal: AbortSignal.timeout(LLM_TIMEOUT_MS)
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`DeepSeek LLM failed: ${res.status} \u2014 ${text.substring(0, 200)}`);
-  }
-  const data = await res.json();
-  const content = data?.choices?.[0]?.message?.content ?? "";
-  if (!content) throw new Error("DeepSeek returned empty content");
-  return content;
-}
-function parseLlmBom(raw, repoUrl) {
-  let json = raw.trim();
-  if (json.startsWith("```")) {
-    json = json.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "").trim();
-  }
-  if (!json.startsWith("{")) {
-    const match = json.match(/\{[\s\S]*\}/);
-    if (match) json = match[0];
-  }
-  const parsed = JSON.parse(json);
-  return {
-    repo_meta: {
-      name: String(parsed.repo_meta?.name ?? repoUrl.split("/").pop() ?? "unknown"),
-      description: String(parsed.repo_meta?.description ?? ""),
-      primary_language: String(parsed.repo_meta?.primary_language ?? "unknown"),
-      license: String(parsed.repo_meta?.license ?? "unknown"),
-      topics: Array.isArray(parsed.repo_meta?.topics) ? parsed.repo_meta.topics.map(String) : []
-    },
-    confidence_score: Math.max(0, Math.min(100, Number(parsed.confidence_score ?? 50))),
-    summary: String(parsed.summary ?? ""),
-    components: (Array.isArray(parsed.components) ? parsed.components : []).map((c) => ({
-      name: String(c.name ?? "unknown"),
-      type: ["tool", "api", "model", "dataset", "pattern", "agent", "service", "library"].includes(String(c.type)) ? String(c.type) : "library",
-      description: String(c.description ?? ""),
-      source_file: c.source_file ? String(c.source_file) : null,
-      capabilities: Array.isArray(c.capabilities) ? c.capabilities.map(String) : [],
-      dependencies: Array.isArray(c.dependencies) ? c.dependencies.map(String) : [],
-      confidence: Math.max(0, Math.min(100, Number(c.confidence ?? 50))),
-      tags: Array.isArray(c.tags) ? c.tags.map(String) : []
-    }))
-  };
-}
-async function callBackendMcp(tool, payload) {
-  const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${config.backendApiKey}`
-    },
-    body: JSON.stringify({ tool, payload }),
-    signal: AbortSignal.timeout(3e4)
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Backend MCP ${tool} failed: ${res.status} \u2014 ${text.substring(0, 200)}`);
-  }
-  return res.json();
-}
-async function writeToNeo4j(bom) {
-  const runCypher = `
-MERGE (r:PhantomBOMRun {runId: $runId})
-SET r.sourceRepo = $sourceRepo,
-    r.sourceType = $sourceType,
-    r.ingestionTimestamp = datetime($ingestionTimestamp),
-    r.confidenceScore = $confidenceScore,
-    r.summary = $summary,
-    r.repoName = $repoName,
-    r.repoDescription = $repoDescription,
-    r.primaryLanguage = $primaryLanguage,
-    r.license = $license,
-    r.topics = $topics,
-    r.componentCount = $componentCount,
-    r.updatedAt = datetime()
-RETURN r.runId as runId`;
-  await callBackendMcp("graph.write_cypher", {
-    query: runCypher,
-    params: {
-      runId: bom.run_id,
-      sourceRepo: bom.source_repo,
-      sourceType: bom.source_type,
-      ingestionTimestamp: bom.ingestion_timestamp,
-      confidenceScore: bom.confidence_score,
-      summary: bom.summary,
-      repoName: bom.repo_meta.name,
-      repoDescription: bom.repo_meta.description,
-      primaryLanguage: bom.repo_meta.primary_language,
-      license: bom.repo_meta.license,
-      topics: bom.repo_meta.topics,
-      componentCount: bom.components.length
-    }
-  });
-  for (const comp of bom.components) {
-    const compCypher = `
-MERGE (c:PhantomComponent {componentId: $componentId})
-SET c.name = $name,
-    c.type = $type,
-    c.description = $description,
-    c.sourceRepo = $sourceRepo,
-    c.sourceFile = $sourceFile,
-    c.capabilities = $capabilities,
-    c.dependencies = $dependencies,
-    c.confidence = $confidence,
-    c.tags = $tags,
-    c.needsEmbedding = true,
-    c.updatedAt = datetime()
-WITH c
-MATCH (r:PhantomBOMRun {runId: $runId})
-MERGE (r)-[:EXTRACTED]->(c)
-RETURN c.componentId as id`;
-    await callBackendMcp("graph.write_cypher", {
-      query: compCypher,
-      params: {
-        componentId: comp.id,
-        name: comp.name,
-        type: comp.type,
-        description: comp.description,
-        sourceRepo: bom.source_repo,
-        sourceFile: comp.source_file,
-        capabilities: comp.capabilities,
-        dependencies: comp.dependencies,
-        confidence: comp.confidence,
-        tags: comp.tags,
-        runId: bom.run_id
-      }
-    });
-  }
-}
-async function extractPhantomBOM(repoUrl, sourceType = "git", runId) {
-  const id = runId ?? `pbom-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
-  runState.set(id, { status: "running", startedAt: (/* @__PURE__ */ new Date()).toISOString() });
-  logger.info({ runId: id, repoUrl }, "PhantomBOM extraction started");
-  try {
-    const packedRepo = runRepomix(repoUrl);
-    logger.info({ runId: id, chars: packedRepo.length }, "Repomix packed repo");
-    const prompt = buildExtractionPrompt(repoUrl, packedRepo);
-    let extracted;
-    let lastError2 = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const raw = await callDeepSeekLlm(prompt);
-        extracted = parseLlmBom(raw, repoUrl);
-        lastError2 = null;
-        logger.info({ runId: id, attempt, components: extracted.components.length }, "LLM extraction parsed");
-        break;
-      } catch (err) {
-        lastError2 = err instanceof Error ? err : new Error(String(err));
-        logger.warn({ runId: id, attempt, err: lastError2.message }, "LLM parse failed, retrying");
-        if (attempt < 2) await new Promise((r) => setTimeout(r, 3e3 * (attempt + 1)));
-      }
-    }
-    if (!extracted) throw lastError2 ?? new Error("LLM extraction failed after 3 attempts");
-    const bom = {
-      bom_version: "1.0",
-      run_id: id,
-      source_repo: repoUrl,
-      source_type: sourceType,
-      ingestion_timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-      confidence_score: extracted.confidence_score,
-      repo_meta: extracted.repo_meta,
-      summary: extracted.summary,
-      components: extracted.components.map((c) => ({
-        ...c,
-        id: phantomId(repoUrl, c.name, c.type)
-      }))
-    };
-    await writeToNeo4j(bom);
-    logger.info({ runId: id, components: bom.components.length }, "PhantomBOM written to Neo4j");
-    runState.set(id, { status: "completed", bom, startedAt: runState.get(id).startedAt });
-    return bom;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    logger.error({ runId: id, err: msg }, "PhantomBOM extraction failed");
-    runState.set(id, { status: "failed", error: msg, startedAt: runState.get(id).startedAt });
-    throw err;
-  }
-}
-function getRunState(runId) {
-  return runState.get(runId) ?? null;
-}
-function listRuns() {
-  return Array.from(runState.entries()).map(([id, state4]) => ({
-    run_id: id,
-    status: state4.status,
-    startedAt: state4.startedAt,
-    source_repo: state4.bom?.source_repo,
-    confidence_score: state4.bom?.confidence_score,
-    component_count: state4.bom?.components.length,
-    error: state4.error
-  }));
-}
-var HITL_THRESHOLD = 70;
-var CLUSTER_STRATEGIES = {
-  eu_safe_reasoning: {
-    label: "EU Safe Reasoning Pool",
-    geoFilter: ["eu_only", "global"],
-    capabilityFilter: ["reasoning", "text_generation"],
-    costFilter: ["free", "per_token", "subscription"]
-  },
-  cost_optimized_code: {
-    label: "Cost-Optimized Code Generation",
-    geoFilter: ["global", "eu_only", "local_only"],
-    capabilityFilter: ["code", "reasoning"],
-    costFilter: ["free"]
-  },
-  local_only_privacy: {
-    label: "Local-Only Privacy Pool",
-    geoFilter: ["local_only"],
-    capabilityFilter: ["reasoning", "code", "text_generation", "embedding"],
-    costFilter: ["free"]
-  },
-  open_source_eu: {
-    label: "Open Source EU Cluster",
-    geoFilter: ["eu_only", "global"],
-    capabilityFilter: ["reasoning", "code", "text_generation", "vision", "embedding", "multimodal"],
-    costFilter: ["free"]
-  }
-};
-function regexProviderParse(rawDocs, sourceUrl) {
-  const result = {};
-  const ctxMatch = rawDocs.match(/(\d+)[Kk]\s*(?:token|context)|context.{0,20}:\s*(\d+)/i);
-  if (ctxMatch) {
-    const raw = ctxMatch[1] ? Number(ctxMatch[1]) * 1024 : Number(ctxMatch[2]);
-    result.context_window = raw > 0 ? raw : 0;
-  }
-  if (/free|open.?source|self.?host/i.test(rawDocs)) result.cost_model = "free";
-  else if (/per.?token|\$/i.test(rawDocs)) result.cost_model = "per_token";
-  else if (/subscri/i.test(rawDocs)) result.cost_model = "subscription";
-  if (/local|self.?host|offline/i.test(rawDocs)) result.geo_restriction = "local_only";
-  else if (/eu.only|gdpr|europe/i.test(rawDocs)) result.geo_restriction = "eu_only";
-  else if (/china|cn.region|\bcn\b/i.test(rawDocs)) result.geo_restriction = "cn_region";
-  const caps = [];
-  if (/reasoning|think|chain.of.thought/i.test(rawDocs)) caps.push("reasoning");
-  if (/code|program|develop/i.test(rawDocs)) caps.push("code");
-  if (/vision|image|visual/i.test(rawDocs)) caps.push("vision");
-  if (/embed/i.test(rawDocs)) caps.push("embedding");
-  if (/multimodal|multi.modal/i.test(rawDocs)) caps.push("multimodal");
-  if (caps.length === 0) caps.push("text_generation");
-  result.capabilities = caps;
-  const verMatch = rawDocs.match(/v(\d+\.\d+(?:\.\d+)?)|version\s+(\d+\.\d+)|-(\d+\.\d+)-/i);
-  result.version = verMatch ? verMatch[1] ?? verMatch[2] ?? verMatch[3] ?? "unknown" : "unknown";
-  return result;
-}
-async function llmProviderParse(name, sourceUrl, rawDocs) {
-  const prompt = `You are a precise JSON-only AI provider analyst. Extract structured metadata about this AI model/provider.
-
-Provider: ${name}
-Source: ${sourceUrl}
-
-DOCUMENTATION:
-${rawDocs.substring(0, 3e3)}
-
-Return EXACTLY this JSON (no prose, no markdown):
-{
-  "version": "version string or unknown",
-  "context_window": 128000,
-  "cost_model": "free",
-  "geo_restriction": "global",
-  "primary_capability": "reasoning",
-  "capabilities": ["reasoning", "code"],
-  "confidence": 85
-}
-
-cost_model: free | per_token | subscription | unknown
-geo_restriction: global | eu_only | local_only | cn_region
-primary_capability and capabilities items: reasoning | code | vision | text_generation | embedding | multimodal
-confidence: 80+ if well-documented, 70-79 partial, <70 if guessing`;
-  const raw = await callDeepSeekLlm(prompt);
-  try {
-    const parsed = JSON.parse(raw.trim());
-    return {
-      version: String(parsed.version ?? "unknown"),
-      context_window: Number(parsed.context_window ?? 0),
-      cost_model: ["free", "per_token", "subscription", "unknown"].includes(parsed.cost_model) ? parsed.cost_model : "unknown",
-      geo_restriction: ["global", "eu_only", "local_only", "cn_region"].includes(parsed.geo_restriction) ? parsed.geo_restriction : "global",
-      primary_capability: parsed.primary_capability ?? "text_generation",
-      capabilities: Array.isArray(parsed.capabilities) ? parsed.capabilities : [],
-      confidence: Math.max(0, Math.min(100, Number(parsed.confidence ?? 50)))
-    };
-  } catch {
-    return {};
-  }
-}
-async function cveCheck(providerName) {
-  try {
-    const res = await callBackendMcp("graph.read_cypher", {
-      query: `MATCH (c:CVE) WHERE toLower(c.description) CONTAINS toLower($name) OR toLower(c.id) CONTAINS toLower($name) RETURN c.id as cveId LIMIT 10`,
-      params: { name: providerName }
-    });
-    return (res?.results ?? []).map((r) => r.cveId).filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-async function hitlGate(provider) {
-  if (provider.confidence >= HITL_THRESHOLD) return { blocked: false };
-  try {
-    const res = await callBackendMcp("linear.create_issue", {
-      title: `[HITL] PhantomProvider low confidence: ${provider.name} (${provider.confidence}%)`,
-      description: `PhantomProvider ingest blocked \u2014 confidence ${provider.confidence}% is below threshold ${HITL_THRESHOLD}%.
-
-Provider: ${provider.name}
-Source: ${provider.source_url}
-Capabilities: ${provider.capabilities.join(", ")}
-
-Manual review required before Neo4j ingest.`,
-      labels: ["HITL", "phantom-bom"],
-      priority: 2
-    });
-    return { blocked: true, issueId: res?.issueId };
-  } catch {
-    return { blocked: true };
-  }
-}
-async function writeProviderToNeo4j(provider) {
-  const cypher = `
-MERGE (p:PhantomProvider {providerId: $providerId})
-SET p.name = $name,
-    p.sourceUrl = $sourceUrl,
-    p.sourceType = $sourceType,
-    p.geoRestriction = $geoRestriction,
-    p.primaryCapability = $primaryCapability,
-    p.capabilities = $capabilities,
-    p.version = $version,
-    p.contextWindow = $contextWindow,
-    p.costModel = $costModel,
-    p.confidence = $confidence,
-    p.cveIds = $cveIds,
-    p.hitlRequired = $hitlRequired,
-    p.hitlLinearIssue = $hitlLinearIssue,
-    p.needsEmbedding = true,
-    p.updatedAt = datetime()
-RETURN p.providerId as id`;
-  await callBackendMcp("graph.write_cypher", {
-    query: cypher,
-    params: {
-      providerId: provider.id,
-      name: provider.name,
-      sourceUrl: provider.source_url,
-      sourceType: provider.source_type,
-      geoRestriction: provider.geo_restriction,
-      primaryCapability: provider.primary_capability,
-      capabilities: provider.capabilities,
-      version: provider.version,
-      contextWindow: provider.context_window,
-      costModel: provider.cost_model,
-      confidence: provider.confidence,
-      cveIds: provider.cve_ids,
-      hitlRequired: provider.hitl_required,
-      hitlLinearIssue: provider.hitl_linear_issue ?? null
-    }
-  });
-}
-async function extractProvider(opts) {
-  const providerId = "prov-" + createHash("sha256").update(opts.source_url + opts.name).digest("hex").substring(0, 16);
-  logger.info({ providerId, name: opts.name }, "PhantomProvider extraction started");
-  const [regexResult, llmResult] = await Promise.all([
-    Promise.resolve(regexProviderParse(opts.raw_docs, opts.source_url)),
-    llmProviderParse(opts.name, opts.source_url, opts.raw_docs)
-  ]);
-  const merged = { ...regexResult, ...llmResult };
-  const cve_ids = await cveCheck(opts.name);
-  const provider = {
-    id: providerId,
-    name: opts.name,
-    source_url: opts.source_url,
-    source_type: opts.source_type,
-    geo_restriction: opts.geo_restriction ?? merged.geo_restriction ?? "global",
-    primary_capability: opts.primary_capability ?? merged.primary_capability ?? "text_generation",
-    version: merged.version ?? "unknown",
-    context_window: merged.context_window ?? 0,
-    cost_model: merged.cost_model ?? "unknown",
-    confidence: merged.confidence ?? 50,
-    capabilities: merged.capabilities ?? [],
-    cve_ids,
-    raw_docs: opts.raw_docs.substring(0, 2e3),
-    hitl_required: (merged.confidence ?? 50) < HITL_THRESHOLD,
-    hitl_linear_issue: void 0
-  };
-  const hitl = await hitlGate(provider);
-  provider.hitl_required = hitl.blocked;
-  provider.hitl_linear_issue = hitl.issueId;
-  if (!hitl.blocked) {
-    await writeProviderToNeo4j(provider);
-    logger.info({ providerId, confidence: provider.confidence, cves: cve_ids.length }, "PhantomProvider written to Neo4j");
-  } else {
-    logger.warn({ providerId, confidence: provider.confidence, issue: hitl.issueId }, "PhantomProvider blocked by HITL gate");
-  }
-  return { provider, blocked: hitl.blocked, hitl_issue: hitl.issueId, cve_count: cve_ids.length };
-}
-async function generatePhantomClusters() {
-  logger.info("Generating PhantomClusters");
-  const res = await callBackendMcp("graph.read_cypher", {
-    query: `MATCH (p:PhantomProvider) RETURN p.providerId as id, p.geoRestriction as geo, p.capabilities as caps, p.costModel as cost, p.confidence as conf, p.hitlRequired as hitl`,
-    params: {}
-  });
-  const providers = res?.results ?? [];
-  if (providers.length === 0) return [];
-  const normalizedProviders = providers.filter((p) => !p.hitl).map((p) => ({
-    ...p,
-    conf: typeof p.conf === "object" && p.conf !== null ? p.conf.low : p.conf ?? 0
-  }));
-  logger.info({ totalProviders: normalizedProviders.length, rawCount: providers.length }, "PhantomCluster: loaded providers");
-  const clusters = [];
-  for (const [strategy, def] of Object.entries(CLUSTER_STRATEGIES)) {
-    const members = normalizedProviders.filter((p) => {
-      const geoOk = def.geoFilter.includes(p.geo);
-      const costOk = def.costFilter.includes(p.cost);
-      const capOk = (p.caps ?? []).some((c) => def.capabilityFilter.includes(c));
-      logger.info({ provider: p.id, strategy, geo: p.geo, geoOk, cost: p.cost, costOk, caps: p.caps, capOk }, "PhantomCluster: provider filter check");
-      return geoOk && costOk && capOk;
-    });
-    logger.info({ strategy, memberCount: members.length }, "PhantomCluster: strategy members");
-    if (members.length === 0) continue;
-    const avg_conf = members.reduce((s, p) => s + (p.conf ?? 0), 0) / members.length;
-    const score = Math.round((0.5 * (avg_conf / 100) + 0.3 * Math.min(members.length / 5, 1) + 0.2 * 0.8) * 100) / 100;
-    const clusterId = `cluster-${strategy}-${Date.now()}`;
-    const cluster = {
-      id: clusterId,
-      strategy,
-      score,
-      member_count: members.length,
-      avg_confidence: Math.round(avg_conf),
-      provider_ids: members.map((p) => p.id),
-      created_at: (/* @__PURE__ */ new Date()).toISOString()
-    };
-    await callBackendMcp("graph.write_cypher", {
-      query: `
-MERGE (cl:PhantomCluster {clusterId: $clusterId})
-SET cl.strategy = $strategy,
-    cl.strategyLabel = $strategyLabel,
-    cl.score = $score,
-    cl.memberCount = $memberCount,
-    cl.avgConfidence = $avgConfidence,
-    cl.providerIds = $providerIds,
-    cl.createdAt = datetime($createdAt),
-    cl.updatedAt = datetime()
-RETURN cl.clusterId as id`,
-      params: {
-        clusterId,
-        strategy,
-        strategyLabel: def.label,
-        score,
-        memberCount: members.length,
-        avgConfidence: Math.round(avg_conf),
-        providerIds: members.map((p) => p.id),
-        createdAt: cluster.created_at
-      }
-    });
-    clusters.push(cluster);
-    logger.info({ clusterId, strategy, members: members.length, score }, "PhantomCluster created");
-  }
-  return clusters;
-}
-async function getProviderRegistry() {
-  const res = await callBackendMcp("graph.read_cypher", {
-    query: `MATCH (p:PhantomProvider) RETURN p.providerId as id, p.name as name, p.geoRestriction as geo, p.primaryCapability as cap, p.confidence as conf, size(p.cveIds) as cves, p.hitlRequired as hitl ORDER BY p.confidence DESC`,
-    params: {}
-  });
-  const rows = res?.results ?? [];
-  return {
-    total: rows.length,
-    active: rows.filter((r) => !r.hitl).length,
-    hitl_blocked: rows.filter((r) => r.hitl).length,
-    providers: rows.map((r) => ({ id: r.id, name: r.name, geo: r.geo, capability: r.cap, confidence: r.conf, cves: r.cves, hitl: r.hitl }))
-  };
-}
-
-// src/routes/phantom-bom.ts
-init_logger();
 var phantomBomRouter = Router52();
 var activeExtractions = 0;
 var MAX_CONCURRENT3 = 3;
@@ -40643,7 +40657,19 @@ phantomBomRouter.post("/clusters/generate", async (_req, res) => {
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    res.status(500).json({ success: false, error: { code: "CLUSTER_GENERATION_FAILED", message: msg, status_code: 500 } });
+    res.status(500).json({ success: false, error: { code: "CLUSTER_GENERATION_FAILED", message: msg, status_code: 500 }, stack: err instanceof Error ? err.stack : void 0 });
+  }
+});
+phantomBomRouter.get("/clusters/debug", async (_req, res) => {
+  try {
+    const { callBackendMcp: callBackendMcp2 } = await Promise.resolve().then(() => (init_phantom_bom(), phantom_bom_exports));
+    const result = await callBackendMcp2("graph.read_cypher", {
+      query: `MATCH (p:PhantomProvider) RETURN p.providerId as id, p.geoRestriction as geo, p.capabilities as caps, p.costModel as cost, p.confidence as conf, p.hitlRequired as hitl`,
+      params: {}
+    });
+    res.json({ success: true, rawResult: result, count: result?.results?.length ?? 0 });
+  } catch (err) {
+    res.status(500).json({ success: false, error: String(err), stack: err instanceof Error ? err.stack : void 0 });
   }
 });
 
