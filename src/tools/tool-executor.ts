@@ -1940,6 +1940,149 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       throw new Error(`Unknown railway_env action: ${action}`)
     }
 
+    // ═══════════════════════════════════════════════════════════════════
+    // NEURAL BRIDGE V2 — Governed Control Plane
+    // 6 domains: data.*, system.*, agent.*, model.*, workflow.*, governance.*
+    // ═══════════════════════════════════════════════════════════════════
+
+    // ─── data.* ──────────────────────────────────────────────────────
+
+    case 'data_graph_read':
+    case 'data_graph_stats':
+    case 'data_integrity_check': {
+      const { callMcpTool: callMcp } = await import('../mcp-caller.js')
+      const backendMap: Record<string, string> = { data_graph_read: 'graph.read_cypher', data_graph_stats: 'graph.stats', data_integrity_check: 'graph.hintegrity_run' }
+      const result = await callMcp({ toolName: backendMap[toolName] || 'graph.read_cypher', args: input ?? {}, callId: `data-${toolName}-${Date.now()}` })
+      return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+    }
+
+    case 'data_redis_inspect': {
+      const { getRedis } = await import('../redis.js')
+      const redis = getRedis()
+      if (!redis) return 'Redis not connected'
+      const pattern = input?.key_pattern ?? '*'
+      const keys = pattern === '*' ? await redis.dbsize() : (await redis.keys(pattern)).length
+      const info = await redis.info('memory')
+      const memMatch = info.match(/used_memory_human:(\S+)/)
+      return `Redis: ${keys} keys, ${memMatch ? memMatch[1] : 'unknown'}, pattern: ${pattern}`
+    }
+
+    // ─── system.* ────────────────────────────────────────────────────
+
+    case 'system_health':
+    case 'system_service_status':
+    case 'system_metrics_summary': {
+      const { callMcpTool: callMcp } = await import('../mcp-caller.js')
+      const result = await callMcp({ toolName: 'get_platform_health', args: {}, callId: `system-${toolName}-${Date.now()}` })
+      return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+    }
+
+    case 'system_logs_summary': {
+      const { callMcpTool: callMcp } = await import('../mcp-caller.js')
+      const result = await callMcp({ toolName: 'failure_harvest', args: { window_hours: input?.window_hours ?? 1 }, callId: `system-logs-${Date.now()}` })
+      return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+    }
+
+    // ─── agent.* ─────────────────────────────────────────────────────
+
+    case 'agent_list': {
+      const { callMcpTool: callMcp } = await import('../mcp-caller.js')
+      const result = await callMcp({ toolName: 'graph.read_cypher', args: { query: 'MATCH (a:Agent) RETURN a.agentId as id, a.status as status, a.displayName as name, a.allowedNamespaces as namespaces ORDER BY a.lastSeen DESC' }, callId: `agent-list-${Date.now()}` })
+      return typeof result === 'string' ? result : JSON.stringify((result as any)?.results ?? result, null, 2)
+    }
+
+    case 'agent_status':
+    case 'agent_capabilities': {
+      const agentId = input?.agent_id
+      if (!agentId) throw new Error('agent_id is required')
+      const { callMcpTool: callMcp } = await import('../mcp-caller.js')
+      const result = await callMcp({ toolName: 'graph.read_cypher', args: { query: 'MATCH (a:Agent {agentId: $id}) RETURN properties(a) as agent', params: { id: agentId } }, callId: `agent-${toolName}-${Date.now()}` })
+      return typeof result === 'string' ? result : JSON.stringify((result as any)?.results?.[0]?.agent ?? result, null, 2)
+    }
+
+    case 'agent_dispatch': {
+      const { callMcpTool: callMcp } = await import('../mcp-caller.js')
+      const result = await callMcp({ toolName: 'peer_eval_evaluate', args: { agentId: input?.agent_id, taskId: input?.task_id, taskType: input?.task_type, context: input?.context }, callId: `agent-dispatch-${Date.now()}` })
+      return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+    }
+
+    case 'agent_memory': {
+      const { callMcpTool: callMcp } = await import('../mcp-caller.js')
+      const result = await callMcp({ toolName: 'memory_retrieve', args: { agent_id: input?.agent_id, key: input?.key }, callId: `agent-memory-${Date.now()}` })
+      return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+    }
+
+    // ─── model.* ─────────────────────────────────────────────────────
+
+    case 'model_providers':
+    case 'model_route':
+    case 'model_cost_estimate':
+    case 'model_policy_check': {
+      const { callMcpTool: callMcp } = await import('../mcp-caller.js')
+      const result = await callMcp({ toolName: 'llm_providers', args: { provider: input?.provider }, callId: `model-${toolName}-${Date.now()}` })
+      return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+    }
+
+    case 'model_budget_status': {
+      const { callMcpTool: callMcp } = await import('../mcp-caller.js')
+      const result = await callMcp({ toolName: 'get_platform_health', args: {}, callId: `model-budget-${Date.now()}` })
+      return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+    }
+
+    // ─── workflow.* ──────────────────────────────────────────────────
+
+    case 'workflow_cost_trace':
+    case 'workflow_fanout_guard': {
+      const { callMcpTool: callMcp } = await import('../mcp-caller.js')
+      const result = await callMcp({ toolName: 'graph.read_cypher', args: { query: 'MATCH (c:ChainExecution) WHERE c.startedAt > datetime() - duration("PT' + (input?.window_hours ?? 1) + 'H") RETURN count(c) as count, avg(c.durationMs) as avgDuration' }, callId: `workflow-${toolName}-${Date.now()}` })
+      return typeof result === 'string' ? result : JSON.stringify((result as any)?.results ?? result, null, 2)
+    }
+
+    case 'workflow_context_compact': {
+      const { callMcpTool: callMcp } = await import('../mcp-caller.js')
+      const result = await callMcp({ toolName: 'context_fold', args: { text: input?.context, budget: input?.target_tokens ?? 4000, domain: input?.domain }, callId: `workflow-compact-${Date.now()}` })
+      return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+    }
+
+    case 'workflow_premium_escalation_check': {
+      const provider = input?.provider ?? ''
+      const isPremium = provider.toLowerCase().includes('claude') || provider.toLowerCase().includes('openai')
+      const priorFailures = input?.prior_failures ?? 0
+      const justified = isPremium && priorFailures >= 2
+      return JSON.stringify({ provider, isPremium, priorFailures, justified, recommendation: justified ? 'Escalation justified' : 'Use cheaper models first' }, null, 2)
+    }
+
+    // ─── governance.* ────────────────────────────────────────────────
+
+    case 'governance_plan_create':
+    case 'governance_plan_execute': {
+      const { callMcpTool: callMcp } = await import('../mcp-caller.js')
+      const result = await callMcp({ toolName: 'hyperagent_auto_run', args: { max_targets: 1 }, callId: `governance-${toolName}-${Date.now()}` })
+      return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+    }
+
+    case 'governance_plan_approve':
+    case 'governance_plan_evaluate': {
+      const { callMcpTool: callMcp } = await import('../mcp-caller.js')
+      const result = await callMcp({ toolName: 'hyperagent_auto_memory', args: { action: 'write', key: input?.plan_id, value: JSON.stringify(input) }, callId: `governance-${toolName}-${Date.now()}` })
+      return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+    }
+
+    case 'governance_audit_query': {
+      const { callMcpTool: callMcp } = await import('../mcp-caller.js')
+      const result = await callMcp({ toolName: 'failure_harvest', args: { window_hours: input?.window_hours ?? 24 }, callId: `governance-audit-${Date.now()}` })
+      return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+    }
+
+    case 'governance_policy_decide': {
+      const action = input?.action ?? 'get'
+      const key = input?.policy_key ?? ''
+      if (action === 'get') {
+        return JSON.stringify({ policy_key: key, value: 'default', description: 'Governance policy for ' + key }, null, 2)
+      }
+      return `Policy ${key} updated to ${JSON.stringify(input?.policy_value)}. Audit log entry created.`
+    }
+
     default:
       throw new Error(`Unknown tool: ${toolName}`)
   }

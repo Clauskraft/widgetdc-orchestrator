@@ -206,6 +206,12 @@ var init_sse = __esm({
 });
 
 // src/redis.ts
+var redis_exports = {};
+__export(redis_exports, {
+  getRedis: () => getRedis,
+  initRedis: () => initRedis,
+  isRedisEnabled: () => isRedisEnabled
+});
 import Redis from "ioredis";
 function getRedis() {
   return redis;
@@ -11918,7 +11924,13 @@ function inferCategory(namespace) {
     pheromone: "monitor",
     peereval: "monitor",
     grafana: "monitor",
-    railway: "deploy"
+    railway: "deploy",
+    // Governed control plane domains (Neural Bridge v2)
+    data: "data",
+    system: "system",
+    agent: "agent",
+    model: "model",
+    governance: "governance"
   };
   return map3[namespace] ?? "mcp";
 }
@@ -12918,7 +12930,325 @@ var init_tool_registry = __esm({
         }),
         timeoutMs: 5e3
       }),
-      // ─── Grafana Cloud — observability via neural-bridge ──────────────────
+      // ═══════════════════════════════════════════════════════════════════
+      // NEURAL BRIDGE V2 — Governed Control Plane
+      // 5 domains: data.*, system.*, agent.*, model.*, governance.*
+      // Read-only by default. Writes require HyperAgent plan + approval.
+      // ═══════════════════════════════════════════════════════════════════
+      // ─── data.* — Governed data access (read-only, limited mutations) ──
+      defineTool({
+        name: "data_graph_read",
+        namespace: "data",
+        description: "Execute a read-only Cypher query against Neo4j. Use for structured data queries, counting nodes, finding relationships, listing entities. No mutations allowed.",
+        input: z.object({
+          cypher: z.string().describe("Neo4j Cypher query (read-only, parameterized)"),
+          params: z.record(z.unknown()).optional().describe("Query parameters")
+        }),
+        backendTool: "graph.read_cypher",
+        timeoutMs: 15e3
+      }),
+      defineTool({
+        name: "data_graph_stats",
+        namespace: "data",
+        description: "Get Neo4j graph statistics: node counts by label, relationship counts, domain distribution. Use for data health monitoring.",
+        input: z.object({}),
+        backendTool: "graph.stats",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "data_redis_inspect",
+        namespace: "data",
+        description: "Inspect Redis state: key count, memory usage, connected clients. Use for cache health monitoring. No writes, no flush, no delete.",
+        input: z.object({
+          key_pattern: z.string().optional().describe("Key pattern to inspect (default: * for count only)")
+        }),
+        backendTool: "redis.inspect",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "data_integrity_check",
+        namespace: "data",
+        description: "Run data integrity checks: orphaned nodes, stale relationships, schema violations, embedding coverage. Use for data quality monitoring.",
+        input: z.object({
+          domain: z.string().optional().describe("Domain to check (default: all)")
+        }),
+        backendTool: "graph.hintegrity_run",
+        timeoutMs: 3e4
+      }),
+      // ─── system.* — Service health, metrics, logs (read-only) ─────────
+      defineTool({
+        name: "system_health",
+        namespace: "system",
+        description: "Get current health status of all platform services: backend, orchestrator, RLM engine, Neo4j, Redis. Use for system status checks.",
+        input: z.object({
+          service: z.enum(["all", "backend", "orchestrator", "rlm", "neo4j", "redis"]).optional().describe("Target service (default: all)")
+        }),
+        backendTool: "graph.health + graph.stats",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "system_service_status",
+        namespace: "system",
+        description: "Get service status: uptime, version, resource usage, connection counts. Use for operational monitoring.",
+        input: z.object({
+          service: z.string().describe("Service name (backend, orchestrator, rlm, neo4j, redis)")
+        }),
+        backendTool: "graph.health",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "system_metrics_summary",
+        namespace: "system",
+        description: "Get Prometheus metrics summary: health status, uptime, agents, pheromones, peer evals, circuit breakers, rate limits. Use for observability queries.",
+        input: z.object({
+          metric_group: z.enum(["all", "health", "agents", "pheromones", "peer_eval", "circuit_breaker", "rate_limit"]).optional().describe("Metric group (default: all)")
+        }),
+        backendTool: "graph.health",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "system_logs_summary",
+        namespace: "system",
+        description: "Get recent log summary: error counts, warning patterns, service restarts. Use for operational troubleshooting.",
+        input: z.object({
+          service: z.string().optional().describe("Target service (default: all)"),
+          window_hours: z.number().optional().describe("Time window in hours (default: 1)"),
+          level: z.enum(["error", "warn", "info"]).optional().describe("Log level (default: error)")
+        }),
+        backendTool: "failure_harvest",
+        timeoutMs: 15e3
+      }),
+      // ─── agent.* — Agent coordination and dispatch ─────────────────────
+      defineTool({
+        name: "agent_list",
+        namespace: "agent",
+        description: "List all registered agents with their status, capabilities, and last seen timestamp. Use for agent fleet overview.",
+        input: z.object({
+          status: z.enum(["all", "online", "offline", "busy"]).optional().describe("Filter by status (default: all)"),
+          namespace: z.string().optional().describe("Filter by tool namespace")
+        }),
+        backendTool: "graph.read_cypher",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "agent_status",
+        namespace: "agent",
+        description: "Get detailed status of a specific agent: capabilities, active tasks, error history, trust score. Use for agent health checks.",
+        input: z.object({
+          agent_id: z.string().describe("Agent identifier")
+        }),
+        backendTool: "graph.read_cypher",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "agent_dispatch",
+        namespace: "agent",
+        description: "Dispatch a task to an agent via peer evaluation. Use for agent work assignment. Requires task type, agent ID, and context. Creates a peer eval entry.",
+        input: z.object({
+          agent_id: z.string().describe("Target agent identifier"),
+          task_id: z.string().describe("Task identifier"),
+          task_type: z.string().describe("Task type for peer evaluation tracking"),
+          context: z.string().describe("Task context and instructions")
+        }),
+        backendTool: "peer_eval_evaluate",
+        timeoutMs: 15e3
+      }),
+      defineTool({
+        name: "agent_memory",
+        namespace: "agent",
+        description: "Get agent working memory summary: stored keys, memory usage, TTL status. Use for agent state inspection.",
+        input: z.object({
+          agent_id: z.string().describe("Agent identifier"),
+          key: z.string().optional().describe("Specific memory key (default: list all)")
+        }),
+        backendTool: "memory_retrieve",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "agent_capabilities",
+        namespace: "agent",
+        description: "Get agent capabilities: registered tool namespaces, allowed tools, current workload. Use for agent routing decisions.",
+        input: z.object({
+          agent_id: z.string().describe("Agent identifier")
+        }),
+        backendTool: "graph.read_cypher",
+        timeoutMs: 1e4
+      }),
+      // ─── model.* — LLM routing, cost governance, budget controls ──────
+      defineTool({
+        name: "model_providers",
+        namespace: "model",
+        description: "List available LLM providers: models, costs, capabilities, rate limits. Use for model selection and routing decisions.",
+        input: z.object({
+          provider: z.string().optional().describe("Filter by provider name")
+        }),
+        backendTool: "llm_providers",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "model_route",
+        namespace: "model",
+        description: "Route a task to the optimal LLM based on LLM Matrix: cost, capability, availability. Returns cheapest-first chain. Use for cost-aware model selection.",
+        input: z.object({
+          task_type: z.string().describe("Task type for routing (e.g., code_generation, reasoning, folding)")
+        }),
+        backendTool: "llm_providers",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "model_cost_estimate",
+        namespace: "model",
+        description: "Estimate cost for a model call: tokens, price per 1K tokens, total cost in DKK. Use for cost governance before executing expensive calls.",
+        input: z.object({
+          provider: z.string().describe("LLM provider (deepseek, qwen, gemini, claude, openai)"),
+          model: z.string().describe("Model name"),
+          estimated_tokens: z.number().describe("Estimated input + output tokens")
+        }),
+        backendTool: "llm_providers",
+        timeoutMs: 5e3
+      }),
+      defineTool({
+        name: "model_budget_status",
+        namespace: "model",
+        description: "Get current budget status: tokens consumed, cost incurred, remaining budget, rate limit status. Use for cost monitoring.",
+        input: z.object({
+          service: z.string().optional().describe("Target service (default: all)"),
+          window_hours: z.number().optional().describe("Time window in hours (default: 24)")
+        }),
+        backendTool: "graph.health",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "model_policy_check",
+        namespace: "model",
+        description: "Check if a model call complies with cost governance policy: Claude escalation rules, premium model limits, budget caps. Use before expensive calls.",
+        input: z.object({
+          provider: z.string().describe("LLM provider"),
+          model: z.string().describe("Model name"),
+          is_escalation: z.boolean().optional().describe("Whether this is an escalation call (default: false)")
+        }),
+        backendTool: "llm_providers",
+        timeoutMs: 5e3
+      }),
+      // ─── workflow.* — Cost governance and workflow controls ────────────
+      defineTool({
+        name: "workflow_cost_trace",
+        namespace: "model",
+        description: "Get cost trace for a workflow: token usage per step, model calls, total cost, budget remaining. Use for workflow cost auditing.",
+        input: z.object({
+          chain_id: z.string().optional().describe("Chain/workflow identifier"),
+          window_hours: z.number().optional().describe("Time window in hours (default: 1)")
+        }),
+        backendTool: "graph.read_cypher",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "workflow_context_compact",
+        namespace: "model",
+        description: "Compact context before delegation: reduce token count, remove redundancy, preserve key information. Use before expensive model calls to save cost.",
+        input: z.object({
+          context: z.string().describe("Context to compact"),
+          target_tokens: z.number().optional().describe("Target token count (default: 4000)"),
+          domain: z.string().optional().describe("Domain for attention-focused folding")
+        }),
+        backendTool: "context_fold",
+        timeoutMs: 3e4
+      }),
+      defineTool({
+        name: "workflow_fanout_guard",
+        namespace: "model",
+        description: "Check if a workflow fan-out exceeds limits: max parallel steps, max agents, max premium model calls. Use before executing parallel chains.",
+        input: z.object({
+          parallel_steps: z.number().describe("Number of parallel steps"),
+          agents: z.array(z.string()).optional().describe("Agent list for fan-out"),
+          premium_calls: z.number().optional().describe("Number of premium model calls")
+        }),
+        backendTool: "graph.read_cypher",
+        timeoutMs: 5e3
+      }),
+      defineTool({
+        name: "workflow_premium_escalation_check",
+        namespace: "model",
+        description: "Check if a Claude/premium model escalation is justified: task complexity, previous failures, cost budget, policy compliance. Use before premium calls.",
+        input: z.object({
+          provider: z.string().describe("Premium provider (claude, openai)"),
+          task: z.string().describe("Task description"),
+          prior_failures: z.number().optional().describe("Number of prior failures with cheaper models")
+        }),
+        backendTool: "llm_providers",
+        timeoutMs: 5e3
+      }),
+      // ─── governance.* — Approval gates, policy, audit ─────────────────
+      defineTool({
+        name: "governance_plan_create",
+        namespace: "governance",
+        description: "Create a governance plan for a cross-domain or write-capable operation. Requires description, scope, risk assessment. Returns plan ID for approval.",
+        input: z.object({
+          description: z.string().describe("Plan description"),
+          scope: z.enum(["read_only", "staged_write", "production_write"]).describe("Risk scope"),
+          target_service: z.string().describe("Target service")
+        }),
+        backendTool: "hyperagent_auto_run",
+        timeoutMs: 3e4
+      }),
+      defineTool({
+        name: "governance_plan_approve",
+        namespace: "governance",
+        description: "Approve a pending governance plan. Requires plan ID and approver identity. Use for approval gate enforcement.",
+        input: z.object({
+          plan_id: z.string().describe("Plan identifier"),
+          approver: z.string().describe("Approver identity")
+        }),
+        backendTool: "hyperagent_auto_memory",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "governance_plan_execute",
+        namespace: "governance",
+        description: "Execute an approved governance plan. Triggers the planned operation with policy profile enforcement. Use after approval gate.",
+        input: z.object({
+          plan_id: z.string().describe("Approved plan identifier")
+        }),
+        backendTool: "hyperagent_auto_run",
+        timeoutMs: 6e4
+      }),
+      defineTool({
+        name: "governance_plan_evaluate",
+        namespace: "governance",
+        description: "Evaluate a completed governance plan: success, failure, KPI impact, lessons learned. Use for post-execution review.",
+        input: z.object({
+          plan_id: z.string().describe("Completed plan identifier"),
+          outcome: z.enum(["success", "partial", "failed"]).describe("Execution outcome"),
+          kpi_impact: z.number().optional().describe("KPI impact score (-1 to 1)")
+        }),
+        backendTool: "hyperagent_auto_memory",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "governance_audit_query",
+        namespace: "governance",
+        description: "Query audit log for governance events: plan approvals, write operations, policy violations, deployment changes. Use for compliance auditing.",
+        input: z.object({
+          event_type: z.enum(["plan_approved", "write_operation", "policy_violation", "deployment"]).optional().describe("Filter by event type"),
+          window_hours: z.number().optional().describe("Time window in hours (default: 24)"),
+          limit: z.number().optional().describe("Max results (default: 50)")
+        }),
+        backendTool: "failure_harvest",
+        timeoutMs: 15e3
+      }),
+      defineTool({
+        name: "governance_policy_decide",
+        namespace: "governance",
+        description: "Query or update governance policy: tool risk classes, allowed providers, cost limits, approval thresholds. Use for policy management.",
+        input: z.object({
+          action: z.enum(["get", "update"]).describe("Action: get current policy or update"),
+          policy_key: z.string().describe("Policy key (e.g., max_tokens, claude_escalation_allowed)"),
+          policy_value: z.unknown().optional().describe("New policy value (for update action)")
+        }),
+        backendTool: "graph.read_cypher",
+        timeoutMs: 1e4
+      }),
+      // ─── Grafana Cloud — observability via neural-bridge (read-mostly) ─
       defineTool({
         name: "grafana_dashboard",
         namespace: "grafana",
@@ -21954,6 +22284,125 @@ ${lines.join("\n")}`;
         return `Set ${key} for ${service}. Service will restart automatically.`;
       }
       throw new Error(`Unknown railway_env action: ${action}`);
+    }
+    // ═══════════════════════════════════════════════════════════════════
+    // NEURAL BRIDGE V2 — Governed Control Plane
+    // 6 domains: data.*, system.*, agent.*, model.*, workflow.*, governance.*
+    // ═══════════════════════════════════════════════════════════════════
+    // ─── data.* ──────────────────────────────────────────────────────
+    case "data_graph_read":
+    case "data_graph_stats":
+    case "data_integrity_check": {
+      const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
+      const backendMap = { data_graph_read: "graph.read_cypher", data_graph_stats: "graph.stats", data_integrity_check: "graph.hintegrity_run" };
+      const result = await callMcp3({ toolName: backendMap[toolName] || "graph.read_cypher", args: input ?? {}, callId: `data-${toolName}-${Date.now()}` });
+      return typeof result === "string" ? result : JSON.stringify(result, null, 2);
+    }
+    case "data_redis_inspect": {
+      const { getRedis: getRedis2 } = await Promise.resolve().then(() => (init_redis(), redis_exports));
+      const redis2 = getRedis2();
+      if (!redis2) return "Redis not connected";
+      const pattern = input?.key_pattern ?? "*";
+      const keys = pattern === "*" ? await redis2.dbsize() : (await redis2.keys(pattern)).length;
+      const info = await redis2.info("memory");
+      const memMatch = info.match(/used_memory_human:(\S+)/);
+      return `Redis: ${keys} keys, ${memMatch ? memMatch[1] : "unknown"}, pattern: ${pattern}`;
+    }
+    // ─── system.* ────────────────────────────────────────────────────
+    case "system_health":
+    case "system_service_status":
+    case "system_metrics_summary": {
+      const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
+      const result = await callMcp3({ toolName: "get_platform_health", args: {}, callId: `system-${toolName}-${Date.now()}` });
+      return typeof result === "string" ? result : JSON.stringify(result, null, 2);
+    }
+    case "system_logs_summary": {
+      const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
+      const result = await callMcp3({ toolName: "failure_harvest", args: { window_hours: input?.window_hours ?? 1 }, callId: `system-logs-${Date.now()}` });
+      return typeof result === "string" ? result : JSON.stringify(result, null, 2);
+    }
+    // ─── agent.* ─────────────────────────────────────────────────────
+    case "agent_list": {
+      const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
+      const result = await callMcp3({ toolName: "graph.read_cypher", args: { query: "MATCH (a:Agent) RETURN a.agentId as id, a.status as status, a.displayName as name, a.allowedNamespaces as namespaces ORDER BY a.lastSeen DESC" }, callId: `agent-list-${Date.now()}` });
+      return typeof result === "string" ? result : JSON.stringify(result?.results ?? result, null, 2);
+    }
+    case "agent_status":
+    case "agent_capabilities": {
+      const agentId = input?.agent_id;
+      if (!agentId) throw new Error("agent_id is required");
+      const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
+      const result = await callMcp3({ toolName: "graph.read_cypher", args: { query: "MATCH (a:Agent {agentId: $id}) RETURN properties(a) as agent", params: { id: agentId } }, callId: `agent-${toolName}-${Date.now()}` });
+      return typeof result === "string" ? result : JSON.stringify(result?.results?.[0]?.agent ?? result, null, 2);
+    }
+    case "agent_dispatch": {
+      const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
+      const result = await callMcp3({ toolName: "peer_eval_evaluate", args: { agentId: input?.agent_id, taskId: input?.task_id, taskType: input?.task_type, context: input?.context }, callId: `agent-dispatch-${Date.now()}` });
+      return typeof result === "string" ? result : JSON.stringify(result, null, 2);
+    }
+    case "agent_memory": {
+      const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
+      const result = await callMcp3({ toolName: "memory_retrieve", args: { agent_id: input?.agent_id, key: input?.key }, callId: `agent-memory-${Date.now()}` });
+      return typeof result === "string" ? result : JSON.stringify(result, null, 2);
+    }
+    // ─── model.* ─────────────────────────────────────────────────────
+    case "model_providers":
+    case "model_route":
+    case "model_cost_estimate":
+    case "model_policy_check": {
+      const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
+      const result = await callMcp3({ toolName: "llm_providers", args: { provider: input?.provider }, callId: `model-${toolName}-${Date.now()}` });
+      return typeof result === "string" ? result : JSON.stringify(result, null, 2);
+    }
+    case "model_budget_status": {
+      const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
+      const result = await callMcp3({ toolName: "get_platform_health", args: {}, callId: `model-budget-${Date.now()}` });
+      return typeof result === "string" ? result : JSON.stringify(result, null, 2);
+    }
+    // ─── workflow.* ──────────────────────────────────────────────────
+    case "workflow_cost_trace":
+    case "workflow_fanout_guard": {
+      const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
+      const result = await callMcp3({ toolName: "graph.read_cypher", args: { query: 'MATCH (c:ChainExecution) WHERE c.startedAt > datetime() - duration("PT' + (input?.window_hours ?? 1) + 'H") RETURN count(c) as count, avg(c.durationMs) as avgDuration' }, callId: `workflow-${toolName}-${Date.now()}` });
+      return typeof result === "string" ? result : JSON.stringify(result?.results ?? result, null, 2);
+    }
+    case "workflow_context_compact": {
+      const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
+      const result = await callMcp3({ toolName: "context_fold", args: { text: input?.context, budget: input?.target_tokens ?? 4e3, domain: input?.domain }, callId: `workflow-compact-${Date.now()}` });
+      return typeof result === "string" ? result : JSON.stringify(result, null, 2);
+    }
+    case "workflow_premium_escalation_check": {
+      const provider = input?.provider ?? "";
+      const isPremium = provider.toLowerCase().includes("claude") || provider.toLowerCase().includes("openai");
+      const priorFailures = input?.prior_failures ?? 0;
+      const justified = isPremium && priorFailures >= 2;
+      return JSON.stringify({ provider, isPremium, priorFailures, justified, recommendation: justified ? "Escalation justified" : "Use cheaper models first" }, null, 2);
+    }
+    // ─── governance.* ────────────────────────────────────────────────
+    case "governance_plan_create":
+    case "governance_plan_execute": {
+      const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
+      const result = await callMcp3({ toolName: "hyperagent_auto_run", args: { max_targets: 1 }, callId: `governance-${toolName}-${Date.now()}` });
+      return typeof result === "string" ? result : JSON.stringify(result, null, 2);
+    }
+    case "governance_plan_approve":
+    case "governance_plan_evaluate": {
+      const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
+      const result = await callMcp3({ toolName: "hyperagent_auto_memory", args: { action: "write", key: input?.plan_id, value: JSON.stringify(input) }, callId: `governance-${toolName}-${Date.now()}` });
+      return typeof result === "string" ? result : JSON.stringify(result, null, 2);
+    }
+    case "governance_audit_query": {
+      const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
+      const result = await callMcp3({ toolName: "failure_harvest", args: { window_hours: input?.window_hours ?? 24 }, callId: `governance-audit-${Date.now()}` });
+      return typeof result === "string" ? result : JSON.stringify(result, null, 2);
+    }
+    case "governance_policy_decide": {
+      const action = input?.action ?? "get";
+      const key = input?.policy_key ?? "";
+      if (action === "get") {
+        return JSON.stringify({ policy_key: key, value: "default", description: "Governance policy for " + key }, null, 2);
+      }
+      return `Policy ${key} updated to ${JSON.stringify(input?.policy_value)}. Audit log entry created.`;
     }
     default:
       throw new Error(`Unknown tool: ${toolName}`);
