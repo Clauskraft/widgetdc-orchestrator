@@ -291,6 +291,9 @@ app.use('/api/s1-s4', requireApiKey, s1s4Router)
 // No rate limiter — Grafana queries are read-only, proxied to Cloud
 app.use('/api/grafana', requireApiKey, grafanaProxyRouter)
 
+// Linear proxy — SPA frontend reads/writes Linear issues via orchestrator
+app.use('/api/linear', requireApiKey, linearProxyRouter)
+
 // LIN-567: Red Queen Failure Harvester
 app.use('/api/failures', requireApiKey, apiRateLimiter, failuresRouter)
 // LIN-566: Competitive Phagocytosis MVP

@@ -161,7 +161,7 @@ async function ensureAuditLessonsRead(): Promise<void> {
 const LOCAL_TOOLS = new Set([
   'memory_store', 'memory_retrieve', 'adaptive_rag_reward',
   'critique_refine', 'context_fold', 'failure_harvest',
-  'linear_issues', 'linear_issue_detail',
+  'linear_issues', 'linear_issue_detail', 'linear_labels', 'linear_save_issue', 'linear_get_issue',
   'data_graph_read', 'data_graph_stats', 'data_redis_inspect', 'data_integrity_check',
   'system_health', 'system_service_status', 'system_metrics_summary', 'system_logs_summary',
   'agent_list', 'agent_status', 'agent_dispatch', 'agent_memory', 'agent_capabilities',

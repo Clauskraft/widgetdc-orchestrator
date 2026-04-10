@@ -12305,6 +12305,46 @@ var init_tool_registry = __esm({
         timeoutMs: 15e3
       }),
       defineTool({
+        name: "linear_labels",
+        namespace: "linear",
+        description: "List available Linear labels for issue categorization. Returns label names, colors, and descriptions.",
+        input: z.object({
+          limit: z.number().optional().describe("Max results (default 100)")
+        }),
+        backendTool: "linear.labels",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "linear_save_issue",
+        namespace: "linear",
+        description: "Create or update a Linear issue. If id is provided, updates the existing issue; otherwise creates a new one. When creating, title and team are required.",
+        input: z.object({
+          id: z.string().optional().describe("Issue ID for update (omit for create)"),
+          title: z.string().optional().describe("Issue title (required when creating)"),
+          description: z.string().optional().describe("Issue description as Markdown"),
+          team: z.string().optional().describe("Team name or ID (required when creating)"),
+          priority: z.number().optional().describe("Priority: 0=None, 1=Urgent, 2=High, 3=Normal, 4=Low"),
+          assignee: z.string().optional().describe('User ID, name, email, or "me"'),
+          labels: z.array(z.string()).optional().describe("Label names or IDs"),
+          state: z.string().optional().describe("State type, name, or ID"),
+          estimate: z.number().optional().describe("Issue estimate value")
+        }),
+        backendTool: "linear.save_issue",
+        timeoutMs: 15e3,
+        riskLevel: "staged_write",
+        requiresPlan: false
+      }),
+      defineTool({
+        name: "linear_get_issue",
+        namespace: "linear",
+        description: "Get a single Linear issue by ID or identifier. Returns full issue details with attachments, comments, and git branch name.",
+        input: z.object({
+          id: z.string().describe("Issue ID or identifier (e.g., LIN-493)")
+        }),
+        backendTool: "linear.get_issue",
+        timeoutMs: 1e4
+      }),
+      defineTool({
         name: "run_chain",
         namespace: "chains",
         description: "Execute a multi-step agent chain. Supports sequential, parallel, debate, and loop modes. Use for complex workflows needing coordinated tool calls.",
@@ -21898,6 +21938,43 @@ ${result.merged_context}`;
       if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
       return JSON.stringify(result.result, null, 2).slice(0, 800);
     }
+    case "linear_labels": {
+      const limit = Math.min(args.limit ?? 100, 250);
+      const result = await callMcpTool({
+        toolName: "linear.labels",
+        args: { limit },
+        callId: uuid23(),
+        timeoutMs: 1e4
+      });
+      if (result.status !== "success") return `Linear labels fetch failed: ${result.error_message}`;
+      const labels = result.result?.nodes ?? result.result ?? [];
+      if (!Array.isArray(labels) || labels.length === 0) return "No Linear labels found.";
+      return labels.map((l) => `- ${l.name} (${l.color}) ${l.description ?? ""}`).join("\n");
+    }
+    case "linear_save_issue": {
+      const body = args;
+      if (!body.title && !body.id) return "Error: title required for new issues";
+      const result = await callMcpTool({
+        toolName: "linear.save_issue",
+        args: body,
+        callId: uuid23(),
+        timeoutMs: 15e3
+      });
+      if (result.status !== "success") return `Linear save issue failed: ${result.error_message}`;
+      return JSON.stringify(result.result, null, 2).slice(0, 800);
+    }
+    case "linear_get_issue": {
+      const id = args.id;
+      if (!id) return "Error: id is required";
+      const result = await callMcpTool({
+        toolName: "linear.get_issue",
+        args: { id },
+        callId: uuid23(),
+        timeoutMs: 1e4
+      });
+      if (result.status !== "success") return `Linear get issue failed: ${result.error_message}`;
+      return JSON.stringify(result.result, null, 2).slice(0, 800);
+    }
     case "investigate": {
       const topic = args.topic;
       if (!topic) return "Error: topic is required";
@@ -23828,6 +23905,9 @@ var init_mcp_caller = __esm({
       "failure_harvest",
       "linear_issues",
       "linear_issue_detail",
+      "linear_labels",
+      "linear_save_issue",
+      "linear_get_issue",
       "data_graph_read",
       "data_graph_stats",
       "data_redis_inspect",
@@ -42255,10 +42335,115 @@ phantomBomRouter.get("/clusters/debug", async (_req, res) => {
   }
 });
 
+// src/routes/linear-proxy.ts
+init_logger();
+init_mcp_caller();
+import { Router as Router53 } from "express";
+var linearProxyRouter = Router53();
+linearProxyRouter.get("/issues", async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 100, 250);
+    const state4 = req.query.state;
+    const result = await callMcpTool({
+      toolName: "linear_issues",
+      args: {
+        limit,
+        state: state4 ?? void 0,
+        orderBy: "updatedAt"
+      },
+      callId: `linear-issues-${Date.now()}`
+    });
+    const issues = Array.isArray(result) ? result : result && typeof result === "object" && "issues" in result ? result.issues : result && typeof result === "object" && "nodes" in result ? result.nodes : [];
+    res.json(issues);
+  } catch (err) {
+    logger.error({ err: String(err) }, "Linear proxy: failed to fetch issues");
+    res.status(502).json({ error: `Failed to fetch Linear issues: ${String(err)}` });
+  }
+});
+linearProxyRouter.get("/labels", async (_req, res) => {
+  try {
+    const result = await callMcpTool({
+      toolName: "linear_labels",
+      args: { limit: 100 },
+      callId: `linear-labels-${Date.now()}`
+    });
+    const labels = Array.isArray(result) ? result : result && typeof result === "object" && "nodes" in result ? result.nodes : [];
+    res.json(labels);
+  } catch (err) {
+    logger.error({ err: String(err) }, "Linear proxy: failed to fetch labels");
+    res.status(502).json({ error: `Failed to fetch Linear labels: ${String(err)}` });
+  }
+});
+linearProxyRouter.post("/issues", async (req, res) => {
+  try {
+    const body = req.body;
+    if (!body.title && !body.id) {
+      res.status(400).json({ error: "title required for new issues" });
+      return;
+    }
+    const result = await callMcpTool({
+      toolName: "linear_save_issue",
+      args: {
+        id: body.id,
+        title: body.title,
+        description: body.description,
+        team: body.team ?? "WidgeTDC",
+        priority: body.priority,
+        assignee: body.assignee,
+        labels: body.labels,
+        state: body.state,
+        estimate: body.estimate
+      },
+      callId: `linear-save-${body.id ?? "new"}-${Date.now()}`
+    });
+    res.json(result);
+  } catch (err) {
+    logger.error({ err: String(err) }, "Linear proxy: failed to save issue");
+    res.status(502).json({ error: `Failed to save Linear issue: ${String(err)}` });
+  }
+});
+linearProxyRouter.post("/issues/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const body = req.body;
+    const result = await callMcpTool({
+      toolName: "linear_save_issue",
+      args: {
+        id,
+        title: body.title,
+        description: body.description,
+        priority: body.priority,
+        assignee: body.assignee,
+        labels: body.labels,
+        state: body.state,
+        estimate: body.estimate
+      },
+      callId: `linear-update-${id}-${Date.now()}`
+    });
+    res.json(result);
+  } catch (err) {
+    logger.error({ err: String(err) }, `Linear proxy: failed to update issue ${req.params.id}`);
+    res.status(502).json({ error: `Failed to update Linear issue: ${String(err)}` });
+  }
+});
+linearProxyRouter.get("/issue/:id", async (req, res) => {
+  try {
+    const result = await callMcpTool({
+      toolName: "linear_get_issue",
+      args: { id: req.params.id },
+      callId: `linear-detail-${req.params.id}-${Date.now()}`
+    });
+    res.json(result);
+  } catch (err) {
+    logger.error({ err: String(err) }, `Linear proxy: failed to get issue ${req.params.id}`);
+    res.status(502).json({ error: `Failed to get Linear issue: ${String(err)}` });
+  }
+});
+
 // src/routes/prometheus-metrics.ts
 init_logger();
-import { Router as Router53 } from "express";
-var prometheusMetricsRouter = Router53();
+import { Router as Router54 } from "express";
+var prometheusMetricsRouter = Router54();
 var samples = [];
 function collectMetrics(health) {
   const now = Date.now();
@@ -42573,6 +42758,7 @@ app.use("/api/decisions", requireApiKey, decisionsRouter);
 app.use("/monitor", requireApiKey, monitorRouter);
 app.use("/api/s1-s4", requireApiKey, s1s4Router);
 app.use("/api/grafana", requireApiKey, grafanaProxyRouter);
+app.use("/api/linear", requireApiKey, linearProxyRouter);
 app.use("/api/failures", requireApiKey, apiRateLimiter, failuresRouter);
 app.use("/api/competitive", requireApiKey, apiRateLimiter, competitiveRouter);
 app.use("/api/fold", requireApiKey, apiRateLimiter, foldRouter);

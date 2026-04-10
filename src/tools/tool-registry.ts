@@ -393,6 +393,49 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
   }),
 
   defineTool({
+    name: 'linear_labels',
+    namespace: 'linear',
+    description: 'List available Linear labels for issue categorization. Returns label names, colors, and descriptions.',
+    input: z.object({
+      limit: z.number().optional().describe('Max results (default 100)'),
+    }),
+    backendTool: 'linear.labels',
+    timeoutMs: 10000,
+  }),
+
+  defineTool({
+    name: 'linear_save_issue',
+    namespace: 'linear',
+    description: 'Create or update a Linear issue. If id is provided, updates the existing issue; otherwise creates a new one. When creating, title and team are required.',
+    input: z.object({
+      id: z.string().optional().describe('Issue ID for update (omit for create)'),
+      title: z.string().optional().describe('Issue title (required when creating)'),
+      description: z.string().optional().describe('Issue description as Markdown'),
+      team: z.string().optional().describe('Team name or ID (required when creating)'),
+      priority: z.number().optional().describe('Priority: 0=None, 1=Urgent, 2=High, 3=Normal, 4=Low'),
+      assignee: z.string().optional().describe('User ID, name, email, or "me"'),
+      labels: z.array(z.string()).optional().describe('Label names or IDs'),
+      state: z.string().optional().describe('State type, name, or ID'),
+      estimate: z.number().optional().describe('Issue estimate value'),
+    }),
+    backendTool: 'linear.save_issue',
+    timeoutMs: 15000,
+    riskLevel: 'staged_write',
+    requiresPlan: false,
+  }),
+
+  defineTool({
+    name: 'linear_get_issue',
+    namespace: 'linear',
+    description: 'Get a single Linear issue by ID or identifier. Returns full issue details with attachments, comments, and git branch name.',
+    input: z.object({
+      id: z.string().describe('Issue ID or identifier (e.g., LIN-493)'),
+    }),
+    backendTool: 'linear.get_issue',
+    timeoutMs: 10000,
+  }),
+
+  defineTool({
     name: 'run_chain',
     namespace: 'chains',
     description: 'Execute a multi-step agent chain. Supports sequential, parallel, debate, and loop modes. Use for complex workflows needing coordinated tool calls.',

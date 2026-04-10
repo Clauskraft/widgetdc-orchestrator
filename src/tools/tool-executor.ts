@@ -724,6 +724,46 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       return JSON.stringify(result.result, null, 2).slice(0, 800)
     }
 
+    case 'linear_labels': {
+      const limit = Math.min((args.limit as number) ?? 100, 250)
+      const result = await callMcpTool({
+        toolName: 'linear.labels',
+        args: { limit },
+        callId: uuid(),
+        timeoutMs: 10000,
+      })
+      if (result.status !== 'success') return `Linear labels fetch failed: ${result.error_message}`
+      const labels = (result.result as any)?.nodes ?? result.result ?? []
+      if (!Array.isArray(labels) || labels.length === 0) return 'No Linear labels found.'
+      return labels.map((l: any) => `- ${l.name} (${l.color}) ${l.description ?? ''}`).join('\n')
+    }
+
+    case 'linear_save_issue': {
+      const body = args as Record<string, unknown>
+      if (!body.title && !body.id) return 'Error: title required for new issues'
+      const result = await callMcpTool({
+        toolName: 'linear.save_issue',
+        args: body,
+        callId: uuid(),
+        timeoutMs: 15000,
+      })
+      if (result.status !== 'success') return `Linear save issue failed: ${result.error_message}`
+      return JSON.stringify(result.result, null, 2).slice(0, 800)
+    }
+
+    case 'linear_get_issue': {
+      const id = args.id as string
+      if (!id) return 'Error: id is required'
+      const result = await callMcpTool({
+        toolName: 'linear.get_issue',
+        args: { id },
+        callId: uuid(),
+        timeoutMs: 10000,
+      })
+      if (result.status !== 'success') return `Linear get issue failed: ${result.error_message}`
+      return JSON.stringify(result.result, null, 2).slice(0, 800)
+    }
+
     case 'investigate': {
       const topic = args.topic as string
       if (!topic) return 'Error: topic is required'
