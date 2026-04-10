@@ -1646,6 +1646,30 @@ await test('188. POST /api/tools/railway_env responds', async () => {
   assert(r.body?.data?.tool_name === 'railway_env', `wrong tool_name`)
 })
 
+// ── 189. linear_labels — responds without args ──
+await test('189. POST /api/tools/linear_labels responds', async () => {
+  const r = await api('/api/tools/linear_labels', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `linear_labels not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'linear_labels', `wrong tool_name: ${r.body?.data?.tool_name}`)
+})
+
+// ── 190. linear_save_issue — rejects missing title on create ──
+await test('190. POST /api/tools/linear_save_issue responds', async () => {
+  const r = await api('/api/tools/linear_save_issue', { method: 'POST', body: JSON.stringify({ title: 'test', team: 'Backend' }) })
+  assert(r.status !== 404, `linear_save_issue not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'linear_save_issue', `wrong tool_name: ${r.body?.data?.tool_name}`)
+})
+
+// ── 191. linear_get_issue — responds with id ──
+await test('191. POST /api/tools/linear_get_issue responds', async () => {
+  const r = await api('/api/tools/linear_get_issue', { method: 'POST', body: JSON.stringify({ id: 'LIN-1' }) })
+  assert(r.status !== 404, `linear_get_issue not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'linear_get_issue', `wrong tool_name: ${r.body?.data?.tool_name}`)
+})
+
 // ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped

@@ -58,6 +58,9 @@ Every tool declares governance metadata per the Neural Bridge v2 specification:
 | 17 | `check_tasks` | linear | 10s | Get active tasks, issues, and project status |
 | 18 | `linear_issues` | linear | 15s | Get issues from Linear project management |
 | 19 | `linear_issue_detail` | linear | 15s | Get detailed info about a specific Linear issue |
+| 19a | `linear_labels` | linear | 10s | List available Linear labels for issue categorization |
+| 19b | `linear_save_issue` | linear | 15s | Create or update a Linear issue |
+| 19c | `linear_get_issue` | linear | 10s | Get a single Linear issue by ID or identifier |
 | 20 | `call_mcp_tool` | mcp | 30s | Call any of the 449+ MCP tools on the WidgeTDC backend |
 | 21 | `get_platform_health` | monitor | 10s | Get health status of all platform services |
 | 22 | `list_tools` | monitor | 5s | List all available orchestrator tools |
@@ -501,6 +504,84 @@ curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/linea
   -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"identifier": "LIN-574"}'
+```
+
+---
+
+#### `linear_labels`
+
+**Description:** List available Linear labels for issue categorization. Returns label names, colors, and descriptions.
+
+**Timeout:** 10,000 ms  
+**Handler:** mcp-proxy → `linear.labels`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `limit` | integer | no | Max results (default 100) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/linear_labels \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+---
+
+#### `linear_save_issue`
+
+**Description:** Create or update a Linear issue. If `id` is provided, updates the existing issue; otherwise creates a new one. When creating, `title` and `team` are required.
+
+**Timeout:** 15,000 ms  
+**Handler:** mcp-proxy → `linear.save_issue`  
+**Risk Level:** staged_write
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | no | Issue ID for update (omit for create) |
+| `title` | string | no | Issue title (required when creating) |
+| `description` | string | no | Issue description as Markdown |
+| `team` | string | no | Team name or ID (required when creating) |
+| `priority` | integer | no | 0=None, 1=Urgent, 2=High, 3=Normal, 4=Low |
+| `assignee` | string | no | User ID, name, email, or "me" |
+| `labels` | array | no | Label names or IDs |
+| `state` | string | no | State type, name, or ID |
+| `estimate` | integer | no | Issue estimate value |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/linear_save_issue \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Fix auth bug", "team": "Backend", "priority": 2}'
+```
+
+---
+
+#### `linear_get_issue`
+
+**Description:** Get a single Linear issue by ID or identifier. Returns full issue details with attachments, comments, and git branch name.
+
+**Timeout:** 10,000 ms  
+**Handler:** mcp-proxy → `linear.get_issue`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | yes | Issue ID or identifier (e.g., LIN-493) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/linear_get_issue \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"id": "LIN-493"}'
 ```
 
 ---

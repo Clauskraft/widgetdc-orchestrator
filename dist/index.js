@@ -37329,10 +37329,207 @@ function buildOpenAPISpec() {
     ]
   };
 }
+function buildChatGPTSpec() {
+  const BASE = "https://orchestrator-production-c27e.up.railway.app";
+  const bearer = { BearerAuth: [{ type: "http", scheme: "bearer", description: "API key as Bearer token. Use: WidgeTDC_Orch_2026" }] };
+  return {
+    openapi: "3.0.3",
+    info: {
+      title: "WidgeTDC Neural Bridge",
+      version: "1.0.0",
+      description: "WidgeTDC platform intelligence: knowledge graph (475K+ nodes), Linear project management, RLM deep reasoning, and multi-agent chains."
+    },
+    servers: [{ url: BASE, description: "WidgeTDC Orchestrator (Railway)" }],
+    security: [{ BearerAuth: [] }],
+    components: {
+      securitySchemes: { BearerAuth: { type: "http", scheme: "bearer" } }
+    },
+    paths: {
+      "/api/tools/search_knowledge": {
+        post: {
+          operationId: "searchKnowledge",
+          summary: "Search the WidgeTDC knowledge graph",
+          description: "Search the knowledge graph and semantic vector store. Use for ANY question about platform data, consulting knowledge, patterns, documents, or entities.",
+          security: [bearer],
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object",
+            required: ["query"],
+            properties: {
+              query: { type: "string", description: "Natural language search query" },
+              max_results: { type: "integer", description: "Max results (default 10)", default: 10 }
+            }
+          } } } },
+          responses: { "200": { description: "Search results from SRAG + Neo4j" } }
+        }
+      },
+      "/api/tools/reason_deeply": {
+        post: {
+          operationId: "reasonDeeply",
+          summary: "Deep multi-step reasoning via RLM engine",
+          description: "Send a complex question to the RLM reasoning engine. Use for strategy questions, architecture analysis, comparisons, evaluations, and planning.",
+          security: [bearer],
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object",
+            required: ["question"],
+            properties: {
+              question: { type: "string", description: "The complex question to reason about" },
+              mode: { type: "string", enum: ["reason", "analyze", "plan"], default: "reason", description: "Reasoning mode" }
+            }
+          } } } },
+          responses: { "200": { description: "Deep reasoning result" } }
+        }
+      },
+      "/api/tools/query_graph": {
+        post: {
+          operationId: "queryGraph",
+          summary: "Execute a Cypher query against Neo4j",
+          description: "Run a read-only Cypher query against the Neo4j knowledge graph (475K+ nodes, 3.8M+ relationships).",
+          security: [bearer],
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object",
+            required: ["cypher"],
+            properties: {
+              cypher: { type: "string", description: "Neo4j Cypher query (read-only)" },
+              params: { type: "object", description: "Query parameters", additionalProperties: true }
+            }
+          } } } },
+          responses: { "200": { description: "Query results" } }
+        }
+      },
+      "/api/tools/check_tasks": {
+        post: {
+          operationId: "checkTasks",
+          summary: "Get active tasks and project status",
+          description: "Get active tasks, issues, and project status. Use when asked about project status, next steps, blockers, sprints, or Linear issues.",
+          security: [bearer],
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object",
+            properties: {
+              filter: { type: "string", enum: ["active", "blocked", "recent", "all"], default: "active" },
+              keyword: { type: "string", description: "Optional keyword to filter tasks" }
+            }
+          } } } },
+          responses: { "200": { description: "Task list" } }
+        }
+      },
+      "/api/tools/linear_issues": {
+        post: {
+          operationId: "linearIssues",
+          summary: "Get Linear issues and project status",
+          description: "Get issues from Linear. Use for project status, sprint progress, blockers, or looking up specific issues (LIN-xxx).",
+          security: [bearer],
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object",
+            properties: {
+              query: { type: "string", description: 'Search query or issue identifier e.g. "LIN-493"' },
+              status: { type: "string", enum: ["active", "done", "backlog", "all"], default: "active" },
+              limit: { type: "integer", default: 10 }
+            }
+          } } } },
+          responses: { "200": { description: "Linear issues" } }
+        }
+      },
+      "/api/tools/linear_save_issue": {
+        post: {
+          operationId: "linearSaveIssue",
+          summary: "Create or update a Linear issue",
+          description: "Create a new Linear issue or update an existing one. Provide id to update, omit to create. Title and team required for new issues.",
+          security: [bearer],
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object",
+            properties: {
+              id: { type: "string", description: "Issue ID for update (omit for create)" },
+              title: { type: "string", description: "Issue title (required when creating)" },
+              description: { type: "string", description: "Issue description as Markdown" },
+              team: { type: "string", description: "Team name or ID (required when creating)" },
+              priority: { type: "integer", description: "0=None, 1=Urgent, 2=High, 3=Normal, 4=Low" },
+              state: { type: "string", description: 'State name e.g. "In Progress"' }
+            }
+          } } } },
+          responses: { "200": { description: "Issue created or updated" } }
+        }
+      },
+      "/api/tools/get_platform_health": {
+        post: {
+          operationId: "getPlatformHealth",
+          summary: "Get platform health status",
+          description: "Check current health of all WidgeTDC services (backend, RLM engine, Neo4j, Redis). Use when asked about system status or uptime.",
+          security: [bearer],
+          requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: {} } } } },
+          responses: { "200": { description: "Health status for all services" } }
+        }
+      },
+      "/api/tools/investigate": {
+        post: {
+          operationId: "investigate",
+          summary: "Deep multi-agent investigation",
+          description: "Run a comprehensive multi-agent investigation on any topic. Returns analysis with graph data, compliance, strategy, and reasoning. Slower but very thorough.",
+          security: [bearer],
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object",
+            required: ["topic"],
+            properties: { topic: { type: "string", description: "The topic to investigate" } }
+          } } } },
+          responses: { "200": { description: "Investigation artifact" } }
+        }
+      },
+      "/api/tools/call_mcp_tool": {
+        post: {
+          operationId: "callMcpTool",
+          summary: "Call any of the 449+ MCP tools directly",
+          description: "Direct access to all WidgeTDC MCP tools. Use for specific operations: srag.query, graph.health, audit.dashboard, embedding.embed, compliance.check, etc.",
+          security: [bearer],
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object",
+            required: ["tool_name"],
+            properties: {
+              tool_name: { type: "string", description: 'MCP tool name e.g. "srag.query", "graph.health"' },
+              payload: { type: "object", description: "Tool arguments", additionalProperties: true }
+            }
+          } } } },
+          responses: { "200": { description: "Tool result" } }
+        }
+      },
+      "/api/tools/run_chain": {
+        post: {
+          operationId: "runChain",
+          summary: "Execute a multi-agent chain",
+          description: "Run a coordinated multi-step agent chain in sequential, parallel, debate, or loop mode.",
+          security: [bearer],
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object",
+            required: ["name", "mode", "steps"],
+            properties: {
+              name: { type: "string", description: "Chain name" },
+              mode: { type: "string", enum: ["sequential", "parallel", "debate", "loop"] },
+              steps: {
+                type: "array",
+                items: {
+                  type: "object",
+                  required: ["agent_id"],
+                  properties: {
+                    agent_id: { type: "string" },
+                    tool_name: { type: "string" },
+                    prompt: { type: "string" }
+                  }
+                }
+              }
+            }
+          } } } },
+          responses: { "200": { description: "Chain result" } }
+        }
+      }
+    }
+  };
+}
 var openapiRouter = Router24();
 var spec = buildOpenAPISpec();
+var gptSpec = buildChatGPTSpec();
 openapiRouter.get("/openapi.json", (_req, res) => {
   res.json(spec);
+});
+openapiRouter.get("/openapi-gpt.json", (_req, res) => {
+  res.json(gptSpec);
 });
 openapiRouter.use("/docs", swaggerUi.serve, swaggerUi.setup(spec, {
   customSiteTitle: "WidgeTDC API Explorer",
