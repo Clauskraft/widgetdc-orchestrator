@@ -233,25 +233,33 @@ RULES:
 
     if (!result) {
       // RLM unavailable or consistently failing — use LLM direct as fallback
-      logger.warn({ attempts: 3 }, 'Inventor: RLM unavailable, falling back to direct LLM call')
-      const { chatLLM } = await import('../llm/llm-proxy.js')
-      const llmResult = await chatLLM({
-        provider: 'deepseek',
-        messages: [
-          { role: 'system', content: 'You are an AI researcher generating solutions for an evolutionary optimization system. Respond in EXACT JSON with "motivation" and "artifact" fields. No markdown, no explanation.' },
-          { role: 'user', content: prompt },
-        ],
-        model: 'deepseek-chat',
-        max_tokens: 4000,
-        temperature: 0.7,
-      })
-      result = { answer: llmResult.content, content: llmResult.content }
+      logger.warn({ attempts: maxAttempts }, 'Inventor: RLM unavailable/failing, falling back to direct LLM call')
+      try {
+        const { chatLLM } = await import('../llm/llm-proxy.js')
+        const llmResult = await chatLLM({
+          provider: 'deepseek',
+          messages: [
+            { role: 'system', content: 'You are a JSON-only API for an evolutionary AI system. Respond with ONLY valid JSON. No markdown code blocks, no explanation text, no extra commentary. The response must parse as JSON.' },
+            { role: 'user', content: prompt },
+          ],
+          model: 'deepseek-chat',
+          max_tokens: 4000,
+          temperature: 0.7,
+        })
+        if (llmResult && llmResult.content) {
+          result = { answer: llmResult.content, content: llmResult.content }
+          logger.info({ contentLength: llmResult.content.length }, 'Inventor: LLM fallback succeeded')
+        }
+      } catch (llmErr) {
+        logger.error({ error: String(llmErr) }, 'Inventor: LLM fallback also failed')
+      }
     }
 
     if (!result) throw lastRlmErr ?? new Error('RLM returned null after 3 attempts')
 
     // Defensive extraction — RLM response structure varies by version
     const r = result as Record<string, unknown>
+    logger.info({ resultKeys: Object.keys(r) }, 'Inventor: researcher RLM response keys')
     const text = String(
       r.answer ?? r.result ?? r.reasoning ?? r.plan ??
       (r.analysis && typeof r.analysis === 'object' ? JSON.stringify(r.analysis) : '') ??

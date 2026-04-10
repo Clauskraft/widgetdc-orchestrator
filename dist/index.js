@@ -21145,22 +21145,30 @@ RULES:
       lastRlmErr = new Error("RLM returned null (non-OK response)");
     }
     if (!result) {
-      logger.warn({ attempts: 3 }, "Inventor: RLM unavailable, falling back to direct LLM call");
-      const { chatLLM: chatLLM2 } = await Promise.resolve().then(() => (init_llm_proxy(), llm_proxy_exports));
-      const llmResult = await chatLLM2({
-        provider: "deepseek",
-        messages: [
-          { role: "system", content: 'You are an AI researcher generating solutions for an evolutionary optimization system. Respond in EXACT JSON with "motivation" and "artifact" fields. No markdown, no explanation.' },
-          { role: "user", content: prompt }
-        ],
-        model: "deepseek-chat",
-        max_tokens: 4e3,
-        temperature: 0.7
-      });
-      result = { answer: llmResult.content, content: llmResult.content };
+      logger.warn({ attempts: maxAttempts }, "Inventor: RLM unavailable/failing, falling back to direct LLM call");
+      try {
+        const { chatLLM: chatLLM2 } = await Promise.resolve().then(() => (init_llm_proxy(), llm_proxy_exports));
+        const llmResult = await chatLLM2({
+          provider: "deepseek",
+          messages: [
+            { role: "system", content: "You are a JSON-only API for an evolutionary AI system. Respond with ONLY valid JSON. No markdown code blocks, no explanation text, no extra commentary. The response must parse as JSON." },
+            { role: "user", content: prompt }
+          ],
+          model: "deepseek-chat",
+          max_tokens: 4e3,
+          temperature: 0.7
+        });
+        if (llmResult && llmResult.content) {
+          result = { answer: llmResult.content, content: llmResult.content };
+          logger.info({ contentLength: llmResult.content.length }, "Inventor: LLM fallback succeeded");
+        }
+      } catch (llmErr) {
+        logger.error({ error: String(llmErr) }, "Inventor: LLM fallback also failed");
+      }
     }
     if (!result) throw lastRlmErr ?? new Error("RLM returned null after 3 attempts");
     const r = result;
+    logger.info({ resultKeys: Object.keys(r) }, "Inventor: researcher RLM response keys");
     const text = String(
       r.answer ?? r.result ?? r.reasoning ?? r.plan ?? (r.analysis && typeof r.analysis === "object" ? JSON.stringify(r.analysis) : "") ?? (r.content ?? "")
     );
