@@ -192,11 +192,17 @@ Generate a NEW solution that improves on the best parent.
 - If no parents, generate an initial high-quality solution
 - Max artifact length: ${config.pipeline.maxArtifactLength} characters
 
-Respond in JSON format:
+Respond in EXACT JSON format (no other text):
 {
   "motivation": "Why this variation should improve on parents...",
   "artifact": "The complete solution code/config..."
-}`
+}
+
+RULES:
+- Return ONLY valid JSON
+- No markdown code blocks, no explanation text
+- artifact should be a complete solution
+- motivation should be 1-2 sentences`
 
   try {
     // Retry up to 3 attempts with backoff to handle cold-start transient failures
@@ -239,19 +245,25 @@ Respond in JSON format:
 
     // Try to parse JSON response
     try {
-      const jsonMatch = text.match(/\{[\s\S]*"artifact"[\s\S]*\}/)
+      // Strip markdown code blocks
+      const stripped = text.replace(/^```json\s*/m, '').replace(/^```\s*$/m, '').trim()
+      const jsonMatch = stripped.match(/\{[\s\S]*"artifact"[\s\S]*\}/)
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0])
-        return {
-          artifact: String(parsed.artifact || '').slice(0, config.pipeline.maxArtifactLength),
-          motivation: String(parsed.motivation || 'No motivation provided'),
+        if (parsed.artifact && typeof parsed.artifact === 'string') {
+          return {
+            artifact: parsed.artifact.slice(0, config.pipeline.maxArtifactLength),
+            motivation: String(parsed.motivation || 'No motivation provided'),
+          }
         }
       }
     } catch { /* fall through to raw text */ }
 
+    // Raw text fallback — wrap as artifact
+    const motivation = text.split('\n').slice(0, 3).join(' ').slice(0, 200)
     return {
       artifact: text.slice(0, config.pipeline.maxArtifactLength),
-      motivation: 'Generated via RLM reasoning (raw output)',
+      motivation: motivation || 'Generated via RLM reasoning (raw output)',
     }
   } catch (err) {
     throw new Error(`Researcher failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -277,6 +289,7 @@ async function runEngineer(
         query: `Evaluate this solution for the task: ${config.taskDescription.slice(0, 400)}`,
         response: node.artifact.slice(0, 3000),
         context: `Score for evolutionary optimization fitness. Reward: correct approach, complete implementation, efficient solution, novelty vs prior attempts.`,
+        provider: 'deepseek',
       },
       callId: `inventor-eng-${node.id}`,
     })
@@ -285,15 +298,53 @@ async function runEngineer(
     // Text format: "PRISM Score: 3.4/10 (...)  P-Precision: 2/10  R-Reasoning: 2/10 ..."
     // Try JSON first; fall back to text parsing.
     const resultObj = (typeof result === 'object' && result !== null) ? result as Record<string, unknown> : {}
+    // Deep extraction: result may be nested in result.result, result.data, etc.
+    const deepResult = (resultObj.result && typeof resultObj.result === 'object')
+      ? resultObj.result as Record<string, unknown> : resultObj
     const resultText = typeof result === 'string' ? result
-      : (typeof resultObj.text === 'string' ? resultObj.text
-        : (typeof resultObj.content === 'string' ? resultObj.content : ''))
+      : (typeof deepResult.text === 'string' ? deepResult.text
+        : (typeof deepResult.content === 'string' ? deepResult.content
+          : (typeof deepResult.answer === 'string' ? deepResult.answer
+            : (typeof resultObj.content === 'string' ? resultObj.content : ''))))
+
+    // If resultText is empty but we have a structured object with scores, use that
+    if (!resultText && deepResult.aggregate !== undefined) {
+      const agg = Number(deepResult.aggregate ?? 5)
+      const scores = (deepResult.scores && typeof deepResult.scores === 'object')
+        ? deepResult.scores as Record<string, number> : {}
+      const score = Math.min(1, Math.max(0, agg > 1 ? agg / 10 : agg))
+      return {
+        nodeId: node.id,
+        success: score > 0.3,
+        score,
+        metrics: {
+          precision: Number(scores.precision ?? score * 10) / 10,
+          reasoning: Number(scores.reasoning ?? score * 10) / 10,
+          information: Number(scores.information ?? score * 10) / 10,
+          safety: Number(scores.safety ?? score * 10) / 10,
+          methodology: Number(scores.methodology ?? score * 10) / 10,
+        },
+        output: JSON.stringify(result).slice(0, 2000),
+        durationMs: Date.now() - t0,
+        tokensUsed: 0,
+      }
+    }
 
     // Helper: parse "PRISM Score: N.N/10" and per-dimension lines from text
     function parsePrismText(text: string): { aggregate: number; scores: Record<string, number> } | null {
-      const aggMatch = text.match(/PRISM\s+Score:\s*([\d.]+)\s*\/\s*10/i)
-      if (!aggMatch) return null
-      const aggregate = parseFloat(aggMatch[1])
+      // Try multiple patterns
+      const patterns = [
+        /PRISM\s+Score:\s*([\d.]+)\s*\/\s*10/i,
+        /aggregate[:\s]+([\d.]+)\s*\/\s*10/i,
+        /overall[:\s]+([\d.]+)\s*\/\s*10/i,
+        /score[:\s]+([\d.]+)\s*\/\s*10/i,
+        /([\d.]+)\s*\/\s*10/,  // catch any X/10 pattern
+      ]
+      let aggregate = 5  // default fallback
+      for (const pattern of patterns) {
+        const m = text.match(pattern)
+        if (m) { aggregate = parseFloat(m[1]); break }
+      }
       const dimMap: Record<string, string> = {
         precision: 'P-Precision', reasoning: 'R-Reasoning', information: 'I-Information',
         safety: 'S-Safety', methodology: 'M-Methodology',

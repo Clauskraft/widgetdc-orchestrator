@@ -21109,11 +21109,17 @@ Generate a NEW solution that improves on the best parent.
 - If no parents, generate an initial high-quality solution
 - Max artifact length: ${config2.pipeline.maxArtifactLength} characters
 
-Respond in JSON format:
+Respond in EXACT JSON format (no other text):
 {
   "motivation": "Why this variation should improve on parents...",
   "artifact": "The complete solution code/config..."
-}`;
+}
+
+RULES:
+- Return ONLY valid JSON
+- No markdown code blocks, no explanation text
+- artifact should be a complete solution
+- motivation should be 1-2 sentences`;
   try {
     let result = null;
     let lastRlmErr = null;
@@ -21146,19 +21152,23 @@ Respond in JSON format:
       throw new Error(`RLM returned no usable text (keys: ${Object.keys(r).join(", ")})`);
     }
     try {
-      const jsonMatch = text.match(/\{[\s\S]*"artifact"[\s\S]*\}/);
+      const stripped = text.replace(/^```json\s*/m, "").replace(/^```\s*$/m, "").trim();
+      const jsonMatch = stripped.match(/\{[\s\S]*"artifact"[\s\S]*\}/);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
-        return {
-          artifact: String(parsed.artifact || "").slice(0, config2.pipeline.maxArtifactLength),
-          motivation: String(parsed.motivation || "No motivation provided")
-        };
+        if (parsed.artifact && typeof parsed.artifact === "string") {
+          return {
+            artifact: parsed.artifact.slice(0, config2.pipeline.maxArtifactLength),
+            motivation: String(parsed.motivation || "No motivation provided")
+          };
+        }
       }
     } catch {
     }
+    const motivation = text.split("\n").slice(0, 3).join(" ").slice(0, 200);
     return {
       artifact: text.slice(0, config2.pipeline.maxArtifactLength),
-      motivation: "Generated via RLM reasoning (raw output)"
+      motivation: motivation || "Generated via RLM reasoning (raw output)"
     };
   } catch (err) {
     throw new Error(`Researcher failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -21168,9 +21178,22 @@ async function runEngineer(node, config2) {
   const t0 = Date.now();
   try {
     let parsePrismText2 = function(text) {
-      const aggMatch = text.match(/PRISM\s+Score:\s*([\d.]+)\s*\/\s*10/i);
-      if (!aggMatch) return null;
-      const aggregate = parseFloat(aggMatch[1]);
+      const patterns = [
+        /PRISM\s+Score:\s*([\d.]+)\s*\/\s*10/i,
+        /aggregate[:\s]+([\d.]+)\s*\/\s*10/i,
+        /overall[:\s]+([\d.]+)\s*\/\s*10/i,
+        /score[:\s]+([\d.]+)\s*\/\s*10/i,
+        /([\d.]+)\s*\/\s*10/
+        // catch any X/10 pattern
+      ];
+      let aggregate = 5;
+      for (const pattern of patterns) {
+        const m = text.match(pattern);
+        if (m) {
+          aggregate = parseFloat(m[1]);
+          break;
+        }
+      }
       const dimMap = {
         precision: "P-Precision",
         reasoning: "R-Reasoning",
@@ -21191,12 +21214,34 @@ async function runEngineer(node, config2) {
       args: {
         query: `Evaluate this solution for the task: ${config2.taskDescription.slice(0, 400)}`,
         response: node.artifact.slice(0, 3e3),
-        context: `Score for evolutionary optimization fitness. Reward: correct approach, complete implementation, efficient solution, novelty vs prior attempts.`
+        context: `Score for evolutionary optimization fitness. Reward: correct approach, complete implementation, efficient solution, novelty vs prior attempts.`,
+        provider: "deepseek"
       },
       callId: `inventor-eng-${node.id}`
     });
     const resultObj = typeof result === "object" && result !== null ? result : {};
-    const resultText = typeof result === "string" ? result : typeof resultObj.text === "string" ? resultObj.text : typeof resultObj.content === "string" ? resultObj.content : "";
+    const deepResult = resultObj.result && typeof resultObj.result === "object" ? resultObj.result : resultObj;
+    const resultText = typeof result === "string" ? result : typeof deepResult.text === "string" ? deepResult.text : typeof deepResult.content === "string" ? deepResult.content : typeof deepResult.answer === "string" ? deepResult.answer : typeof resultObj.content === "string" ? resultObj.content : "";
+    if (!resultText && deepResult.aggregate !== void 0) {
+      const agg = Number(deepResult.aggregate ?? 5);
+      const scores = deepResult.scores && typeof deepResult.scores === "object" ? deepResult.scores : {};
+      const score2 = Math.min(1, Math.max(0, agg > 1 ? agg / 10 : agg));
+      return {
+        nodeId: node.id,
+        success: score2 > 0.3,
+        score: score2,
+        metrics: {
+          precision: Number(scores.precision ?? score2 * 10) / 10,
+          reasoning: Number(scores.reasoning ?? score2 * 10) / 10,
+          information: Number(scores.information ?? score2 * 10) / 10,
+          safety: Number(scores.safety ?? score2 * 10) / 10,
+          methodology: Number(scores.methodology ?? score2 * 10) / 10
+        },
+        output: JSON.stringify(result).slice(0, 2e3),
+        durationMs: Date.now() - t0,
+        tokensUsed: 0
+      };
+    }
     let prismScores = {};
     let rawAggregate;
     const jsonPrism = resultObj.scores && typeof resultObj.scores === "object" ? resultObj.scores : null;
