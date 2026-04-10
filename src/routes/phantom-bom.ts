@@ -13,6 +13,7 @@
 import { Router, Request, Response } from 'express'
 import { extractPhantomBOM, getRunState, listRuns, extractProvider, generatePhantomClusters, getProviderRegistry } from '../phantom-bom.js'
 import { logger } from '../logger.js'
+import { config } from '../config.js'
 
 export const phantomBomRouter = Router()
 
@@ -210,16 +211,32 @@ phantomBomRouter.post('/clusters/generate', async (_req: Request, res: Response)
 
 /**
  * GET /api/phantom-bom/clusters/debug
- * Debug: return raw provider query results from Neo4j.
+ * Debug: return raw provider query results from Neo4j via direct backend call.
  */
 phantomBomRouter.get('/clusters/debug', async (_req: Request, res: Response) => {
   try {
-    const { callBackendMcp } = await import('../phantom-bom.js')
-    const result = await callBackendMcp('graph.read_cypher', {
-      query: `MATCH (p:PhantomProvider) RETURN p.providerId as id, p.geoRestriction as geo, p.capabilities as caps, p.costModel as cost, p.confidence as conf, p.hitlRequired as hitl`,
-      params: {},
+    const backendRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.backendApiKey}`,
+      },
+      body: JSON.stringify({
+        tool: 'graph.read_cypher',
+        payload: {
+          query: `MATCH (p:PhantomProvider) RETURN p.providerId as id, p.geoRestriction as geo, p.capabilities as caps, p.costModel as cost, p.confidence as conf, p.hitlRequired as hitl`,
+        },
+      }),
+      signal: AbortSignal.timeout(15000),
     })
-    res.json({ success: true, rawResult: result, count: (result as any)?.results?.length ?? 0 })
+    const data = await backendRes.json()
+    const results = data?.result?.results ?? data?.results ?? []
+    res.json({
+      success: true,
+      rawQuery: `MATCH (p:PhantomProvider) RETURN p.providerId as id, p.geoRestriction as geo, p.capabilities as caps, p.costModel as cost, p.confidence as conf, p.hitlRequired as hitl`,
+      resultCount: results.length,
+      sample: results.slice(0, 3),
+    })
   } catch (err) {
     res.status(500).json({ success: false, error: String(err), stack: err instanceof Error ? err.stack : undefined })
   }
