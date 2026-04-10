@@ -40922,6 +40922,7 @@ app.use((req, _res, next) => {
   logger.debug({ method: req.method, path: req.path }, "Request");
   next();
 });
+app.use(prometheusMetricsRouter);
 app.use(express.static(path2.join(__dirname3, "public"), {
   etag: false,
   maxAge: 0,
@@ -40932,7 +40933,7 @@ app.use(express.static(path2.join(__dirname3, "public"), {
 var spaIndexPath = path2.join(__dirname3, "public", "index.html");
 app.use((req, res, next) => {
   if (req.method !== "GET" && req.method !== "HEAD") return next();
-  if (req.path.startsWith("/ws") || req.path.startsWith("/sse") || req.path.startsWith("/health") || req.path.startsWith("/api/") || req.path.match(/\.\w+$/)) return next();
+  if (req.path.startsWith("/ws") || req.path.startsWith("/sse") || req.path.startsWith("/health") || req.path.startsWith("/api/") || req.path.startsWith("/metrics") || req.path.match(/\.\w+$/)) return next();
   if (req.accepts("html", "json") === "html") {
     return res.sendFile(spaIndexPath);
   }
@@ -40982,7 +40983,6 @@ app.use("/api/pheromone", requireApiKey, pheromoneRouter);
 app.use("/api/peer-eval", requireApiKey, peerEvalRouter);
 app.use("/api/flywheel", requireApiKey, flywheelRouter);
 app.use("/api/benchmark", requireApiKey, benchmarkRouter);
-app.use(prometheusMetricsRouter);
 app.use("/api/phantom-bom", requireApiKey, apiRateLimiter, phantomBomRouter);
 app.use("/api/obsidian", requireApiKey, obsidianRouter);
 app.use("/api/hyperagent/auto", requireApiKey, apiRateLimiter, hyperagentAutoRouter);

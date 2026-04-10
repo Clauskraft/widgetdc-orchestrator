@@ -224,6 +224,10 @@ app.use((req, _res, next) => {
   next()
 })
 
+// ─── Prometheus metrics — Grafana Cloud scraping (no auth) ───────────────────
+// MUST be before static files + SPA catch-all
+app.use(prometheusMetricsRouter)
+
 // ─── Static frontend (Command Center SPA) ───────────────────────────────────
 app.use(express.static(path.join(__dirname, 'public'), {
   etag: false,
@@ -236,10 +240,10 @@ app.use(express.static(path.join(__dirname, 'public'), {
 const spaIndexPath = path.join(__dirname, 'public', 'index.html')
 app.use((req, res, next) => {
   if (req.method !== 'GET' && req.method !== 'HEAD') return next()
-  // Skip WebSocket, SSE, health, API routes, and static assets
+  // Skip WebSocket, SSE, health, API routes, static assets, and metrics
   if (req.path.startsWith('/ws') || req.path.startsWith('/sse') ||
       req.path.startsWith('/health') || req.path.startsWith('/api/') ||
-      req.path.match(/\.\w+$/)) return next()
+      req.path.startsWith('/metrics') || req.path.match(/\.\w+$/)) return next()
   // Serve SPA for browser navigation, let API calls through
   if (req.accepts('html', 'json') === 'html') {
     return res.sendFile(spaIndexPath)
@@ -323,9 +327,6 @@ app.use('/api/flywheel', requireApiKey, flywheelRouter)
 
 // Benchmark: Inventor vs. research baselines (circle-packing / scheduler-opt / ablation)
 app.use('/api/benchmark', requireApiKey, benchmarkRouter)
-
-// Prometheus metrics — Grafana Cloud scraping (no auth needed for metrics)
-app.use(prometheusMetricsRouter)
 
 // PhantomBOM Extractor — repo → LLM → PhantomComponent nodes in Neo4j
 app.use('/api/phantom-bom', requireApiKey, apiRateLimiter, phantomBomRouter)
