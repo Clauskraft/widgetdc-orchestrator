@@ -1320,10 +1320,14 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
   defineTool({
     name: 'system_health',
     namespace: 'system',
-    description: 'Get current health status of all platform services: backend, orchestrator, RLM engine, Neo4j, Redis. Use for system status checks.',
+    description: 'Alias for get_platform_health. Canonical health tool is get_platform_health — use that for new integrations.',
     input: z.object({
       service: z.enum(['all', 'backend', 'orchestrator', 'rlm', 'neo4j', 'redis']).optional().describe('Target service (default: all)'),
     }),
+    deprecated: true,
+    deprecatedSince: '2026-04-11',
+    deprecatedMessage: 'Use get_platform_health instead. This alias delegates internally.',
+    replacedBy: 'get_platform_health',
     backendTool: 'graph.health + graph.stats',
     timeoutMs: 10000,
   }),
@@ -1331,10 +1335,14 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
   defineTool({
     name: 'system_service_status',
     namespace: 'system',
-    description: 'Get service status: uptime, version, resource usage, connection counts. Use for operational monitoring.',
+    description: 'Alias for get_platform_health (operational monitoring). Use get_platform_health for new integrations.',
     input: z.object({
       service: z.string().describe('Service name (backend, orchestrator, rlm, neo4j, redis)'),
     }),
+    deprecated: true,
+    deprecatedSince: '2026-04-11',
+    deprecatedMessage: 'Use get_platform_health instead. This alias delegates internally.',
+    replacedBy: 'get_platform_health',
     backendTool: 'graph.health',
     timeoutMs: 10000,
   }),

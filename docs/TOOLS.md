@@ -623,6 +623,17 @@ curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/call_
   -d '{"tool_name": "audit.dashboard", "payload": {}}'
 ```
 
+**Dual-Format Args Contract (LIN-750):**
+
+This tool accepts arguments in **two equivalent formats** and normalizes them identically:
+
+| Format | Example | Used by |
+|--------|---------|---------|
+| **Payload** | `{tool_name: "chat_read", payload: {thread_id: "general"}}` | Internal orchestrator |
+| **Flat** | `{tool_name: "chat_read", thread_id: "general"}` | External agents (OpenAI function calling) |
+
+**Normalization rule:** If `payload` exists, use it as MCP args. Otherwise, strip `tool_name` and use remaining keys as args. Both formats produce identical internal calls. Verified by `test/dual-format-args.test.mjs` (CHECK 6 in CI gate).
+
 ---
 
 ### monitor (4 tools)
