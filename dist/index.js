@@ -709,12 +709,12 @@ var init_agent_registry = __esm({
         return count;
       },
       incrementActive(agentId) {
-        const e2 = registry.get(agentId);
-        if (e2) e2.activeCalls++;
+        const e = registry.get(agentId);
+        if (e) e.activeCalls++;
       },
       decrementActive(agentId) {
-        const e2 = registry.get(agentId);
-        if (e2) e2.activeCalls = Math.max(0, e2.activeCalls - 1);
+        const e = registry.get(agentId);
+        if (e) e.activeCalls = Math.max(0, e.activeCalls - 1);
       },
       getActiveCalls(agentId) {
         return registry.get(agentId)?.activeCalls ?? 0;
@@ -11741,7 +11741,7 @@ async function getRecentEvals(limit = 20) {
     } catch {
       return null;
     }
-  }).filter((e2) => e2 !== null);
+  }).filter((e) => e !== null);
 }
 async function runFleetAnalysis() {
   if (!isRlmAvailable()) return "RLM unavailable";
@@ -16699,7 +16699,7 @@ async function generateDeliverable(req) {
       generation_ms: Date.now() - t0,
       sections_count: sections.length,
       token_estimate: Math.ceil(deliverable.markdown.length / 4),
-      graphrag_results: evidence.reduce((sum, e2) => sum + e2.results.length, 0)
+      graphrag_results: evidence.reduce((sum, e) => sum + e.results.length, 0)
     };
     deliverable.status = "completed";
     deliverable.completed_at = (/* @__PURE__ */ new Date()).toISOString();
@@ -17545,9 +17545,9 @@ function withTimeout(promise, ms, label) {
         clearTimeout(timer);
         resolve(v);
       },
-      (e2) => {
+      (e) => {
         clearTimeout(timer);
-        reject(e2);
+        reject(e);
       }
     );
   });
@@ -18017,7 +18017,7 @@ function createBlackboard(taskId) {
       if (!schema) throw new Error(`Unknown blackboard slot: ${slot}`);
       if (!value_exports2.Check(schema, data)) {
         const errors = [...value_exports2.Errors(schema, data)];
-        const msg = errors.slice(0, 3).map((e2) => `${e2.path}: ${e2.message}`).join("; ");
+        const msg = errors.slice(0, 3).map((e) => `${e.path}: ${e.message}`).join("; ");
         throw new Error(`Blackboard validation failed for slot '${slot}': ${msg}`);
       }
       await redisSet(`${prefix}${slot}`, JSON.stringify(data));
@@ -18725,13 +18725,13 @@ __export(engagement_engine_exports, {
   recordOutcome: () => recordOutcome
 });
 import { v4 as uuid19 } from "uuid";
-async function saveEngagement(e2) {
-  engagementCache.set(e2.$id, e2);
+async function saveEngagement(e) {
+  engagementCache.set(e.$id, e);
   const redis2 = getRedis();
   if (redis2) {
     try {
-      await redis2.set(`${REDIS_PREFIX8}${e2.$id}`, JSON.stringify(e2), "EX", TTL_SECONDS4);
-      await redis2.zadd(REDIS_INDEX3, Date.now(), e2.$id);
+      await redis2.set(`${REDIS_PREFIX8}${e.$id}`, JSON.stringify(e), "EX", TTL_SECONDS4);
+      await redis2.zadd(REDIS_INDEX3, Date.now(), e.$id);
     } catch (err) {
       logger.warn({ error: String(err) }, "Engagement: Redis save failed");
     }
@@ -18745,9 +18745,9 @@ async function getEngagement(id) {
   try {
     const raw = await redis2.get(`${REDIS_PREFIX8}${id}`);
     if (!raw) return null;
-    const e2 = JSON.parse(raw);
-    engagementCache.set(id, e2);
-    return e2;
+    const e = JSON.parse(raw);
+    engagementCache.set(id, e);
+    return e;
   } catch {
     return null;
   }
@@ -18759,15 +18759,15 @@ async function listEngagements(limit = 20) {
     const ids = await redis2.zrevrange(REDIS_INDEX3, 0, limit - 1);
     const out = [];
     for (const id of ids) {
-      const e2 = await getEngagement(id);
-      if (e2) out.push(e2);
+      const e = await getEngagement(id);
+      if (e) out.push(e);
     }
     return out;
   } catch {
     return [];
   }
 }
-async function mergeEngagementNode(e2) {
+async function mergeEngagementNode(e) {
   try {
     await callMcpTool({
       toolName: "graph.write_cypher",
@@ -18788,16 +18788,16 @@ UNWIND $methodologyRefs AS mref
 MERGE (m {title: mref})
 MERGE (eng)-[:USES_METHODOLOGY]->(m)`,
         params: {
-          id: e2.$id,
-          client: e2.client,
-          domain: e2.domain,
-          objective: e2.objective.slice(0, 500),
-          startDate: e2.start_date,
-          targetEndDate: e2.target_end_date,
-          status: e2.status,
-          budgetDkk: e2.budget_dkk ?? 0,
-          teamSize: e2.team_size ?? 0,
-          methodologyRefs: (e2.methodology_refs ?? []).slice(0, 10)
+          id: e.$id,
+          client: e.client,
+          domain: e.domain,
+          objective: e.objective.slice(0, 500),
+          startDate: e.start_date,
+          targetEndDate: e.target_end_date,
+          status: e.status,
+          budgetDkk: e.budget_dkk ?? 0,
+          teamSize: e.team_size ?? 0,
+          methodologyRefs: (e.methodology_refs ?? []).slice(0, 10)
         },
         _force: true
       },
@@ -18805,7 +18805,7 @@ MERGE (eng)-[:USES_METHODOLOGY]->(m)`,
       timeoutMs: 1e4
     });
   } catch (err) {
-    logger.warn({ id: e2.$id, error: String(err) }, "Engagement: Neo4j MERGE failed (non-fatal)");
+    logger.warn({ id: e.$id, error: String(err) }, "Engagement: Neo4j MERGE failed (non-fatal)");
   }
 }
 async function mergeOutcomeNode(o) {
@@ -18844,17 +18844,17 @@ SET eng.status = 'completed'`,
     logger.warn({ id: o.engagement_id, error: String(err) }, "Engagement outcome: Neo4j MERGE failed");
   }
 }
-async function indexEngagementForPrecedent(e2) {
-  const content = `Consulting engagement: ${e2.objective}. Client domain: ${e2.domain}. Duration: ${e2.start_date} to ${e2.target_end_date}. Team size: ${e2.team_size ?? "unspecified"}. Methodologies: ${(e2.methodology_refs ?? []).join(", ") || "none specified"}.`;
+async function indexEngagementForPrecedent(e) {
+  const content = `Consulting engagement: ${e.objective}. Client domain: ${e.domain}. Duration: ${e.start_date} to ${e.target_end_date}. Team size: ${e.team_size ?? "unspecified"}. Methodologies: ${(e.methodology_refs ?? []).join(", ") || "none specified"}.`;
   try {
     await callMcpTool({
       toolName: "raptor.index",
       args: {
         content,
         metadata: {
-          title: `Engagement: ${e2.client} \u2014 ${e2.objective.slice(0, 60)}`,
+          title: `Engagement: ${e.client} \u2014 ${e.objective.slice(0, 60)}`,
           domain: "Engagement",
-          engagement_id: e2.$id,
+          engagement_id: e.$id,
           type: "engagement"
         },
         orgId: "default",
@@ -18864,12 +18864,12 @@ async function indexEngagementForPrecedent(e2) {
       timeoutMs: 15e3
     });
   } catch (err) {
-    logger.warn({ id: e2.$id, error: String(err) }, "Engagement: raptor.index failed (non-fatal)");
+    logger.warn({ id: e.$id, error: String(err) }, "Engagement: raptor.index failed (non-fatal)");
   }
 }
 async function createEngagement(req) {
   const now = (/* @__PURE__ */ new Date()).toISOString();
-  const e2 = {
+  const e = {
     $id: `eng-${uuid19()}`,
     $schema: "https://widgetdc.io/schemas/engagement/v1",
     client: req.client.slice(0, 120),
@@ -18884,16 +18884,16 @@ async function createEngagement(req) {
     created_at: now,
     updated_at: now
   };
-  await saveEngagement(e2);
+  await saveEngagement(e);
   try {
-    await mergeEngagementNode(e2);
+    await mergeEngagementNode(e);
   } catch (err) {
-    logger.warn({ id: e2.$id, error: String(err) }, "Engagement: Neo4j MERGE await failed \u2014 non-blocking");
+    logger.warn({ id: e.$id, error: String(err) }, "Engagement: Neo4j MERGE await failed \u2014 non-blocking");
   }
-  indexEngagementForPrecedent(e2).catch(() => {
+  indexEngagementForPrecedent(e).catch(() => {
   });
-  logger.info({ id: e2.$id, client: e2.client, domain: e2.domain }, "Engagement: created");
-  return e2;
+  logger.info({ id: e.$id, client: e.client, domain: e.domain }, "Engagement: created");
+  return e;
 }
 async function matchPrecedents(req) {
   const t0 = Date.now();
@@ -19972,9 +19972,9 @@ function stream(event, data) {
   logger.info({ event, ...payload }, `HyperAgent-Auto: ${event}`);
 }
 function computePriority(target, edgeScores) {
-  const edge = edgeScores.find((e2) => e2.name === target.edge);
+  const edge = edgeScores.find((e) => e.name === target.edge);
   if (!edge) return 0;
-  const maxGap = Math.max(...edgeScores.map((e2) => e2.gap), 0.1);
+  const maxGap = Math.max(...edgeScores.map((e) => e.gap), 0.1);
   const edgeGapNorm = edge.gap / maxGap;
   return W_EDGE_GAP * edgeGapNorm + W_TARGET_GAP * target.targetGapNorm + W_DEPENDENCY * (1 / (1 + target.deps)) - W_EFFORT * target.effortNorm;
 }
@@ -19989,10 +19989,10 @@ async function observeEdgeScores() {
       if (raw) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed) && parsed.length >= 6) {
-          return parsed.map((e2) => ({
-            ...e2,
+          return parsed.map((e) => ({
+            ...e,
             target: TARGET_EDGE_SCORE,
-            gap: TARGET_EDGE_SCORE - e2.score
+            gap: TARGET_EDGE_SCORE - e.score
           }));
         }
       }
@@ -20024,7 +20024,7 @@ async function observeEdgeScores() {
   } catch {
     logger.debug("HyperAgent-Auto: EdgeScore graph nodes not found, using defaults");
   }
-  const defaults = DEFAULT_EDGE_SCORES.map((e2) => ({ ...e2 }));
+  const defaults = DEFAULT_EDGE_SCORES.map((e) => ({ ...e }));
   if (redis2) await redis2.set(EDGE_SCORES_REDIS_KEY, JSON.stringify(defaults)).catch(() => {
   });
   return defaults;
@@ -20035,11 +20035,11 @@ async function updateEdgeScores(currentScores, closedTargets) {
   for (const t of closedTargets) {
     deltaPerEdge[t.edge] = (deltaPerEdge[t.edge] || 0) + SCORE_PER_TARGET;
   }
-  const updated = currentScores.map((e2) => {
-    const delta = deltaPerEdge[e2.name] || 0;
-    const newScore = Math.min(e2.score + delta, TARGET_EDGE_SCORE);
+  const updated = currentScores.map((e) => {
+    const delta = deltaPerEdge[e.name] || 0;
+    const newScore = Math.min(e.score + delta, TARGET_EDGE_SCORE);
     return {
-      name: e2.name,
+      name: e.name,
       score: Number(newScore.toFixed(3)),
       target: TARGET_EDGE_SCORE,
       gap: Number((TARGET_EDGE_SCORE - newScore).toFixed(3))
@@ -20195,7 +20195,7 @@ function computeFitness(edgeScores) {
 }
 function adaptWeights(edgesBefore, edgesAfter) {
   for (const after of edgesAfter) {
-    const before = edgesBefore.find((e2) => e2.name === after.name);
+    const before = edgesBefore.find((e) => e.name === after.name);
     if (!before) continue;
     const delta = after.score - before.score;
     const gapFromTarget = TARGET_EDGE_SCORE - after.score;
@@ -20245,7 +20245,7 @@ async function reasonAboutTarget(target, ragContext, edgesBefore, phase) {
     return { approach: "", confidence: 0 };
   }
   try {
-    const edge = edgesBefore.find((e2) => e2.name === target.edge);
+    const edge = edgesBefore.find((e) => e.name === target.edge);
     const reasonResult = await callCognitiveRaw("reason", {
       prompt: `Deep analysis for autonomous target execution.
 
@@ -20265,7 +20265,7 @@ Determine:
       agent_id: "hyperagent-auto",
       depth: target.category === "E" || target.category === "A" ? 2 : 1,
       context: {
-        edgeScores: edgesBefore.reduce((acc, e2) => ({ ...acc, [e2.name]: e2.score }), {}),
+        edgeScores: edgesBefore.reduce((acc, e) => ({ ...acc, [e.name]: e.score }), {}),
         phase
       }
     }, 3e4);
@@ -20386,7 +20386,7 @@ async function runAutonomousCycle(phase, maxTargets) {
     for (const target of batch) {
       currentTarget = target.id;
       targetsAttempted++;
-      const edgeGap = edgesBefore.find((e2) => e2.name === target.edge)?.gap ?? 1;
+      const edgeGap = edgesBefore.find((e) => e.name === target.edge)?.gap ?? 1;
       stream("target_start", { targetId: target.id, edge: target.edge, category: target.category, edgeGap });
       try {
         stream("target_step", { targetId: target.id, step: "rag_enrich" });
@@ -20612,7 +20612,7 @@ function getAutonomousStatus() {
 }
 function checkPhaseGate() {
   const edges = lastCycle2?.edgeScoresAfter ?? [];
-  const minEdge = edges.length > 0 ? Math.min(...edges.map((e2) => e2.score)) : 0;
+  const minEdge = edges.length > 0 ? Math.min(...edges.map((e) => e.score)) : 0;
   const phases = ["phase_0", "phase_1", "phase_2", "phase_3"];
   const currentIdx = phases.indexOf(currentPhase);
   if (currentIdx >= phases.length - 1) {
@@ -21770,7 +21770,7 @@ async function getExperimentHistory(limit = 20) {
   if (!redis2) return [];
   try {
     const entries = await redis2.lrange(historyKey(), 0, limit - 1);
-    return entries.map((e2) => JSON.parse(e2));
+    return entries.map((e) => JSON.parse(e));
   } catch {
     return [];
   }
@@ -22742,7 +22742,7 @@ Skills: ${result.required_skills.join(", ")}${gateInfo}`;
         const engagements = await listEngagements2(limit);
         if (engagements.length === 0) return "No engagements found";
         const lines = engagements.map(
-          (e2, i) => `${i + 1}. ${e2.client} (${e2.domain}) \u2014 ${e2.objective.slice(0, 60)}... [${e2.status}]`
+          (e, i) => `${i + 1}. ${e.client} (${e.domain}) \u2014 ${e.objective.slice(0, 60)}... [${e.status}]`
         );
         return `${engagements.length} engagements:
 ${lines.join("\n")}`;
@@ -22776,7 +22776,7 @@ ${lines.join("\n")}`;
         }
         const entries = await listMemories2(agentId);
         return `${entries.length} memories for ${agentId}:
-${entries.map((e2) => `- ${e2.key}`).join("\n")}`;
+${entries.map((e) => `- ${e.key}`).join("\n")}`;
       } catch (err) {
         return `Memory retrieve failed: ${err instanceof Error ? err.message : String(err)}`;
       }
@@ -22935,7 +22935,7 @@ ${lines.join("\n")}`;
         if (!assemblyId) return "Error: assembly_id required";
         const lineage = await buildLineageChain2(assemblyId);
         if (lineage.length === 0) return `No lineage found for ${assemblyId}`;
-        const lines = lineage.map((e2, i) => `${i + 1}. [${e2.stage}] ${e2.node_type} \u2014 ${e2.name} (${e2.node_id})`);
+        const lines = lineage.map((e, i) => `${i + 1}. [${e.stage}] ${e.node_type} \u2014 ${e.name} (${e.node_id})`);
         return `Lineage chain (${lineage.length} entries):
 ${lines.join("\n")}`;
       } catch (err) {
@@ -28909,16 +28909,16 @@ agentsRouter.post("/register", (req, res) => {
   });
 });
 agentsRouter.get("/", (_req, res) => {
-  const agents = AgentRegistry.all().map((e2) => ({
-    agent_id: e2.handshake.agent_id,
-    display_name: e2.handshake.display_name,
-    version: e2.handshake.version ?? null,
-    status: e2.handshake.status,
-    capabilities: e2.handshake.capabilities,
-    allowed_tool_namespaces: e2.handshake.allowed_tool_namespaces,
-    active_calls: e2.activeCalls,
-    registered_at: e2.registeredAt.toISOString(),
-    last_seen_at: e2.lastSeenAt.toISOString()
+  const agents = AgentRegistry.all().map((e) => ({
+    agent_id: e.handshake.agent_id,
+    display_name: e.handshake.display_name,
+    version: e.handshake.version ?? null,
+    status: e.handshake.status,
+    capabilities: e.handshake.capabilities,
+    allowed_tool_namespaces: e.handshake.allowed_tool_namespaces,
+    active_calls: e.activeCalls,
+    registered_at: e.registeredAt.toISOString(),
+    last_seen_at: e.lastSeenAt.toISOString()
   }));
   res.json({ success: true, data: { agents, total: agents.length } });
 });
@@ -31717,6 +31717,9 @@ async function getFlywheelMetrics() {
   }
   return { available: true, report: lastReport, pillars: lastReport.pillars };
 }
+function fallbackPillar(name) {
+  return { name, score: 0, trend: "flat", headline: "Data unavailable", details: [] };
+}
 async function scoreCostEfficiency() {
   try {
     const summary = getCostSummary();
@@ -31800,8 +31803,8 @@ async function scoreAdoption() {
 }
 async function scorePheromone() {
   try {
-    const { getPheromoneStats } = await Promise.resolve().then(() => (init_pheromone_layer(), pheromone_layer_exports));
-    const stats = getPheromoneStats();
+    const { getPheromoneState: getPheromoneState2 } = await Promise.resolve().then(() => (init_pheromone_layer(), pheromone_layer_exports));
+    const stats = getPheromoneState2();
     const active = stats?.activePheromones ?? 0;
     const deposits = stats?.totalDeposits ?? 0;
     const amplifications = stats?.totalAmplifications ?? 0;
@@ -31836,24 +31839,24 @@ async function scorePlatformHealth() {
     let chainSuccessRate = 0.5;
     let totalChains = 0;
     let failedChains = 0;
+    let completedCount = 0;
     if (redis2) {
       try {
         const keys = await redis2.keys("orchestrator:chain:*");
         totalChains = keys.length;
-        let completedCount2 = 0;
         for (const key of keys.slice(0, 100)) {
           const raw = await redis2.get(key);
           if (raw) {
             try {
               const data = JSON.parse(raw);
-              if (data.status === "completed") completedCount2++;
+              if (data.status === "completed") completedCount++;
               if (data.status === "failed") failedChains++;
             } catch {
             }
           }
         }
         if (totalChains > 0) {
-          chainSuccessRate = completedCount2 / Math.min(totalChains, 100);
+          chainSuccessRate = completedCount / Math.min(totalChains, 100);
         }
       } catch {
       }
@@ -31874,8 +31877,9 @@ async function scorePlatformHealth() {
         `Failed chains: ${failedChains}`
       ]
     };
-  } catch {
-    return { success: false, error: String(e) };
+  } catch (err) {
+    logger.warn({ err }, "[Flywheel] scorePlatformHealth failed");
+    return fallbackPillar("Platform Health");
   }
 }
 
@@ -33953,9 +33957,9 @@ auditRouter.get("/log", async (req, res) => {
   const action = req.query.action;
   const entityType = req.query.entity_type;
   let filtered = entries;
-  if (actor) filtered = filtered.filter((e2) => e2.actor === actor);
-  if (action) filtered = filtered.filter((e2) => e2.action === action);
-  if (entityType) filtered = filtered.filter((e2) => e2.entity_type === entityType);
+  if (actor) filtered = filtered.filter((e) => e.actor === actor);
+  if (action) filtered = filtered.filter((e) => e.action === action);
+  if (entityType) filtered = filtered.filter((e) => e.entity_type === entityType);
   res.json({ success: true, data: { entries: filtered, total: filtered.length, limit, offset } });
 });
 
@@ -39833,7 +39837,7 @@ intelligenceRouter.get("/health", async (_req, res) => {
         write_gate: writeGate.status === "fulfilled" ? writeGate.value : { error: "unavailable" },
         engagement_intelligence: engagements.status === "fulfilled" ? {
           active_engagements_sample: engagements.value.length,
-          latest_engagement_ids: engagements.value.slice(0, 3).map((e2) => e2.$id)
+          latest_engagement_ids: engagements.value.slice(0, 3).map((e) => e.$id)
         } : { error: "unavailable" }
       }
     });
@@ -42229,7 +42233,7 @@ obsidianRouter.get("/vault/list", async (req, res) => {
     try {
       const entries = await ghListDir(path3);
       res.json({
-        files: entries.map((e2) => ({ path: e2.path, type: e2.type === "dir" ? "dir" : "file" }))
+        files: entries.map((e) => ({ path: e.path, type: e.type === "dir" ? "dir" : "file" }))
       });
     } catch (err) {
       res.status(503).json({ error: err.message });
@@ -43702,7 +43706,7 @@ app.get("/health", (_req, res) => {
     sse_clients: getSSEClientCount(),
     redis_enabled: isRedisEnabled(),
     rlm_available: isRlmAvailable(),
-    active_chains: listExecutions().filter((e2) => e2.status === "running").length,
+    active_chains: listExecutions().filter((e) => e.status === "running").length,
     cron_jobs: listCronJobs().filter((j) => j.enabled).length,
     openclaw_healthy: isOpenClawHealthy(),
     librechat_url: config.libreChatUrl || null,

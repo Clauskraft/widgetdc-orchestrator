@@ -120,6 +120,12 @@ export async function getFlywheelMetrics(): Promise<{
   return { available: true, report: lastReport, pillars: lastReport.pillars }
 }
 
+// ─── Pillar helpers ───────────────────────────────────────────────────────────
+
+function fallbackPillar(name: string): PillarScore {
+  return { name, score: 0, trend: 'flat', headline: 'Data unavailable', details: [] }
+}
+
 // ─── Pillar scorers ───────────────────────────────────────────────────────────
 
 async function scoreCostEfficiency(): Promise<PillarScore> {
@@ -220,8 +226,8 @@ async function scoreAdoption(): Promise<PillarScore> {
 async function scorePheromone(): Promise<PillarScore> {
   // Pheromone data is in the health endpoint — use dynamic import to avoid circular
   try {
-    const { getPheromoneStats } = await import('../swarm/pheromone-layer.js')
-    const stats = getPheromoneStats()
+    const { getPheromoneState } = await import('../swarm/pheromone-layer.js')
+    const stats = getPheromoneState()
     const active = stats?.activePheromones ?? 0
     const deposits = stats?.totalDeposits ?? 0
     const amplifications = stats?.totalAmplifications ?? 0
@@ -260,13 +266,13 @@ async function scorePlatformHealth(): Promise<PillarScore> {
     let chainSuccessRate = 0.5
     let totalChains = 0
     let failedChains = 0
+    let completedCount = 0
 
     if (redis) {
       try {
         // Scan recent chain executions from Redis
         const keys = await redis.keys('orchestrator:chain:*')
         totalChains = keys.length
-        let completedCount = 0
         for (const key of keys.slice(0, 100)) { // cap at 100 to avoid OOM
           const raw = await redis.get(key)
           if (raw) {
@@ -306,7 +312,8 @@ async function scorePlatformHealth(): Promise<PillarScore> {
         `Failed chains: ${failedChains}`,
       ],
     }
-  } catch {
-   return { success: false, error: String(e) }
+  } catch (err) {
+    logger.warn({ err }, '[Flywheel] scorePlatformHealth failed')
+    return fallbackPillar('Platform Health')
   }
 }
