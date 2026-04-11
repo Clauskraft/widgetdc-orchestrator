@@ -580,13 +580,14 @@ async function hitlGate(provider: PhantomProvider): Promise<{ blocked: boolean; 
 
   // Create Linear issue
   try {
-    const res = await callBackendMcp('linear.create_issue', {
+    const res = await callBackendMcp('linear.save_issue', {
       title: `[HITL] PhantomProvider low confidence: ${provider.name} (${provider.confidence}%)`,
       description: `PhantomProvider ingest blocked — confidence ${provider.confidence}% is below threshold ${HITL_THRESHOLD}%.\n\nProvider: ${provider.name}\nSource: ${provider.source_url}\nCapabilities: ${provider.capabilities.join(', ')}\n\nManual review required before Neo4j ingest.`,
+      team: 'Linear-clauskraft',
       labels: ['HITL', 'phantom-bom'],
       priority: 2,
-    }) as { issueId?: string }
-    return { blocked: true, issueId: res?.issueId }
+    }) as { id?: string; identifier?: string }
+    return { blocked: true, issueId: res?.identifier ?? res?.id }
   } catch {
     return { blocked: true }
   }

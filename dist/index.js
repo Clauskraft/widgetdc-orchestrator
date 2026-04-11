@@ -42789,7 +42789,7 @@ async function cveCheck(providerName) {
 async function hitlGate(provider) {
   if (provider.confidence >= HITL_THRESHOLD) return { blocked: false };
   try {
-    const res = await callBackendMcp("linear.create_issue", {
+    const res = await callBackendMcp("linear.save_issue", {
       title: `[HITL] PhantomProvider low confidence: ${provider.name} (${provider.confidence}%)`,
       description: `PhantomProvider ingest blocked \u2014 confidence ${provider.confidence}% is below threshold ${HITL_THRESHOLD}%.
 
@@ -42798,10 +42798,11 @@ Source: ${provider.source_url}
 Capabilities: ${provider.capabilities.join(", ")}
 
 Manual review required before Neo4j ingest.`,
+      team: "Linear-clauskraft",
       labels: ["HITL", "phantom-bom"],
       priority: 2
     });
-    return { blocked: true, issueId: res?.issueId };
+    return { blocked: true, issueId: res?.identifier ?? res?.id };
   } catch {
     return { blocked: true };
   }
