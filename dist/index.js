@@ -24166,17 +24166,55 @@ var init_mcp_caller = __esm({
     _auditLessonsCache = null;
     AUDIT_LESSONS_TTL_MS = 10 * 60 * 1e3;
     LOCAL_TOOLS = /* @__PURE__ */ new Set([
+      // Core search + reasoning
+      "search_knowledge",
+      "reason_deeply",
+      "query_graph",
+      "check_tasks",
+      "call_mcp_tool",
+      "get_platform_health",
+      "search_documents",
+      // Chain + investigation
+      "run_chain",
+      "investigate",
+      "create_notebook",
+      "verify_output",
+      "generate_deliverable",
+      "precedent_search",
+      "governance_matrix",
+      "run_osint_scan",
+      "list_tools",
+      // Memory + RAG
       "memory_store",
       "memory_retrieve",
       "adaptive_rag_reward",
+      "adaptive_rag_dashboard",
+      "adaptive_rag_query",
+      "adaptive_rag_retrain",
       "critique_refine",
       "context_fold",
       "failure_harvest",
+      "moa_query",
+      "judge_response",
+      // Graph hygiene
+      "graph_hygiene_run",
+      // Linear
       "linear_issues",
       "linear_issue_detail",
       "linear_labels",
       "linear_save_issue",
       "linear_get_issue",
+      // Forge
+      "forge_tool",
+      "forge_analyze_gaps",
+      "forge_list",
+      // Engagement
+      "engagement_create",
+      "engagement_match",
+      "engagement_plan",
+      "engagement_outcome",
+      "engagement_list",
+      // Data + system
       "data_graph_read",
       "data_graph_stats",
       "data_redis_inspect",
@@ -24185,28 +24223,76 @@ var init_mcp_caller = __esm({
       "system_service_status",
       "system_metrics_summary",
       "system_logs_summary",
+      // Agents
       "agent_list",
       "agent_status",
       "agent_dispatch",
       "agent_memory",
       "agent_capabilities",
+      // Chat + LLM
       "chat_send",
       "chat_read",
+      "llm_chat",
+      "llm_providers",
+      // Model routing
       "model_providers",
       "model_route",
       "model_cost_estimate",
       "model_budget_status",
       "model_policy_check",
+      // Workflow
       "workflow_cost_trace",
       "workflow_context_compact",
       "workflow_fanout_guard",
       "workflow_premium_escalation_check",
+      // Governance
       "governance_plan_create",
       "governance_plan_approve",
       "governance_plan_execute",
       "governance_plan_evaluate",
       "governance_audit_query",
       "governance_policy_decide",
+      // Decisions + artifacts
+      "decision_certify",
+      "decision_list",
+      "decision_lineage",
+      "artifact_list",
+      "artifact_get",
+      // Drill + research
+      "drill_start",
+      "drill_down",
+      "drill_up",
+      "drill_children",
+      "research_harvest",
+      // Competitive + loose ends
+      "competitive_crawl",
+      "loose_ends_scan",
+      // HyperAgent
+      "hyperagent_auto_run",
+      "hyperagent_auto_status",
+      "hyperagent_auto_memory",
+      "hyperagent_auto_issues",
+      // Pheromone
+      "pheromone_status",
+      "pheromone_sense",
+      "pheromone_deposit",
+      "pheromone_heatmap",
+      // PeerEval
+      "peer_eval_status",
+      "peer_eval_fleet",
+      "peer_eval_evaluate",
+      "peer_eval_analyze",
+      // Inventor
+      "inventor_run",
+      "inventor_status",
+      "inventor_nodes",
+      "inventor_node",
+      "inventor_best",
+      "inventor_stop",
+      "inventor_history",
+      // Run evolution
+      "run_evolution",
+      // Infrastructure
       "grafana_dashboard",
       "railway_deploy",
       "railway_env"
