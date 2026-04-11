@@ -316,7 +316,145 @@ RETURN c.componentId as id`
   }
 }
 
-// ─── Core extraction ──────────────────────────────────────────────────────────
+// ─── Completeness Gate (P1 Fix LIN-763) ────────────────────────────────────
+
+/**
+ * Extract directory/module structure from cloned repo.
+ * Returns list of module names with file counts and export types.
+ */
+function extractModuleStructure(repoUrl: string): Array<{
+  name: string
+  files: number
+  hasExports: boolean
+  exportTypes: string[]
+}> {
+  const tmpDir = `_clone-gate-${Date.now()}`
+  try {
+    const remoteArg = repoUrl.startsWith('http') ? repoUrl : repoUrl
+    execSync(`git clone --depth 1 ${remoteArg} ${tmpDir}`, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 60_000,
+    })
+
+    const exts = ['.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs']
+    const files: Array<{ path: string }> = []
+    function walk(d: string) {
+      for (const entry of require('fs').readdirSync(d, { withFileTypes: true })) {
+        if (entry.name === '.git' || entry.name === 'node_modules' || entry.name === '.github') continue
+        const full = require('path').join(d, entry.name)
+        if (entry.isDirectory()) walk(full)
+        else if (exts.some(e => entry.name.endsWith(e))) {
+          files.push({ path: full })
+        }
+      }
+    }
+    walk(tmpDir)
+
+    // Group by subdirectory module
+    const modules = new Map<string, Array<{ path: string }>>()
+    for (const f of files) {
+      const rel = f.path.replace(require('path').sep, '/').substring(tmpDir.length + 1)
+      const parts = rel.split('/')
+      let key: string
+      if (parts.length >= 3 && parts[0] === 'src') {
+        key = `src/${parts[1]}`
+      } else if (parts.length >= 2) {
+        key = parts[0]
+      } else {
+        key = '__root__'
+      }
+      if (!modules.has(key)) modules.set(key, [])
+      modules.get(key)!.push(f)
+    }
+
+    const result: Array<{ name: string; files: number; hasExports: boolean; exportTypes: string[] }> = []
+    for (const [name, modFiles] of modules) {
+      let hasExports = false
+      const exportTypes = new Set<string>()
+      for (const f of modFiles) {
+        try {
+          const content = require('fs').readFileSync(f.path, 'utf8')
+          if (/^export (default |const |class |function |interface |type |enum )/m.test(content)) {
+            hasExports = true
+            if (/export class /m.test(content)) exportTypes.add('class')
+            if (/export function /m.test(content)) exportTypes.add('function')
+            if (/export interface /m.test(content)) exportTypes.add('interface')
+            if (/export type /m.test(content)) exportTypes.add('type')
+            if (/export const /m.test(content)) exportTypes.add('const')
+            if (/export default/m.test(content)) exportTypes.add('default')
+          }
+        } catch { /* skip binary files */ }
+      }
+      result.push({ name, files: modFiles.length, hasExports, exportTypes: [...exportTypes] })
+    }
+
+    // Cleanup
+    try { require('fs').rmSync(tmpDir, { recursive: true, force: true }) } catch {}
+
+    return result
+  } catch {
+    try { require('fs').rmSync(tmpDir, { recursive: true, force: true }) } catch {}
+    return []
+  }
+}
+
+/**
+ * Completeness gate: compare LLM-extracted components vs actual repo modules.
+ * Returns { completeness, missed, matched, total }.
+ */
+function checkCompleteness(
+  components: PhantomComponent[],
+  modules: Array<{ name: string }>
+): { completeness: number; matched: number; missed: string[]; total: number } {
+  if (modules.length === 0) return { completeness: 100, matched: 0, missed: [], total: 0 }
+  if (components.length === 0) return { completeness: 0, matched: 0, missed: modules.map(m => m.name), total: modules.length }
+
+  const compNames = components.map(c => c.name.toLowerCase())
+  const matched = modules.filter(m => {
+    const mLower = m.name.toLowerCase()
+    return compNames.some(cn => {
+      if (mLower.includes(cn) || cn.includes(mLower)) return true
+      // Semantic matches
+      if (mLower.includes('orchestrator') && cn.includes('coordinator')) return true
+      if (mLower.includes('agent') && (cn.includes('worker') || cn.includes('agent'))) return true
+      if (mLower.includes('task') && cn.includes('task')) return true
+      if (mLower.includes('llm') && cn.includes('model')) return true
+      if (mLower.includes('tool') && cn.includes('tool')) return true
+      if (mLower.includes('memory') && cn.includes('memory')) return true
+      return false
+    })
+  })
+  const missed = modules.filter(m => !matched.includes(m)).map(m => m.name)
+  return {
+    completeness: Math.round((matched.length / modules.length) * 100),
+    matched: matched.length,
+    missed,
+    total: modules.length,
+  }
+}
+
+/**
+ * Build a targeted re-extraction prompt for missed modules.
+ */
+function buildRecoveryPrompt(
+  repoUrl: string,
+  packedRepo: string,
+  missedModules: string[]
+): string {
+  return `You previously extracted components from ${repoUrl} but missed these modules:
+
+MISSED MODULES (you MUST extract components for each):
+${missedModules.map(m => `- ${m}`).join('\n')}
+
+REPOSITORY CONTENTS:
+${packedRepo}
+
+Return ONLY valid JSON with additional components for the missed modules above.
+Use this exact structure:
+{"components": [{"name": "...", "type": "tool|api|model|dataset|pattern|agent|service|library", "description": "...", "source_file": "path or null", "capabilities": [], "dependencies": [], "confidence": 85, "tags": []}]}`
+}
+
+// ─── Core extraction (with completeness gate) ───────────────────────────────
 
 export async function extractPhantomBOM(
   repoUrl: string,
@@ -328,11 +466,11 @@ export async function extractPhantomBOM(
   logger.info({ runId: id, repoUrl }, 'PhantomBOM extraction started')
 
   try {
-    // 1. Pack repo with repomix (no clone dir, no cleanup needed)
+    // 1. Pack repo with repomix
     const packedRepo = runRepomix(repoUrl)
     logger.info({ runId: id, chars: packedRepo.length }, 'Repomix packed repo')
 
-    // 2. Build prompt and call DeepSeek with 2 retries on parse failure
+    // 2. LLM extraction with retries
     const prompt = buildExtractionPrompt(repoUrl, packedRepo)
     let extracted
     let lastError: Error | null = null
@@ -352,7 +490,71 @@ export async function extractPhantomBOM(
     }
     if (!extracted) throw lastError ?? new Error('LLM extraction failed after 3 attempts')
 
-    // 3. Assemble BOM with stable IDs
+    // 3. ── COMPLETENESS GATE (P1 LIN-763) ──────────────────────────────────
+    const modules = extractModuleStructure(repoUrl)
+    const gate = checkCompleteness(extracted.components, modules)
+    logger.info({
+      runId: id,
+      completeness: gate.completeness,
+      matched: gate.matched,
+      missed: gate.missed,
+      total: gate.total,
+    }, 'Completeness gate check')
+
+    // If < 80%, re-prompt with missed modules
+    if (gate.completeness < 80 && gate.missed.length > 0) {
+      logger.info({ runId: id, missed: gate.missed }, 'Completeness < 80% — re-extraction')
+      try {
+        const recoveryPrompt = buildRecoveryPrompt(repoUrl, packedRepo, gate.missed)
+        const recoveryRaw = await callDeepSeekLlm(recoveryPrompt)
+        const recoveryParsed = parseLlmBom(recoveryRaw, repoUrl)
+
+        // Merge: add missed components that don't already exist
+        const existingNames = new Set(extracted.components.map(c => c.name.toLowerCase()))
+        for (const c of recoveryParsed.components) {
+          if (!existingNames.has(c.name.toLowerCase())) {
+            extracted.components.push(c)
+            existingNames.add(c.name.toLowerCase())
+          }
+        }
+        const newGate = checkCompleteness(extracted.components, modules)
+        logger.info({
+          runId: id,
+          completeness_before: gate.completeness,
+          completeness_after: newGate.completeness,
+          added: recoveryParsed.components.length,
+        }, 'Completeness gate recovery complete')
+      } catch (err) {
+        logger.warn({ runId: id, err: err instanceof Error ? err.message : String(err) }, 'Recovery extraction failed — proceeding with initial results')
+      }
+    }
+
+    // Write completeness evidence
+    await callBackendMcp('graph.write_cypher', {
+      query: `MERGE (e:EvidenceObject {external_id: $eid})
+        SET e.producer = 'phantom_bom_completeness_gate',
+            e.subject_ref = $repo,
+            e.evidence_class = 'CompletenessGate',
+            e.payload_json = $payload,
+            e.verification_status = CASE WHEN $completeness >= 80 THEN 'PASS' WHEN $completeness >= 50 THEN 'PASS_WITH_FIXES' ELSE 'FAIL' END,
+            e.created_at = datetime()`,
+      params: {
+        eid: `ev_completeness_${createHash('sha256').update(repoUrl).digest('hex').substring(0, 16)}`,
+        repo: repoUrl,
+        completeness: gate.completeness,
+        payload: JSON.stringify({
+          action: 'completeness_gate',
+          total_modules: gate.total,
+          matched: gate.matched,
+          missed: gate.missed,
+          completeness_pct: gate.completeness,
+          verdict: gate.completeness >= 80 ? 'PASS' : gate.completeness >= 50 ? 'PASS_WITH_FIXES' : 'FAIL',
+          timestamp: new Date().toISOString(),
+        }),
+      },
+    })
+
+    // 4. Assemble BOM with stable IDs
     const bom: PhantomBOM = {
       bom_version: '1.0',
       run_id: id,
@@ -368,9 +570,9 @@ export async function extractPhantomBOM(
       })),
     }
 
-    // 4. Write to Neo4j
+    // 5. Write to Neo4j
     await writeToNeo4j(bom)
-    logger.info({ runId: id, components: bom.components.length }, 'PhantomBOM written to Neo4j')
+    logger.info({ runId: id, components: bom.components.length, completeness: gate.completeness }, 'PhantomBOM written to Neo4j')
 
     runState.set(id, { status: 'completed', bom, startedAt: runState.get(id)!.startedAt })
     return bom
