@@ -2026,17 +2026,114 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     case 'railway_deploy': {
       const service = args?.service ?? 'orchestrator'
       const action = args?.action ?? 'status'
-      // Deploy by pushing to main — Railway auto-deploys
-      const { execSync } = await import('child_process')
-      if (action === 'deploy') {
-        execSync('git push origin main', { stdio: 'pipe', timeout: 30000 })
-        return `Deploy triggered for ${service}. Check status in Railway dashboard.`
-      }
+      const railwayToken = process.env.RAILWAY_TOKEN
+
       if (action === 'restart') {
-        return `Restart requested for ${service}. Use Railway CLI or dashboard to restart.`
+        if (!railwayToken) {
+          // Fallback: return dashboard link
+          return `Restart requested for ${service}. RAILWAY_TOKEN not set — use Railway dashboard: https://railway.com/project/widgetdc-orchestrator/service/${service}`
+        }
+        try {
+          // Railway REST API: POST /deployment/restart
+          const resp = await fetch(`https://backboard.railway.app/graphql/v2`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${railwayToken}`,
+            },
+            body: JSON.stringify({
+              query: `mutation RestartDeployment($serviceId: String!) {
+                deploymentRestart(serviceId: $serviceId) {
+                  id
+                  staticUrl
+                }
+              }`,
+              variables: { serviceId: service },
+            }),
+            signal: AbortSignal.timeout(15000),
+          })
+          const data = await resp.json()
+          if (data.errors) {
+            return `Railway restart failed: ${JSON.stringify(data.errors)}. Fallback: use dashboard at https://railway.com/project/widgetdc-orchestrator/service/${service}`
+          }
+          return `Backend restart triggered via Railway API (deployment: ${data.data?.deploymentRestart?.id}). Service will be back in ~60s.`
+        } catch (err) {
+          return `Railway restart failed: ${err instanceof Error ? err.message : String(err)}. Fallback: use dashboard at https://railway.com/project/widgetdc-orchestrator/service/${service}`
+        }
       }
+
+      if (action === 'deploy') {
+        // Deploy by pushing to main — Railway auto-deploys
+        try {
+          const { execSync } = await import('child_process')
+          execSync('git push origin main', { stdio: 'pipe', timeout: 30000 })
+          return `Deploy triggered for ${service}. Railway will auto-deploy. Check status: https://railway.com/project/widgetdc-orchestrator/service/${service}`
+        } catch {
+          return `Deploy failed: not in a git repository. Use Railway dashboard to trigger manual deploy.`
+        }
+      }
+
       if (action === 'logs') {
+        if (railwayToken) {
+          try {
+            const resp = await fetch(`https://backboard.railway.app/graphql/v2`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${railwayToken}`,
+              },
+              body: JSON.stringify({
+                query: `query GetDeploymentLogs($serviceId: String!) {
+                  deployments(serviceId: $serviceId, first: 1) {
+                    edges {
+                      node {
+                        id
+                        status
+                        createdAt
+                      }
+                    }
+                  }
+                }`,
+                variables: { serviceId: service },
+              }),
+              signal: AbortSignal.timeout(10000),
+            })
+            const data = await resp.json()
+            if (data.data?.deployments?.edges?.[0]) {
+              const dep = data.data.deployments.edges[0].node
+              return `Latest deploy: ${dep.id} (status: ${dep.status}, created: ${dep.createdAt})`
+            }
+          } catch { /* fall through */ }
+        }
         return `Logs for ${service}: View at https://railway.com/project/widgetdc-orchestrator/service/${service}`
+      }
+
+      // status action (default)
+      if (railwayToken) {
+        try {
+          const resp = await fetch(`https://backboard.railway.app/graphql/v2`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${railwayToken}`,
+            },
+            body: JSON.stringify({
+              query: `query GetServiceStatus($serviceId: String!) {
+                service(id: $serviceId) {
+                  id
+                  name
+                  slug
+                }
+              }`,
+              variables: { serviceId: service },
+            }),
+            signal: AbortSignal.timeout(10000),
+          })
+          const data = await resp.json()
+          if (data.data?.service) {
+            return JSON.stringify({ service: data.data.service, dashboard: `https://railway.com/project/widgetdc-orchestrator/service/${service}` }, null, 2)
+          }
+        } catch { /* fall through */ }
       }
       return `${service} status: Check https://railway.com/project/widgetdc-orchestrator/service/${service}`
     }
