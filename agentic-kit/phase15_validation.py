@@ -321,17 +321,34 @@ class Phase15Validator:
     # ── C5: Code Hygiene (filesystem checks, no Neo4j) ───────────────────────
 
     def check_c5_1_no_id_usage(self, cid: str, name: str, group: str, critical: bool):
-        """Grep for `id(` in app code (not matching `external_id`)."""
-        pattern = re.compile(r"(?<!external_)id\(\s*[a-zA-Z_]")
+        """
+        Grep for Neo4j builtin `id()` usage in Cypher strings.
+
+        We target the Neo4j anti-pattern where code uses `id(n)` inside Cypher
+        instead of app-stable `external_id` references. Python's builtin `id()`
+        is not a problem; only Cypher-embedded calls are.
+
+        Strategy: scan string literals inside .py files. A hit is flagged only
+        when `id(<var>)` appears inside a line that also contains Cypher keywords
+        (MATCH, RETURN, WHERE, MERGE, CREATE, SET, WITH, OPTIONAL MATCH).
+
+        This eliminates false-positives on Python method names ending in `id`
+        (e.g. `_make_contract_id(...)`) because `(?<![A-Za-z_])` requires the
+        `id(` token to NOT be preceded by a word character.
+        """
+        cypher_kw = re.compile(r"\b(MATCH|RETURN|WHERE|MERGE|CREATE|SET|WITH)\b")
+        id_call = re.compile(r"(?<![A-Za-z_])id\s*\(\s*[a-zA-Z_]")
         hits: list[str] = []
         for py_file in AGENTIC_KIT_DIR.glob("*.py"):
+            if py_file.name == "phase15_validation.py":
+                continue  # self-reference: contains the regex above
             try:
                 content = py_file.read_text(encoding="utf-8", errors="replace")
                 for i, line in enumerate(content.splitlines(), 1):
-                    if pattern.search(line) and not line.strip().startswith("#"):
-                        # Skip false positives: builtin id() function on objects
-                        if "id(self" in line or "id(obj" in line or "MATCH" in line.upper() or "CYPHER" in line.upper():
-                            continue
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    if id_call.search(line) and cypher_kw.search(line):
                         hits.append(f"{py_file.name}:{i}")
             except Exception:
                 continue
