@@ -38,3 +38,4 @@ docs/chat-*.txt
 docs/chat-*.json
 docs/table-*.csv
 docs/*.plugin
+agentic-kit/__pycache__/
