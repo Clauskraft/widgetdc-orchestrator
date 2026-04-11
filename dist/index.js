@@ -1,6 +1,12 @@
 import { createRequire } from 'module'; const require = createRequire(import.meta.url);
 var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
+var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
+  get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
+}) : x)(function(x) {
+  if (typeof require !== "undefined") return require.apply(this, arguments);
+  throw Error('Dynamic require of "' + x + '" is not supported');
+});
 var __esm = (fn, res) => function __init() {
   return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
 };
@@ -13155,20 +13161,28 @@ var init_tool_registry = __esm({
       defineTool({
         name: "system_health",
         namespace: "system",
-        description: "Get current health status of all platform services: backend, orchestrator, RLM engine, Neo4j, Redis. Use for system status checks.",
+        description: "Alias for get_platform_health. Canonical health tool is get_platform_health \u2014 use that for new integrations.",
         input: z.object({
           service: z.enum(["all", "backend", "orchestrator", "rlm", "neo4j", "redis"]).optional().describe("Target service (default: all)")
         }),
+        deprecated: true,
+        deprecatedSince: "2026-04-11",
+        deprecatedMessage: "Use get_platform_health instead. This alias delegates internally.",
+        replacedBy: "get_platform_health",
         backendTool: "graph.health + graph.stats",
         timeoutMs: 1e4
       }),
       defineTool({
         name: "system_service_status",
         namespace: "system",
-        description: "Get service status: uptime, version, resource usage, connection counts. Use for operational monitoring.",
+        description: "Alias for get_platform_health (operational monitoring). Use get_platform_health for new integrations.",
         input: z.object({
           service: z.string().describe("Service name (backend, orchestrator, rlm, neo4j, redis)")
         }),
+        deprecated: true,
+        deprecatedSince: "2026-04-11",
+        deprecatedMessage: "Use get_platform_health instead. This alias delegates internally.",
+        replacedBy: "get_platform_health",
         backendTool: "graph.health",
         timeoutMs: 1e4
       }),
@@ -13675,6 +13689,263 @@ var init_tool_registry = __esm({
         requiresPlan: false,
         requiresApproval: false,
         costTier: "micro"
+      }),
+      // ─── v4.0.5 Ghost-Tier Registration (LIN-617): Pheromone Layer ────────────
+      defineTool({
+        name: "pheromone_status",
+        namespace: "pheromone",
+        description: "Get pheromone layer status: active pheromone count, total deposits, decay cycles, amplifications, trail count. Use to check flywheel health.",
+        input: z.object({}),
+        backendTool: "pheromone.status",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "pheromone_sense",
+        namespace: "pheromone",
+        description: "Sense pheromones in a domain \u2014 returns active signals ranked by strength. Use before task execution to find best trails, or to check which strategies are working in a domain.",
+        input: z.object({
+          domain: z.string().describe('Domain to sense (e.g., "research", "analysis", "chain:sequential")'),
+          type: z.enum(["attraction", "repellent", "trail", "external", "amplification"]).optional().describe("Filter by pheromone type"),
+          tags: z.array(z.string()).optional().describe("Filter by tags"),
+          min_strength: z.number().optional().describe("Minimum strength threshold (0-1, default 0.1)"),
+          limit: z.number().optional().describe("Max results (default 20)")
+        }),
+        backendTool: "pheromone.sense",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "pheromone_deposit",
+        namespace: "pheromone",
+        description: "Deposit a pheromone signal \u2014 attraction (good result), repellent (bad result), trail (successful path), or external (outside intelligence). Use after task completion to share learnings with the fleet.",
+        input: z.object({
+          type: z.string().describe("Pheromone type"),
+          domain: z.string().describe('Domain (e.g., "research", "analysis", "cost-optimization")'),
+          source: z.string().describe("Who deposited (agent ID or system)"),
+          label: z.string().optional().describe("Human-readable label for the signal"),
+          strength: z.number().optional().describe("Signal strength 0-1 (default 0.5)"),
+          metadata: z.record(z.number()).optional().describe("Numeric metrics (e.g., { score: 0.9, latency_ms: 50 })"),
+          tags: z.array(z.string()).optional().describe("Classification tags")
+        }),
+        backendTool: "pheromone.deposit",
+        timeoutMs: 1e4,
+        riskLevel: "staged_write"
+      }),
+      defineTool({
+        name: "pheromone_heatmap",
+        namespace: "pheromone",
+        description: "Get cross-domain pheromone heatmap \u2014 shows which domains have the strongest signals and most activity. Use for strategic overview of where the flywheel is spinning fastest.",
+        input: z.object({}),
+        backendTool: "pheromone.heatmap",
+        timeoutMs: 1e4
+      }),
+      // ─── v4.0.5 Ghost-Tier Registration (LIN-617): PeerEval / Fleet Learning ──
+      defineTool({
+        name: "peer_eval_status",
+        namespace: "peereval",
+        description: "Get fleet learning status: total evals, task types tracked, best practices shared. Use to check if the fleet is learning effectively.",
+        input: z.object({}),
+        backendTool: "peer-eval.status",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "peer_eval_fleet",
+        namespace: "peereval",
+        description: "Get fleet learning data for a specific task type or all task types. Returns best agent, average efficiency, top strategies from pheromone trails, and EMA-aggregated scores.",
+        input: z.object({
+          task_type: z.string().optional().describe("Specific task type to query (omit for all)")
+        }),
+        backendTool: "peer-eval.fleet",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "peer_eval_evaluate",
+        namespace: "peereval",
+        description: "Trigger a manual peer evaluation for an agent task. Records self-assessment, deposits pheromones, updates fleet learning, and broadcasts best practices if score + novelty are high.",
+        input: z.object({
+          agent_id: z.string().describe("Agent that performed the task"),
+          task_id: z.string().optional().describe("Task identifier"),
+          context: z.string().optional().describe("What the agent did (for self-assessment prompt)")
+        }),
+        backendTool: "peer-eval.evaluate",
+        timeoutMs: 3e4,
+        riskLevel: "staged_write"
+      }),
+      defineTool({
+        name: "peer_eval_analyze",
+        namespace: "peereval",
+        description: "Run RLM-powered fleet analysis \u2014 identifies underperformers, top strategies, and strategic recommendations across all task types. Expensive but high-value. Runs weekly via cron.",
+        input: z.object({}),
+        backendTool: "peer-eval.analyze",
+        timeoutMs: 6e4
+      }),
+      // ─── v4.0.5 Ghost-Tier Registration (LIN-617): Inventor Evolution Engine ──
+      defineTool({
+        name: "inventor_run",
+        namespace: "inventor",
+        description: "Start or resume an Inventor evolution experiment. Fire-and-forget \u2014 poll inventor_status for progress. Requires experiment name + task description. Supports UCB1, greedy, random, or island (MAP-Elites) sampling.",
+        input: z.object({
+          experiment_name: z.string().describe("Unique experiment identifier (used for Redis/Neo4j namespacing)"),
+          task_description: z.string().describe("Problem description to evolve solutions for"),
+          initial_artifact: z.string().optional().describe("Optional seed solution to start from"),
+          sampling_algorithm: z.enum(["ucb1", "greedy", "random", "island"]).optional().describe("Sampling strategy (default: ucb1)"),
+          sample_n: z.number().optional().describe("Number of parent nodes to sample per step (default: 3)"),
+          max_steps: z.number().optional().describe("Maximum evolution steps (default: 20)"),
+          chain_mode: z.enum(["sequential", "parallel", "debate"]).optional().describe("Chain execution mode (default: sequential)"),
+          resume: z.boolean().optional().describe("Resume a paused experiment (default: false)")
+        }),
+        backendTool: "inventor.run",
+        timeoutMs: 3e5
+      }),
+      defineTool({
+        name: "inventor_status",
+        namespace: "inventor",
+        description: "Get current Inventor experiment status: running state, current step, total steps, nodes created, best score, best node ID, sampling algorithm, and last error if any.",
+        input: z.object({}),
+        backendTool: "inventor.status",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "inventor_nodes",
+        namespace: "inventor",
+        description: "List all Inventor trial nodes from current or last experiment. Sortable by score or creation time. Each node has: artifact, score, metrics, analysis, motivation, parent lineage.",
+        input: z.object({
+          limit: z.number().optional().describe("Max nodes to return (default: 50, max: 200)"),
+          offset: z.number().optional().describe("Pagination offset (default: 0)"),
+          sort: z.enum(["score", "created"]).optional().describe("Sort order (default: score)")
+        }),
+        backendTool: "inventor.nodes",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "inventor_node",
+        namespace: "inventor",
+        description: "Get a specific Inventor trial node by ID. Returns full artifact, score, metrics, analysis, motivation, parent ID, island, visit count, and timestamps.",
+        input: z.object({
+          node_id: z.string().describe("The trial node ID to retrieve")
+        }),
+        backendTool: "inventor.node",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "inventor_best",
+        namespace: "inventor",
+        description: "Get the best-scoring Inventor trial node from the current or last experiment. Returns the winning solution with full artifact, score breakdown, and evolution lineage.",
+        input: z.object({}),
+        backendTool: "inventor.best",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "inventor_stop",
+        namespace: "inventor",
+        description: "Stop the currently running Inventor experiment gracefully. The experiment will halt after the current step completes and persist results to history.",
+        input: z.object({}),
+        backendTool: "inventor.stop",
+        timeoutMs: 1e4,
+        riskLevel: "staged_write"
+      }),
+      defineTool({
+        name: "inventor_history",
+        namespace: "inventor",
+        description: "List past Inventor experiments with their status, scores, and configuration. Returns up to 20 most recent experiments from Redis history.",
+        input: z.object({
+          limit: z.number().optional().describe("Max experiments to return (default: 20, max: 50)")
+        }),
+        backendTool: "inventor.history",
+        timeoutMs: 1e4
+      }),
+      // ─── v4.0.5 Ghost-Tier Registration (LIN-617): HyperAgent Autonomous ──────
+      defineTool({
+        name: "hyperagent_auto_run",
+        namespace: "hyperagent",
+        description: "Trigger an autonomous execution cycle. Prioritizes targets by fitness function, plans via RLM, executes via chain engine, evaluates, discovers issues, and evolves weights. Callable from ANY repo via MCP. Persistent memory ensures continuity across sessions and repos.",
+        input: z.object({
+          phase: z.enum(["phase_0", "phase_1", "phase_2", "phase_3"]).optional().describe("Override phase (default: current)"),
+          max_targets: z.number().optional().describe("Max targets per cycle (default: phase-dependent batch size)"),
+          caller_repo: z.string().optional().describe("Calling repo identifier for cross-repo memory tracking")
+        }),
+        backendTool: "hyperagent.run",
+        timeoutMs: 3e5
+      }),
+      defineTool({
+        name: "hyperagent_auto_status",
+        namespace: "hyperagent",
+        description: "Get current autonomous executor status \u2014 phase, fitness score, edge scores, running state, cycle count, last cycle results. Callable from ANY repo via MCP.",
+        input: z.object({
+          include_history: z.boolean().optional().describe("Include last N cycle results (default: false)"),
+          history_limit: z.number().optional().describe("Number of historical cycles to include (default: 5)")
+        }),
+        backendTool: "hyperagent.status",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "hyperagent_auto_memory",
+        namespace: "hyperagent",
+        description: "Read/write persistent cross-repo memory for the autonomous executor. Stores lessons, discoveries, and execution context in Redis + Neo4j. Memory is keyed by domain and persists across sessions, repos, and restarts.",
+        input: z.object({
+          action: z.string().describe("Memory operation"),
+          domain: z.string().optional().describe('Memory domain (e.g. "lessons", "discoveries", "fitness", "edges")'),
+          key: z.string().optional().describe("Specific memory key (for read/write)"),
+          value: z.string().optional().describe("Value to store (for write)"),
+          caller_repo: z.string().optional().describe("Calling repo for provenance tracking")
+        }),
+        backendTool: "hyperagent.memory",
+        timeoutMs: 15e3,
+        riskLevel: "staged_write"
+      }),
+      defineTool({
+        name: "hyperagent_auto_issues",
+        namespace: "hyperagent",
+        description: "List all issues discovered during autonomous execution cycles. Issues are accumulated across all cycles and repos. Useful for cross-repo coordination and backlog grooming.",
+        input: z.object({
+          limit: z.number().optional().describe("Max issues to return (default: 50)"),
+          caller_repo: z.string().optional().describe("Calling repo identifier"),
+          since_cycle: z.string().optional().describe("Only issues discovered after this cycle ID")
+        }),
+        backendTool: "hyperagent.issues",
+        timeoutMs: 1e4
+      }),
+      // ─── v4.0.5 Ghost-Tier Registration (LIN-617): Flywheel + Anomaly ─────────
+      defineTool({
+        name: "flywheel_metrics",
+        namespace: "monitor",
+        description: "Get the Value Flywheel metrics \u2014 5 pillars + compound score, plus latest consolidation scan report. Use to check platform growth health and cost optimization status.",
+        input: z.object({}),
+        backendTool: "flywheel.metrics",
+        timeoutMs: 15e3
+      }),
+      defineTool({
+        name: "flywheel_consolidation",
+        namespace: "monitor",
+        description: "Get or trigger the LLM consolidation engine \u2014 scans codebase for duplicate functionality, unused dependencies, and simplification opportunities. Returns scan report with actionable recommendations.",
+        input: z.object({
+          trigger: z.boolean().optional().describe("If true, trigger a new consolidation scan instead of reading last report")
+        }),
+        backendTool: "flywheel.consolidation",
+        timeoutMs: 6e4
+      }),
+      defineTool({
+        name: "anomaly_status",
+        namespace: "monitor",
+        description: "Get anomaly watcher status \u2014 scan count, active anomalies, learned patterns. Use for proactive system health monitoring.",
+        input: z.object({}),
+        backendTool: "anomaly-watcher.status",
+        timeoutMs: 1e4
+      }),
+      defineTool({
+        name: "anomaly_scan",
+        namespace: "monitor",
+        description: "Trigger an on-demand anomaly scan \u2014 checks backend/RLM/Redis reachability, detects negative and positive anomalies, returns analysis. Debounced: min 30s between scans.",
+        input: z.object({}),
+        backendTool: "anomaly-watcher.scan",
+        timeoutMs: 3e4
+      }),
+      defineTool({
+        name: "anomaly_patterns",
+        namespace: "monitor",
+        description: "Get learned anomaly patterns with frequency and known fixes. Use to understand recurring system issues.",
+        input: z.object({}),
+        backendTool: "anomaly-watcher.patterns",
+        timeoutMs: 1e4
       })
       // ─── Universal Agent Communication ───────────────────────────────────
     ];
@@ -13998,6 +14269,15 @@ var init_failure_harvester = __esm({
 });
 
 // src/flywheel/cost-optimizer.ts
+var cost_optimizer_exports = {};
+__export(cost_optimizer_exports, {
+  getAllCostProfiles: () => getAllCostProfiles,
+  getCostProfile: () => getCostProfile,
+  getCostSummary: () => getCostSummary,
+  loadFromRedis: () => loadFromRedis,
+  selectOptimalAgent: () => selectOptimalAgent,
+  updateCostProfile: () => updateCostProfile
+});
 function profileKey(agentId, taskType) {
   return `${agentId}:${taskType}`;
 }
@@ -14048,6 +14328,28 @@ async function updateCostProfile(agentId, taskType, metrics2) {
   }
   schedulePersist();
 }
+function selectOptimalAgent(taskType, candidates, opts = {}) {
+  const { minQuality = 0.5, maxCostUsd = Infinity } = opts;
+  const eligible = [];
+  for (const agentId of candidates) {
+    const p = profiles.get(profileKey(agentId, taskType));
+    if (!p || p.totalTasks < MIN_SAMPLES_FOR_ROUTING) continue;
+    if (p.avgQualityScore < minQuality) continue;
+    if (p.avgCostUsd > maxCostUsd) continue;
+    if (p.degraded) continue;
+    const confidence = Math.min(0.95, 0.5 + p.totalTasks * 0.02);
+    eligible.push({ agentId, profile: p, confidence });
+  }
+  if (eligible.length === 0) {
+    return { agentId: candidates[0] ?? "default", profile: null, confidence: 0.3 };
+  }
+  eligible.sort((a, b) => b.profile.efficiencyRatio - a.profile.efficiencyRatio);
+  const best = eligible[0];
+  return { agentId: best.agentId, profile: best.profile, confidence: best.confidence };
+}
+function getCostProfile(agentId, taskType) {
+  return profiles.get(profileKey(agentId, taskType)) ?? null;
+}
 function getAllCostProfiles() {
   return [...profiles.values()];
 }
@@ -14085,7 +14387,31 @@ async function persistToRedis2() {
     logger.warn({ error: String(err) }, "[CostOptimizer] Redis persist failed");
   }
 }
-var REDIS_PREFIX3, REDIS_INDEX, MAX_PROFILES, profiles, persistTimer;
+async function loadFromRedis() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const keys = await redis2.smembers(REDIS_INDEX);
+    if (!keys.length) return;
+    const values = await redis2.mGet(keys.map((k) => `${REDIS_PREFIX3}profile:${k}`));
+    let loaded = 0;
+    for (const v of values) {
+      if (!v) continue;
+      try {
+        const p = JSON.parse(v);
+        if (p.agentId && p.taskType) {
+          profiles.set(profileKey(p.agentId, p.taskType), p);
+          loaded++;
+        }
+      } catch {
+      }
+    }
+    logger.info({ loaded }, "[CostOptimizer] Loaded cost profiles from Redis");
+  } catch (err) {
+    logger.warn({ error: String(err) }, "[CostOptimizer] Redis load failed");
+  }
+}
+var REDIS_PREFIX3, REDIS_INDEX, MIN_SAMPLES_FOR_ROUTING, MAX_PROFILES, profiles, persistTimer;
 var init_cost_optimizer = __esm({
   "src/flywheel/cost-optimizer.ts"() {
     "use strict";
@@ -14093,6 +14419,7 @@ var init_cost_optimizer = __esm({
     init_logger();
     REDIS_PREFIX3 = "orchestrator:cost:";
     REDIS_INDEX = `${REDIS_PREFIX3}index`;
+    MIN_SAMPLES_FOR_ROUTING = 5;
     MAX_PROFILES = 1e3;
     profiles = /* @__PURE__ */ new Map();
     persistTimer = null;
@@ -20227,7 +20554,11 @@ async function loadTargetRegistry() {
   try {
     const keyPatterns = [
       "wm:HYPERAGENT:target-registry-v2.2",
-      // working-memory format
+      // working-memory format (uppercase)
+      "wm:hyperagent-auto:target-registry-v2.2",
+      // working-memory format (lowercase auto agent)
+      "wm:hyperagent-auto:targets:full-registry-v2.2",
+      // cross-repo memory nested domain
       "hyperagent:HYPERAGENT:target-registry-v2.2",
       // legacy format
       "hyperagent:memory:targets:full-registry-v2.2",
@@ -22113,6 +22444,997 @@ var init_agentic_runner = __esm({
   }
 });
 
+// src/flywheel/flywheel-coordinator.ts
+var flywheel_coordinator_exports = {};
+__export(flywheel_coordinator_exports, {
+  getFlywheelMetrics: () => getFlywheelMetrics,
+  getLastReport: () => getLastReport,
+  runWeeklySync: () => runWeeklySync
+});
+async function loadLastReport() {
+  const redis2 = getRedis();
+  if (!redis2 || lastReport) return;
+  try {
+    const raw = await redis2.get(FLYWHEEL_REDIS_KEY);
+    if (raw) lastReport = JSON.parse(raw);
+  } catch {
+  }
+}
+async function saveLastReport(report) {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    await redis2.set(FLYWHEEL_REDIS_KEY, JSON.stringify(report), "EX", 691200);
+  } catch {
+  }
+}
+async function runWeeklySync() {
+  logger.info("[Flywheel] Starting weekly sync");
+  await loadLastReport();
+  const pillars = await Promise.all([
+    scoreCostEfficiency(),
+    scoreFleetIntelligence(),
+    scoreAdoption(),
+    scorePheromone(),
+    scorePlatformHealth()
+  ]);
+  const compound = Math.pow(
+    pillars.reduce((product, p) => product * Math.max(0.01, p.score), 1),
+    1 / pillars.length
+  );
+  const nearZeroCount = pillars.filter((p) => p.score < 0.1).length;
+  const finalCompound = nearZeroCount >= 2 ? compound * 0.5 : compound;
+  const optimizations = identifyOptimizations(pillars);
+  const delta = lastReport ? compound - lastReport.compoundScore : 0;
+  const report = {
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    compoundScore: parseFloat(finalCompound.toFixed(4)),
+    pillars,
+    nextOptimizations: optimizations.slice(0, 5),
+    weeklyDelta: parseFloat(delta.toFixed(4))
+  };
+  lastReport = report;
+  await saveLastReport(report);
+  logger.info({ compound: report.compoundScore, delta: report.weeklyDelta }, "[Flywheel] Weekly sync complete");
+  return report;
+}
+function getLastReport() {
+  return lastReport;
+}
+async function getFlywheelMetrics() {
+  if (!lastReport) {
+    try {
+      const report = await runWeeklySync();
+      return { available: true, report, pillars: report.pillars };
+    } catch {
+      return { available: false, report: null };
+    }
+  }
+  return { available: true, report: lastReport, pillars: lastReport.pillars };
+}
+function fallbackPillar(name) {
+  return { name, score: 0, trend: "flat", headline: "Data unavailable", details: [] };
+}
+async function scoreCostEfficiency() {
+  try {
+    const summary = getCostSummary();
+    const profiles2 = getAllCostProfiles();
+    const degradedPct = summary.totalProfiles > 0 ? summary.degradedAgents.length / summary.totalProfiles : 0;
+    const avgQuality = profiles2.length > 0 ? profiles2.reduce((s, p) => s + p.avgQualityScore, 0) / profiles2.length : 0.5;
+    const score = Math.max(0, Math.min(
+      1,
+      avgQuality * 0.5 + (1 - degradedPct) * 0.3 + (summary.avgPlatformCostPerTask < 0.05 ? 0.2 : summary.avgPlatformCostPerTask < 0.1 ? 0.1 : 0)
+    ));
+    return {
+      name: "Cost Efficiency",
+      score: parseFloat(score.toFixed(3)),
+      trend: "flat",
+      headline: `${summary.totalProfiles} agent\xD7task profiles \xB7 avg quality ${(avgQuality * 100).toFixed(0)}%`,
+      details: [
+        `${summary.degradedAgents.length} degraded agents`,
+        `${summary.taskTypesCovered} task types covered`,
+        `Avg cost/task: $${summary.avgPlatformCostPerTask.toFixed(4)}`,
+        ...summary.topEfficient.slice(0, 2).map((p) => `Top: ${p.agentId}/${p.taskType} efficiency=${p.efficiencyRatio.toFixed(2)}`)
+      ]
+    };
+  } catch (err) {
+    logger.warn({ err }, "[Flywheel] scoreCostEfficiency failed");
+    return fallbackPillar("Cost Efficiency");
+  }
+}
+async function scoreFleetIntelligence() {
+  try {
+    const learnings = getAllFleetLearnings();
+    const state4 = getPeerEvalState();
+    const reliableLearnings = learnings.filter((l) => l.totalEvals >= 5 && l.avgScore >= 0.6);
+    const avgScore = learnings.length > 0 ? learnings.reduce((s, l) => s + l.avgScore, 0) / learnings.length : 0.5;
+    const bpCount = learnings.reduce((s, l) => s + (l.bestPractices?.length ?? 0), 0);
+    const score = Math.min(
+      1,
+      (state4.totalEvals > 0 ? Math.min(0.4, state4.totalEvals / 1e3) : 0) + avgScore * 0.4 + (bpCount > 0 ? Math.min(0.2, bpCount / 50) : 0)
+    );
+    return {
+      name: "Fleet Intelligence",
+      score: parseFloat(score.toFixed(3)),
+      trend: state4.totalEvals > 100 ? "up" : "flat",
+      headline: `${state4.totalEvals} evals \xB7 ${learnings.length} task types \xB7 ${bpCount} best practices`,
+      details: [
+        `${reliableLearnings.length} reliable routes (\u22655 evals, \u22650.6 quality)`,
+        `Avg fleet quality: ${(avgScore * 100).toFixed(0)}%`,
+        `Task types tracked: ${state4.taskTypesTracked}`
+      ]
+    };
+  } catch (err) {
+    logger.warn({ err }, "[Flywheel] scoreFleetIntelligence failed");
+    return fallbackPillar("Fleet Intelligence");
+  }
+}
+async function scoreAdoption() {
+  try {
+    const telemetry = await computeTelemetry();
+    const totalCalls = telemetry.tools.reduce((s, t) => s + t.lifetime_calls, 0);
+    const uniqueTools = telemetry.tools_called_this_week;
+    const advancedPct = (telemetry.kpis.advanced_utilisation_pct ?? 0) / 100;
+    const score = Math.min(
+      1,
+      (uniqueTools > 0 ? Math.min(0.4, uniqueTools / 20) : 0) + advancedPct * 0.3 + (totalCalls > 100 ? 0.3 : totalCalls / 100 * 0.3)
+    );
+    return {
+      name: "Adoption",
+      score: parseFloat(score.toFixed(3)),
+      trend: totalCalls > 0 ? "up" : "flat",
+      headline: `${totalCalls} calls \xB7 ${uniqueTools} tools active this week \xB7 ${(advancedPct * 100).toFixed(0)}% advanced`,
+      details: [
+        `Total lifetime calls: ${totalCalls}`,
+        `Tools active this week: ${uniqueTools} / ${telemetry.total_tools}`,
+        `Advanced tool usage: ${(advancedPct * 100).toFixed(0)}%`,
+        `Utilisation rate: ${telemetry.kpis.utilisation_rate_pct.toFixed(0)}%`
+      ]
+    };
+  } catch (err) {
+    logger.warn({ err }, "[Flywheel] scoreAdoption failed");
+    return fallbackPillar("Adoption");
+  }
+}
+async function scorePheromone() {
+  try {
+    const { getPheromoneState: getPheromoneState2 } = await Promise.resolve().then(() => (init_pheromone_layer(), pheromone_layer_exports));
+    const stats = getPheromoneState2();
+    const active = stats?.activePheromones ?? 0;
+    const deposits = stats?.totalDeposits ?? 0;
+    const amplifications = stats?.totalAmplifications ?? 0;
+    const score = Math.min(
+      1,
+      (active > 0 ? Math.min(0.4, active / 200) : 0) + (deposits > 0 ? Math.min(0.3, deposits / 1e3) : 0) + (amplifications > 0 ? Math.min(0.3, amplifications / 200) : 0)
+    );
+    return {
+      name: "Pheromone Signal",
+      score: parseFloat(score.toFixed(3)),
+      trend: active > 50 ? "up" : "flat",
+      headline: `${active} active \xB7 ${deposits} deposits \xB7 ${amplifications} amplifications`,
+      details: [
+        `Active pheromones: ${active}`,
+        `Total deposits: ${deposits}`,
+        `Cross-pillar amplifications: ${amplifications}`,
+        `Decay cycles: ${stats?.totalDecays ?? 0}`
+      ]
+    };
+  } catch (err) {
+    logger.warn({ err }, "[Flywheel] scorePheromone failed");
+    return fallbackPillar("Pheromone Signal");
+  }
+}
+async function scorePlatformHealth() {
+  try {
+    const { getCircuitBreakerStats } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
+    const cb = getCircuitBreakerStats?.() ?? null;
+    const circuitOpen = cb?.open === true;
+    const failures = cb?.failures ?? 0;
+    const redis2 = getRedis();
+    let chainSuccessRate = 0.5;
+    let totalChains = 0;
+    let failedChains = 0;
+    let completedCount = 0;
+    if (redis2) {
+      try {
+        const keys = await redis2.keys("orchestrator:chain:*");
+        totalChains = keys.length;
+        for (const key of keys.slice(0, 100)) {
+          const raw = await redis2.get(key);
+          if (raw) {
+            try {
+              const data = JSON.parse(raw);
+              if (data.status === "completed") completedCount++;
+              if (data.status === "failed") failedChains++;
+            } catch {
+            }
+          }
+        }
+        if (totalChains > 0) {
+          chainSuccessRate = completedCount / Math.min(totalChains, 100);
+        }
+      } catch {
+      }
+    }
+    const circuitScore = circuitOpen ? 0 : Math.max(0, 1 - failures * 0.05);
+    const score = 0.6 * chainSuccessRate + 0.4 * circuitScore;
+    const isLying = chainSuccessRate < 0.3 && circuitScore > 0.8;
+    const headline = isLying ? `\u26A0 ${failedChains} of ${totalChains} chains failed \u2014 circuit breaker silent` : circuitOpen ? `\u26A0 Circuit breaker OPEN` : `${Math.round(chainSuccessRate * 100)}% chain success rate`;
+    return {
+      name: "Platform Health",
+      score: parseFloat(Math.min(1, score).toFixed(3)),
+      trend: chainSuccessRate < 0.3 ? "down" : circuitOpen ? "down" : failures > 0 ? "flat" : "up",
+      headline,
+      details: [
+        `Chain success rate: ${Math.round(chainSuccessRate * 100)}% (${completedCount}/${Math.min(totalChains, 100)})`,
+        `Circuit breaker: ${circuitOpen ? "OPEN" : "closed"}`,
+        `Backend failures: ${failures}`,
+        `Failed chains: ${failedChains}`
+      ]
+    };
+  } catch (err) {
+    logger.warn({ err }, "[Flywheel] scorePlatformHealth failed");
+    return fallbackPillar("Platform Health");
+  }
+}
+var FLYWHEEL_REDIS_KEY, lastReport;
+var init_flywheel_coordinator = __esm({
+  "src/flywheel/flywheel-coordinator.ts"() {
+    "use strict";
+    init_logger();
+    init_redis();
+    init_cost_optimizer();
+    init_peer_eval();
+    init_adoption_telemetry();
+    FLYWHEEL_REDIS_KEY = "flywheel:last-report";
+    lastReport = null;
+  }
+});
+
+// src/llm/consolidation-engine.ts
+var consolidation_engine_exports = {};
+__export(consolidation_engine_exports, {
+  getLastReport: () => getLastReport2,
+  runWeeklyConsolidation: () => runWeeklyConsolidation
+});
+async function runWeeklyConsolidation() {
+  logger.info("[Consolidation] Starting weekly scan");
+  const candidates = [];
+  await scanDegradedAgents(candidates);
+  await scanDominantRoutes(candidates);
+  await scanStaleTools(candidates);
+  const report = {
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    candidates,
+    autoExecuted: 0,
+    manualReview: candidates.length,
+    summary: `${candidates.length} consolidation candidates found \u2014 all require human review`
+  };
+  lastReport2 = report;
+  logger.info({ candidates: candidates.length }, "[Consolidation] Weekly scan complete");
+  return report;
+}
+function getLastReport2() {
+  return lastReport2;
+}
+async function scanDegradedAgents(candidates) {
+  try {
+    const profiles2 = getAllCostProfiles();
+    const degraded = profiles2.filter((p) => p.degraded && p.totalTasks >= 10);
+    for (const p of degraded) {
+      const recent = p.recentScores.slice(-5);
+      const recentAvg = recent.reduce((s, v) => s + v, 0) / Math.max(1, recent.length);
+      candidates.push({
+        id: `degraded:${p.agentId}:${p.taskType}`,
+        category: "degraded-agent",
+        agentId: p.agentId,
+        taskType: p.taskType,
+        reason: `Agent "${p.agentId}" has quality degradation on task type "${p.taskType}"`,
+        evidence: [
+          `Last ${recent.length} scores avg: ${(recentAvg * 100).toFixed(0)}% (below 40%)`,
+          `Total tasks evaluated: ${p.totalTasks}`,
+          `Efficiency ratio: ${p.efficiencyRatio.toFixed(3)}`
+        ],
+        riskLevel: recentAvg < 0.2 ? "high" : "medium",
+        suggestedAction: `Investigate agent config for "${p.agentId}" on "${p.taskType}" tasks. Consider routing to a different agent temporarily.`
+      });
+    }
+  } catch (err) {
+    logger.warn({ err }, "[Consolidation] scanDegradedAgents failed");
+  }
+}
+async function scanDominantRoutes(candidates) {
+  try {
+    const learnings = getAllFleetLearnings();
+    for (const l of learnings) {
+      if (l.totalEvals >= 20 && l.bestScore >= 0.85 && l.bestAgent) {
+        const profiles2 = getAllCostProfiles().filter((p) => p.taskType === l.taskType);
+        const nonBest = profiles2.filter((p) => p.agentId !== l.bestAgent);
+        for (const p of nonBest) {
+          if (p.totalTasks >= 5 && p.avgQualityScore < l.bestScore - 0.2) {
+            candidates.push({
+              id: `dominant:${l.taskType}:${p.agentId}`,
+              category: "dominant-route",
+              agentId: p.agentId,
+              taskType: l.taskType,
+              reason: `"${l.bestAgent}" dominates "${l.taskType}" task type \u2014 "${p.agentId}" is underperforming`,
+              evidence: [
+                `Best agent: ${l.bestAgent} score=${l.bestScore.toFixed(2)}`,
+                `This agent: ${p.agentId} score=${p.avgQualityScore.toFixed(2)} (\u0394=${(l.bestScore - p.avgQualityScore).toFixed(2)})`,
+                `Fleet evals: ${l.totalEvals}`
+              ],
+              riskLevel: "low",
+              suggestedAction: `Consider updating chain routing for "${l.taskType}" to default to "${l.bestAgent}".`
+            });
+          }
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn({ err }, "[Consolidation] scanDominantRoutes failed");
+  }
+}
+async function scanStaleTools(candidates) {
+  try {
+    const summary = await computeTelemetry();
+    const stale = summary.stale_tools ?? [];
+    for (const toolName2 of stale.slice(0, 10)) {
+      candidates.push({
+        id: `stale:${toolName2}`,
+        category: "stale-tool",
+        toolName: toolName2,
+        reason: `Tool "${toolName2}" has not been called in 30+ days`,
+        evidence: ["0 calls in last 30-day window", "Detected by adoption-telemetry stale scan"],
+        riskLevel: "low",
+        suggestedAction: `Verify if "${toolName2}" is still needed. If unused for 60+ days, consider removing from tool registry.`
+      });
+    }
+  } catch (err) {
+    logger.warn({ err }, "[Consolidation] scanStaleTools failed");
+  }
+}
+var lastReport2;
+var init_consolidation_engine = __esm({
+  "src/llm/consolidation-engine.ts"() {
+    "use strict";
+    init_logger();
+    init_cost_optimizer();
+    init_peer_eval();
+    init_adoption_telemetry();
+    lastReport2 = null;
+  }
+});
+
+// src/swarm/anomaly-watcher.ts
+var anomaly_watcher_exports = {};
+__export(anomaly_watcher_exports, {
+  getActiveAnomalies: () => getActiveAnomalies,
+  getAnomalyPatterns: () => getAnomalyPatterns,
+  getWatcherState: () => getWatcherState,
+  initAnomalyWatcher: () => initAnomalyWatcher,
+  runAnomalyScan: () => runAnomalyScan
+});
+async function probeHealth() {
+  const t0 = Date.now();
+  let backendReachable = false;
+  let backendLatencyMs = 0;
+  try {
+    const res = await fetch(`${config.backendUrl}/health`, {
+      signal: AbortSignal.timeout(5e3)
+    });
+    backendReachable = res.ok;
+    backendLatencyMs = Date.now() - t0;
+  } catch {
+    backendLatencyMs = Date.now() - t0;
+  }
+  let redisReachable = false;
+  try {
+    const redis2 = getRedis();
+    if (redis2) {
+      await redis2.ping();
+      redisReachable = true;
+    }
+  } catch {
+  }
+  return {
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    backendCircuit: getBackendCircuitState(),
+    rateLimitState: getRateLimitState(),
+    backendReachable,
+    backendLatencyMs,
+    rlmReachable: isRlmAvailable(),
+    redisReachable
+  };
+}
+async function detectAnomalies(health) {
+  const anomalies = [];
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  if (health.rateLimitState.current_delay_ms > 0 || health.rateLimitState.hits_in_window >= 3) {
+    anomalies.push({
+      id: `rl-storm-${Date.now()}`,
+      type: "rate_limit_storm",
+      valence: "negative",
+      severity: health.rateLimitState.current_delay_ms >= 5e3 ? "critical" : "warning",
+      source: "mcp-caller",
+      description: `Rate-limit backpressure active: ${health.rateLimitState.hits_in_window} hits in ${health.rateLimitState.window_ms}ms window, delay=${health.rateLimitState.current_delay_ms}ms`,
+      metrics: {
+        delay_ms: health.rateLimitState.current_delay_ms,
+        hits_in_window: health.rateLimitState.hits_in_window
+      },
+      detectedAt: now,
+      resolvedAt: null,
+      remediation: null,
+      learnings: []
+    });
+  }
+  if (health.backendCircuit.open) {
+    anomalies.push({
+      id: `cb-open-${Date.now()}`,
+      type: "circuit_breaker_open",
+      valence: "negative",
+      severity: "critical",
+      source: "backend",
+      description: `Backend circuit breaker OPEN: ${health.backendCircuit.failures} consecutive failures, cooldown=${health.backendCircuit.cooldown_remaining_ms}ms`,
+      metrics: {
+        failures: health.backendCircuit.failures,
+        cooldown_remaining_ms: health.backendCircuit.cooldown_remaining_ms
+      },
+      detectedAt: now,
+      resolvedAt: null,
+      remediation: null,
+      learnings: []
+    });
+  }
+  if (!health.backendReachable) {
+    anomalies.push({
+      id: `backend-down-${Date.now()}`,
+      type: "timeout_cascade",
+      valence: "negative",
+      severity: "critical",
+      source: "backend",
+      description: `Backend unreachable (latency: ${health.backendLatencyMs}ms)`,
+      metrics: { latency_ms: health.backendLatencyMs },
+      detectedAt: now,
+      resolvedAt: null,
+      remediation: null,
+      learnings: []
+    });
+  } else if (health.backendLatencyMs > 5e3) {
+    anomalies.push({
+      id: `backend-slow-${Date.now()}`,
+      type: "timeout_cascade",
+      valence: "negative",
+      severity: "warning",
+      source: "backend",
+      description: `Backend high latency: ${health.backendLatencyMs}ms (threshold: 5000ms)`,
+      metrics: { latency_ms: health.backendLatencyMs },
+      detectedAt: now,
+      resolvedAt: null,
+      remediation: null,
+      learnings: []
+    });
+  }
+  if (!health.rlmReachable) {
+    anomalies.push({
+      id: `rlm-down-${Date.now()}`,
+      type: "stagnation",
+      valence: "negative",
+      severity: "warning",
+      source: "rlm-engine",
+      description: "RLM Engine unavailable \u2014 cognitive pipelines (reason, analyze, fold) will fail",
+      metrics: {},
+      detectedAt: now,
+      resolvedAt: null,
+      remediation: null,
+      learnings: []
+    });
+  }
+  if (!health.redisReachable) {
+    anomalies.push({
+      id: `redis-down-${Date.now()}`,
+      type: "stagnation",
+      valence: "negative",
+      severity: "critical",
+      source: "redis",
+      description: "Redis unreachable \u2014 edge scores, totalCycles, agent state at risk of loss on restart",
+      metrics: {},
+      detectedAt: now,
+      resolvedAt: null,
+      remediation: null,
+      learnings: []
+    });
+  }
+  if (health.backendReachable && health.backendLatencyMs < 50 && health.backendLatencyMs > 0) {
+    anomalies.push({
+      id: `perf-spike-${Date.now()}`,
+      type: "performance_spike",
+      valence: "positive",
+      severity: "info",
+      source: "backend",
+      description: `Backend responding exceptionally fast: ${health.backendLatencyMs}ms (normal 100-500ms)`,
+      metrics: { latency_ms: health.backendLatencyMs },
+      detectedAt: now,
+      resolvedAt: null,
+      remediation: null,
+      learnings: []
+    });
+  }
+  if (health.rateLimitState.current_delay_ms === 0 && health.rateLimitState.hits_in_window === 0) {
+    const stormPattern = state3.patterns.find((p) => p.type === "rate_limit_storm");
+    if (stormPattern && stormPattern.count > 0) {
+      const lastStorm = new Date(stormPattern.lastSeen).getTime();
+      const timeSinceStorm = Date.now() - lastStorm;
+      if (timeSinceStorm < 36e5 && timeSinceStorm > 6e4) {
+        anomalies.push({
+          id: `recovery-${Date.now()}`,
+          type: "unexpected_success",
+          valence: "positive",
+          severity: "info",
+          source: "mcp-caller",
+          description: `Rate-limit storm self-resolved in ${Math.round(timeSinceStorm / 1e3)}s \u2014 backpressure system effective`,
+          metrics: { recovery_ms: timeSinceStorm, prior_storms: stormPattern.count },
+          detectedAt: now,
+          resolvedAt: null,
+          remediation: null,
+          learnings: []
+        });
+      }
+    }
+  }
+  try {
+    const hyperStatus = await callMcpTool({
+      toolName: "hyperagent_auto_status",
+      args: {},
+      callId: `anomaly-hyper-${Date.now()}`
+    });
+    if (hyperStatus && typeof hyperStatus === "object") {
+      const edges = hyperStatus.edge_scores;
+      if (edges) {
+        for (const [edgeName, score] of Object.entries(edges)) {
+          if (typeof score === "number" && score >= 0.85) {
+            anomalies.push({
+              id: `edge-break-${edgeName}-${Date.now()}`,
+              type: "edge_breakthrough",
+              valence: "positive",
+              severity: "info",
+              source: "hyperagent",
+              description: `Sovereign Edge "${edgeName}" reached breakthrough score: ${(score * 100).toFixed(1)}%`,
+              metrics: { edge: 0, score },
+              detectedAt: now,
+              resolvedAt: null,
+              remediation: null,
+              learnings: []
+            });
+          }
+        }
+      }
+      const totalCycles3 = hyperStatus.totalCycles;
+      const phase = hyperStatus.phase;
+      if (typeof totalCycles3 === "number" && typeof phase === "number" && phase >= 2 && totalCycles3 > 10) {
+        const cyclesPerPhase = totalCycles3 / (phase + 1);
+        if (cyclesPerPhase < 5) {
+          anomalies.push({
+            id: `pattern-emerge-${Date.now()}`,
+            type: "pattern_emergence",
+            valence: "positive",
+            severity: "info",
+            source: "hyperagent",
+            description: `Fast phase progression: ${totalCycles3} cycles across ${phase + 1} phases (${cyclesPerPhase.toFixed(1)} cycles/phase) \u2014 platform learning accelerating`,
+            metrics: { totalCycles: totalCycles3, phase, cyclesPerPhase },
+            detectedAt: now,
+            resolvedAt: null,
+            remediation: null,
+            learnings: []
+          });
+        }
+      }
+    }
+  } catch {
+  }
+  try {
+    const inventorBest = await callMcpTool({
+      toolName: "run_evolution",
+      args: { action: "status" },
+      callId: `anomaly-inventor-${Date.now()}`
+    });
+    if (inventorBest && typeof inventorBest === "object") {
+      const bestScore2 = inventorBest.best_score;
+      if (typeof bestScore2 === "number" && bestScore2 > 0.9) {
+        anomalies.push({
+          id: `inventor-high-${Date.now()}`,
+          type: "unexpected_success",
+          valence: "positive",
+          severity: "info",
+          source: "inventor",
+          description: `Inventor evolution reached high-quality trial: score ${(bestScore2 * 100).toFixed(1)}% \u2014 candidate for production adoption`,
+          metrics: { best_score: bestScore2 },
+          detectedAt: now,
+          resolvedAt: null,
+          remediation: null,
+          learnings: []
+        });
+      }
+    }
+  } catch {
+  }
+  return anomalies;
+}
+async function learnFromAnomalies(anomalies) {
+  if (anomalies.length === 0) return;
+  for (const a of anomalies) {
+    let pattern = state3.patterns.find((p) => p.type === a.type);
+    if (!pattern) {
+      pattern = { type: a.type, count: 0, lastSeen: a.detectedAt, avgDurationMs: 0, knownFix: null };
+      state3.patterns.push(pattern);
+    }
+    pattern.count++;
+    pattern.lastSeen = a.detectedAt;
+  }
+  if (state3.patterns.length > MAX_PATTERNS) {
+    state3.patterns.sort((a, b) => b.count - a.count);
+    state3.patterns = state3.patterns.slice(0, MAX_PATTERNS);
+  }
+  for (const a of anomalies) {
+    onAnomaly(a.type, a.valence, a.source, a.severity).catch(() => {
+    });
+  }
+  for (const a of anomalies) {
+    try {
+      await callMcpTool({
+        toolName: "memory_store",
+        args: {
+          agent_id: "anomaly-watcher",
+          key: `anomaly:${a.valence}:${a.type}:${a.id}`,
+          value: JSON.stringify({
+            type: a.type,
+            valence: a.valence,
+            severity: a.severity,
+            source: a.source,
+            description: a.description,
+            metrics: a.metrics
+          }),
+          metadata: { severity: a.severity, source: a.source, type: a.type, valence: a.valence }
+        },
+        callId: `anomaly-mem-${a.id}`
+      });
+    } catch {
+    }
+  }
+  const negatives = anomalies.filter((a) => a.valence === "negative");
+  if (negatives.length > 0) {
+    try {
+      await callMcpTool({
+        toolName: "failure_harvest",
+        args: {
+          failures: negatives.map((a) => ({
+            category: a.type,
+            pattern: a.description,
+            context: a.metrics,
+            severity: a.severity
+          }))
+        },
+        callId: `anomaly-harvest-${Date.now()}`
+      });
+    } catch {
+    }
+  }
+  try {
+    const items = anomalies.map((a) => ({
+      title: a.valence === "positive" ? `[OPPORTUNITY] ${a.type}: ${a.source}` : `[${a.severity.toUpperCase()}] ${a.type}: ${a.source}`,
+      description: a.description,
+      priority: a.valence === "positive" ? "P2" : a.severity === "critical" ? "P0" : "P1",
+      category: a.valence === "positive" ? "platform-opportunity" : "platform-health"
+    }));
+    await callMcpTool({
+      toolName: "loose_ends_scan",
+      args: { source: "anomaly-watcher", items },
+      callId: `anomaly-loose-${Date.now()}`
+    });
+  } catch {
+  }
+}
+async function reasonAboutAnomalies(anomalies) {
+  if (anomalies.length === 0 || !isRlmAvailable()) return "";
+  const negatives = anomalies.filter((a) => a.valence === "negative");
+  const positives = anomalies.filter((a) => a.valence === "positive");
+  const criticals = negatives.filter((a) => a.severity === "critical");
+  if (criticals.length === 0 && positives.length === 0) return "";
+  try {
+    let priorInsights = "";
+    try {
+      const allTypes = anomalies.map((a) => a.type);
+      const memResult = await callMcpTool({
+        toolName: "memory_retrieve",
+        args: {
+          agent_id: "anomaly-watcher",
+          query: `anomaly resolution amplification ${allTypes.join(" ")}`,
+          top_k: 5
+        },
+        callId: `anomaly-reason-mem-${Date.now()}`
+      });
+      const memories = Array.isArray(memResult.memories) ? memResult.memories : [];
+      priorInsights = memories.map((m) => String(m.value || "")).join("\n");
+    } catch {
+    }
+    const negativesSection = criticals.length > 0 ? `
+CRITICAL ANOMALIES (negative \u2014 needs remediation):
+${criticals.map((a) => `- [${a.severity}] ${a.type} from ${a.source}: ${a.description}
+  Metrics: ${JSON.stringify(a.metrics)}`).join("\n")}` : "";
+    const positivesSection = positives.length > 0 ? `
+POSITIVE ANOMALIES (unexpected successes \u2014 worth amplifying):
+${positives.map((a) => `- [${a.type}] from ${a.source}: ${a.description}
+  Metrics: ${JSON.stringify(a.metrics)}`).join("\n")}` : "";
+    const result = await callCognitiveRaw("reason", {
+      prompt: `You are the Anomaly Intelligence Agent for the WidgeTDC platform.
+You analyze BOTH negative anomalies (to fix) AND positive anomalies (to amplify and learn from).
+${negativesSection}${positivesSection}
+
+HISTORICAL PATTERNS:
+${state3.patterns.filter((p) => p.count > 1).map((p) => `- ${p.type}: occurred ${p.count} times, last seen ${p.lastSeen}${p.knownFix ? `, fix: ${p.knownFix}` : ""}`).join("\n") || "(no prior patterns)"}
+
+PRIOR LEARNINGS:
+${priorInsights || "(no prior insights)"}
+
+Provide:
+${criticals.length > 0 ? `1. ROOT CAUSE ANALYSIS for negative anomalies (most likely cause)
+2. IMMEDIATE REMEDIATION steps the orchestrator can take autonomously
+3. PREVENTIVE MEASURES to add to the platform` : ""}
+${positives.length > 0 ? `${criticals.length > 0 ? "4" : "1"}. AMPLIFICATION STRATEGY for positive anomalies \u2014 what's working well and how to reinforce it
+${criticals.length > 0 ? "5" : "2"}. DEVELOPMENT IDEAS inspired by the positive patterns \u2014 new capabilities or optimizations to explore
+${criticals.length > 0 ? "6" : "3"}. PATTERN CONNECTIONS \u2014 how positive signals relate to recent changes or experiments` : ""}
+${criticals.length > 0 || positives.length > 0 ? `
+FINAL: One-liner insight to remember for next time` : ""}`,
+      agent_id: "anomaly-watcher",
+      depth: 2
+    }, 2e4);
+    const analysis = String(result.answer || result.result || "");
+    if (analysis.length > 50) {
+      const primaryType = criticals.length > 0 ? criticals[0].type : positives[0]?.type ?? "mixed";
+      const memKey = positives.length > 0 && criticals.length === 0 ? `amplification:${primaryType}:${Date.now()}` : `remediation:${primaryType}:${Date.now()}`;
+      try {
+        await callMcpTool({
+          toolName: "memory_store",
+          args: {
+            agent_id: "anomaly-watcher",
+            key: memKey,
+            value: analysis.slice(0, 2e3),
+            metadata: {
+              types: anomalies.map((a) => a.type),
+              valences: [...new Set(anomalies.map((a) => a.valence))],
+              scan: state3.totalScans
+            }
+          },
+          callId: `anomaly-rem-store-${Date.now()}`
+        });
+      } catch {
+      }
+    }
+    return analysis;
+  } catch (err) {
+    logger.warn({ error: String(err) }, "Anomaly-watcher: RLM reasoning failed");
+    return "";
+  }
+}
+async function runAnomalyScan() {
+  const t0 = Date.now();
+  state3.totalScans++;
+  state3.lastScanAt = (/* @__PURE__ */ new Date()).toISOString();
+  broadcastSSE("anomaly-watcher", { event: "scan_start", scan: state3.totalScans });
+  const health = await probeHealth();
+  const anomalies = await detectAnomalies(health);
+  const activeTypes = new Set(anomalies.map((a) => a.type));
+  state3.activeAnomalies = state3.activeAnomalies.filter((a) => {
+    if (!activeTypes.has(a.type) && !a.resolvedAt) {
+      a.resolvedAt = (/* @__PURE__ */ new Date()).toISOString();
+      state3.anomaliesResolved++;
+      logger.info({ type: a.type, source: a.source }, "Anomaly resolved");
+      return false;
+    }
+    return true;
+  });
+  if (anomalies.length > 0) {
+    state3.anomaliesDetected += anomalies.length;
+    for (const a of anomalies) {
+      if (!state3.activeAnomalies.find((x) => x.type === a.type)) {
+        state3.activeAnomalies.push(a);
+      }
+    }
+    if (state3.activeAnomalies.length > MAX_ACTIVE_ANOMALIES) {
+      state3.activeAnomalies = state3.activeAnomalies.slice(-MAX_ACTIVE_ANOMALIES);
+    }
+    await learnFromAnomalies(anomalies);
+    const analysis = await reasonAboutAnomalies(anomalies);
+    const critCount = anomalies.filter((a) => a.severity === "critical").length;
+    const positiveCount = anomalies.filter((a) => a.valence === "positive").length;
+    if (critCount > 0) {
+      broadcastMessage({
+        from: "AnomalyWatcher",
+        to: "All",
+        source: "orchestrator",
+        type: "Alert",
+        message: `${critCount} critical anomal${critCount === 1 ? "y" : "ies"} detected: ${anomalies.filter((a) => a.severity === "critical").map((a) => `${a.type}(${a.source})`).join(", ")}`
+      });
+    }
+    if (positiveCount > 0) {
+      broadcastMessage({
+        from: "AnomalyWatcher",
+        to: "All",
+        source: "orchestrator",
+        type: "Message",
+        message: `${positiveCount} positive signal${positiveCount === 1 ? "" : "s"}: ${anomalies.filter((a) => a.valence === "positive").map((a) => `${a.type}(${a.source})`).join(", ")}`
+      });
+    }
+    broadcastSSE("anomaly-watcher", {
+      event: "scan_complete",
+      scan: state3.totalScans,
+      anomalies: anomalies.length,
+      critical: critCount,
+      positive: positiveCount,
+      duration_ms: Date.now() - t0
+    });
+    logger.info({
+      scan: state3.totalScans,
+      anomalies: anomalies.length,
+      critical: critCount,
+      duration_ms: Date.now() - t0
+    }, "Anomaly scan complete");
+    await persistState2();
+    return { anomalies, health, analysis, patterns: state3.patterns };
+  }
+  broadcastSSE("anomaly-watcher", {
+    event: "scan_complete",
+    scan: state3.totalScans,
+    anomalies: 0,
+    critical: 0,
+    duration_ms: Date.now() - t0
+  });
+  await persistState2();
+  return { anomalies: [], health, analysis: "", patterns: state3.patterns };
+}
+async function persistState2() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    await redis2.set(REDIS_KEY3, JSON.stringify({ ...state3, _schemaVersion: 1 }), "EX", 86400);
+  } catch {
+  }
+}
+async function loadState3() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const raw = await redis2.get(REDIS_KEY3);
+    if (raw) {
+      const loaded = JSON.parse(raw);
+      if (loaded._schemaVersion !== 1) {
+        logger.warn("Anomaly-watcher: schema version mismatch, using defaults");
+        return;
+      }
+      state3 = { ...state3, ...loaded };
+      logger.info(
+        { totalScans: state3.totalScans, patterns: state3.patterns.length },
+        "Anomaly-watcher: restored state from Redis"
+      );
+    }
+  } catch {
+  }
+}
+function getWatcherState() {
+  return { ...state3 };
+}
+function getActiveAnomalies() {
+  return [...state3.activeAnomalies];
+}
+function getAnomalyPatterns() {
+  return [...state3.patterns];
+}
+async function initAnomalyWatcher() {
+  await loadState3();
+  if (state3.patterns.length === 0) {
+    state3.patterns = [...KNOWN_FAILURE_PATTERNS];
+    await persistState2();
+    logger.info(
+      { seeded: state3.patterns.length },
+      "Anomaly-watcher: seeded known failure patterns from production history"
+    );
+  }
+  logger.info(
+    { totalScans: state3.totalScans, patterns: state3.patterns.length },
+    "Anomaly-watcher initialized"
+  );
+}
+var REDIS_KEY3, MAX_ACTIVE_ANOMALIES, MAX_PATTERNS, state3, KNOWN_FAILURE_PATTERNS;
+var init_anomaly_watcher = __esm({
+  "src/swarm/anomaly-watcher.ts"() {
+    "use strict";
+    init_config();
+    init_logger();
+    init_redis();
+    init_mcp_caller();
+    init_mcp_caller();
+    init_cognitive_proxy();
+    init_sse();
+    init_chat_broadcaster();
+    init_pheromone_layer();
+    REDIS_KEY3 = "anomaly-watcher:state";
+    MAX_ACTIVE_ANOMALIES = 50;
+    MAX_PATTERNS = 100;
+    state3 = {
+      lastScanAt: null,
+      totalScans: 0,
+      anomaliesDetected: 0,
+      anomaliesResolved: 0,
+      activeAnomalies: [],
+      patterns: []
+    };
+    KNOWN_FAILURE_PATTERNS = [
+      {
+        type: "validation_error",
+        count: 52,
+        lastSeen: "2026-04-09T21:50:00.000Z",
+        avgDurationMs: 1200,
+        knownFix: "Validate payloads before MCP dispatch \u2014 orchestrator sends badly formatted payloads to backend"
+      },
+      {
+        type: "timeout_cascade",
+        count: 24,
+        lastSeen: "2026-04-09T21:48:00.000Z",
+        avgDurationMs: 15e3,
+        knownFix: "Add retry with exponential backoff for Neo4j, increase RLM timeout, circuit breaker for external APIs"
+      },
+      {
+        type: "unknown_error",
+        count: 28,
+        lastSeen: "2026-04-09T21:49:00.000Z",
+        avgDurationMs: 800,
+        knownFix: "Add structured error logging in backend MCP router to capture full error context"
+      },
+      {
+        type: "502_backend",
+        count: 4,
+        lastSeen: "2026-04-09T21:30:00.000Z",
+        avgDurationMs: 12e3,
+        knownFix: "Railway cold-start ~12s \u2014 add health check retry before marking as failure"
+      },
+      {
+        type: "tool_offline",
+        count: 1,
+        lastSeen: "2026-04-09T21:50:42.000Z",
+        avgDurationMs: 0,
+        knownFix: 'slack.channel.post OFFLINE after 23 failures \u2014 "No Slack credentials configured". Set SLACK_BOT_TOKEN + SLACK_CHANNEL_ID'
+      },
+      {
+        type: "chain_failure_spike",
+        count: 19,
+        lastSeen: "2026-04-09T20:00:00.000Z",
+        avgDurationMs: 3500,
+        knownFix: "Kill chains with 0% success rate. Circuit breaker auto-disables after 3 consecutive failures."
+      },
+      {
+        type: "peer_eval_crash",
+        count: 2,
+        lastSeen: "2026-04-09T21:00:00.000Z",
+        avgDurationMs: 500,
+        knownFix: "Null guard on quality_score \u2014 hookIntoExecution was passed string instead of context object"
+      },
+      {
+        type: "circuit_breaker_open",
+        count: 5,
+        lastSeen: "2026-04-09T20:00:00.000Z",
+        avgDurationMs: 6e4,
+        knownFix: "Tool auto-recovers after 60s of no failures, or restart service"
+      },
+      {
+        type: "stagnation",
+        count: 3,
+        lastSeen: "2026-04-09T19:00:00.000Z",
+        avgDurationMs: 0,
+        knownFix: "Verify RLM_URL and Redis connection env vars"
+      }
+    ];
+  }
+});
+
 // src/tools/tool-executor.ts
 var tool_executor_exports = {};
 __export(tool_executor_exports, {
@@ -23684,16 +25006,108 @@ ${lines.join("\n")}`;
     case "railway_deploy": {
       const service = args?.service ?? "orchestrator";
       const action = args?.action ?? "status";
-      const { execSync: execSync2 } = await import("child_process");
-      if (action === "deploy") {
-        execSync2("git push origin main", { stdio: "pipe", timeout: 3e4 });
-        return `Deploy triggered for ${service}. Check status in Railway dashboard.`;
-      }
+      const railwayToken = process.env.RAILWAY_TOKEN;
       if (action === "restart") {
-        return `Restart requested for ${service}. Use Railway CLI or dashboard to restart.`;
+        if (!railwayToken) {
+          return `Restart requested for ${service}. RAILWAY_TOKEN not set \u2014 use Railway dashboard: https://railway.com/project/widgetdc-orchestrator/service/${service}`;
+        }
+        try {
+          const resp = await fetch(`https://backboard.railway.app/graphql/v2`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${railwayToken}`
+            },
+            body: JSON.stringify({
+              query: `mutation RestartDeployment($serviceId: String!) {
+                deploymentRestart(serviceId: $serviceId) {
+                  id
+                  staticUrl
+                }
+              }`,
+              variables: { serviceId: service }
+            }),
+            signal: AbortSignal.timeout(15e3)
+          });
+          const data = await resp.json();
+          if (data.errors) {
+            return `Railway restart failed: ${JSON.stringify(data.errors)}. Fallback: use dashboard at https://railway.com/project/widgetdc-orchestrator/service/${service}`;
+          }
+          return `Backend restart triggered via Railway API (deployment: ${data.data?.deploymentRestart?.id}). Service will be back in ~60s.`;
+        } catch (err) {
+          return `Railway restart failed: ${err instanceof Error ? err.message : String(err)}. Fallback: use dashboard at https://railway.com/project/widgetdc-orchestrator/service/${service}`;
+        }
+      }
+      if (action === "deploy") {
+        try {
+          const { execSync: execSync2 } = await import("child_process");
+          execSync2("git push origin main", { stdio: "pipe", timeout: 3e4 });
+          return `Deploy triggered for ${service}. Railway will auto-deploy. Check status: https://railway.com/project/widgetdc-orchestrator/service/${service}`;
+        } catch {
+          return `Deploy failed: not in a git repository. Use Railway dashboard to trigger manual deploy.`;
+        }
       }
       if (action === "logs") {
+        if (railwayToken) {
+          try {
+            const resp = await fetch(`https://backboard.railway.app/graphql/v2`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${railwayToken}`
+              },
+              body: JSON.stringify({
+                query: `query GetDeploymentLogs($serviceId: String!) {
+                  deployments(serviceId: $serviceId, first: 1) {
+                    edges {
+                      node {
+                        id
+                        status
+                        createdAt
+                      }
+                    }
+                  }
+                }`,
+                variables: { serviceId: service }
+              }),
+              signal: AbortSignal.timeout(1e4)
+            });
+            const data = await resp.json();
+            if (data.data?.deployments?.edges?.[0]) {
+              const dep = data.data.deployments.edges[0].node;
+              return `Latest deploy: ${dep.id} (status: ${dep.status}, created: ${dep.createdAt})`;
+            }
+          } catch {
+          }
+        }
         return `Logs for ${service}: View at https://railway.com/project/widgetdc-orchestrator/service/${service}`;
+      }
+      if (railwayToken) {
+        try {
+          const resp = await fetch(`https://backboard.railway.app/graphql/v2`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${railwayToken}`
+            },
+            body: JSON.stringify({
+              query: `query GetServiceStatus($serviceId: String!) {
+                service(id: $serviceId) {
+                  id
+                  name
+                  slug
+                }
+              }`,
+              variables: { serviceId: service }
+            }),
+            signal: AbortSignal.timeout(1e4)
+          });
+          const data = await resp.json();
+          if (data.data?.service) {
+            return JSON.stringify({ service: data.data.service, dashboard: `https://railway.com/project/widgetdc-orchestrator/service/${service}` }, null, 2);
+          }
+        } catch {
+        }
       }
       return `${service} status: Check https://railway.com/project/widgetdc-orchestrator/service/${service}`;
     }
@@ -24164,6 +25578,52 @@ ${lines.join("\n")}`;
       } catch (err) {
         return `Agentic compliance_audit failed: ${err instanceof Error ? err.message : String(err)}`;
       }
+    }
+    // ── Flywheel + Anomaly Watcher (LIN-617) ────────────────────────────────
+    case "flywheel_metrics": {
+      const { getFlywheelMetrics: getFlywheelMetrics2 } = await Promise.resolve().then(() => (init_flywheel_coordinator(), flywheel_coordinator_exports));
+      const { getCostSummary: getCostSummary2, getAllCostProfiles: getAllCostProfiles2 } = await Promise.resolve().then(() => (init_cost_optimizer(), cost_optimizer_exports));
+      const metrics2 = await getFlywheelMetrics2();
+      return JSON.stringify({ ...metrics2, costSummary: getCostSummary2(), profiles: getAllCostProfiles2().slice(0, 50) });
+    }
+    case "flywheel_consolidation": {
+      const { runWeeklyConsolidation: runWeeklyConsolidation2 } = await Promise.resolve().then(() => (init_consolidation_engine(), consolidation_engine_exports));
+      if (args.trigger ?? false) {
+        const report = await runWeeklyConsolidation2();
+        return JSON.stringify({ triggered: true, report });
+      }
+      const { getLastReport: getLastReport3 } = await Promise.resolve().then(() => (init_consolidation_engine(), consolidation_engine_exports));
+      const last = getLastReport3();
+      return JSON.stringify({ triggered: false, available: !!last, report: last });
+    }
+    case "anomaly_status": {
+      const { getWatcherState: getWatcherState2, getActiveAnomalies: getActiveAnomalies2, getAnomalyPatterns: getAnomalyPatterns2 } = await Promise.resolve().then(() => (init_anomaly_watcher(), anomaly_watcher_exports));
+      const state4 = getWatcherState2();
+      return JSON.stringify({
+        lastScanAt: state4.lastScanAt,
+        totalScans: state4.totalScans,
+        anomaliesDetected: state4.anomaliesDetected,
+        anomaliesResolved: state4.anomaliesResolved,
+        activeCount: state4.activeAnomalies.length,
+        patternCount: state4.patterns.length
+      });
+    }
+    case "anomaly_scan": {
+      const { runAnomalyScan: runAnomalyScan2 } = await Promise.resolve().then(() => (init_anomaly_watcher(), anomaly_watcher_exports));
+      const result = await runAnomalyScan2();
+      return JSON.stringify({
+        anomalies: result.anomalies.length,
+        negative: result.anomalies.filter((a) => a.valence === "negative").length,
+        positive: result.anomalies.filter((a) => a.valence === "positive").length,
+        critical: result.anomalies.filter((a) => a.severity === "critical").length,
+        health: result.health,
+        patterns: result.patterns.length
+      });
+    }
+    case "anomaly_patterns": {
+      const { getAnomalyPatterns: getAnomalyPatterns2 } = await Promise.resolve().then(() => (init_anomaly_watcher(), anomaly_watcher_exports));
+      const patterns = getAnomalyPatterns2();
+      return JSON.stringify({ patterns, count: patterns.length });
     }
     default:
       throw new Error(`Unknown tool: ${toolName}`);
@@ -31025,7 +32485,7 @@ init_adoption_telemetry();
 import { Router as Router6 } from "express";
 import { v4 as uuid25 } from "uuid";
 var adoptionRouter = Router6();
-var REDIS_KEY3 = "orchestrator:adoption-metrics";
+var REDIS_KEY4 = "orchestrator:adoption-metrics";
 var REDIS_TRENDS_KEY = "orchestrator:adoption-trends";
 var DEFAULT_METRICS = {
   features_done: 14,
@@ -31055,7 +32515,7 @@ adoptionRouter.get("/metrics", async (_req, res) => {
   const redis2 = getRedis();
   if (redis2) {
     try {
-      const cached = await redis2.get(REDIS_KEY3);
+      const cached = await redis2.get(REDIS_KEY4);
       if (cached) {
         res.json(JSON.parse(cached));
         return;
@@ -31070,7 +32530,7 @@ adoptionRouter.get("/metrics", async (_req, res) => {
   };
   if (redis2) {
     try {
-      await redis2.set(REDIS_KEY3, JSON.stringify(metrics2));
+      await redis2.set(REDIS_KEY4, JSON.stringify(metrics2));
     } catch (err) {
       logger.warn({ err: String(err) }, "Redis write failed for adoption metrics");
     }
@@ -31083,7 +32543,7 @@ adoptionRouter.put("/metrics", async (req, res) => {
   let current = { ...DEFAULT_METRICS, generated_at: (/* @__PURE__ */ new Date()).toISOString() };
   if (redis2) {
     try {
-      const cached = await redis2.get(REDIS_KEY3);
+      const cached = await redis2.get(REDIS_KEY4);
       if (cached) current = JSON.parse(cached);
     } catch (err) {
       logger.warn({ err: String(err) }, "Redis read failed during adoption metrics update");
@@ -31101,7 +32561,7 @@ adoptionRouter.put("/metrics", async (req, res) => {
   current.generated_at = (/* @__PURE__ */ new Date()).toISOString();
   if (redis2) {
     try {
-      await redis2.set(REDIS_KEY3, JSON.stringify(current));
+      await redis2.set(REDIS_KEY4, JSON.stringify(current));
     } catch (err) {
       logger.warn({ err: String(err) }, "Redis write failed for adoption metrics update");
       res.status(500).json({ success: false, error: "Failed to persist metrics" });
@@ -31152,7 +32612,7 @@ async function captureAdoptionSnapshot() {
   let current = { ...DEFAULT_METRICS, generated_at: (/* @__PURE__ */ new Date()).toISOString() };
   if (redis2) {
     try {
-      const cached = await redis2.get(REDIS_KEY3);
+      const cached = await redis2.get(REDIS_KEY4);
       if (cached) current = JSON.parse(cached);
     } catch {
     }
@@ -31292,7 +32752,7 @@ init_sse();
 import { Router as Router7 } from "express";
 import { v4 as uuid26 } from "uuid";
 var looseEndsRouter = Router7();
-var REDIS_KEY4 = "orchestrator:loose-ends:latest";
+var REDIS_KEY5 = "orchestrator:loose-ends:latest";
 var REDIS_HISTORY = "orchestrator:loose-ends:history";
 var DETECTION_QUERIES = [
   {
@@ -31431,7 +32891,7 @@ async function runLooseEndScan() {
   const redis2 = getRedis();
   if (redis2) {
     try {
-      await redis2.set(REDIS_KEY4, JSON.stringify(scanResult), "EX", 86400);
+      await redis2.set(REDIS_KEY5, JSON.stringify(scanResult), "EX", 86400);
       await redis2.zadd(REDIS_HISTORY, Date.now(), JSON.stringify(scanResult));
       const count = await redis2.zcard(REDIS_HISTORY);
       if (count > 30) {
@@ -31494,7 +32954,7 @@ looseEndsRouter.get("/", async (_req, res) => {
     return;
   }
   try {
-    const raw = await redis2.get(REDIS_KEY4);
+    const raw = await redis2.get(REDIS_KEY5);
     if (!raw) {
       res.json({ success: true, data: null, message: "No scan has been run yet" });
       return;
@@ -31535,963 +32995,11 @@ init_graph_hygiene_cron();
 init_hierarchical_intelligence();
 init_adaptive_rag();
 init_hyperagent_autonomous();
-
-// src/swarm/anomaly-watcher.ts
-init_config();
-init_logger();
-init_redis();
-init_mcp_caller();
-init_mcp_caller();
-init_cognitive_proxy();
-init_sse();
-init_chat_broadcaster();
-init_pheromone_layer();
-var REDIS_KEY5 = "anomaly-watcher:state";
-var MAX_ACTIVE_ANOMALIES = 50;
-var MAX_PATTERNS = 100;
-var state3 = {
-  lastScanAt: null,
-  totalScans: 0,
-  anomaliesDetected: 0,
-  anomaliesResolved: 0,
-  activeAnomalies: [],
-  patterns: []
-};
-async function probeHealth() {
-  const t0 = Date.now();
-  let backendReachable = false;
-  let backendLatencyMs = 0;
-  try {
-    const res = await fetch(`${config.backendUrl}/health`, {
-      signal: AbortSignal.timeout(5e3)
-    });
-    backendReachable = res.ok;
-    backendLatencyMs = Date.now() - t0;
-  } catch {
-    backendLatencyMs = Date.now() - t0;
-  }
-  let redisReachable = false;
-  try {
-    const redis2 = getRedis();
-    if (redis2) {
-      await redis2.ping();
-      redisReachable = true;
-    }
-  } catch {
-  }
-  return {
-    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-    backendCircuit: getBackendCircuitState(),
-    rateLimitState: getRateLimitState(),
-    backendReachable,
-    backendLatencyMs,
-    rlmReachable: isRlmAvailable(),
-    redisReachable
-  };
-}
-async function detectAnomalies(health) {
-  const anomalies = [];
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  if (health.rateLimitState.current_delay_ms > 0 || health.rateLimitState.hits_in_window >= 3) {
-    anomalies.push({
-      id: `rl-storm-${Date.now()}`,
-      type: "rate_limit_storm",
-      valence: "negative",
-      severity: health.rateLimitState.current_delay_ms >= 5e3 ? "critical" : "warning",
-      source: "mcp-caller",
-      description: `Rate-limit backpressure active: ${health.rateLimitState.hits_in_window} hits in ${health.rateLimitState.window_ms}ms window, delay=${health.rateLimitState.current_delay_ms}ms`,
-      metrics: {
-        delay_ms: health.rateLimitState.current_delay_ms,
-        hits_in_window: health.rateLimitState.hits_in_window
-      },
-      detectedAt: now,
-      resolvedAt: null,
-      remediation: null,
-      learnings: []
-    });
-  }
-  if (health.backendCircuit.open) {
-    anomalies.push({
-      id: `cb-open-${Date.now()}`,
-      type: "circuit_breaker_open",
-      valence: "negative",
-      severity: "critical",
-      source: "backend",
-      description: `Backend circuit breaker OPEN: ${health.backendCircuit.failures} consecutive failures, cooldown=${health.backendCircuit.cooldown_remaining_ms}ms`,
-      metrics: {
-        failures: health.backendCircuit.failures,
-        cooldown_remaining_ms: health.backendCircuit.cooldown_remaining_ms
-      },
-      detectedAt: now,
-      resolvedAt: null,
-      remediation: null,
-      learnings: []
-    });
-  }
-  if (!health.backendReachable) {
-    anomalies.push({
-      id: `backend-down-${Date.now()}`,
-      type: "timeout_cascade",
-      valence: "negative",
-      severity: "critical",
-      source: "backend",
-      description: `Backend unreachable (latency: ${health.backendLatencyMs}ms)`,
-      metrics: { latency_ms: health.backendLatencyMs },
-      detectedAt: now,
-      resolvedAt: null,
-      remediation: null,
-      learnings: []
-    });
-  } else if (health.backendLatencyMs > 5e3) {
-    anomalies.push({
-      id: `backend-slow-${Date.now()}`,
-      type: "timeout_cascade",
-      valence: "negative",
-      severity: "warning",
-      source: "backend",
-      description: `Backend high latency: ${health.backendLatencyMs}ms (threshold: 5000ms)`,
-      metrics: { latency_ms: health.backendLatencyMs },
-      detectedAt: now,
-      resolvedAt: null,
-      remediation: null,
-      learnings: []
-    });
-  }
-  if (!health.rlmReachable) {
-    anomalies.push({
-      id: `rlm-down-${Date.now()}`,
-      type: "stagnation",
-      valence: "negative",
-      severity: "warning",
-      source: "rlm-engine",
-      description: "RLM Engine unavailable \u2014 cognitive pipelines (reason, analyze, fold) will fail",
-      metrics: {},
-      detectedAt: now,
-      resolvedAt: null,
-      remediation: null,
-      learnings: []
-    });
-  }
-  if (!health.redisReachable) {
-    anomalies.push({
-      id: `redis-down-${Date.now()}`,
-      type: "stagnation",
-      valence: "negative",
-      severity: "critical",
-      source: "redis",
-      description: "Redis unreachable \u2014 edge scores, totalCycles, agent state at risk of loss on restart",
-      metrics: {},
-      detectedAt: now,
-      resolvedAt: null,
-      remediation: null,
-      learnings: []
-    });
-  }
-  if (health.backendReachable && health.backendLatencyMs < 50 && health.backendLatencyMs > 0) {
-    anomalies.push({
-      id: `perf-spike-${Date.now()}`,
-      type: "performance_spike",
-      valence: "positive",
-      severity: "info",
-      source: "backend",
-      description: `Backend responding exceptionally fast: ${health.backendLatencyMs}ms (normal 100-500ms)`,
-      metrics: { latency_ms: health.backendLatencyMs },
-      detectedAt: now,
-      resolvedAt: null,
-      remediation: null,
-      learnings: []
-    });
-  }
-  if (health.rateLimitState.current_delay_ms === 0 && health.rateLimitState.hits_in_window === 0) {
-    const stormPattern = state3.patterns.find((p) => p.type === "rate_limit_storm");
-    if (stormPattern && stormPattern.count > 0) {
-      const lastStorm = new Date(stormPattern.lastSeen).getTime();
-      const timeSinceStorm = Date.now() - lastStorm;
-      if (timeSinceStorm < 36e5 && timeSinceStorm > 6e4) {
-        anomalies.push({
-          id: `recovery-${Date.now()}`,
-          type: "unexpected_success",
-          valence: "positive",
-          severity: "info",
-          source: "mcp-caller",
-          description: `Rate-limit storm self-resolved in ${Math.round(timeSinceStorm / 1e3)}s \u2014 backpressure system effective`,
-          metrics: { recovery_ms: timeSinceStorm, prior_storms: stormPattern.count },
-          detectedAt: now,
-          resolvedAt: null,
-          remediation: null,
-          learnings: []
-        });
-      }
-    }
-  }
-  try {
-    const hyperStatus = await callMcpTool({
-      toolName: "hyperagent_auto_status",
-      args: {},
-      callId: `anomaly-hyper-${Date.now()}`
-    });
-    if (hyperStatus && typeof hyperStatus === "object") {
-      const edges = hyperStatus.edge_scores;
-      if (edges) {
-        for (const [edgeName, score] of Object.entries(edges)) {
-          if (typeof score === "number" && score >= 0.85) {
-            anomalies.push({
-              id: `edge-break-${edgeName}-${Date.now()}`,
-              type: "edge_breakthrough",
-              valence: "positive",
-              severity: "info",
-              source: "hyperagent",
-              description: `Sovereign Edge "${edgeName}" reached breakthrough score: ${(score * 100).toFixed(1)}%`,
-              metrics: { edge: 0, score },
-              detectedAt: now,
-              resolvedAt: null,
-              remediation: null,
-              learnings: []
-            });
-          }
-        }
-      }
-      const totalCycles3 = hyperStatus.totalCycles;
-      const phase = hyperStatus.phase;
-      if (typeof totalCycles3 === "number" && typeof phase === "number" && phase >= 2 && totalCycles3 > 10) {
-        const cyclesPerPhase = totalCycles3 / (phase + 1);
-        if (cyclesPerPhase < 5) {
-          anomalies.push({
-            id: `pattern-emerge-${Date.now()}`,
-            type: "pattern_emergence",
-            valence: "positive",
-            severity: "info",
-            source: "hyperagent",
-            description: `Fast phase progression: ${totalCycles3} cycles across ${phase + 1} phases (${cyclesPerPhase.toFixed(1)} cycles/phase) \u2014 platform learning accelerating`,
-            metrics: { totalCycles: totalCycles3, phase, cyclesPerPhase },
-            detectedAt: now,
-            resolvedAt: null,
-            remediation: null,
-            learnings: []
-          });
-        }
-      }
-    }
-  } catch {
-  }
-  try {
-    const inventorBest = await callMcpTool({
-      toolName: "run_evolution",
-      args: { action: "status" },
-      callId: `anomaly-inventor-${Date.now()}`
-    });
-    if (inventorBest && typeof inventorBest === "object") {
-      const bestScore2 = inventorBest.best_score;
-      if (typeof bestScore2 === "number" && bestScore2 > 0.9) {
-        anomalies.push({
-          id: `inventor-high-${Date.now()}`,
-          type: "unexpected_success",
-          valence: "positive",
-          severity: "info",
-          source: "inventor",
-          description: `Inventor evolution reached high-quality trial: score ${(bestScore2 * 100).toFixed(1)}% \u2014 candidate for production adoption`,
-          metrics: { best_score: bestScore2 },
-          detectedAt: now,
-          resolvedAt: null,
-          remediation: null,
-          learnings: []
-        });
-      }
-    }
-  } catch {
-  }
-  return anomalies;
-}
-async function learnFromAnomalies(anomalies) {
-  if (anomalies.length === 0) return;
-  for (const a of anomalies) {
-    let pattern = state3.patterns.find((p) => p.type === a.type);
-    if (!pattern) {
-      pattern = { type: a.type, count: 0, lastSeen: a.detectedAt, avgDurationMs: 0, knownFix: null };
-      state3.patterns.push(pattern);
-    }
-    pattern.count++;
-    pattern.lastSeen = a.detectedAt;
-  }
-  if (state3.patterns.length > MAX_PATTERNS) {
-    state3.patterns.sort((a, b) => b.count - a.count);
-    state3.patterns = state3.patterns.slice(0, MAX_PATTERNS);
-  }
-  for (const a of anomalies) {
-    onAnomaly(a.type, a.valence, a.source, a.severity).catch(() => {
-    });
-  }
-  for (const a of anomalies) {
-    try {
-      await callMcpTool({
-        toolName: "memory_store",
-        args: {
-          agent_id: "anomaly-watcher",
-          key: `anomaly:${a.valence}:${a.type}:${a.id}`,
-          value: JSON.stringify({
-            type: a.type,
-            valence: a.valence,
-            severity: a.severity,
-            source: a.source,
-            description: a.description,
-            metrics: a.metrics
-          }),
-          metadata: { severity: a.severity, source: a.source, type: a.type, valence: a.valence }
-        },
-        callId: `anomaly-mem-${a.id}`
-      });
-    } catch {
-    }
-  }
-  const negatives = anomalies.filter((a) => a.valence === "negative");
-  if (negatives.length > 0) {
-    try {
-      await callMcpTool({
-        toolName: "failure_harvest",
-        args: {
-          failures: negatives.map((a) => ({
-            category: a.type,
-            pattern: a.description,
-            context: a.metrics,
-            severity: a.severity
-          }))
-        },
-        callId: `anomaly-harvest-${Date.now()}`
-      });
-    } catch {
-    }
-  }
-  try {
-    const items = anomalies.map((a) => ({
-      title: a.valence === "positive" ? `[OPPORTUNITY] ${a.type}: ${a.source}` : `[${a.severity.toUpperCase()}] ${a.type}: ${a.source}`,
-      description: a.description,
-      priority: a.valence === "positive" ? "P2" : a.severity === "critical" ? "P0" : "P1",
-      category: a.valence === "positive" ? "platform-opportunity" : "platform-health"
-    }));
-    await callMcpTool({
-      toolName: "loose_ends_scan",
-      args: { source: "anomaly-watcher", items },
-      callId: `anomaly-loose-${Date.now()}`
-    });
-  } catch {
-  }
-}
-async function reasonAboutAnomalies(anomalies) {
-  if (anomalies.length === 0 || !isRlmAvailable()) return "";
-  const negatives = anomalies.filter((a) => a.valence === "negative");
-  const positives = anomalies.filter((a) => a.valence === "positive");
-  const criticals = negatives.filter((a) => a.severity === "critical");
-  if (criticals.length === 0 && positives.length === 0) return "";
-  try {
-    let priorInsights = "";
-    try {
-      const allTypes = anomalies.map((a) => a.type);
-      const memResult = await callMcpTool({
-        toolName: "memory_retrieve",
-        args: {
-          agent_id: "anomaly-watcher",
-          query: `anomaly resolution amplification ${allTypes.join(" ")}`,
-          top_k: 5
-        },
-        callId: `anomaly-reason-mem-${Date.now()}`
-      });
-      const memories = Array.isArray(memResult.memories) ? memResult.memories : [];
-      priorInsights = memories.map((m) => String(m.value || "")).join("\n");
-    } catch {
-    }
-    const negativesSection = criticals.length > 0 ? `
-CRITICAL ANOMALIES (negative \u2014 needs remediation):
-${criticals.map((a) => `- [${a.severity}] ${a.type} from ${a.source}: ${a.description}
-  Metrics: ${JSON.stringify(a.metrics)}`).join("\n")}` : "";
-    const positivesSection = positives.length > 0 ? `
-POSITIVE ANOMALIES (unexpected successes \u2014 worth amplifying):
-${positives.map((a) => `- [${a.type}] from ${a.source}: ${a.description}
-  Metrics: ${JSON.stringify(a.metrics)}`).join("\n")}` : "";
-    const result = await callCognitiveRaw("reason", {
-      prompt: `You are the Anomaly Intelligence Agent for the WidgeTDC platform.
-You analyze BOTH negative anomalies (to fix) AND positive anomalies (to amplify and learn from).
-${negativesSection}${positivesSection}
-
-HISTORICAL PATTERNS:
-${state3.patterns.filter((p) => p.count > 1).map((p) => `- ${p.type}: occurred ${p.count} times, last seen ${p.lastSeen}${p.knownFix ? `, fix: ${p.knownFix}` : ""}`).join("\n") || "(no prior patterns)"}
-
-PRIOR LEARNINGS:
-${priorInsights || "(no prior insights)"}
-
-Provide:
-${criticals.length > 0 ? `1. ROOT CAUSE ANALYSIS for negative anomalies (most likely cause)
-2. IMMEDIATE REMEDIATION steps the orchestrator can take autonomously
-3. PREVENTIVE MEASURES to add to the platform` : ""}
-${positives.length > 0 ? `${criticals.length > 0 ? "4" : "1"}. AMPLIFICATION STRATEGY for positive anomalies \u2014 what's working well and how to reinforce it
-${criticals.length > 0 ? "5" : "2"}. DEVELOPMENT IDEAS inspired by the positive patterns \u2014 new capabilities or optimizations to explore
-${criticals.length > 0 ? "6" : "3"}. PATTERN CONNECTIONS \u2014 how positive signals relate to recent changes or experiments` : ""}
-${criticals.length > 0 || positives.length > 0 ? `
-FINAL: One-liner insight to remember for next time` : ""}`,
-      agent_id: "anomaly-watcher",
-      depth: 2
-    }, 2e4);
-    const analysis = String(result.answer || result.result || "");
-    if (analysis.length > 50) {
-      const primaryType = criticals.length > 0 ? criticals[0].type : positives[0]?.type ?? "mixed";
-      const memKey = positives.length > 0 && criticals.length === 0 ? `amplification:${primaryType}:${Date.now()}` : `remediation:${primaryType}:${Date.now()}`;
-      try {
-        await callMcpTool({
-          toolName: "memory_store",
-          args: {
-            agent_id: "anomaly-watcher",
-            key: memKey,
-            value: analysis.slice(0, 2e3),
-            metadata: {
-              types: anomalies.map((a) => a.type),
-              valences: [...new Set(anomalies.map((a) => a.valence))],
-              scan: state3.totalScans
-            }
-          },
-          callId: `anomaly-rem-store-${Date.now()}`
-        });
-      } catch {
-      }
-    }
-    return analysis;
-  } catch (err) {
-    logger.warn({ error: String(err) }, "Anomaly-watcher: RLM reasoning failed");
-    return "";
-  }
-}
-async function runAnomalyScan() {
-  const t0 = Date.now();
-  state3.totalScans++;
-  state3.lastScanAt = (/* @__PURE__ */ new Date()).toISOString();
-  broadcastSSE("anomaly-watcher", { event: "scan_start", scan: state3.totalScans });
-  const health = await probeHealth();
-  const anomalies = await detectAnomalies(health);
-  const activeTypes = new Set(anomalies.map((a) => a.type));
-  state3.activeAnomalies = state3.activeAnomalies.filter((a) => {
-    if (!activeTypes.has(a.type) && !a.resolvedAt) {
-      a.resolvedAt = (/* @__PURE__ */ new Date()).toISOString();
-      state3.anomaliesResolved++;
-      logger.info({ type: a.type, source: a.source }, "Anomaly resolved");
-      return false;
-    }
-    return true;
-  });
-  if (anomalies.length > 0) {
-    state3.anomaliesDetected += anomalies.length;
-    for (const a of anomalies) {
-      if (!state3.activeAnomalies.find((x) => x.type === a.type)) {
-        state3.activeAnomalies.push(a);
-      }
-    }
-    if (state3.activeAnomalies.length > MAX_ACTIVE_ANOMALIES) {
-      state3.activeAnomalies = state3.activeAnomalies.slice(-MAX_ACTIVE_ANOMALIES);
-    }
-    await learnFromAnomalies(anomalies);
-    const analysis = await reasonAboutAnomalies(anomalies);
-    const critCount = anomalies.filter((a) => a.severity === "critical").length;
-    const positiveCount = anomalies.filter((a) => a.valence === "positive").length;
-    if (critCount > 0) {
-      broadcastMessage({
-        from: "AnomalyWatcher",
-        to: "All",
-        source: "orchestrator",
-        type: "Alert",
-        message: `${critCount} critical anomal${critCount === 1 ? "y" : "ies"} detected: ${anomalies.filter((a) => a.severity === "critical").map((a) => `${a.type}(${a.source})`).join(", ")}`
-      });
-    }
-    if (positiveCount > 0) {
-      broadcastMessage({
-        from: "AnomalyWatcher",
-        to: "All",
-        source: "orchestrator",
-        type: "Message",
-        message: `${positiveCount} positive signal${positiveCount === 1 ? "" : "s"}: ${anomalies.filter((a) => a.valence === "positive").map((a) => `${a.type}(${a.source})`).join(", ")}`
-      });
-    }
-    broadcastSSE("anomaly-watcher", {
-      event: "scan_complete",
-      scan: state3.totalScans,
-      anomalies: anomalies.length,
-      critical: critCount,
-      positive: positiveCount,
-      duration_ms: Date.now() - t0
-    });
-    logger.info({
-      scan: state3.totalScans,
-      anomalies: anomalies.length,
-      critical: critCount,
-      duration_ms: Date.now() - t0
-    }, "Anomaly scan complete");
-    await persistState2();
-    return { anomalies, health, analysis, patterns: state3.patterns };
-  }
-  broadcastSSE("anomaly-watcher", {
-    event: "scan_complete",
-    scan: state3.totalScans,
-    anomalies: 0,
-    critical: 0,
-    duration_ms: Date.now() - t0
-  });
-  await persistState2();
-  return { anomalies: [], health, analysis: "", patterns: state3.patterns };
-}
-async function persistState2() {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  try {
-    await redis2.set(REDIS_KEY5, JSON.stringify({ ...state3, _schemaVersion: 1 }), "EX", 86400);
-  } catch {
-  }
-}
-async function loadState3() {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  try {
-    const raw = await redis2.get(REDIS_KEY5);
-    if (raw) {
-      const loaded = JSON.parse(raw);
-      if (loaded._schemaVersion !== 1) {
-        logger.warn("Anomaly-watcher: schema version mismatch, using defaults");
-        return;
-      }
-      state3 = { ...state3, ...loaded };
-      logger.info(
-        { totalScans: state3.totalScans, patterns: state3.patterns.length },
-        "Anomaly-watcher: restored state from Redis"
-      );
-    }
-  } catch {
-  }
-}
-function getWatcherState() {
-  return { ...state3 };
-}
-function getActiveAnomalies() {
-  return [...state3.activeAnomalies];
-}
-function getAnomalyPatterns() {
-  return [...state3.patterns];
-}
-var KNOWN_FAILURE_PATTERNS = [
-  {
-    type: "validation_error",
-    count: 52,
-    lastSeen: "2026-04-09T21:50:00.000Z",
-    avgDurationMs: 1200,
-    knownFix: "Validate payloads before MCP dispatch \u2014 orchestrator sends badly formatted payloads to backend"
-  },
-  {
-    type: "timeout_cascade",
-    count: 24,
-    lastSeen: "2026-04-09T21:48:00.000Z",
-    avgDurationMs: 15e3,
-    knownFix: "Add retry with exponential backoff for Neo4j, increase RLM timeout, circuit breaker for external APIs"
-  },
-  {
-    type: "unknown_error",
-    count: 28,
-    lastSeen: "2026-04-09T21:49:00.000Z",
-    avgDurationMs: 800,
-    knownFix: "Add structured error logging in backend MCP router to capture full error context"
-  },
-  {
-    type: "502_backend",
-    count: 4,
-    lastSeen: "2026-04-09T21:30:00.000Z",
-    avgDurationMs: 12e3,
-    knownFix: "Railway cold-start ~12s \u2014 add health check retry before marking as failure"
-  },
-  {
-    type: "tool_offline",
-    count: 1,
-    lastSeen: "2026-04-09T21:50:42.000Z",
-    avgDurationMs: 0,
-    knownFix: 'slack.channel.post OFFLINE after 23 failures \u2014 "No Slack credentials configured". Set SLACK_BOT_TOKEN + SLACK_CHANNEL_ID'
-  },
-  {
-    type: "chain_failure_spike",
-    count: 19,
-    lastSeen: "2026-04-09T20:00:00.000Z",
-    avgDurationMs: 3500,
-    knownFix: "Kill chains with 0% success rate. Circuit breaker auto-disables after 3 consecutive failures."
-  },
-  {
-    type: "peer_eval_crash",
-    count: 2,
-    lastSeen: "2026-04-09T21:00:00.000Z",
-    avgDurationMs: 500,
-    knownFix: "Null guard on quality_score \u2014 hookIntoExecution was passed string instead of context object"
-  },
-  {
-    type: "circuit_breaker_open",
-    count: 5,
-    lastSeen: "2026-04-09T20:00:00.000Z",
-    avgDurationMs: 6e4,
-    knownFix: "Tool auto-recovers after 60s of no failures, or restart service"
-  },
-  {
-    type: "stagnation",
-    count: 3,
-    lastSeen: "2026-04-09T19:00:00.000Z",
-    avgDurationMs: 0,
-    knownFix: "Verify RLM_URL and Redis connection env vars"
-  }
-];
-async function initAnomalyWatcher() {
-  await loadState3();
-  if (state3.patterns.length === 0) {
-    state3.patterns = [...KNOWN_FAILURE_PATTERNS];
-    await persistState2();
-    logger.info(
-      { seeded: state3.patterns.length },
-      "Anomaly-watcher: seeded known failure patterns from production history"
-    );
-  }
-  logger.info(
-    { totalScans: state3.totalScans, patterns: state3.patterns.length },
-    "Anomaly-watcher initialized"
-  );
-}
-
-// src/cron-scheduler.ts
+init_anomaly_watcher();
 init_pheromone_layer();
 init_peer_eval();
-
-// src/flywheel/flywheel-coordinator.ts
-init_logger();
-init_redis();
-init_cost_optimizer();
-init_peer_eval();
-init_adoption_telemetry();
-var FLYWHEEL_REDIS_KEY = "flywheel:last-report";
-var lastReport = null;
-async function loadLastReport() {
-  const redis2 = getRedis();
-  if (!redis2 || lastReport) return;
-  try {
-    const raw = await redis2.get(FLYWHEEL_REDIS_KEY);
-    if (raw) lastReport = JSON.parse(raw);
-  } catch {
-  }
-}
-async function saveLastReport(report) {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  try {
-    await redis2.set(FLYWHEEL_REDIS_KEY, JSON.stringify(report), "EX", 691200);
-  } catch {
-  }
-}
-async function runWeeklySync() {
-  logger.info("[Flywheel] Starting weekly sync");
-  await loadLastReport();
-  const pillars = await Promise.all([
-    scoreCostEfficiency(),
-    scoreFleetIntelligence(),
-    scoreAdoption(),
-    scorePheromone(),
-    scorePlatformHealth()
-  ]);
-  const compound = Math.pow(
-    pillars.reduce((product, p) => product * Math.max(0.01, p.score), 1),
-    1 / pillars.length
-  );
-  const nearZeroCount = pillars.filter((p) => p.score < 0.1).length;
-  const finalCompound = nearZeroCount >= 2 ? compound * 0.5 : compound;
-  const optimizations = identifyOptimizations(pillars);
-  const delta = lastReport ? compound - lastReport.compoundScore : 0;
-  const report = {
-    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    compoundScore: parseFloat(finalCompound.toFixed(4)),
-    pillars,
-    nextOptimizations: optimizations.slice(0, 5),
-    weeklyDelta: parseFloat(delta.toFixed(4))
-  };
-  lastReport = report;
-  await saveLastReport(report);
-  logger.info({ compound: report.compoundScore, delta: report.weeklyDelta }, "[Flywheel] Weekly sync complete");
-  return report;
-}
-async function getFlywheelMetrics() {
-  if (!lastReport) {
-    try {
-      const report = await runWeeklySync();
-      return { available: true, report, pillars: report.pillars };
-    } catch {
-      return { available: false, report: null };
-    }
-  }
-  return { available: true, report: lastReport, pillars: lastReport.pillars };
-}
-function fallbackPillar(name) {
-  return { name, score: 0, trend: "flat", headline: "Data unavailable", details: [] };
-}
-async function scoreCostEfficiency() {
-  try {
-    const summary = getCostSummary();
-    const profiles2 = getAllCostProfiles();
-    const degradedPct = summary.totalProfiles > 0 ? summary.degradedAgents.length / summary.totalProfiles : 0;
-    const avgQuality = profiles2.length > 0 ? profiles2.reduce((s, p) => s + p.avgQualityScore, 0) / profiles2.length : 0.5;
-    const score = Math.max(0, Math.min(
-      1,
-      avgQuality * 0.5 + (1 - degradedPct) * 0.3 + (summary.avgPlatformCostPerTask < 0.05 ? 0.2 : summary.avgPlatformCostPerTask < 0.1 ? 0.1 : 0)
-    ));
-    return {
-      name: "Cost Efficiency",
-      score: parseFloat(score.toFixed(3)),
-      trend: "flat",
-      headline: `${summary.totalProfiles} agent\xD7task profiles \xB7 avg quality ${(avgQuality * 100).toFixed(0)}%`,
-      details: [
-        `${summary.degradedAgents.length} degraded agents`,
-        `${summary.taskTypesCovered} task types covered`,
-        `Avg cost/task: $${summary.avgPlatformCostPerTask.toFixed(4)}`,
-        ...summary.topEfficient.slice(0, 2).map((p) => `Top: ${p.agentId}/${p.taskType} efficiency=${p.efficiencyRatio.toFixed(2)}`)
-      ]
-    };
-  } catch (err) {
-    logger.warn({ err }, "[Flywheel] scoreCostEfficiency failed");
-    return fallbackPillar("Cost Efficiency");
-  }
-}
-async function scoreFleetIntelligence() {
-  try {
-    const learnings = getAllFleetLearnings();
-    const state4 = getPeerEvalState();
-    const reliableLearnings = learnings.filter((l) => l.totalEvals >= 5 && l.avgScore >= 0.6);
-    const avgScore = learnings.length > 0 ? learnings.reduce((s, l) => s + l.avgScore, 0) / learnings.length : 0.5;
-    const bpCount = learnings.reduce((s, l) => s + (l.bestPractices?.length ?? 0), 0);
-    const score = Math.min(
-      1,
-      (state4.totalEvals > 0 ? Math.min(0.4, state4.totalEvals / 1e3) : 0) + avgScore * 0.4 + (bpCount > 0 ? Math.min(0.2, bpCount / 50) : 0)
-    );
-    return {
-      name: "Fleet Intelligence",
-      score: parseFloat(score.toFixed(3)),
-      trend: state4.totalEvals > 100 ? "up" : "flat",
-      headline: `${state4.totalEvals} evals \xB7 ${learnings.length} task types \xB7 ${bpCount} best practices`,
-      details: [
-        `${reliableLearnings.length} reliable routes (\u22655 evals, \u22650.6 quality)`,
-        `Avg fleet quality: ${(avgScore * 100).toFixed(0)}%`,
-        `Task types tracked: ${state4.taskTypesTracked}`
-      ]
-    };
-  } catch (err) {
-    logger.warn({ err }, "[Flywheel] scoreFleetIntelligence failed");
-    return fallbackPillar("Fleet Intelligence");
-  }
-}
-async function scoreAdoption() {
-  try {
-    const telemetry = await computeTelemetry();
-    const totalCalls = telemetry.tools.reduce((s, t) => s + t.lifetime_calls, 0);
-    const uniqueTools = telemetry.tools_called_this_week;
-    const advancedPct = (telemetry.kpis.advanced_utilisation_pct ?? 0) / 100;
-    const score = Math.min(
-      1,
-      (uniqueTools > 0 ? Math.min(0.4, uniqueTools / 20) : 0) + advancedPct * 0.3 + (totalCalls > 100 ? 0.3 : totalCalls / 100 * 0.3)
-    );
-    return {
-      name: "Adoption",
-      score: parseFloat(score.toFixed(3)),
-      trend: totalCalls > 0 ? "up" : "flat",
-      headline: `${totalCalls} calls \xB7 ${uniqueTools} tools active this week \xB7 ${(advancedPct * 100).toFixed(0)}% advanced`,
-      details: [
-        `Total lifetime calls: ${totalCalls}`,
-        `Tools active this week: ${uniqueTools} / ${telemetry.total_tools}`,
-        `Advanced tool usage: ${(advancedPct * 100).toFixed(0)}%`,
-        `Utilisation rate: ${telemetry.kpis.utilisation_rate_pct.toFixed(0)}%`
-      ]
-    };
-  } catch (err) {
-    logger.warn({ err }, "[Flywheel] scoreAdoption failed");
-    return fallbackPillar("Adoption");
-  }
-}
-async function scorePheromone() {
-  try {
-    const { getPheromoneState: getPheromoneState2 } = await Promise.resolve().then(() => (init_pheromone_layer(), pheromone_layer_exports));
-    const stats = getPheromoneState2();
-    const active = stats?.activePheromones ?? 0;
-    const deposits = stats?.totalDeposits ?? 0;
-    const amplifications = stats?.totalAmplifications ?? 0;
-    const score = Math.min(
-      1,
-      (active > 0 ? Math.min(0.4, active / 200) : 0) + (deposits > 0 ? Math.min(0.3, deposits / 1e3) : 0) + (amplifications > 0 ? Math.min(0.3, amplifications / 200) : 0)
-    );
-    return {
-      name: "Pheromone Signal",
-      score: parseFloat(score.toFixed(3)),
-      trend: active > 50 ? "up" : "flat",
-      headline: `${active} active \xB7 ${deposits} deposits \xB7 ${amplifications} amplifications`,
-      details: [
-        `Active pheromones: ${active}`,
-        `Total deposits: ${deposits}`,
-        `Cross-pillar amplifications: ${amplifications}`,
-        `Decay cycles: ${stats?.totalDecays ?? 0}`
-      ]
-    };
-  } catch (err) {
-    logger.warn({ err }, "[Flywheel] scorePheromone failed");
-    return fallbackPillar("Pheromone Signal");
-  }
-}
-async function scorePlatformHealth() {
-  try {
-    const { getCircuitBreakerStats } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
-    const cb = getCircuitBreakerStats?.() ?? null;
-    const circuitOpen = cb?.open === true;
-    const failures = cb?.failures ?? 0;
-    const redis2 = getRedis();
-    let chainSuccessRate = 0.5;
-    let totalChains = 0;
-    let failedChains = 0;
-    let completedCount = 0;
-    if (redis2) {
-      try {
-        const keys = await redis2.keys("orchestrator:chain:*");
-        totalChains = keys.length;
-        for (const key of keys.slice(0, 100)) {
-          const raw = await redis2.get(key);
-          if (raw) {
-            try {
-              const data = JSON.parse(raw);
-              if (data.status === "completed") completedCount++;
-              if (data.status === "failed") failedChains++;
-            } catch {
-            }
-          }
-        }
-        if (totalChains > 0) {
-          chainSuccessRate = completedCount / Math.min(totalChains, 100);
-        }
-      } catch {
-      }
-    }
-    const circuitScore = circuitOpen ? 0 : Math.max(0, 1 - failures * 0.05);
-    const score = 0.6 * chainSuccessRate + 0.4 * circuitScore;
-    const isLying = chainSuccessRate < 0.3 && circuitScore > 0.8;
-    const headline = isLying ? `\u26A0 ${failedChains} of ${totalChains} chains failed \u2014 circuit breaker silent` : circuitOpen ? `\u26A0 Circuit breaker OPEN` : `${Math.round(chainSuccessRate * 100)}% chain success rate`;
-    return {
-      name: "Platform Health",
-      score: parseFloat(Math.min(1, score).toFixed(3)),
-      trend: chainSuccessRate < 0.3 ? "down" : circuitOpen ? "down" : failures > 0 ? "flat" : "up",
-      headline,
-      details: [
-        `Chain success rate: ${Math.round(chainSuccessRate * 100)}% (${completedCount}/${Math.min(totalChains, 100)})`,
-        `Circuit breaker: ${circuitOpen ? "OPEN" : "closed"}`,
-        `Backend failures: ${failures}`,
-        `Failed chains: ${failedChains}`
-      ]
-    };
-  } catch (err) {
-    logger.warn({ err }, "[Flywheel] scorePlatformHealth failed");
-    return fallbackPillar("Platform Health");
-  }
-}
-
-// src/llm/consolidation-engine.ts
-init_logger();
-init_cost_optimizer();
-init_peer_eval();
-init_adoption_telemetry();
-var lastReport2 = null;
-async function runWeeklyConsolidation() {
-  logger.info("[Consolidation] Starting weekly scan");
-  const candidates = [];
-  await scanDegradedAgents(candidates);
-  await scanDominantRoutes(candidates);
-  await scanStaleTools(candidates);
-  const report = {
-    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    candidates,
-    autoExecuted: 0,
-    manualReview: candidates.length,
-    summary: `${candidates.length} consolidation candidates found \u2014 all require human review`
-  };
-  lastReport2 = report;
-  logger.info({ candidates: candidates.length }, "[Consolidation] Weekly scan complete");
-  return report;
-}
-function getLastReport() {
-  return lastReport2;
-}
-async function scanDegradedAgents(candidates) {
-  try {
-    const profiles2 = getAllCostProfiles();
-    const degraded = profiles2.filter((p) => p.degraded && p.totalTasks >= 10);
-    for (const p of degraded) {
-      const recent = p.recentScores.slice(-5);
-      const recentAvg = recent.reduce((s, v) => s + v, 0) / Math.max(1, recent.length);
-      candidates.push({
-        id: `degraded:${p.agentId}:${p.taskType}`,
-        category: "degraded-agent",
-        agentId: p.agentId,
-        taskType: p.taskType,
-        reason: `Agent "${p.agentId}" has quality degradation on task type "${p.taskType}"`,
-        evidence: [
-          `Last ${recent.length} scores avg: ${(recentAvg * 100).toFixed(0)}% (below 40%)`,
-          `Total tasks evaluated: ${p.totalTasks}`,
-          `Efficiency ratio: ${p.efficiencyRatio.toFixed(3)}`
-        ],
-        riskLevel: recentAvg < 0.2 ? "high" : "medium",
-        suggestedAction: `Investigate agent config for "${p.agentId}" on "${p.taskType}" tasks. Consider routing to a different agent temporarily.`
-      });
-    }
-  } catch (err) {
-    logger.warn({ err }, "[Consolidation] scanDegradedAgents failed");
-  }
-}
-async function scanDominantRoutes(candidates) {
-  try {
-    const learnings = getAllFleetLearnings();
-    for (const l of learnings) {
-      if (l.totalEvals >= 20 && l.bestScore >= 0.85 && l.bestAgent) {
-        const profiles2 = getAllCostProfiles().filter((p) => p.taskType === l.taskType);
-        const nonBest = profiles2.filter((p) => p.agentId !== l.bestAgent);
-        for (const p of nonBest) {
-          if (p.totalTasks >= 5 && p.avgQualityScore < l.bestScore - 0.2) {
-            candidates.push({
-              id: `dominant:${l.taskType}:${p.agentId}`,
-              category: "dominant-route",
-              agentId: p.agentId,
-              taskType: l.taskType,
-              reason: `"${l.bestAgent}" dominates "${l.taskType}" task type \u2014 "${p.agentId}" is underperforming`,
-              evidence: [
-                `Best agent: ${l.bestAgent} score=${l.bestScore.toFixed(2)}`,
-                `This agent: ${p.agentId} score=${p.avgQualityScore.toFixed(2)} (\u0394=${(l.bestScore - p.avgQualityScore).toFixed(2)})`,
-                `Fleet evals: ${l.totalEvals}`
-              ],
-              riskLevel: "low",
-              suggestedAction: `Consider updating chain routing for "${l.taskType}" to default to "${l.bestAgent}".`
-            });
-          }
-        }
-      }
-    }
-  } catch (err) {
-    logger.warn({ err }, "[Consolidation] scanDominantRoutes failed");
-  }
-}
-async function scanStaleTools(candidates) {
-  try {
-    const summary = await computeTelemetry();
-    const stale = summary.stale_tools ?? [];
-    for (const toolName2 of stale.slice(0, 10)) {
-      candidates.push({
-        id: `stale:${toolName2}`,
-        category: "stale-tool",
-        toolName: toolName2,
-        reason: `Tool "${toolName2}" has not been called in 30+ days`,
-        evidence: ["0 calls in last 30-day window", "Detected by adoption-telemetry stale scan"],
-        riskLevel: "low",
-        suggestedAction: `Verify if "${toolName2}" is still needed. If unused for 60+ days, consider removing from tool registry.`
-      });
-    }
-  } catch (err) {
-    logger.warn({ err }, "[Consolidation] scanStaleTools failed");
-  }
-}
-
-// src/cron-scheduler.ts
+init_flywheel_coordinator();
+init_consolidation_engine();
 var jobs = /* @__PURE__ */ new Map();
 var cronTasks = /* @__PURE__ */ new Map();
 var REDIS_CRON_KEY = "orchestrator:cron-jobs";
@@ -41783,8 +42291,9 @@ inventorRouter.get("/export/:name", async (req, res) => {
 });
 
 // src/routes/anomaly-watcher.ts
-import { Router as Router46 } from "express";
+init_anomaly_watcher();
 init_logger();
+import { Router as Router46 } from "express";
 var anomalyWatcherRouter = Router46();
 anomalyWatcherRouter.get("/status", (_req, res) => {
   const state4 = getWatcherState();
@@ -41873,6 +42382,9 @@ anomalyWatcherRouter.post("/scan", async (_req, res) => {
     });
   }
 });
+
+// src/index.ts
+init_anomaly_watcher();
 
 // src/routes/pheromone.ts
 init_pheromone_layer();
@@ -42026,9 +42538,11 @@ peerEvalRouter.post("/analyze", async (_req, res) => {
 });
 
 // src/routes/flywheel.ts
-import { Router as Router49 } from "express";
+init_flywheel_coordinator();
+init_consolidation_engine();
 init_cost_optimizer();
 init_logger();
+import { Router as Router49 } from "express";
 var flywheelRouter = Router49();
 flywheelRouter.get("/metrics", async (_req, res) => {
   try {
@@ -42049,7 +42563,7 @@ flywheelRouter.post("/metrics", async (_req, res) => {
   }
 });
 flywheelRouter.get("/consolidation", (_req, res) => {
-  const report = getLastReport();
+  const report = getLastReport2();
   if (!report) {
     return res.json({ success: true, available: false, report: null });
   }
@@ -42929,7 +43443,11 @@ function phantomId(sourceRepo, name, type) {
   return `phantom-${hash}`;
 }
 function runRepomix(repoUrl) {
-  const remoteArg = repoUrl.startsWith("http") ? repoUrl : repoUrl;
+  let remoteArg = repoUrl;
+  if (repoUrl.startsWith("http")) {
+    const match = repoUrl.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/);
+    if (match) remoteArg = `${match[1]}/${match[2]}`;
+  }
   const cmd = `npx --yes repomix --remote "${remoteArg}" --stdout --style plain --quiet`;
   logger.info({ cmd }, "Running repomix");
   const raw = execSync(cmd, {
@@ -43129,6 +43647,115 @@ RETURN c.componentId as id`;
     });
   }
 }
+function extractModuleStructure(repoUrl) {
+  const tmpDir = `_clone-gate-${Date.now()}`;
+  try {
+    let walk2 = function(d) {
+      for (const entry of __require("fs").readdirSync(d, { withFileTypes: true })) {
+        if (entry.name === ".git" || entry.name === "node_modules" || entry.name === ".github") continue;
+        const full = __require("path").join(d, entry.name);
+        if (entry.isDirectory()) walk2(full);
+        else if (exts.some((e) => entry.name.endsWith(e))) {
+          files.push({ path: full });
+        }
+      }
+    };
+    var walk = walk2;
+    const remoteArg = repoUrl.startsWith("http") ? repoUrl : repoUrl;
+    execSync(`git clone --depth 1 ${remoteArg} ${tmpDir}`, {
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 6e4
+    });
+    const exts = [".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs"];
+    const files = [];
+    walk2(tmpDir);
+    const modules = /* @__PURE__ */ new Map();
+    for (const f of files) {
+      const rel = f.path.replace(__require("path").sep, "/").substring(tmpDir.length + 1);
+      const parts = rel.split("/");
+      let key;
+      if (parts.length >= 3 && parts[0] === "src") {
+        key = `src/${parts[1]}`;
+      } else if (parts.length >= 2) {
+        key = parts[0];
+      } else {
+        key = "__root__";
+      }
+      if (!modules.has(key)) modules.set(key, []);
+      modules.get(key).push(f);
+    }
+    const result = [];
+    for (const [name, modFiles] of modules) {
+      let hasExports = false;
+      const exportTypes = /* @__PURE__ */ new Set();
+      for (const f of modFiles) {
+        try {
+          const content = __require("fs").readFileSync(f.path, "utf8");
+          if (/^export (default |const |class |function |interface |type |enum )/m.test(content)) {
+            hasExports = true;
+            if (/export class /m.test(content)) exportTypes.add("class");
+            if (/export function /m.test(content)) exportTypes.add("function");
+            if (/export interface /m.test(content)) exportTypes.add("interface");
+            if (/export type /m.test(content)) exportTypes.add("type");
+            if (/export const /m.test(content)) exportTypes.add("const");
+            if (/export default/m.test(content)) exportTypes.add("default");
+          }
+        } catch {
+        }
+      }
+      result.push({ name, files: modFiles.length, hasExports, exportTypes: [...exportTypes] });
+    }
+    try {
+      __require("fs").rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+    }
+    return result;
+  } catch {
+    try {
+      __require("fs").rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+    }
+    return [];
+  }
+}
+function checkCompleteness(components, modules) {
+  if (modules.length === 0) return { completeness: 100, matched: 0, missed: [], total: 0 };
+  if (components.length === 0) return { completeness: 0, matched: 0, missed: modules.map((m) => m.name), total: modules.length };
+  const compNames = components.map((c) => c.name.toLowerCase());
+  const matched = modules.filter((m) => {
+    const mLower = m.name.toLowerCase();
+    return compNames.some((cn) => {
+      if (mLower.includes(cn) || cn.includes(mLower)) return true;
+      if (mLower.includes("orchestrator") && cn.includes("coordinator")) return true;
+      if (mLower.includes("agent") && (cn.includes("worker") || cn.includes("agent"))) return true;
+      if (mLower.includes("task") && cn.includes("task")) return true;
+      if (mLower.includes("llm") && cn.includes("model")) return true;
+      if (mLower.includes("tool") && cn.includes("tool")) return true;
+      if (mLower.includes("memory") && cn.includes("memory")) return true;
+      return false;
+    });
+  });
+  const missed = modules.filter((m) => !matched.includes(m)).map((m) => m.name);
+  return {
+    completeness: Math.round(matched.length / modules.length * 100),
+    matched: matched.length,
+    missed,
+    total: modules.length
+  };
+}
+function buildRecoveryPrompt(repoUrl, packedRepo, missedModules) {
+  return `You previously extracted components from ${repoUrl} but missed these modules:
+
+MISSED MODULES (you MUST extract components for each):
+${missedModules.map((m) => `- ${m}`).join("\n")}
+
+REPOSITORY CONTENTS:
+${packedRepo}
+
+Return ONLY valid JSON with additional components for the missed modules above.
+Use this exact structure:
+{"components": [{"name": "...", "type": "tool|api|model|dataset|pattern|agent|service|library", "description": "...", "source_file": "path or null", "capabilities": [], "dependencies": [], "confidence": 85, "tags": []}]}`;
+}
 async function extractPhantomBOM(repoUrl, sourceType = "git", runId) {
   const id = runId ?? `pbom-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
   runState.set(id, { status: "running", startedAt: (/* @__PURE__ */ new Date()).toISOString() });
@@ -43153,6 +43780,62 @@ async function extractPhantomBOM(repoUrl, sourceType = "git", runId) {
       }
     }
     if (!extracted) throw lastError2 ?? new Error("LLM extraction failed after 3 attempts");
+    const modules = extractModuleStructure(repoUrl);
+    const gate = checkCompleteness(extracted.components, modules);
+    logger.info({
+      runId: id,
+      completeness: gate.completeness,
+      matched: gate.matched,
+      missed: gate.missed,
+      total: gate.total
+    }, "Completeness gate check");
+    if (gate.completeness < 80 && gate.missed.length > 0) {
+      logger.info({ runId: id, missed: gate.missed }, "Completeness < 80% \u2014 re-extraction");
+      try {
+        const recoveryPrompt = buildRecoveryPrompt(repoUrl, packedRepo, gate.missed);
+        const recoveryRaw = await callDeepSeekLlm(recoveryPrompt);
+        const recoveryParsed = parseLlmBom(recoveryRaw, repoUrl);
+        const existingNames = new Set(extracted.components.map((c) => c.name.toLowerCase()));
+        for (const c of recoveryParsed.components) {
+          if (!existingNames.has(c.name.toLowerCase())) {
+            extracted.components.push(c);
+            existingNames.add(c.name.toLowerCase());
+          }
+        }
+        const newGate = checkCompleteness(extracted.components, modules);
+        logger.info({
+          runId: id,
+          completeness_before: gate.completeness,
+          completeness_after: newGate.completeness,
+          added: recoveryParsed.components.length
+        }, "Completeness gate recovery complete");
+      } catch (err) {
+        logger.warn({ runId: id, err: err instanceof Error ? err.message : String(err) }, "Recovery extraction failed \u2014 proceeding with initial results");
+      }
+    }
+    await callBackendMcp("graph.write_cypher", {
+      query: `MERGE (e:EvidenceObject {external_id: $eid})
+        SET e.producer = 'phantom_bom_completeness_gate',
+            e.subject_ref = $repo,
+            e.evidence_class = 'CompletenessGate',
+            e.payload_json = $payload,
+            e.verification_status = CASE WHEN $completeness >= 80 THEN 'PASS' WHEN $completeness >= 50 THEN 'PASS_WITH_FIXES' ELSE 'FAIL' END,
+            e.created_at = datetime()`,
+      params: {
+        eid: `ev_completeness_${createHash("sha256").update(repoUrl).digest("hex").substring(0, 16)}`,
+        repo: repoUrl,
+        completeness: gate.completeness,
+        payload: JSON.stringify({
+          action: "completeness_gate",
+          total_modules: gate.total,
+          matched: gate.matched,
+          missed: gate.missed,
+          completeness_pct: gate.completeness,
+          verdict: gate.completeness >= 80 ? "PASS" : gate.completeness >= 50 ? "PASS_WITH_FIXES" : "FAIL",
+          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        })
+      }
+    });
     const bom = {
       bom_version: "1.0",
       run_id: id,
@@ -43168,7 +43851,7 @@ async function extractPhantomBOM(repoUrl, sourceType = "git", runId) {
       }))
     };
     await writeToNeo4j(bom);
-    logger.info({ runId: id, components: bom.components.length }, "PhantomBOM written to Neo4j");
+    logger.info({ runId: id, components: bom.components.length, completeness: gate.completeness }, "PhantomBOM written to Neo4j");
     runState.set(id, { status: "completed", bom, startedAt: runState.get(id).startedAt });
     return bom;
   } catch (err) {
