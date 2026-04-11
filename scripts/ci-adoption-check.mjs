@@ -242,10 +242,37 @@ if (NO_BUILD) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// CHECK 6 — LLM Matrix drift gate (LIN-625 Wave 5)
+// CHECK 6 — Dual-format args compatibility (LIN-750)
 // ══════════════════════════════════════════════════════════════════════════════
 
-console.log(label('CHECK 6 — LLM Matrix drift gate (LIN-625)'))
+console.log(label('CHECK 6 — Dual-format args compatibility (LIN-750)'))
+
+if (!existsSync(path.join(ROOT, 'test/dual-format-args.test.mjs'))) {
+  console.log(`  ${warn('test/dual-format-args.test.mjs not found — skipping')}`)
+  addResult('Dual-format args', true, ['Skipped — test file not found'])
+} else {
+  const dualResult = run('node test/dual-format-args.test.mjs')
+  if (dualResult.ok) {
+    const lines = dualResult.out.trim().split('\n').filter(l => l.includes('✅') || l.includes('PASS') || l.includes('format'))
+    lines.slice(-3).forEach(l => console.log(`    ${l}`))
+    console.log(`  ${ok('Dual-format args compatibility confirmed')}`)
+    addResult('Dual-format args', true)
+  } else {
+    const lines = (dualResult.out + dualResult.err).trim().split('\n')
+    lines.forEach(l => console.log(`  ${RED}  ${l}${RESET}`))
+    console.log(`  ${fail('Dual-format regression: payload and flat args produce different normalized output!')}`)
+    addResult('Dual-format args', false, [
+      'call_mcp_tool produces different args for payload vs flat format',
+      'Fix: ensure dual-format normalization in executeToolByName case call_mcp_tool',
+    ])
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CHECK 7 — LLM Matrix drift gate (LIN-625 Wave 5)
+// ══════════════════════════════════════════════════════════════════════════════
+
+console.log(label('CHECK 7 — LLM Matrix drift gate (LIN-625)'))
 
 if (!existsSync(path.join(ROOT, 'scripts/check-matrix-drift.mjs'))) {
   console.log(`  ${warn('scripts/check-matrix-drift.mjs not found — skipping')}`)
