@@ -2461,6 +2461,124 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       return `Policy ${key} updated to ${JSON.stringify(args?.policy_value)}. Audit log entry created.`
     }
 
+    // ─── agentic.* — Python agentic-kit MCP wrappers ────────────────────────
+
+    case 'agentic_snout_ingest': {
+      try {
+        const { spawnPythonAgentic } = await import('./agentic-runner.js')
+        const result = await spawnPythonAgentic('snout_ingest', {
+          mode: args.mode ?? 'discovery',
+          agent_data: args.agent_data,
+        })
+        return JSON.stringify(result, null, 2)
+      } catch (err) {
+        return `Agentic snout_ingest failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'agentic_mrp_recalculate': {
+      try {
+        const { spawnPythonAgentic } = await import('./agentic-runner.js')
+        const result = await spawnPythonAgentic('mrp_recalculate', {})
+        return JSON.stringify(result, null, 2)
+      } catch (err) {
+        return `Agentic mrp_recalculate failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'agentic_mrp_route': {
+      try {
+        const { spawnPythonAgentic } = await import('./agentic-runner.js')
+        const result = await spawnPythonAgentic('mrp_route', {
+          capability: args.capability,
+          geo: args.geo ?? 'ANY',
+          max_cost: args.max_cost ?? 0.00001,
+        })
+        return JSON.stringify(result, null, 2)
+      } catch (err) {
+        return `Agentic mrp_route failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'agentic_hitl_escalate': {
+      try {
+        const { spawnPythonAgentic } = await import('./agentic-runner.js')
+        const result = await spawnPythonAgentic('hitl_escalate', {
+          issue_type: args.issue_type ?? 'Low Confidence Ingest',
+          context: args.context ?? {},
+        })
+        return JSON.stringify(result, null, 2)
+      } catch (err) {
+        return `Agentic hitl_escalate failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'agentic_contract_issue': {
+      try {
+        const { spawnPythonAgentic } = await import('./agentic-runner.js')
+        const result = await spawnPythonAgentic('contract_issue', {
+          requester: args.requester,
+          contractor_agent_id: args.contractor_agent_id,
+          deliverable_spec: args.deliverable_spec ?? {},
+          sla_latency_ms: args.sla_latency_ms ?? 5000,
+          sla_quality_threshold: args.sla_quality_threshold ?? 0.85,
+        })
+        return JSON.stringify(result, null, 2)
+      } catch (err) {
+        return `Agentic contract_issue failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'agentic_canary_evaluate': {
+      try {
+        const { spawnPythonAgentic } = await import('./agentic-runner.js')
+        const result = await spawnPythonAgentic('canary_evaluate', {
+          agent_id: args.agent_id,
+        })
+        return JSON.stringify(result, null, 2)
+      } catch (err) {
+        return `Agentic canary_evaluate failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'agentic_reward_compute': {
+      try {
+        const { spawnPythonAgentic } = await import('./agentic-runner.js')
+        const result = await spawnPythonAgentic('reward_compute', {
+          agent_id: args.agent_id,
+          quality_score: args.quality_score ?? 0.8,
+          cost_per_1k: args.cost_per_1k ?? 0.000002,
+          latency_ms: args.latency_ms ?? 320,
+        })
+        return JSON.stringify(result, null, 2)
+      } catch (err) {
+        return `Agentic reward_compute failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'agentic_chaos_test': {
+      try {
+        const { spawnPythonAgentic } = await import('./agentic-runner.js')
+        const result = await spawnPythonAgentic('chaos_test', {})
+        return JSON.stringify(result, null, 2)
+      } catch (err) {
+        return `Agentic chaos_test failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'agentic_compliance_audit': {
+      try {
+        const { spawnPythonAgentic } = await import('./agentic-runner.js')
+        const result = await spawnPythonAgentic('compliance_audit', {
+          action: args.action ?? 'audit',
+          data_class: args.data_class ?? 'GENERAL',
+        })
+        return JSON.stringify(result, null, 2)
+      } catch (err) {
+        return `Agentic compliance_audit failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
     default:
       throw new Error(`Unknown tool: ${toolName}`)
   }
