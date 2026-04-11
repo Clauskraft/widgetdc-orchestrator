@@ -206,7 +206,42 @@ class SecurityError(Exception):
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Compliance Audit — GDPR Art.44 Enforcement")
+    parser.add_argument(
+        "--test-geo-residency",
+        action="store_true",
+        help="Gate-check: verify current region against EU allowlist and exit 0/1",
+    )
+    parser.add_argument(
+        "--region",
+        default=None,
+        metavar="REGION",
+        help="Override GCP_REGION for test (e.g. europe-west4)",
+    )
+    args = parser.parse_args()
+
+    if args.test_geo_residency:
+        # Gate test: does not require Neo4j — pure region check
+        test_region = args.region or os.environ.get("GCP_REGION", "unknown")
+        compliant = test_region in ALLOWED_REGIONS
+        status = "PASS" if compliant else "FAIL"
+        print(f"🔒 GDPR Art.44 geo-residency check")
+        print(f"   Region:  {test_region}")
+        print(f"   Allowed: {ALLOWED_REGIONS}")
+        print(f"   Result:  {status}")
+        if compliant:
+            print(f"✅ Compliant — {test_region} is an EU-approved zone")
+            sys.exit(0)
+        else:
+            print(f"❌ VIOLATION — {test_region} is outside EU allowlist")
+            sys.exit(1)
+
     print("🔒 Compliance Audit — GDPR Art.44 Demo")
+    if args.region:
+        os.environ["GCP_REGION"] = args.region
+
     enforcer = ResidencyEnforcer()
     try:
         region = os.environ.get("GCP_REGION", "NOT_SET")

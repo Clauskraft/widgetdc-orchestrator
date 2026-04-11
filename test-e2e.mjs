@@ -1686,6 +1686,61 @@ await test('193. POST /api/tools/chat_read returns messages', async () => {
   assert(r.body?.data?.tool_name === 'chat_read', `wrong tool_name: ${r.body?.data?.tool_name}`)
 })
 
+// ── 194–202. agentic.* — Python agentic-kit MCP wrappers ──────────────────
+await test('194. POST /api/tools/agentic_snout_ingest responds', async () => {
+  const r = await api('/api/tools/agentic_snout_ingest', { method: 'POST', body: JSON.stringify({ mode: 'discovery' }) })
+  assert(r.status !== 404, `agentic_snout_ingest not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'agentic_snout_ingest', `wrong tool_name`)
+})
+
+await test('195. POST /api/tools/agentic_mrp_recalculate responds', async () => {
+  const r = await api('/api/tools/agentic_mrp_recalculate', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `agentic_mrp_recalculate not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'agentic_mrp_recalculate', `wrong tool_name`)
+})
+
+await test('196. POST /api/tools/agentic_mrp_route responds', async () => {
+  const r = await api('/api/tools/agentic_mrp_route', { method: 'POST', body: JSON.stringify({ capability: 'reasoning', geo: 'EU' }) })
+  assert(r.status !== 404, `agentic_mrp_route not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'agentic_mrp_route', `wrong tool_name`)
+})
+
+await test('197. POST /api/tools/agentic_hitl_escalate responds', async () => {
+  const r = await api('/api/tools/agentic_hitl_escalate', { method: 'POST', body: JSON.stringify({ issue_type: 'Test Escalation', context: { agent_id: 'test' } }) })
+  assert(r.status !== 404, `agentic_hitl_escalate not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'agentic_hitl_escalate', `wrong tool_name`)
+})
+
+await test('198. POST /api/tools/agentic_contract_issue responds', async () => {
+  const r = await api('/api/tools/agentic_contract_issue', { method: 'POST', body: JSON.stringify({ requester: 'test', contractor_agent_id: 'qwen-eu-v2.5', deliverable_spec: { task: 'reasoning' } }) })
+  assert(r.status !== 404, `agentic_contract_issue not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'agentic_contract_issue', `wrong tool_name`)
+})
+
+await test('199. POST /api/tools/agentic_canary_evaluate responds', async () => {
+  const r = await api('/api/tools/agentic_canary_evaluate', { method: 'POST', body: JSON.stringify({ agent_id: 'qwen-eu-v2.5' }) })
+  assert(r.status !== 404, `agentic_canary_evaluate not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'agentic_canary_evaluate', `wrong tool_name`)
+})
+
+await test('200. POST /api/tools/agentic_reward_compute responds', async () => {
+  const r = await api('/api/tools/agentic_reward_compute', { method: 'POST', body: JSON.stringify({ quality_score: 0.9, cost_per_1k: 0.000002, latency_ms: 320 }) })
+  assert(r.status !== 404, `agentic_reward_compute not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'agentic_reward_compute', `wrong tool_name`)
+})
+
+await test('201. POST /api/tools/agentic_chaos_test responds', async () => {
+  const r = await api('/api/tools/agentic_chaos_test', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `agentic_chaos_test not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'agentic_chaos_test', `wrong tool_name`)
+})
+
+await test('202. POST /api/tools/agentic_compliance_audit responds', async () => {
+  const r = await api('/api/tools/agentic_compliance_audit', { method: 'POST', body: JSON.stringify({ action: 'vendor_scrape', data_class: 'PII' }) })
+  assert(r.status !== 404, `agentic_compliance_audit not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'agentic_compliance_audit', `wrong tool_name`)
+})
+
 // ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped

@@ -149,6 +149,15 @@ Every tool declares governance metadata per the Neural Bridge v2 specification:
 | 103 | `grafana_dashboard` | grafana | 15s | Query Grafana Cloud dashboards and panels |
 | 104 | `railway_deploy` | railway | 30s | Trigger Railway deployment or check status |
 | 105 | `railway_env` | railway | 15s | Get or set Railway environment variables |
+| 106 | `agentic_snout_ingest` | agentic | 30s | Run Snout agent discovery + ingestion cycle via Python agentic-kit |
+| 107 | `agentic_mrp_recalculate` | agentic | 30s | Recalculate PhantomCluster nodes via MRP Engine |
+| 108 | `agentic_mrp_route` | agentic | 15s | Dynamic sovereignty-aware routing (capability + geo + cost) |
+| 109 | `agentic_hitl_escalate` | agentic | 15s | Create a Linear HITL issue for low-confidence ingests or routing failures |
+| 110 | `agentic_contract_issue` | agentic | 15s | Issue an agent contract with SLA (Contractor model) |
+| 111 | `agentic_canary_evaluate` | agentic | 15s | Evaluate RL-Canary window for an agent — promote or rollback |
+| 112 | `agentic_reward_compute` | agentic | 10s | Compute reward R = 0.4·Q + 0.3·C + 0.3·L for an agent delivery |
+| 113 | `agentic_chaos_test` | agentic | 60s | Run chaos engineering test suite (4 scenarios, <2s SLA gate) |
+| 114 | `agentic_compliance_audit` | agentic | 15s | Run GDPR Art.44 compliance audit for a data processing action |
 
 ---
 
@@ -1900,6 +1909,214 @@ curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/chat_
   -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"limit": 10, "from_agent": "qwen"}'
+```
+
+---
+
+### agentic — Python agentic-kit MCP Wrappers (9 tools)
+
+Tools that spawn Python subprocesses via `agentic-kit/run_mcp.py` to execute the Phase 1–4 agentic pipeline: Snout ingestion, MRP routing, HITL, contracts, RL-Canary, chaos tests, and GDPR compliance.
+
+---
+
+#### `agentic_snout_ingest`
+
+**Description:** Run Snout agent discovery + ingestion cycle. Calls `SnoutIngestor` in Python, writes Agent + Provider nodes to Neo4j with ADR-003 evidence chain.
+
+**Timeout:** 30,000 ms | **Risk:** staged_write
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `mode` | string | no | `discovery` (mock cycle) or `ingest` (single agent). Default: discovery |
+| `agent_data` | object | no | Required when mode=ingest. Fields: agent_id, provider, model_name, pricing_input, pricing_output, context_window, capabilities, sov_data_residency, sov_exec_residency, confidence |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/agentic_snout_ingest \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"discovery"}'
+```
+
+---
+
+#### `agentic_mrp_recalculate`
+
+**Description:** Recalculate PhantomCluster nodes via MRP Engine. Scans all Agent nodes, groups by (capability × geo), computes validity_score = 0.4·Q + 0.3·R + 0.2·U + 0.1·C, MERGEs clusters to Neo4j.
+
+**Timeout:** 30,000 ms | **Risk:** staged_write
+
+**Input Parameters:** none
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/agentic_mrp_recalculate \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+---
+
+#### `agentic_mrp_route`
+
+**Description:** Dynamic sovereignty-aware routing. Selects optimal Agent + PhantomCluster for a capability request, enforcing validity_score > 0.75 and cost constraints.
+
+**Timeout:** 15,000 ms | **Risk:** read_only
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `capability` | string | yes | Required capability (e.g. `reasoning`, `math`) |
+| `geo` | string | no | Geo constraint: EU, US, CN, ANY. Default: ANY |
+| `max_cost` | number | no | Max cost per 1K tokens. Default: 0.00001 |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/agentic_mrp_route \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"capability":"reasoning","geo":"EU","max_cost":0.00001}'
+```
+
+---
+
+#### `agentic_hitl_escalate`
+
+**Description:** Create a Linear HITL issue for low-confidence ingests or routing failures. Routes to human review queue.
+
+**Timeout:** 15,000 ms | **Risk:** staged_write
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `issue_type` | string | no | Type of HITL issue. Default: Low Confidence Ingest |
+| `context` | object | no | Structured context for the issue (agent_id, confidence, etc.) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/agentic_hitl_escalate \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"issue_type":"Low Confidence Ingest","context":{"agent_id":"qwen-eu-v2.5","confidence":0.63}}'
+```
+
+---
+
+#### `agentic_contract_issue`
+
+**Description:** Issue an agent contract with SLA via the Contractor model (Phase 4). Creates a Contract node in Neo4j with ADR-003 audit trail.
+
+**Timeout:** 15,000 ms | **Risk:** staged_write
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `requester` | string | yes | Requesting system or agent ID |
+| `contractor_agent_id` | string | yes | Agent that will fulfil the contract |
+| `deliverable_spec` | object | no | Deliverable specification (task, max_tokens, etc.) |
+| `sla_latency_ms` | number | no | Latency SLA in ms. Default: 5000 |
+| `sla_quality_threshold` | number | no | Quality threshold. Default: 0.85 |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/agentic_contract_issue \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"requester":"mrp_engine","contractor_agent_id":"qwen-eu-v2.5","deliverable_spec":{"task":"reasoning"}}'
+```
+
+---
+
+#### `agentic_canary_evaluate`
+
+**Description:** Evaluate RL-Canary window for an agent. Checks reward delta over last N windows and returns PROMOTE / HOLD / ROLLBACK decision.
+
+**Timeout:** 15,000 ms | **Risk:** staged_write
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `agent_id` | string | yes | Agent ID to evaluate canary window for |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/agentic_canary_evaluate \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"mistral-eu-large-v2"}'
+```
+
+---
+
+#### `agentic_reward_compute`
+
+**Description:** Compute reward R = 0.4·Quality + 0.3·CostEfficiency + 0.3·LatencyScore for an agent delivery. Optionally persists reward log to Neo4j.
+
+**Timeout:** 10,000 ms | **Risk:** staged_write
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `quality_score` | number | yes | Quality score 0–1 |
+| `cost_per_1k` | number | yes | Cost per 1K tokens (USD) |
+| `latency_ms` | number | yes | Response latency in milliseconds |
+| `agent_id` | string | no | If provided, persists reward log to Neo4j |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/agentic_reward_compute \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"quality_score":0.9,"cost_per_1k":0.000002,"latency_ms":320,"agent_id":"qwen-eu-v2.5"}'
+```
+
+---
+
+#### `agentic_chaos_test`
+
+**Description:** Run chaos engineering test suite (4 scenarios: primary timeout, single-agent cluster, full outage, geo failover). Gate: all scenarios must resolve in <2s.
+
+**Timeout:** 60,000 ms | **Risk:** staged_write
+
+**Input Parameters:** none
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/agentic_chaos_test \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+---
+
+#### `agentic_compliance_audit`
+
+**Description:** Run GDPR Art.44 compliance audit for a data processing action. Checks GCP_REGION against EU allowlist; logs violations to Neo4j + Linear HITL.
+
+**Timeout:** 15,000 ms | **Risk:** staged_write
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `action` | string | no | Processing action (e.g. `vendor_scrape`, `audit`). Default: audit |
+| `data_class` | string | no | Data classification: PII, CONFIDENTIAL, GENERAL. Default: GENERAL |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/agentic_compliance_audit \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"vendor_scrape","data_class":"PII"}'
 ```
 
 ---

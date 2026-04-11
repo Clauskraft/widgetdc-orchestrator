@@ -1,0 +1,44 @@
+# canary_config.yaml — RL-Canary Shadow Mode Configuration (Orch_11)
+#
+# Controls traffic split, reward evaluation, and rollback gates for the
+# RL-Canary engine. Used by agentic-kit/rl_canary.py.
+#
+# Deploy:
+#   railway variables --service orchestrator --set \
+#     CANARY_SHADOW=true CANARY_SPLIT=0.05 REDIS_URL=${REDIS_URL}
+
+# ── Shadow Mode ───────────────────────────────────────────────────────────────
+shadow_mode: true          # true = shadow (no live impact), false = live split
+traffic_split: 0.05        # 5% — Phase 4 shadow baseline; promote to 1.0 when stable
+
+# ── Redis ─────────────────────────────────────────────────────────────────────
+redis_endpoint: "${REDIS_URL}"   # e.g. redis://:password@host:6379 (TLS required in prod)
+redis_key_prefix: "canary"
+
+# ── Reward Function (R = 0.4·Q + 0.3·cost + 0.3·latency) ────────────────────
+reward_window_hours: 6           # Evaluate reward over rolling 6-hour window
+reward_weights:
+  quality:  0.4
+  cost:     0.3
+  latency:  0.3
+
+# ── Rollback Gates ────────────────────────────────────────────────────────────
+rollback_threshold: -0.05        # ΔR < -0.05 over 3 consecutive windows → rollback
+rollback_consecutive_windows: 3  # Number of bad windows before auto-rollback triggers
+
+# ── Promotion Stages ─────────────────────────────────────────────────────────
+# Advance through stages once reward is stable (ΔR ≥ 0 for rollback_window_hours)
+stages:
+  - split: 0.01   # 1%  — initial smoke
+  - split: 0.05   # 5%  — shadow (current)
+  - split: 0.25   # 25% — expanded validation
+  - split: 1.00   # 100% — full promotion
+
+# ── SLA Gates (K1 + K3 from Open Spec v0.1) ──────────────────────────────────
+sla:
+  k1_quality_min: 0.85     # K1: Quality score must stay ≥ 0.85
+  k3_cost_max_delta: 0.10  # K3: Cost efficiency must not degrade >10% vs baseline
+
+# ── Monitoring ────────────────────────────────────────────────────────────────
+metrics_port: 9090           # Prometheus /metrics scrape port
+log_reward_deltas: true      # Emit canary_reward_delta lines to stdout (grep target)

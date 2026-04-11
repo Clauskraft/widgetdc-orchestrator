@@ -96,13 +96,52 @@ class DynamicRouter:
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="DynamicRouter — Sovereignty-Aware Agent Router")
+    parser.add_argument(
+        "--test-route",
+        action="store_true",
+        help="Test routing for given capability/geo and print result (exit 0 if ROUTED)",
+    )
+    parser.add_argument(
+        "--capability",
+        default="reasoning",
+        metavar="CAP",
+        help="Capability to route for (default: reasoning)",
+    )
+    parser.add_argument(
+        "--geo",
+        default="EU",
+        metavar="GEO",
+        help="Geo constraint: EU, CN, US, ANY (default: EU)",
+    )
+    parser.add_argument(
+        "--max-cost",
+        type=float,
+        default=0.00001,
+        metavar="COST",
+        help="Max pricing_input_per_1k (default: 0.00001)",
+    )
+    args = parser.parse_args()
+
+    # TEE_ENABLED=false → fallback mode (no TEE dependency, standard inference)
+    tee_enabled = os.environ.get("TEE_ENABLED", "true").lower() not in ("false", "0", "no")
+    if not tee_enabled:
+        print("ℹ️  TEE_ENABLED=false — routing in standard (non-TEE) fallback mode")
+
     router = DynamicRouter()
     try:
-        # Test: reasoning in EU
+        if args.test_route:
+            result = router.route_request(args.capability, args.geo, args.max_cost)
+            result["tee_mode"] = "TEE_ACTIVE" if tee_enabled else "TEE_DISABLED_FALLBACK"
+            print(f"Route test ({args.capability}/{args.geo}): {result}")
+            sys.exit(0 if result.get("status") == "ROUTED" else 1)
+
+        # Default: two smoke-test routes
         result = router.route_request("reasoning", "EU", max_cost=0.00001)
         print("Router result (EU/reasoning):", result)
 
-        # Test: math, any geo
         result2 = router.route_request("math", "ANY", max_cost=0.00001)
         print("Router result (ANY/math):", result2)
     finally:
