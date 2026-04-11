@@ -85,11 +85,16 @@ function phantomId(sourceRepo: string, name: string, type: string): string {
 
 /**
  * Run repomix --remote <repoUrl> and return packed text output.
- * Falls back to github.com URL if bare "user/repo" format given.
+ * Converts HTTPS URLs to "user/repo" format that repomix expects.
  */
 function runRepomix(repoUrl: string): string {
-  // Accept both "https://github.com/user/repo" and "user/repo" shorthand
-  const remoteArg = repoUrl.startsWith('http') ? repoUrl : repoUrl
+  // repomix --remote expects "user/repo" format, not HTTPS URLs
+  let remoteArg = repoUrl
+  if (repoUrl.startsWith('http')) {
+    // Convert https://github.com/user/repo.git → user/repo
+    const match = repoUrl.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/)
+    if (match) remoteArg = `${match[1]}/${match[2]}`
+  }
 
   const cmd = `npx --yes repomix --remote "${remoteArg}" --stdout --style plain --quiet`
   logger.info({ cmd }, 'Running repomix')
