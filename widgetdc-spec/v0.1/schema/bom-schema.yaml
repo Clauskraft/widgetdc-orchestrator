@@ -1,0 +1,98 @@
+# WidgeTDC Open Spec v0.1 — Agent BOM (Bill of Materials) Schema
+
+$schema: "https://json-schema.org/draft/2020-12"
+$id: "https://spec.widgetdc.io/v0.1/schema/agent-bom"
+title: AgentBOM
+description: >
+  Bill of Materials for an AI Agent. Captures identity, pricing,
+  sovereignty profile, capability set, and CVE linkage.
+  Ingested by Snout; stored as :Agent node in Neo4j.
+type: object
+
+required:
+  - agent_id
+  - provider
+  - model_name
+  - sov_data_residency
+  - sov_exec_residency
+  - capabilities
+  - confidence_score
+
+properties:
+  agent_id:
+    type: string
+    description: Stable unique identifier (slug format).
+    example: "qwen-eu-v2.5"
+
+  provider:
+    type: string
+    example: "Alibaba Cloud"
+
+  model_name:
+    type: string
+    example: "Qwen-EU-2.5"
+
+  pricing_input_per_1k:
+    type: number
+    minimum: 0
+    description: USD per 1000 input tokens.
+
+  pricing_output_per_1k:
+    type: number
+    minimum: 0
+    description: USD per 1000 output tokens.
+
+  context_window:
+    type: integer
+    minimum: 0
+    description: Maximum context length in tokens.
+
+  capabilities:
+    type: array
+    items:
+      type: string
+    description: Capability tags (e.g. reasoning, code, math, multilingual).
+    minItems: 1
+
+  sov_data_residency:
+    type: string
+    enum: [EU, CN, US, ANY, UNKNOWN]
+    description: Jurisdiction where data is stored at rest.
+
+  sov_exec_residency:
+    type: string
+    enum: [EU, CN, US, ANY, UNKNOWN]
+    description: Jurisdiction where inference executes.
+
+  confidence_score:
+    type: number
+    minimum: 0.0
+    maximum: 1.0
+    description: Snout's confidence in the accuracy of this BOM entry.
+
+  hitl_required:
+    type: boolean
+    description: True when confidence_score < HITL_THRESHOLD (0.70).
+
+  source_url:
+    type: string
+    description: Canonical source for this agent's documentation.
+
+  cve_ids:
+    type: array
+    items:
+      type: string
+    description: CVE identifiers linked to known vulnerabilities.
+
+  ingested_at:
+    type: string
+    format: date-time
+
+hitl_policy:
+  threshold: 0.70
+  action: "Block Neo4j write; create Linear issue [HITL] with priority=High"
+  gate: "Implemented in phantom-bom.ts and snout_ingestor.py"
+
+conformance:
+  storage:    "MERGE (a:Agent {agent_id: $agent_id}) SET a += $props"
+  provider_link: "MERGE (p:Provider {name: $provider}) MERGE (a)-[:HOSTED_BY]->(p)"

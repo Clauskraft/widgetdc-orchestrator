@@ -1,0 +1,71 @@
+# WidgeTDC Open Spec v0.1 — PhantomCluster Schema
+
+$schema: "https://json-schema.org/draft/2020-12"
+$id: "https://spec.widgetdc.io/v0.1/schema/phantom-cluster"
+title: PhantomCluster
+description: >
+  A grouped set of Agents satisfying the same capability × geo constraints.
+  Materialised by the MRP Engine. Drives the Dynamic Router.
+type: object
+
+required:
+  - external_id
+  - name
+  - validity_score
+  - rule_capability
+  - rule_geo
+
+properties:
+  external_id:
+    type: string
+    pattern: "^Cluster_[A-Z]+_.+$"
+    example: "Cluster_EU_reasoning"
+
+  name:
+    type: string
+    description: Human-readable label (same as external_id by convention).
+
+  validity_score:
+    type: number
+    minimum: 0.0
+    maximum: 1.0
+    description: >
+      Composite score = 0.4×avg_confidence + 0.3×redundancy_factor
+                      + 0.2×avg_uptime + 0.1×compliance_weight.
+      Router gate: only routes to clusters where validity_score > 0.75.
+
+  rule_capability:
+    type: string
+    description: Single capability string this cluster satisfies.
+    example: "reasoning"
+
+  rule_geo:
+    type: string
+    enum: [EU, CN, US, ANY, UNKNOWN]
+    description: Sovereignty residency constraint.
+
+  agent_count:
+    type: integer
+    minimum: 1
+
+  last_recalculated:
+    type: string
+    format: date-time
+
+relationships:
+  PART_OF:
+    direction: "Agent → PhantomCluster"
+    description: Agent belongs to this cluster. Idempotent (no rel properties).
+
+validity_formula:
+  weights:
+    avg_confidence:     0.4
+    redundancy_factor:  0.3   # min(agent_count / 4.0, 1.0)
+    avg_uptime:         0.2   # coalesce(uptime_30d, 0.8)
+    compliance_weight:  0.1   # 1.0 if geo==EU else 0.7
+  gate_threshold: 0.75
+
+conformance:
+  recalculation: "Full re-MERGE on every Snout ingestion cycle"
+  idempotency:   "MERGE on external_id"
+  minimum_agents: 1            # Phase 1/2; increase to 2+ in production

@@ -1,0 +1,79 @@
+# WidgeTDC Open Spec v0.1 — EvidenceObject Schema
+# ADR-003: Hash-Chain Contract
+# Canonical definition of an immutable audit record.
+
+$schema: "https://json-schema.org/draft/2020-12"
+$id: "https://spec.widgetdc.io/v0.1/schema/evidence-object"
+title: EvidenceObject
+description: >
+  Immutable audit record created before every Neo4j mutation.
+  Linked via [:NEXT_IN_CHAIN] to form a tamper-evident hash chain.
+type: object
+
+required:
+  - external_id
+  - producer
+  - subject_ref
+  - evidence_class
+  - payload_json
+  - payload_hash
+  - verification_status
+
+properties:
+  external_id:
+    type: string
+    pattern: "^ev_[a-z0-9_]+_[a-f0-9]{16}$"
+    description: "Stable identifier: ev_{producer}_{payload_hash[:16]}"
+    example: "ev_snout_agent_d1418938348b871e"
+
+  producer:
+    type: string
+    description: Service or agent ID that created this evidence.
+    example: "snout_ingestor"
+
+  subject_ref:
+    type: string
+    description: external_id of the entity being audited (Agent, Cluster, Task).
+    example: "agent_deepseek_v3"
+
+  evidence_class:
+    type: string
+    enum: [ActionLog, DeletionEvent, IngestionEvent, ClusterAssignment, RoutingDecision]
+    description: Semantic category of the audit event.
+
+  payload_json:
+    type: string
+    description: JSON-serialised audit payload (canonical form, sort_keys=true).
+
+  payload_hash:
+    type: string
+    pattern: "^[a-f0-9]{64}$"
+    description: SHA-256 of payload_json encoded as UTF-8.
+
+  previous_hash:
+    type: ["string", "null"]
+    pattern: "^[a-f0-9]{64}$"
+    description: payload_hash of the preceding EvidenceObject in the chain. Null for root.
+
+  verification_status:
+    type: string
+    enum: [VERIFIED, PENDING, TAMPERED]
+    default: VERIFIED
+
+  last_updated:
+    type: string
+    format: date-time
+
+relationships:
+  EVIDENCE_FOR:
+    description: Links EvidenceObject to the entity it audits (OPTIONAL — entity may not exist yet).
+    target: "Agent | PhantomCluster | Task"
+  NEXT_IN_CHAIN:
+    description: Ordered chain link from predecessor to this EvidenceObject.
+    target: EvidenceObject
+
+conformance:
+  hash_algorithm: SHA-256
+  serialisation: "json.dumps(payload, sort_keys=True).encode('utf-8')"
+  chain_verification: "prev.payload_hash == curr.previous_hash for every consecutive pair"
+  idempotency: "MERGE on external_id — re-ingestion is safe"
