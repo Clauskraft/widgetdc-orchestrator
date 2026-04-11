@@ -310,7 +310,9 @@ async function loadTargetRegistry(): Promise<TargetDef[]> {
   try {
     // Try multiple key patterns (working-memory prefix, hyperagent prefix, cross-repo memory)
     const keyPatterns = [
-      'wm:HYPERAGENT:target-registry-v2.2',          // working-memory format
+      'wm:HYPERAGENT:target-registry-v2.2',          // working-memory format (uppercase)
+      'wm:hyperagent-auto:target-registry-v2.2',     // working-memory format (lowercase auto agent)
+      'wm:hyperagent-auto:targets:full-registry-v2.2', // cross-repo memory nested domain
       'hyperagent:HYPERAGENT:target-registry-v2.2',   // legacy format
       'hyperagent:memory:targets:full-registry-v2.2', // cross-repo memory format
       'wm:HYPERAGENT:target-registry-v2.1',           // older version
