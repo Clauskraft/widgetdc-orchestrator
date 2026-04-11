@@ -145,6 +145,38 @@ const _LEGACY_TOOLS = [
   {
     type: 'function' as const,
     function: {
+      name: 'chat_send',
+      description: 'Send a message to another agent or broadcast to all agents via the orchestrator chat bus. Use for A2A coordination: share findings, request review, trigger debate. to="All" broadcasts to everyone.',
+      parameters: {
+        type: 'object',
+        properties: {
+          from: { type: 'string', description: 'Sender agent ID (e.g. "chatgpt", "qwen", "omega")' },
+          to: { type: 'string', description: 'Recipient agent ID or "All" for broadcast' },
+          message: { type: 'string', description: 'Message content' },
+          thread_id: { type: 'string', description: 'Thread ID for conversation grouping' },
+        },
+        required: ['from', 'to', 'message'],
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'chat_read',
+      description: 'Read recent messages from the orchestrator chat bus. Use to see what other agents have said, check for replies, or follow an ongoing A2A debate thread.',
+      parameters: {
+        type: 'object',
+        properties: {
+          thread_id: { type: 'string', description: 'Filter to specific thread' },
+          limit: { type: 'number', description: 'Number of messages to fetch (default 20, max 100)' },
+          from_agent: { type: 'string', description: 'Filter messages by sender agent ID' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
       name: 'get_platform_health',
       description: 'Get current health status of all WidgeTDC platform services (backend, RLM engine, Neo4j graph, Redis). Use when asked about system status, uptime, or health.',
       parameters: {
@@ -645,9 +677,22 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     }
 
     case 'call_mcp_tool': {
+      // Support both formats:
+      // 1. Internal/orchestrator: {tool_name, payload: {...}}
+      // 2. External agents (OpenAI function calling): {tool_name, ...flatArgs}
+      const toolName = args.tool_name as string
+      const payload = args.payload as Record<string, unknown> | undefined
+
+      // If payload exists, use it as args (internal format)
+      // Otherwise, strip tool_name and use remaining args (external format)
+      const mcpArgs = payload ?? (() => {
+        const { tool_name: _strip, ...rest } = args
+        return rest as Record<string, unknown>
+      })()
+
       const result = await callMcpTool({
-        toolName: args.tool_name as string,
-        args: (args.payload as Record<string, unknown>) ?? {},
+        toolName,
+        args: mcpArgs ?? {},
         callId: uuid(),
         timeoutMs: 30000,
       })

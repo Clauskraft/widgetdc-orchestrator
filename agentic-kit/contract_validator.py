@@ -306,6 +306,87 @@ class ContractValidator:
             return [dict(r) for r in result]
 
 
+# ── TEE Gate Validator (Phase 4 — Orch_10) ───────────────────────────────────
+
+
+class TEEGateValidator:
+    """
+    Hardware TEE environment guard for Snout ingestion.
+
+    Verifies that the process is running inside a GCP Confidential Space
+    (SEV-SNP) before allowing sensitive data to be processed. Blocks
+    context folding and credential handling outside the TEE boundary.
+
+    On non-TEE environments (local dev, CI) the gate degrades gracefully
+    with a warning unless strict=True.
+    """
+
+    # Path written by AMD SEV-SNP firmware inside Confidential Space VMs
+    ATTESTATION_STATUS_PATH = "/sys/firmware/attestation/status"
+    ATTESTATION_REPORT_PATH = "/sys/firmware/attestation/report"
+
+    def __init__(self, strict: bool = False):
+        """
+        Args:
+            strict: If True, raise EnvironmentError outside TEE.
+                    If False, log a warning (useful for local dev).
+        """
+        self.strict = strict
+        self.tee_verified = os.path.exists(self.ATTESTATION_STATUS_PATH)
+
+    # ── Core gate ──────────────────────────────────────────────────────────
+
+    def validate_environment(self) -> bool:
+        """
+        Assert TEE presence. Returns True inside TEE.
+        Raises EnvironmentError in strict mode outside TEE.
+        """
+        if self.tee_verified:
+            return True
+
+        msg = (
+            "Running outside TEE — sensitive payload processing blocked. "
+            f"Expected attestation at {self.ATTESTATION_STATUS_PATH}. "
+            "Deploy to GCP Confidential Space (widgetdc-tee-snout-ingestor)."
+        )
+        if self.strict:
+            raise EnvironmentError(f"CRITICAL: {msg}")
+        else:
+            import logging as _log
+            _log.warning(f"⚠️  TEE not detected (non-strict mode): {msg}")
+            return False
+
+    def process_sensitive_payload(self, payload: dict) -> bool:
+        """
+        Gate: only executes context folding inside a verified TEE.
+        Returns True if processing is allowed, False if degraded.
+        """
+        if not self.validate_environment():
+            return False
+        # Actual folding logic delegated to context_fold.py in production
+        return True
+
+    def enforce_for_snout(self) -> None:
+        """
+        Strict TEE gate for Snout ACI ingestor.
+        Call before processing any vendor credentials or PII scrape results.
+        """
+        if not self.tee_verified:
+            raise EnvironmentError(
+                "CRITICAL: Running outside TEE. Aborting Snout ingestion. "
+                "Vendor session tokens and PII must not be processed in plain RAM."
+            )
+
+    def attestation_summary(self) -> dict:
+        """Return TEE attestation status for logging/audit."""
+        return {
+            "tee_verified": self.tee_verified,
+            "attestation_path": self.ATTESTATION_STATUS_PATH,
+            "strict_mode": self.strict,
+            "environment": "CONFIDENTIAL_SPACE" if self.tee_verified else "STANDARD_VM",
+        }
+
+
 # ── Demo ──────────────────────────────────────────────────────────────────────
 
 

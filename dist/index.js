@@ -22083,9 +22083,15 @@ ${result.merged_context}`;
       return rows.map((r) => `- [${r.id ?? "?"}] ${r.title ?? "Untitled"} (${r.status ?? "?"})`).join("\n");
     }
     case "call_mcp_tool": {
+      const toolName2 = args.tool_name;
+      const payload = args.payload;
+      const mcpArgs = payload ?? (() => {
+        const { tool_name: _strip, ...rest } = args;
+        return rest;
+      })();
       const result = await callMcpTool({
-        toolName: args.tool_name,
-        args: args.payload ?? {},
+        toolName: toolName2,
+        args: mcpArgs ?? {},
         callId: uuid23(),
         timeoutMs: 3e4
       });
