@@ -1893,6 +1893,292 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     costTier: 'micro',
   }),
 
+  // ─── v4.0.5 Ghost-Tier Registration (LIN-617): Pheromone Layer ────────────
+
+  defineTool({
+    name: 'pheromone_status',
+    namespace: 'pheromone',
+    description: 'Get pheromone layer status: active pheromone count, total deposits, decay cycles, amplifications, trail count. Use to check flywheel health.',
+    input: z.object({}),
+    backendTool: 'pheromone.status',
+    timeoutMs: 10000,
+  }),
+
+  defineTool({
+    name: 'pheromone_sense',
+    namespace: 'pheromone',
+    description: 'Sense pheromones in a domain — returns active signals ranked by strength. Use before task execution to find best trails, or to check which strategies are working in a domain.',
+    input: z.object({
+      domain: z.string().describe('Domain to sense (e.g., "research", "analysis", "chain:sequential")'),
+      type: z.enum(['attraction', 'repellent', 'trail', 'external', 'amplification']).optional().describe('Filter by pheromone type'),
+      tags: z.array(z.string()).optional().describe('Filter by tags'),
+      min_strength: z.number().optional().describe('Minimum strength threshold (0-1, default 0.1)'),
+      limit: z.number().optional().describe('Max results (default 20)'),
+    }),
+    backendTool: 'pheromone.sense',
+    timeoutMs: 10000,
+  }),
+
+  defineTool({
+    name: 'pheromone_deposit',
+    namespace: 'pheromone',
+    description: 'Deposit a pheromone signal — attraction (good result), repellent (bad result), trail (successful path), or external (outside intelligence). Use after task completion to share learnings with the fleet.',
+    input: z.object({
+      type: z.string().describe('Pheromone type'),
+      domain: z.string().describe('Domain (e.g., "research", "analysis", "cost-optimization")'),
+      source: z.string().describe('Who deposited (agent ID or system)'),
+      label: z.string().optional().describe('Human-readable label for the signal'),
+      strength: z.number().optional().describe('Signal strength 0-1 (default 0.5)'),
+      metadata: z.record(z.number()).optional().describe('Numeric metrics (e.g., { score: 0.9, latency_ms: 50 })'),
+      tags: z.array(z.string()).optional().describe('Classification tags'),
+    }),
+    backendTool: 'pheromone.deposit',
+    timeoutMs: 10000,
+    riskLevel: 'staged_write',
+  }),
+
+  defineTool({
+    name: 'pheromone_heatmap',
+    namespace: 'pheromone',
+    description: 'Get cross-domain pheromone heatmap — shows which domains have the strongest signals and most activity. Use for strategic overview of where the flywheel is spinning fastest.',
+    input: z.object({}),
+    backendTool: 'pheromone.heatmap',
+    timeoutMs: 10000,
+  }),
+
+  // ─── v4.0.5 Ghost-Tier Registration (LIN-617): PeerEval / Fleet Learning ──
+
+  defineTool({
+    name: 'peer_eval_status',
+    namespace: 'peereval',
+    description: 'Get fleet learning status: total evals, task types tracked, best practices shared. Use to check if the fleet is learning effectively.',
+    input: z.object({}),
+    backendTool: 'peer-eval.status',
+    timeoutMs: 10000,
+  }),
+
+  defineTool({
+    name: 'peer_eval_fleet',
+    namespace: 'peereval',
+    description: 'Get fleet learning data for a specific task type or all task types. Returns best agent, average efficiency, top strategies from pheromone trails, and EMA-aggregated scores.',
+    input: z.object({
+      task_type: z.string().optional().describe('Specific task type to query (omit for all)'),
+    }),
+    backendTool: 'peer-eval.fleet',
+    timeoutMs: 10000,
+  }),
+
+  defineTool({
+    name: 'peer_eval_evaluate',
+    namespace: 'peereval',
+    description: 'Trigger a manual peer evaluation for an agent task. Records self-assessment, deposits pheromones, updates fleet learning, and broadcasts best practices if score + novelty are high.',
+    input: z.object({
+      agent_id: z.string().describe('Agent that performed the task'),
+      task_id: z.string().optional().describe('Task identifier'),
+      context: z.string().optional().describe('What the agent did (for self-assessment prompt)'),
+    }),
+    backendTool: 'peer-eval.evaluate',
+    timeoutMs: 30000,
+    riskLevel: 'staged_write',
+  }),
+
+  defineTool({
+    name: 'peer_eval_analyze',
+    namespace: 'peereval',
+    description: 'Run RLM-powered fleet analysis — identifies underperformers, top strategies, and strategic recommendations across all task types. Expensive but high-value. Runs weekly via cron.',
+    input: z.object({}),
+    backendTool: 'peer-eval.analyze',
+    timeoutMs: 60000,
+  }),
+
+  // ─── v4.0.5 Ghost-Tier Registration (LIN-617): Inventor Evolution Engine ──
+
+  defineTool({
+    name: 'inventor_run',
+    namespace: 'inventor',
+    description: 'Start or resume an Inventor evolution experiment. Fire-and-forget — poll inventor_status for progress. Requires experiment name + task description. Supports UCB1, greedy, random, or island (MAP-Elites) sampling.',
+    input: z.object({
+      experiment_name: z.string().describe('Unique experiment identifier (used for Redis/Neo4j namespacing)'),
+      task_description: z.string().describe('Problem description to evolve solutions for'),
+      initial_artifact: z.string().optional().describe('Optional seed solution to start from'),
+      sampling_algorithm: z.enum(['ucb1', 'greedy', 'random', 'island']).optional().describe('Sampling strategy (default: ucb1)'),
+      sample_n: z.number().optional().describe('Number of parent nodes to sample per step (default: 3)'),
+      max_steps: z.number().optional().describe('Maximum evolution steps (default: 20)'),
+      chain_mode: z.enum(['sequential', 'parallel', 'debate']).optional().describe('Chain execution mode (default: sequential)'),
+      resume: z.boolean().optional().describe('Resume a paused experiment (default: false)'),
+    }),
+    backendTool: 'inventor.run',
+    timeoutMs: 300000,
+  }),
+
+  defineTool({
+    name: 'inventor_status',
+    namespace: 'inventor',
+    description: 'Get current Inventor experiment status: running state, current step, total steps, nodes created, best score, best node ID, sampling algorithm, and last error if any.',
+    input: z.object({}),
+    backendTool: 'inventor.status',
+    timeoutMs: 10000,
+  }),
+
+  defineTool({
+    name: 'inventor_nodes',
+    namespace: 'inventor',
+    description: 'List all Inventor trial nodes from current or last experiment. Sortable by score or creation time. Each node has: artifact, score, metrics, analysis, motivation, parent lineage.',
+    input: z.object({
+      limit: z.number().optional().describe('Max nodes to return (default: 50, max: 200)'),
+      offset: z.number().optional().describe('Pagination offset (default: 0)'),
+      sort: z.enum(['score', 'created']).optional().describe('Sort order (default: score)'),
+    }),
+    backendTool: 'inventor.nodes',
+    timeoutMs: 10000,
+  }),
+
+  defineTool({
+    name: 'inventor_node',
+    namespace: 'inventor',
+    description: 'Get a specific Inventor trial node by ID. Returns full artifact, score, metrics, analysis, motivation, parent ID, island, visit count, and timestamps.',
+    input: z.object({
+      node_id: z.string().describe('The trial node ID to retrieve'),
+    }),
+    backendTool: 'inventor.node',
+    timeoutMs: 10000,
+  }),
+
+  defineTool({
+    name: 'inventor_best',
+    namespace: 'inventor',
+    description: 'Get the best-scoring Inventor trial node from the current or last experiment. Returns the winning solution with full artifact, score breakdown, and evolution lineage.',
+    input: z.object({}),
+    backendTool: 'inventor.best',
+    timeoutMs: 10000,
+  }),
+
+  defineTool({
+    name: 'inventor_stop',
+    namespace: 'inventor',
+    description: 'Stop the currently running Inventor experiment gracefully. The experiment will halt after the current step completes and persist results to history.',
+    input: z.object({}),
+    backendTool: 'inventor.stop',
+    timeoutMs: 10000,
+    riskLevel: 'staged_write',
+  }),
+
+  defineTool({
+    name: 'inventor_history',
+    namespace: 'inventor',
+    description: 'List past Inventor experiments with their status, scores, and configuration. Returns up to 20 most recent experiments from Redis history.',
+    input: z.object({
+      limit: z.number().optional().describe('Max experiments to return (default: 20, max: 50)'),
+    }),
+    backendTool: 'inventor.history',
+    timeoutMs: 10000,
+  }),
+
+  // ─── v4.0.5 Ghost-Tier Registration (LIN-617): HyperAgent Autonomous ──────
+
+  defineTool({
+    name: 'hyperagent_auto_run',
+    namespace: 'hyperagent',
+    description: 'Trigger an autonomous execution cycle. Prioritizes targets by fitness function, plans via RLM, executes via chain engine, evaluates, discovers issues, and evolves weights. Callable from ANY repo via MCP. Persistent memory ensures continuity across sessions and repos.',
+    input: z.object({
+      phase: z.enum(['phase_0', 'phase_1', 'phase_2', 'phase_3']).optional().describe('Override phase (default: current)'),
+      max_targets: z.number().optional().describe('Max targets per cycle (default: phase-dependent batch size)'),
+      caller_repo: z.string().optional().describe('Calling repo identifier for cross-repo memory tracking'),
+    }),
+    backendTool: 'hyperagent.run',
+    timeoutMs: 300000,
+  }),
+
+  defineTool({
+    name: 'hyperagent_auto_status',
+    namespace: 'hyperagent',
+    description: 'Get current autonomous executor status — phase, fitness score, edge scores, running state, cycle count, last cycle results. Callable from ANY repo via MCP.',
+    input: z.object({
+      include_history: z.boolean().optional().describe('Include last N cycle results (default: false)'),
+      history_limit: z.number().optional().describe('Number of historical cycles to include (default: 5)'),
+    }),
+    backendTool: 'hyperagent.status',
+    timeoutMs: 10000,
+  }),
+
+  defineTool({
+    name: 'hyperagent_auto_memory',
+    namespace: 'hyperagent',
+    description: 'Read/write persistent cross-repo memory for the autonomous executor. Stores lessons, discoveries, and execution context in Redis + Neo4j. Memory is keyed by domain and persists across sessions, repos, and restarts.',
+    input: z.object({
+      action: z.string().describe('Memory operation'),
+      domain: z.string().optional().describe('Memory domain (e.g. "lessons", "discoveries", "fitness", "edges")'),
+      key: z.string().optional().describe('Specific memory key (for read/write)'),
+      value: z.string().optional().describe('Value to store (for write)'),
+      caller_repo: z.string().optional().describe('Calling repo for provenance tracking'),
+    }),
+    backendTool: 'hyperagent.memory',
+    timeoutMs: 15000,
+    riskLevel: 'staged_write',
+  }),
+
+  defineTool({
+    name: 'hyperagent_auto_issues',
+    namespace: 'hyperagent',
+    description: 'List all issues discovered during autonomous execution cycles. Issues are accumulated across all cycles and repos. Useful for cross-repo coordination and backlog grooming.',
+    input: z.object({
+      limit: z.number().optional().describe('Max issues to return (default: 50)'),
+      caller_repo: z.string().optional().describe('Calling repo identifier'),
+      since_cycle: z.string().optional().describe('Only issues discovered after this cycle ID'),
+    }),
+    backendTool: 'hyperagent.issues',
+    timeoutMs: 10000,
+  }),
+
+  // ─── v4.0.5 Ghost-Tier Registration (LIN-617): Flywheel + Anomaly ─────────
+
+  defineTool({
+    name: 'flywheel_metrics',
+    namespace: 'monitor',
+    description: 'Get the Value Flywheel metrics — 5 pillars + compound score, plus latest consolidation scan report. Use to check platform growth health and cost optimization status.',
+    input: z.object({}),
+    backendTool: 'flywheel.metrics',
+    timeoutMs: 15000,
+  }),
+
+  defineTool({
+    name: 'flywheel_consolidation',
+    namespace: 'monitor',
+    description: 'Get or trigger the LLM consolidation engine — scans codebase for duplicate functionality, unused dependencies, and simplification opportunities. Returns scan report with actionable recommendations.',
+    input: z.object({
+      trigger: z.boolean().optional().describe('If true, trigger a new consolidation scan instead of reading last report'),
+    }),
+    backendTool: 'flywheel.consolidation',
+    timeoutMs: 60000,
+  }),
+
+  defineTool({
+    name: 'anomaly_status',
+    namespace: 'monitor',
+    description: 'Get anomaly watcher status — scan count, active anomalies, learned patterns. Use for proactive system health monitoring.',
+    input: z.object({}),
+    backendTool: 'anomaly-watcher.status',
+    timeoutMs: 10000,
+  }),
+
+  defineTool({
+    name: 'anomaly_scan',
+    namespace: 'monitor',
+    description: 'Trigger an on-demand anomaly scan — checks backend/RLM/Redis reachability, detects negative and positive anomalies, returns analysis. Debounced: min 30s between scans.',
+    input: z.object({}),
+    backendTool: 'anomaly-watcher.scan',
+    timeoutMs: 30000,
+  }),
+
+  defineTool({
+    name: 'anomaly_patterns',
+    namespace: 'monitor',
+    description: 'Get learned anomaly patterns with frequency and known fixes. Use to understand recurring system issues.',
+    input: z.object({}),
+    backendTool: 'anomaly-watcher.patterns',
+    timeoutMs: 10000,
+  }),
+
   // ─── Universal Agent Communication ───────────────────────────────────
 ]
 

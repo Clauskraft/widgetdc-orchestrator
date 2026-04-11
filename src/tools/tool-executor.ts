@@ -2579,6 +2579,55 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    // ── Flywheel + Anomaly Watcher (LIN-617) ────────────────────────────────
+
+    case 'flywheel_metrics': {
+      const { getFlywheelMetrics } = await import('../flywheel/flywheel-coordinator.js')
+      const { getCostSummary, getAllCostProfiles } = await import('../flywheel/cost-optimizer.js')
+      const metrics = await getFlywheelMetrics()
+      return JSON.stringify({ ...metrics, costSummary: getCostSummary(), profiles: getAllCostProfiles().slice(0, 50) })
+    }
+
+    case 'flywheel_consolidation': {
+      const { runWeeklyConsolidation } = await import('../llm/consolidation-engine.js')
+      if ((args.trigger as boolean) ?? false) {
+        const report = await runWeeklyConsolidation()
+        return JSON.stringify({ triggered: true, report })
+      }
+      const { getLastReport } = await import('../llm/consolidation-engine.js')
+      const last = getLastReport()
+      return JSON.stringify({ triggered: false, available: !!last, report: last })
+    }
+
+    case 'anomaly_status': {
+      const { getWatcherState, getActiveAnomalies, getAnomalyPatterns } = await import('../swarm/anomaly-watcher.js')
+      const state = getWatcherState()
+      return JSON.stringify({
+        lastScanAt: state.lastScanAt, totalScans: state.totalScans,
+        anomaliesDetected: state.anomaliesDetected, anomaliesResolved: state.anomaliesResolved,
+        activeCount: state.activeAnomalies.length, patternCount: state.patterns.length,
+      })
+    }
+
+    case 'anomaly_scan': {
+      const { runAnomalyScan } = await import('../swarm/anomaly-watcher.js')
+      const result = await runAnomalyScan()
+      return JSON.stringify({
+        anomalies: result.anomalies.length,
+        negative: result.anomalies.filter((a: any) => a.valence === 'negative').length,
+        positive: result.anomalies.filter((a: any) => a.valence === 'positive').length,
+        critical: result.anomalies.filter((a: any) => a.severity === 'critical').length,
+        health: result.health,
+        patterns: result.patterns.length,
+      })
+    }
+
+    case 'anomaly_patterns': {
+      const { getAnomalyPatterns } = await import('../swarm/anomaly-watcher.js')
+      const patterns = getAnomalyPatterns()
+      return JSON.stringify({ patterns, count: patterns.length })
+    }
+
     default:
       throw new Error(`Unknown tool: ${toolName}`)
   }

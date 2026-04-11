@@ -1741,6 +1741,41 @@ await test('202. POST /api/tools/agentic_compliance_audit responds', async () =>
   assert(r.body?.data?.tool_name === 'agentic_compliance_audit', `wrong tool_name`)
 })
 
+// ── 203. flywheel_metrics — MCP tool exists ──
+await test('203. POST /api/tools/flywheel_metrics responds', async () => {
+  const r = await api('/api/tools/flywheel_metrics', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `flywheel_metrics not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'flywheel_metrics', `wrong tool_name`)
+})
+
+// ── 204. flywheel_consolidation — MCP tool exists ──
+await test('204. POST /api/tools/flywheel_consolidation responds', async () => {
+  const r = await api('/api/tools/flywheel_consolidation', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `flywheel_consolidation not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'flywheel_consolidation', `wrong tool_name`)
+})
+
+// ── 205. anomaly_status — MCP tool exists ──
+await test('205. POST /api/tools/anomaly_status responds', async () => {
+  const r = await api('/api/tools/anomaly_status', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `anomaly_status not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'anomaly_status', `wrong tool_name`)
+})
+
+// ── 206. anomaly_scan — MCP tool exists ──
+await test('206. POST /api/tools/anomaly_scan responds', async () => {
+  const r = await api('/api/tools/anomaly_scan', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `anomaly_scan not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'anomaly_scan', `wrong tool_name`)
+})
+
+// ── 207. anomaly_patterns — MCP tool exists ──
+await test('207. POST /api/tools/anomaly_patterns responds', async () => {
+  const r = await api('/api/tools/anomaly_patterns', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `anomaly_patterns not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'anomaly_patterns', `wrong tool_name`)
+})
+
 // ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped

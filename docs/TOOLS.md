@@ -116,6 +116,10 @@ Every tool declares governance metadata per the Neural Bridge v2 specification:
 | 72 | `inventor_best` | inventor | 5s | Get best-scoring Inventor trial node |
 | 73 | `inventor_stop` | inventor | 5s | Stop running Inventor experiment |
 | 74 | `inventor_history` | inventor | 5s | List Inventor experiment history |
+| 74a | `hyperagent_auto_run` | hyperagent | 300s | Trigger autonomous execution cycle |
+| 74b | `hyperagent_auto_status` | hyperagent | 5s | Get autonomous executor status |
+| 74c | `hyperagent_auto_memory` | hyperagent | 15s | Read/write persistent cross-repo memory |
+| 74d | `hyperagent_auto_issues` | hyperagent | 5s | List discovered autonomous execution issues |
 | 75 | `data_graph_read` | data | 15s | Execute a read-only Cypher query against Neo4j |
 | 76 | `data_graph_stats` | data | 10s | Get Neo4j graph statistics |
 | 77 | `data_redis_inspect` | data | 10s | Inspect Redis state for cache health monitoring |
@@ -158,6 +162,11 @@ Every tool declares governance metadata per the Neural Bridge v2 specification:
 | 112 | `agentic_reward_compute` | agentic | 10s | Compute reward R = 0.4·Q + 0.3·C + 0.3·L for an agent delivery |
 | 113 | `agentic_chaos_test` | agentic | 60s | Run chaos engineering test suite (4 scenarios, <2s SLA gate) |
 | 114 | `agentic_compliance_audit` | agentic | 15s | Run GDPR Art.44 compliance audit for a data processing action |
+| 115 | `flywheel_metrics` | monitor | 15s | Get Value Flywheel metrics + cost summary |
+| 116 | `flywheel_consolidation` | monitor | 60s | Get or trigger LLM consolidation scan |
+| 117 | `anomaly_status` | monitor | 5s | Get anomaly watcher status |
+| 118 | `anomaly_scan` | monitor | 30s | Trigger on-demand anomaly scan |
+| 119 | `anomaly_patterns` | monitor | 5s | Get learned anomaly patterns |
 
 ---
 
@@ -2128,6 +2137,88 @@ curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/agent
   -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"action":"vendor_scrape","data_class":"PII"}'
+```
+
+---
+
+#### `flywheel_metrics`
+
+**Description:** Get the Value Flywheel metrics — 5 pillars + compound score, plus latest consolidation scan report and cost optimizer summary. Use to check platform growth health.
+
+**Timeout:** 15,000 ms | **Handler:** orchestrator
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/flywheel_metrics \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+---
+
+#### `flywheel_consolidation`
+
+**Description:** Get or trigger the LLM consolidation engine — scans codebase for duplicate functionality, unused dependencies, and simplification opportunities.
+
+**Timeout:** 60,000 ms | **Handler:** orchestrator
+
+**Optional:** `trigger` (boolean — if true, run a new scan)
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/flywheel_consolidation \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+---
+
+#### `anomaly_status`
+
+**Description:** Get anomaly watcher status — scan count, active anomalies, learned patterns. Use for proactive system health monitoring.
+
+**Timeout:** 10,000 ms | **Handler:** orchestrator
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/anomaly_status \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+---
+
+#### `anomaly_scan`
+
+**Description:** Trigger an on-demand anomaly scan — checks backend/RLM/Redis reachability, detects anomalies, returns analysis. Debounced: min 30s between scans.
+
+**Timeout:** 30,000 ms | **Handler:** orchestrator
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/anomaly_scan \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+---
+
+#### `anomaly_patterns`
+
+**Description:** Get learned anomaly patterns with frequency and known fixes.
+
+**Timeout:** 10,000 ms | **Handler:** orchestrator
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/anomaly_patterns \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{}'
 ```
 
 ---

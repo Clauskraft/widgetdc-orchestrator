@@ -21,6 +21,14 @@ const INFRA_ROUTERS = new Set([
   // - tools: IS the tool-registry REST surface (POST /tools/call dispatches registered tools)
   // - openclaw: external service proxy (forwards to openclaw.up.railway.app)
   'tools', 'openclaw',
+  // v4.0.5 (LIN-617): Reclassified as infra/observability
+  'grafana-proxy', 'prometheus-metrics', 'tool-output', 'linear-proxy',
+  // v4.0.5: Neural bus is internal agent communication
+  'neural-bus',
+  // v4.0.5: Obsidian is export/format layer
+  'obsidian',
+  // v4.0.5: Phantom BOM is supply-chain metadata
+  'phantom-bom',
 ])
 
 // Routers that SHOULD have tool-registry entries (feature routers)
@@ -61,6 +69,14 @@ const EXPECTED_TOOLS_BY_ROUTER = {
   'llm': ['llm_chat', 'llm_providers'],
   'drill': ['drill_start', 'drill_down', 'drill_up', 'drill_children'],
   's1-s4': ['research_harvest'],
+  // v4.0.5 (LIN-617): Ghost-tier registration
+  'pheromone': ['pheromone_status', 'pheromone_sense', 'pheromone_deposit', 'pheromone_heatmap'],
+  'peer-eval': ['peer_eval_status', 'peer_eval_fleet', 'peer_eval_evaluate', 'peer_eval_analyze'],
+  'inventor': ['inventor_run', 'inventor_status', 'inventor_nodes', 'inventor_node', 'inventor_best', 'inventor_stop', 'inventor_history'],
+  'hyperagent': ['hyperagent_auto_run', 'hyperagent_auto_status', 'hyperagent_auto_memory', 'hyperagent_auto_issues'],
+  // v4.0.5 (LIN-617): Flywheel + Anomaly registration
+  'flywheel': ['flywheel_metrics', 'flywheel_consolidation'],
+  'anomaly-watcher': ['anomaly_status', 'anomaly_scan', 'anomaly_patterns'],
 }
 
 function extractEndpoints(routerFile) {
