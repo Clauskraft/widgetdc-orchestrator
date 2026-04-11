@@ -128,7 +128,11 @@ var init_config = __esm({
       obsidianToken: optional("OBSIDIAN_API_TOKEN", ""),
       // GitHub token for Obsidian vault fallback (private repo access)
       githubToken: optional("GITHUB_TOKEN", ""),
-      obsidianGithubRepo: optional("OBSIDIAN_GITHUB_REPO", "Clauskraft/Obsidian-Vault")
+      obsidianGithubRepo: optional("OBSIDIAN_GITHUB_REPO", "Clauskraft/Obsidian-Vault"),
+      // Neo4j AuraDB (shared with backend — direct graph access for fantom_validator etc.)
+      neo4jUri: optional("NEO4J_URI", ""),
+      neo4jUser: optional("NEO4J_USER", "neo4j"),
+      neo4jPassword: optional("NEO4J_PASSWORD", "")
     };
   }
 });
