@@ -16,6 +16,50 @@ import { logger } from '../logger.js'
 import type { AgentRequest, AgentResponse } from '@widgetdc/contracts/agent'
 import { agentSuccess, agentFailure } from '../agent/agent-interface.js'
 import { getAdaptiveWeights } from './adaptive-rag.js'
+import { deposit as pheromoneDeposit, sense as pheromoneSense } from '../swarm/pheromone-layer.js'
+import { config } from '../config.js'
+
+// ─── Adoption Layer v4 helpers ───────────────────────────────────────────────
+
+async function mcpCall(tool: string, payload: Record<string, unknown>): Promise<unknown> {
+  try {
+    const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(config.backendApiKey ? { 'Authorization': `Bearer ${config.backendApiKey}` } : {}),
+      },
+      body: JSON.stringify({ tool, payload }),
+      signal: AbortSignal.timeout(10000),
+    })
+    const data = (await res.json().catch(() => null)) as Record<string, unknown> | null
+    return data?.result ?? data
+  } catch (err) {
+    logger.warn({ err: String(err), tool }, 'mcpCall failed (adoption helper)')
+    return null
+  }
+}
+
+/** Write claim AgentMemory before work per ADOPTION_LAYER_v4 §1.1 */
+async function writeClaim(agentId: string, scope: string, vprop: string, description: string) {
+  await mcpCall('graph.write_cypher', {
+    query: `MERGE (m:AgentMemory {agentId: $agentId, key: $key})
+            SET m.value = $value, m.type = 'claim', m.vprop = $vprop,
+                m.expiresAt = datetime() + duration('PT1H'),
+                m.updatedAt = datetime()`,
+    params: { agentId, key: `claim-${scope}-${Date.now()}`, value: description, vprop },
+  })
+}
+
+/** Write closure broadcast after work per ADOPTION_LAYER_v4 §1.2 */
+async function writeClosure(agentId: string, scope: string, vprop: string, outcome: string, summary: string) {
+  await mcpCall('graph.write_cypher', {
+    query: `MERGE (m:AgentMemory {agentId: $agentId, key: $key})
+            SET m.value = $value, m.type = 'closure', m.vprop = $vprop,
+                m.outcome = $outcome, m.updatedAt = datetime()`,
+    params: { agentId, key: `closure-${scope}-${Date.now()}`, value: summary, vprop, outcome },
+  })
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -221,7 +265,22 @@ export async function handleRAGRoute(request: AgentRequest): Promise<AgentRespon
       return agentFailure(request, 'No query provided. Include query in context.query')
     }
 
-    const decision = classifyStrategy(query)
+    // ADOPTION_LAYER_v4 §2.1: audit.lessons at tool boot (best-effort, no throw)
+    mcpCall('audit.lessons', { agentId: 'rag-router' }).catch(() => {})
+
+    let decision = classifyStrategy(query)
+
+    // ADOPTION_LAYER_v4 §2.1 pheromone-weighted strategy selection:
+    // if recent ATTRACTION trail on a strategy scores higher than classifier's pick, switch.
+    try {
+      const senseRes = await pheromoneSense({ domain: 'rag', agentId: 'rag-router' } as any)
+      const strongest = (senseRes as any)?.strongest ?? null
+      if (strongest?.metadata?.strategy && strongest.intensity > 0.7
+          && strongest.metadata.strategy !== decision.strategy
+          && decision.confidence < 0.8) {
+        decision = { ...decision, strategy: strongest.metadata.strategy, reasoning: `${decision.reasoning} + pheromone-override` }
+      }
+    } catch { /* pheromone miss — keep classifier pick */ }
 
     // Execute via existing adaptive_rag_query with chosen channels
     const { queryAdaptiveRAG } = await import('./adaptive-rag.js')
@@ -229,6 +288,16 @@ export async function handleRAGRoute(request: AgentRequest): Promise<AgentRespon
       channels: decision.channels,
       limit: typeof request.context.limit === 'number' ? request.context.limit : 10,
     })
+
+    // ADOPTION_LAYER_v4 §2.1 post-outcome pheromone deposit (SUCCESS → attraction)
+    try {
+      await pheromoneDeposit({
+        agentId: 'rag-router', type: 'STATUS', domain: 'rag',
+        intensity: Math.min(1, results.length / 10),
+        message: `RAG route via ${decision.strategy} → ${results.length} results`,
+        metadata: { strategy: decision.strategy, channels: decision.channels, query_len: query.length },
+      } as any)
+    } catch { /* */ }
 
     const lines = [
       `# RAG Route Decision`,
@@ -263,8 +332,28 @@ export async function handleRAGRoute(request: AgentRequest): Promise<AgentRespon
  * V6: Skill Corpus Sync — trigger nightly sync.
  */
 export async function handleCorpusSync(request: AgentRequest): Promise<AgentResponse> {
+  const scope = `corpus-${new Date().toISOString().slice(0, 13)}`
   try {
+    // ADOPTION_LAYER_v4 §1.1 claim-before-work + §2.5 audit.lessons at boot
+    await writeClaim('corpus-sync', scope, 'V6', 'Nightly skill corpus sync')
+    mcpCall('audit.lessons', { agentId: 'corpus-sync' }).catch(() => {})
+
     const result = await syncSkillCorpus()
+
+    // ADOPTION_LAYER_v4 §2.1 pheromone deposit on ingestion
+    try {
+      await pheromoneDeposit({
+        agentId: 'corpus-sync', type: 'INTEL', domain: 'prompts',
+        intensity: Math.min(1, result.ingested / 20),
+        message: `Ingested ${result.ingested} prompts from awesome-lists`,
+        metadata: { ingested: result.ingested, skipped: result.skipped, errors: result.errors.length },
+      } as any)
+    } catch { /* */ }
+
+    // Closure broadcast
+    await writeClosure('corpus-sync', scope, 'V6',
+      result.errors.length > 0 ? 'partial' : 'success',
+      JSON.stringify({ ingested: result.ingested, skipped: result.skipped, errors: result.errors.length }))
     const lines = [
       `# Skill Corpus Sync`,
       ``,

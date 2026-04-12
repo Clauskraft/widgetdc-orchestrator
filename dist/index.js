@@ -12949,6 +12949,26 @@ var init_tool_registry = __esm({
         timeoutMs: 18e4,
         outputDescription: "Deliverable with title, sections, citations, markdown content, confidence scores"
       }),
+      // ─── rag.* — RAG Router + Corpus Sync (Phantom Week 8, V6, V7) ──
+      defineTool({
+        name: "rag_route",
+        namespace: "rag",
+        description: 'Adaptive RAG router: classifies query into strategy (simple/multi-hop/ppr/community) and dispatches to optimal retrieval channels. Uses Q-learning weights from adaptive-rag. V7: "GraphRAG-Anywhere router".',
+        input: z.object({
+          query: z.string().describe("Search query to route and execute"),
+          limit: z.number().optional().describe("Max results (default 10)")
+        }),
+        timeoutMs: 3e4,
+        outputDescription: "Route decision + retrieval results with confidence scores"
+      }),
+      defineTool({
+        name: "skill_corpus_sync",
+        namespace: "rag",
+        description: 'Trigger nightly skill corpus sync: crawls configured awesome-lists/repos \u2192 ingests into knowledge base. MERGE idempotent (content hash dedup). V6: "Self-updating SKILL.md corpus".',
+        input: z.object({}),
+        timeoutMs: 6e4,
+        outputDescription: "Sync results: ingested count, skipped count, errors"
+      }),
       defineTool({
         name: "failure_harvest",
         namespace: "intelligence",
@@ -16067,7 +16087,7 @@ __export(hyperagent_exports, {
   validateWebhookSignature: () => validateWebhookSignature
 });
 import { v4 as uuid10 } from "uuid";
-import * as crypto from "crypto";
+import * as crypto2 from "crypto";
 function onPlanEvent(fn) {
   planEventSubscribers.add(fn);
   return () => {
@@ -16338,8 +16358,8 @@ function validateWebhookSignature(body, signature) {
   const secret = process.env.APPROVAL_WEBHOOK_SECRET;
   if (!secret) return true;
   if (!signature) return false;
-  const expected = crypto.createHmac("sha256", secret).update(body).digest("hex");
-  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+  const expected = crypto2.createHmac("sha256", secret).update(body).digest("hex");
+  return crypto2.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
 }
 async function executePlan(planId) {
   const plan = plans.get(planId);
@@ -22681,6 +22701,289 @@ var init_multi_agent_pr_reviewer = __esm({
   }
 });
 
+// src/rag/adaptive-rag-router.ts
+var adaptive_rag_router_exports = {};
+__export(adaptive_rag_router_exports, {
+  classifyStrategy: () => classifyStrategy,
+  handleCorpusSync: () => handleCorpusSync,
+  handleRAGRoute: () => handleRAGRoute,
+  syncSkillCorpus: () => syncSkillCorpus
+});
+async function mcpCall6(tool, payload) {
+  try {
+    const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+      },
+      body: JSON.stringify({ tool, payload }),
+      signal: AbortSignal.timeout(1e4)
+    });
+    const data = await res.json().catch(() => null);
+    return data?.result ?? data;
+  } catch (err) {
+    logger.warn({ err: String(err), tool }, "mcpCall failed (adoption helper)");
+    return null;
+  }
+}
+async function writeClaim(agentId, scope, vprop, description) {
+  await mcpCall6("graph.write_cypher", {
+    query: `MERGE (m:AgentMemory {agentId: $agentId, key: $key})
+            SET m.value = $value, m.type = 'claim', m.vprop = $vprop,
+                m.expiresAt = datetime() + duration('PT1H'),
+                m.updatedAt = datetime()`,
+    params: { agentId, key: `claim-${scope}-${Date.now()}`, value: description, vprop }
+  });
+}
+async function writeClosure(agentId, scope, vprop, outcome, summary) {
+  await mcpCall6("graph.write_cypher", {
+    query: `MERGE (m:AgentMemory {agentId: $agentId, key: $key})
+            SET m.value = $value, m.type = 'closure', m.vprop = $vprop,
+                m.outcome = $outcome, m.updatedAt = datetime()`,
+    params: { agentId, key: `closure-${scope}-${Date.now()}`, value: summary, vprop, outcome }
+  });
+}
+function classifyStrategy(query) {
+  const q = query.toLowerCase();
+  const wordCount = q.split(/\s+/).length;
+  const hasMultipleEntities = (q.match(/["'][^"']+["']/g) || []).length >= 2;
+  const hasComparisonWords = /\b(compare|vs|versus|difference|similar|unlike)\b/i.test(q);
+  const hasAggregationWords = /\b(all|total|count|sum|average|list|every|each)\b/i.test(q);
+  const hasPathWords = /\b(path|connection|relationship|link|chain|route|between)\b/i.test(q);
+  const hasComplexityMarkers = wordCount > 15 || hasMultipleEntities || hasComparisonWords;
+  const hasCommunitySignals = /\b(cluster|group|category|pattern|trend|theme|common)\b/i.test(q);
+  const hasPPRSignals = /^["'][^"']+["']/.test(q.trim()) || /\b(find|get|show|lookup|retrieve)\b/i.test(q);
+  if (hasComplexityMarkers && hasPathWords) {
+    const weights = getAdaptiveWeightsSync();
+    return {
+      strategy: "multi-hop",
+      confidence: 0.75,
+      reasoning: `Query has ${wordCount} words + path/relationship keywords \u2192 multi-hop traversal needed`,
+      channels: weights.multi_hop_channels,
+      fallback_strategy: "simple"
+    };
+  }
+  if (hasCommunitySignals && hasAggregationWords) {
+    return {
+      strategy: "community",
+      confidence: 0.65,
+      reasoning: "Query asks for patterns/clusters/trends \u2192 community detection strategy",
+      channels: ["community", "srag"],
+      fallback_strategy: "multi-hop"
+    };
+  }
+  if (hasPPRSignals && !hasComplexityMarkers) {
+    return {
+      strategy: "ppr",
+      confidence: 0.7,
+      reasoning: "Specific entity lookup \u2192 personalized pagerank",
+      channels: ["cypher", "graphrag"],
+      fallback_strategy: "simple"
+    };
+  }
+  return {
+    strategy: "simple",
+    confidence: 0.6,
+    reasoning: `Simple query (${wordCount} words) \u2192 standard retrieval`,
+    channels: getAdaptiveWeightsSync().simple_channels,
+    fallback_strategy: "multi-hop"
+  };
+}
+function getAdaptiveWeightsSync() {
+  return {
+    simple_channels: ["graphrag", "srag", "cypher"],
+    multi_hop_channels: ["graphrag", "cypher", "community", "srag"],
+    structured_channels: ["cypher", "graphrag"],
+    confidence_threshold: 0.4,
+    updated_at: (/* @__PURE__ */ new Date()).toISOString(),
+    training_samples: 0
+  };
+}
+async function syncSkillCorpus(sources = DEFAULT_CORPUS_SOURCES) {
+  const results = { ingested: 0, skipped: 0, errors: [] };
+  for (const source of sources) {
+    try {
+      const rawUrl = `https://raw.githubusercontent.com/${source.repo}/main/${source.path}`;
+      const res = await fetch(rawUrl, {
+        signal: AbortSignal.timeout(1e4)
+      });
+      if (!res.ok) {
+        results.errors.push(`${source.repo}: HTTP ${res.status}`);
+        continue;
+      }
+      const content = await res.text();
+      if (content.length < 100) {
+        results.skipped++;
+        continue;
+      }
+      const hash = await hashContent(content);
+      const title = `${source.category}: ${source.repo}/${source.path}`;
+      const { ingestKnowledge: ingestKnowledge2 } = await Promise.resolve().then(() => (init_prompt_library(), prompt_library_exports));
+      const doc = await ingestKnowledge2({
+        title,
+        content: content.slice(0, 1e4),
+        // Cap at 10KB
+        source_type: "url",
+        source_path: `https://github.com/${source.repo}/blob/main/${source.path}`,
+        tags: [...source.tags, "corpus-sync", `hash:${hash.slice(0, 8)}`],
+        word_count: content.split(/\s+/).length,
+        metadata: { repo: source.repo, category: source.category, hash, synced_at: (/* @__PURE__ */ new Date()).toISOString() }
+      });
+      if (doc) {
+        results.ingested++;
+      } else {
+        results.skipped++;
+      }
+      if (sources.indexOf(source) < sources.length - 1) {
+        await new Promise((r) => setTimeout(r, 1e3));
+      }
+    } catch (err) {
+      results.errors.push(`${source.repo}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  logger.info(results, "Skill corpus sync complete");
+  return results;
+}
+async function hashContent(content) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(content);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function handleRAGRoute(request) {
+  try {
+    const query = typeof request.context?.query === "string" ? request.context.query : null;
+    if (!query) {
+      return agentFailure(request, "No query provided. Include query in context.query");
+    }
+    mcpCall6("audit.lessons", { agentId: "rag-router" }).catch(() => {
+    });
+    let decision = classifyStrategy(query);
+    try {
+      const senseRes = await sense({ domain: "rag", agentId: "rag-router" });
+      const strongest = senseRes?.strongest ?? null;
+      if (strongest?.metadata?.strategy && strongest.intensity > 0.7 && strongest.metadata.strategy !== decision.strategy && decision.confidence < 0.8) {
+        decision = { ...decision, strategy: strongest.metadata.strategy, reasoning: `${decision.reasoning} + pheromone-override` };
+      }
+    } catch {
+    }
+    const { queryAdaptiveRAG } = await import("./adaptive-rag.js");
+    const results = await queryAdaptiveRAG(query, {
+      channels: decision.channels,
+      limit: typeof request.context.limit === "number" ? request.context.limit : 10
+    });
+    try {
+      await deposit({
+        agentId: "rag-router",
+        type: "STATUS",
+        domain: "rag",
+        intensity: Math.min(1, results.length / 10),
+        message: `RAG route via ${decision.strategy} \u2192 ${results.length} results`,
+        metadata: { strategy: decision.strategy, channels: decision.channels, query_len: query.length }
+      });
+    } catch {
+    }
+    const lines = [
+      `# RAG Route Decision`,
+      ``,
+      `**Query:** ${query.slice(0, 100)}${query.length > 100 ? "..." : ""}`,
+      `**Strategy:** ${decision.strategy}`,
+      `**Confidence:** ${decision.confidence}`,
+      `**Reasoning:** ${decision.reasoning}`,
+      `**Channels:** ${decision.channels.join(", ")}`,
+      `**Fallback:** ${decision.fallback_strategy}`,
+      ``,
+      `## Results (${results.length} found)`,
+      ``
+    ];
+    for (const r of results.slice(0, 5)) {
+      const score = r.confidence ?? r.score ?? "N/A";
+      const source = r.source ?? r.channel ?? "unknown";
+      const text = r.content ?? r.text ?? "";
+      lines.push(`### [${score}] ${source}`);
+      lines.push(text.slice(0, 200));
+      lines.push("");
+    }
+    return agentSuccess(request, lines.join("\n"), { input: 0, output: lines.length * 10 });
+  } catch (err) {
+    return agentFailure(request, err instanceof Error ? err.message : String(err));
+  }
+}
+async function handleCorpusSync(request) {
+  const scope = `corpus-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 13)}`;
+  try {
+    await writeClaim("corpus-sync", scope, "V6", "Nightly skill corpus sync");
+    mcpCall6("audit.lessons", { agentId: "corpus-sync" }).catch(() => {
+    });
+    const result = await syncSkillCorpus();
+    try {
+      await deposit({
+        agentId: "corpus-sync",
+        type: "INTEL",
+        domain: "prompts",
+        intensity: Math.min(1, result.ingested / 20),
+        message: `Ingested ${result.ingested} prompts from awesome-lists`,
+        metadata: { ingested: result.ingested, skipped: result.skipped, errors: result.errors.length }
+      });
+    } catch {
+    }
+    await writeClosure(
+      "corpus-sync",
+      scope,
+      "V6",
+      result.errors.length > 0 ? "partial" : "success",
+      JSON.stringify({ ingested: result.ingested, skipped: result.skipped, errors: result.errors.length })
+    );
+    const lines = [
+      `# Skill Corpus Sync`,
+      ``,
+      `**Ingested:** ${result.ingested}`,
+      `**Skipped:** ${result.skipped}`,
+      `**Errors:** ${result.errors.length}`,
+      ``
+    ];
+    if (result.errors.length > 0) {
+      lines.push(`## Errors`);
+      result.errors.forEach((e) => lines.push(`- ${e}`));
+    }
+    return agentSuccess(request, lines.join("\n"), { input: 0, output: lines.length * 10 });
+  } catch (err) {
+    return agentFailure(request, err instanceof Error ? err.message : String(err));
+  }
+}
+var DEFAULT_CORPUS_SOURCES;
+var init_adaptive_rag_router = __esm({
+  "src/rag/adaptive-rag-router.ts"() {
+    "use strict";
+    init_logger();
+    init_agent_interface();
+    init_pheromone_layer();
+    init_config();
+    DEFAULT_CORPUS_SOURCES = [
+      {
+        repo: "microsoft/PowerPlatform-Connectors",
+        path: "connectors/README.md",
+        category: "connector",
+        tags: ["power-platform", "connectors", "microsoft"]
+      },
+      {
+        repo: "Hannibal046/Awesome-LLM",
+        path: "README.md",
+        category: "llm-tool",
+        tags: ["llm", "awesome-list", "tools"]
+      },
+      {
+        repo: "dair-ai/Prompt-Engineering-Guide",
+        path: "README.md",
+        category: "prompt-pattern",
+        tags: ["prompt-engineering", "patterns", "techniques"]
+      }
+    ];
+  }
+});
+
 // src/competitive-crawler.ts
 var competitive_crawler_exports = {};
 __export(competitive_crawler_exports, {
@@ -27271,6 +27574,43 @@ ${formatted}`;
         return `Deliverable draft failed: ${err instanceof Error ? err.message : String(err)}`;
       }
     }
+    // ─── rag.* — RAG Router + Corpus Sync (Phantom Week 8, V6, V7) ──
+    case "rag_route": {
+      try {
+        const { handleRAGRoute: handleRAGRoute2 } = await Promise.resolve().then(() => (init_adaptive_rag_router(), adaptive_rag_router_exports));
+        const query = String(args.query ?? "");
+        if (!query || query.length < 3) return "Error: query required (min 3 chars)";
+        const request = {
+          request_id: `rag-${Date.now().toString(36)}`,
+          agent_id: "orchestrator",
+          task: `RAG route and query: ${query.slice(0, 80)}`,
+          capabilities: ["rag", "retrieval"],
+          context: { query, limit: args.limit },
+          priority: "normal"
+        };
+        const response = await handleRAGRoute2(request);
+        return response.output;
+      } catch (err) {
+        return `RAG route failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "skill_corpus_sync": {
+      try {
+        const { handleCorpusSync: handleCorpusSync2 } = await Promise.resolve().then(() => (init_adaptive_rag_router(), adaptive_rag_router_exports));
+        const request = {
+          request_id: `corpus-sync-${Date.now().toString(36)}`,
+          agent_id: "orchestrator",
+          task: "Skill corpus sync",
+          capabilities: ["corpus", "ingestion"],
+          context: {},
+          priority: "low"
+        };
+        const response = await handleCorpusSync2(request);
+        return response.output;
+      } catch (err) {
+        return `Corpus sync failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
     case "failure_harvest": {
       try {
         const { harvestFailures: harvestFailures2, buildFailureSummary: buildFailureSummary2 } = await Promise.resolve().then(() => (init_failure_harvester(), failure_harvester_exports));
@@ -28992,6 +29332,9 @@ var init_mcp_caller = __esm({
       // Value-Props (Phantom Week 7)
       "pr_review_parallel",
       "deliverable_draft",
+      // Value-Props (Phantom Week 8)
+      "rag_route",
+      "skill_corpus_sync",
       // Model routing
       "model_providers",
       "model_route",
@@ -34048,7 +34391,7 @@ init_llm_proxy();
 init_dual_rag();
 init_agent_registry();
 init_routing_engine();
-async function mcpCall6(tool, payload) {
+async function mcpCall7(tool, payload) {
   const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
     method: "POST",
     headers: {
@@ -34063,7 +34406,7 @@ async function mcpCall6(tool, payload) {
 }
 async function storeEpisode(title, description, events, outcome, tags) {
   try {
-    await mcpCall6("memory_operation", {
+    await mcpCall7("memory_operation", {
       action: "RECORD_EPISODE",
       data: {
         title,
@@ -34090,7 +34433,7 @@ async function storeGraphMemory(agentId, type, content, tags) {
       created_at: datetime(),
       source: 'command-center-chat'
     }) RETURN m`;
-    await mcpCall6("graph.write_cypher", {
+    await mcpCall7("graph.write_cypher", {
       query: cypher,
       parameters: { agent_id: agentId, type, content: content.slice(0, 4e3), tags }
     });
@@ -34101,7 +34444,7 @@ async function storeGraphMemory(agentId, type, content, tags) {
 }
 async function storeSRAG(content, tags, source) {
   try {
-    await mcpCall6("srag.ingest", {
+    await mcpCall7("srag.ingest", {
       content,
       source,
       tags,
@@ -34284,7 +34627,7 @@ chatRouter.post("/send", (req, res) => {
   broadcastMessage(msg);
   notifyChatMessage(msg.from, msg.to, msg.message);
   logger.info({ from: msg.from, to: msg.to, type: msg.type }, "A2A chat message sent");
-  mcpCall6("graph.write_cypher", {
+  mcpCall7("graph.write_cypher", {
     query: `MERGE (m:AgentMemory {agentId: $from, key: $key}) SET m.value = $value, m.type = 'a2a_message', m.updatedAt = datetime()`,
     params: {
       from: msg.from,
@@ -37344,6 +37687,18 @@ function registerDefaultLoops() {
       name: "Agent Drift Monitor",
       mode: "sequential",
       steps: [{ agent_id: "orchestrator", tool_name: "agent_drift_report", arguments: {} }]
+    }
+  });
+  registerCronJob({
+    id: "skill-corpus-sync",
+    name: "Skill Corpus Sync (Nightly Awesome-List Crawl)",
+    schedule: "0 3 * * *",
+    // Daily 03:00 UTC
+    enabled: true,
+    chain: {
+      name: "Skill Corpus Sync",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "skill_corpus_sync", arguments: {} }]
     }
   });
   registerCronJob({
