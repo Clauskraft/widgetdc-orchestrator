@@ -264,6 +264,7 @@ app.use(auditMiddleware)
 app.use('/agents', requireApiKey, agentsRouter)
 app.use('/tools', requireApiKey, apiRateLimiter, toolsRouter)
 app.use('/chat', requireApiKey, chatRouter)
+app.use('/api/chat', requireApiKey, chatRouter)  // A2A alias — agents call /api/chat/send
 app.use('/chains', requireApiKey, apiRateLimiter, chainsRouter)
 app.use('/cognitive', requireApiKey, apiRateLimiter, cognitiveRouter)
 app.use('/cron', requireApiKey, cronRouter)

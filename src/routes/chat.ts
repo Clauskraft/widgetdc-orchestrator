@@ -279,6 +279,46 @@ chatRouter.post('/message', (req: Request, res: Response) => {
   res.json({ success: true, data: { id: msg.id, timestamp: msg.timestamp } })
 })
 
+// ─── POST /send — Simple A2A message (alias for /message) ───────────────────
+chatRouter.post('/send', (req: Request, res: Response) => {
+  const { from, to, message, thread_id } = req.body
+  if (!from || !to || !message) {
+    res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_PAYLOAD', message: 'from, to, and message are required', status_code: 400 },
+    })
+    return
+  }
+
+  const msg = {
+    from,
+    to,
+    message,
+    source: 'agent' as const,
+    type: 'message' as const,
+    id: msgId(),
+    timestamp: new Date().toISOString(),
+    thread_id: thread_id || `a2a-${Date.now()}`,
+    provider: 'orchestrator',
+  }
+
+  broadcastMessage(msg)
+  notifyChatMessage(msg.from, msg.to, msg.message)
+  logger.info({ from: msg.from, to: msg.to, type: msg.type }, 'A2A chat message sent')
+
+  // Persist to Neo4j AgentMemory for cross-session recall
+  mcpCall('graph.write_cypher', {
+    query: `MERGE (m:AgentMemory {agentId: $from, key: $key}) SET m.value = $value, m.type = 'a2a_message', m.updatedAt = datetime()`,
+    params: {
+      from: msg.from,
+      key: `a2a-${msg.id}`,
+      value: JSON.stringify({ to: msg.to, message: msg.message.slice(0, 500), thread_id: msg.thread_id }),
+    },
+  }).catch(() => {})
+
+  res.json({ success: true, data: { id: msg.id, timestamp: msg.timestamp } })
+})
+
 // ─── GET /history — Persistent message history ───────────────────────────────
 chatRouter.get('/history', async (req: Request, res: Response) => {
   const limit = Math.min(parseInt(req.query.limit as string) || 100, 500)
