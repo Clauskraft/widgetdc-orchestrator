@@ -293,14 +293,14 @@ function mergeVerdicts(pr: PRDiff, verdicts: ReviewVerdict[]): MergedReview {
   if (allStrengths.length > 0) {
     summaryLines.push(`## Strengths`)
     summaryLines.push(``)
-    [...new Set(allStrengths)].forEach(s => summaryLines.push(`- ${s}`))
+    Array.from(new Set(allStrengths)).forEach(s => summaryLines.push(`- ${s}`))
     summaryLines.push(``)
   }
 
   if (allSuggestions.length > 0) {
     summaryLines.push(`## Suggestions`)
     summaryLines.push(``)
-    [...new Set(allSuggestions)].forEach(s => summaryLines.push(`- ${s}`))
+    Array.from(new Set(allSuggestions)).forEach(s => summaryLines.push(`- ${s}`))
     summaryLines.push(``)
   }
 

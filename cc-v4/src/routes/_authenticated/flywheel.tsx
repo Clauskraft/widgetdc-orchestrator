@@ -2,12 +2,13 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { apiGet, apiPost } from '@/lib/api-client'
+import { usePlatformSocket } from '@/hooks/usePlatformSocket'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
-import { RefreshCw, TrendingUp, TrendingDown, Minus, Zap } from 'lucide-react'
+import { RefreshCw, TrendingUp, TrendingDown, Minus, Zap, Wifi, WifiOff } from 'lucide-react'
 import { RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, Tooltip } from 'recharts'
 
 interface PillarScore {
@@ -90,6 +91,11 @@ function FlywheelPage() {
   const [syncing, setSyncing] = useState(false)
   const [scanning, setScanning] = useState(false)
 
+  // WebSocket for real-time updates (falls back to polling if unavailable)
+  const { connected: socketConnected } = usePlatformSocket({
+    queryKeys: [['flywheel-metrics'], ['flywheel-consolidation']],
+  })
+
   const { data: fw, isLoading: fwLoading, error: fwError } = useQuery<FlywheelResponse>({
     queryKey: ['flywheel-metrics'],
     queryFn: () => apiGet('/api/flywheel/metrics'),
@@ -149,11 +155,22 @@ function FlywheelPage() {
     <div className="flex flex-col gap-6 p-8">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Value Flywheel</h1>
-          <p className="text-muted-foreground mt-1">
-            5-pillar compound health — Cost Efficiency · Fleet Intelligence · Adoption · Pheromone · Platform Health
-          </p>
+        <div className="flex items-center gap-3">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight">Value Flywheel</h1>
+            <p className="text-muted-foreground mt-1">
+              5-pillar compound health — Cost Efficiency · Fleet Intelligence · Adoption · Pheromone · Platform Health
+            </p>
+          </div>
+          {/* WebSocket status indicator */}
+          <div className="flex items-center gap-1 text-xs ml-4" title={socketConnected ? 'Live updates via WebSocket' : 'Polling every 60s'}>
+            {socketConnected ? (
+              <Wifi className="h-3.5 w-3.5 text-green-500" />
+            ) : (
+              <WifiOff className="h-3.5 w-3.5 text-muted-foreground" />
+            )}
+            <span className="text-muted-foreground">{socketConnected ? 'Live' : 'Polling'}</span>
+          </div>
         </div>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={triggerScan} disabled={scanning} className="flex items-center gap-1.5">
