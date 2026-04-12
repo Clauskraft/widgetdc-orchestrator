@@ -1726,6 +1726,19 @@ export function registerDefaultLoops(): void {
     },
   })
 
+  // Agent Drift Monitor — V5: weekly regression flag per agent → auto Linear issue
+  registerCronJob({
+    id: 'agent-drift-monitor',
+    name: 'Agent Drift Monitor (Weekly Success-Rate Regression Check)',
+    schedule: '0 7 * * 1', // Monday 07:00 UTC
+    enabled: true,
+    chain: {
+      name: 'Agent Drift Monitor',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'agent_drift_report', arguments: {} }],
+    },
+  })
+
   // Skill Forge — auto-generate composite MCP tools from usage patterns
   // DISABLED 2026-04-09: backend endpoint not responding, burns capacity
   registerCronJob({

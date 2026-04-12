@@ -1207,6 +1207,24 @@ await test('118k. POST /api/tools/knowledge_query responds', async () => {
   assert(r.status !== 404, `knowledge_query not deployed (404)`)
 })
 
+// ── 118l. compliance_gap_audit — exists ──
+await test('118l. POST /api/tools/compliance_gap_audit responds', async () => {
+  const r = await api('/api/tools/compliance_gap_audit', { method: 'POST', body: JSON.stringify({ stack: [{ name: 'test-model', category: 'ml-model' }] }) })
+  assert(r.status !== 404, `compliance_gap_audit not deployed (404)`)
+})
+
+// ── 118m. engagement_cost_report — exists ──
+await test('118m. POST /api/tools/engagement_cost_report responds', async () => {
+  const r = await api('/api/tools/engagement_cost_report', { method: 'POST', body: JSON.stringify({ engagement_id: 'test-e2e' }) })
+  assert(r.status !== 404, `engagement_cost_report not deployed (404)`)
+})
+
+// ── 118n. agent_drift_report — exists ──
+await test('118n. POST /api/tools/agent_drift_report responds', async () => {
+  const r = await api('/api/tools/agent_drift_report', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `agent_drift_report not deployed (404)`)
+})
+
 // ── 119. failure_harvest — exists ──
 await test('119. POST /api/tools/failure_harvest responds', async () => {
   const r = await api('/api/tools/failure_harvest', { method: 'POST', body: JSON.stringify({ window_hours: 1 }) })

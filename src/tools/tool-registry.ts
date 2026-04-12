@@ -994,6 +994,56 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     outputDescription: 'KnowledgeDocument[] sorted by word_count descending',
   }),
 
+  // ─── compliance.* — EU AI Act Compliance (Phantom Week 6, V1) ──
+
+  defineTool({
+    name: 'compliance_gap_audit',
+    namespace: 'compliance',
+    description: 'Run EU AI Act Annex III compliance gap audit on a tech stack. Upload stack JSON → get gap report with severity, affected articles, remediation steps. V1: "Upload klient-stack → få AI-Act gap-rapport på 5 min".',
+    input: z.object({
+      stack: z.array(z.object({
+        name: z.string().describe('Component name'),
+        category: z.string().describe('ml-model, data-pipeline, deployment, monitoring, governance'),
+        provider: z.string().optional(),
+        risk_level: z.enum(['minimal', 'limited', 'high', 'unacceptable']).optional(),
+        data_types: z.array(z.string()).optional().describe('PII categories: personal, biometric, health, financial, behavioral'),
+        has_human_oversight: z.boolean().optional(),
+        has_risk_assessment: z.boolean().optional(),
+        has_transparency_notice: z.boolean().optional(),
+        has_data_governance: z.boolean().optional(),
+        has_monitoring: z.boolean().optional(),
+        has_documentation: z.boolean().optional(),
+        logs_retention_days: z.number().optional(),
+      })).describe('Tech stack to audit'),
+    }),
+    timeoutMs: 30000,
+    outputDescription: 'Compliance report: score, gap counts, top remediation actions',
+  }),
+
+  // ─── analytics.* — Engagement Cost + Drift (Phantom Week 6, V3, V5) ──
+
+  defineTool({
+    name: 'engagement_cost_report',
+    namespace: 'analytics',
+    description: 'Get cost attribution per client engagement: DKK rollup by agent and tool. V3: "Hvilket engagement brugte hvilken agent — hvor meget kostede det?"',
+    input: z.object({
+      engagement_id: z.string().describe('Engagement identifier'),
+    }),
+    timeoutMs: 15000,
+    outputDescription: 'Cost report: total DKK, by-agent breakdown, by-tool breakdown',
+  }),
+
+  defineTool({
+    name: 'agent_drift_report',
+    namespace: 'analytics',
+    description: 'Check all agents for regression drift: success-rate, latency, cost. Creates Linear issues for critical drifts. V5: "Weekly regression flag per agent → auto Linear issue".',
+    input: z.object({
+      threshold: z.number().optional().describe('Success-rate regression threshold % (default: 15)'),
+    }),
+    timeoutMs: 30000,
+    outputDescription: 'Drift report: agents checked, drifts found, Linear issues created',
+  }),
+
   defineTool({
     name: 'failure_harvest',
     namespace: 'intelligence',

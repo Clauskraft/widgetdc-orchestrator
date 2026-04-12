@@ -1636,6 +1636,69 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    // ─── compliance.* — EU AI Act Audit (Phantom Week 6, V1) ─────
+
+    case 'compliance_gap_audit': {
+      try {
+        const { handleComplianceAudit } = await import('../compliance/ai-act-auditor.js')
+        const stack = args.stack
+        if (!stack) return 'Error: stack required — array of StackItem objects'
+        const request = {
+          request_id: `audit-${Date.now().toString(36)}`,
+          agent_id: 'orchestrator',
+          task: 'EU AI Act Annex III compliance audit',
+          capabilities: ['compliance', 'audit'],
+          context: { stack },
+          priority: 'high' as const,
+        }
+        const response = await handleComplianceAudit(request)
+        return response.output
+      } catch (err) {
+        return `Compliance audit failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    // ─── analytics.* — Engagement Cost + Drift (Phantom Week 6, V3, V5) ──
+
+    case 'engagement_cost_report': {
+      try {
+        const { handleEngagementCostReport } = await import('../analytics/engagement-cost-tracker.js')
+        const engagementId = typeof args.engagement_id === 'string' ? args.engagement_id : ''
+        if (!engagementId) return 'Error: engagement_id required'
+        const request = {
+          request_id: `cost-${Date.now().toString(36)}`,
+          agent_id: 'orchestrator',
+          task: `Cost report for engagement: ${engagementId}`,
+          capabilities: ['analytics', 'cost-tracking'],
+          context: { engagement_id: engagementId },
+          priority: 'normal' as const,
+        }
+        const response = await handleEngagementCostReport(request)
+        return response.output
+      } catch (err) {
+        return `Engagement cost report failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'agent_drift_report': {
+      try {
+        const { handleDriftReport } = await import('../analytics/agent-drift-monitor.js')
+        const threshold = typeof args.threshold === 'number' ? args.threshold : undefined
+        const request = {
+          request_id: `drift-${Date.now().toString(36)}`,
+          agent_id: 'orchestrator',
+          task: 'Agent drift check',
+          capabilities: ['analytics', 'monitoring'],
+          context: threshold ? { threshold } : {},
+          priority: 'normal' as const,
+        }
+        const response = await handleDriftReport(request)
+        return response.output
+      } catch (err) {
+        return `Agent drift report failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
     case 'failure_harvest': {
       try {
         const { harvestFailures, buildFailureSummary } = await import('../flywheel/failure-harvester.js')

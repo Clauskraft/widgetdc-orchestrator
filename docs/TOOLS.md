@@ -103,6 +103,9 @@ Every tool declares governance metadata per the Neural Bridge v2 specification:
 | 59 | `prompt_use` | prompts | 5s | Record prompt usage for quality scoring feedback loop |
 | 60 | `knowledge_ingest` | knowledge | 15s | Ingest document → Neo4j :KnowledgeDocument (from document_convert output) |
 | 61 | `knowledge_query` | knowledge | 10s | Query knowledge documents: tags, full-text, source type |
+| 62 | `compliance_gap_audit` | compliance | 30s | EU AI Act Annex III gap audit: stack JSON → compliance report |
+| 63 | `engagement_cost_report` | analytics | 15s | Per-engagement DKK rollup by agent and tool |
+| 64 | `agent_drift_report` | analytics | 30s | Agent regression drift check → auto Linear issue on critical |
 | 53 | `llm_chat` | llm | 60s | Direct LLM chat proxy supporting 6 providers |
 | 54 | `llm_providers` | llm | 5s | List available LLM providers with default models |
 | 55 | `decision_certify` | decisions | 30s | Certify an assembly as an architecture decision |
