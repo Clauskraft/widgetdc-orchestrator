@@ -13,6 +13,7 @@ import { executeToolUnified } from '../tools/tool-executor.js'
 import { broadcastMessage } from '../chat-broadcaster.js'
 import { msgId } from '../chat-store.js'
 import { logger } from '../logger.js'
+import { recordAgentResponse, recordToolMetrics } from '../analytics/runtime-analytics.js'
 
 export class OrchestratorAgentAdapter implements IAgent {
   readonly agentId = 'orchestrator'
@@ -23,6 +24,7 @@ export class OrchestratorAgentAdapter implements IAgent {
     const t0 = Date.now()
     const task = request.task
     const context = request.context
+    let invokedTool: string | null = null
 
     try {
       // Orchestrator processes the task via tool execution or dispatch
@@ -30,12 +32,15 @@ export class OrchestratorAgentAdapter implements IAgent {
 
       if (context.tool_name && typeof context.tool_name === 'string') {
         // Execute a specific tool
+        invokedTool = context.tool_name
         const toolArgs = (context.tool_args as Record<string, unknown>) ?? {}
+        const tTool = Date.now()
         const result = await executeToolUnified(
           context.tool_name,
           toolArgs,
           { call_id: request.request_id, fold: false },
         )
+        await recordToolMetrics(invokedTool, Date.now() - tTool, !!result.error)
         output = result.error ? `Tool error: ${result.error}` : String(result.result ?? '')
       } else if (context.dispatch_to && typeof context.dispatch_to === 'string') {
         // Dispatch to another agent via A2A
@@ -56,13 +61,18 @@ export class OrchestratorAgentAdapter implements IAgent {
       }
 
       const durationMs = Date.now() - t0
-      return agentSuccess(request, output, { input: 0, output: output.length / 4 }, 0)
+      const response = agentSuccess(request, output, { input: 0, output: Math.round(output.length / 4) }, 0)
+      await recordAgentResponse(response, durationMs)
+      return response
     } catch (err) {
-      return agentFailure(
+      const durationMs = Date.now() - t0
+      const response = agentFailure(
         request,
         err instanceof Error ? err.message : String(err),
         { input: 0, output: 0 },
       )
+      await recordAgentResponse(response, durationMs)
+      return response
     }
   }
 

@@ -12767,6 +12767,36 @@ var init_tool_registry = __esm({
         timeoutMs: 3e4,
         outputDescription: "ConvertedDocument with text, word_count, headings, links, tables, images, language"
       }),
+      // ─── analytics.* — Runtime Analytics (Phantom Week 4) ────────────
+      defineTool({
+        name: "runtime_summary",
+        namespace: "analytics",
+        description: "Get runtime analytics summary: total agents, requests, cost, tokens, success rate, top agents and tools. Phantom Week 4.",
+        input: z.object({}),
+        timeoutMs: 1e4,
+        outputDescription: "RuntimeSummary with totals and top-10 agents/tools"
+      }),
+      defineTool({
+        name: "agent_metrics",
+        namespace: "analytics",
+        description: "Get detailed metrics for a specific agent: requests, success/fail rate, tokens, cost, avg latency. Phantom Week 4.",
+        input: z.object({
+          agent_id: z.string().describe("Agent ID to get metrics for")
+        }),
+        timeoutMs: 1e4,
+        outputDescription: "AgentMetrics with request counts, tokens, cost, latency"
+      }),
+      defineTool({
+        name: "tool_metrics",
+        namespace: "analytics",
+        description: "Get metrics for a specific tool (or top N tools): call count, error rate, avg duration. Phantom Week 4.",
+        input: z.object({
+          tool_name: z.string().optional().describe("Tool name (omit for top 10 tools)"),
+          limit: z.number().optional().describe("Max tools to return (default 10)")
+        }),
+        timeoutMs: 1e4,
+        outputDescription: "ToolMetrics or ToolMetrics[] for top tools"
+      }),
       defineTool({
         name: "failure_harvest",
         namespace: "intelligence",
@@ -20904,6 +20934,173 @@ var init_document_converter = __esm({
   }
 });
 
+// src/analytics/runtime-analytics.ts
+var runtime_analytics_exports = {};
+__export(runtime_analytics_exports, {
+  getAgentMetrics: () => getAgentMetrics,
+  getAllAgentMetrics: () => getAllAgentMetrics,
+  getRuntimeSummary: () => getRuntimeSummary,
+  getToolMetrics: () => getToolMetrics,
+  getTopTools: () => getTopTools,
+  recordAgentResponse: () => recordAgentResponse,
+  recordToolMetrics: () => recordToolMetrics
+});
+async function recordAgentResponse(response, latencyMs = 0) {
+  if (!isRedisEnabled()) return;
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const agentKey = `${REDIS_METRICS_PREFIX}${response.agent_id}`;
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    await redis2.hincrby(agentKey, "total_requests", 1);
+    if (response.status === "success") await redis2.hincrby(agentKey, "total_success", 1);
+    else if (response.status === "failed") await redis2.hincrby(agentKey, "total_failed", 1);
+    else if (response.status === "partial") await redis2.hincrby(agentKey, "total_partial", 1);
+    await redis2.hincrby(agentKey, "total_tokens_input", response.tokens_used?.input ?? 0);
+    await redis2.hincrby(agentKey, "total_tokens_output", response.tokens_used?.output ?? 0);
+    const costMilli = Math.round((response.cost_dkk ?? 0) * 1e3);
+    await redis2.hincrby(agentKey, "total_cost_milli", costMilli);
+    await redis2.hincrby(agentKey, "latency_sum_ms", latencyMs);
+    await redis2.hincrby(agentKey, "latency_count", 1);
+    await redis2.hset(agentKey, "last_request_at", now);
+    await redis2.hsetnx(agentKey, "first_request_at", now);
+    await redis2.expire(agentKey, REDIS_TTL2);
+    await redis2.sadd(REDIS_AGENT_LIST, response.agent_id);
+  } catch (err) {
+    logger.warn({ err: String(err), agent_id: response.agent_id }, "Failed to record agent response metrics");
+  }
+}
+async function recordToolMetrics(toolName2, durationMs, isError = false) {
+  if (!isRedisEnabled()) return;
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const toolKey = `${REDIS_TOOL_PREFIX}${toolName2}`;
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    await redis2.hincrby(toolKey, "call_count", 1);
+    if (isError) await redis2.hincrby(toolKey, "error_count", 1);
+    await redis2.hincrby(toolKey, "total_duration_ms", durationMs);
+    await redis2.hset(toolKey, "last_called_at", now);
+    await redis2.expire(toolKey, REDIS_TTL2);
+  } catch (err) {
+    logger.warn({ err: String(err), tool: toolName2 }, "Failed to record tool metrics");
+  }
+}
+async function getAgentMetrics(agentId) {
+  const redis2 = getRedis();
+  if (!redis2 || !isRedisEnabled()) return null;
+  try {
+    const agentKey = `${REDIS_METRICS_PREFIX}${agentId}`;
+    const data = await redis2.hgetall(agentKey);
+    if (!data || Object.keys(data).length === 0) return null;
+    const totalRequests = parseInt(data.total_requests || "0");
+    const latencySum = parseInt(data.latency_sum_ms || "0");
+    const latencyCount = parseInt(data.latency_count || "0");
+    const costMilli = parseInt(data.total_cost_milli || "0");
+    return {
+      agent_id: agentId,
+      total_requests: totalRequests,
+      total_success: parseInt(data.total_success || "0"),
+      total_failed: parseInt(data.total_failed || "0"),
+      total_partial: parseInt(data.total_partial || "0"),
+      total_tokens_input: parseInt(data.total_tokens_input || "0"),
+      total_tokens_output: parseInt(data.total_tokens_output || "0"),
+      total_cost_dkk: costMilli / 1e3,
+      avg_latency_ms: latencyCount > 0 ? Math.round(latencySum / latencyCount) : 0,
+      last_request_at: data.last_request_at ?? "",
+      first_request_at: data.first_request_at ?? ""
+    };
+  } catch (err) {
+    logger.warn({ err: String(err), agent_id: agentId }, "Failed to get agent metrics");
+    return null;
+  }
+}
+async function getAllAgentMetrics() {
+  const redis2 = getRedis();
+  if (!redis2 || !isRedisEnabled()) return [];
+  try {
+    const agentIds = await redis2.smembers(REDIS_AGENT_LIST);
+    const metrics2 = [];
+    for (const agentId of agentIds) {
+      const m = await getAgentMetrics(agentId);
+      if (m) metrics2.push(m);
+    }
+    return metrics2.sort((a, b) => b.total_cost_dkk - a.total_cost_dkk);
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Failed to get all agent metrics");
+    return [];
+  }
+}
+async function getToolMetrics(toolName2) {
+  const redis2 = getRedis();
+  if (!redis2 || !isRedisEnabled()) return null;
+  try {
+    const toolKey = `${REDIS_TOOL_PREFIX}${toolName2}`;
+    const data = await redis2.hgetall(toolKey);
+    if (!data || Object.keys(data).length === 0) return null;
+    const callCount = parseInt(data.call_count || "0");
+    const totalDuration = parseInt(data.total_duration_ms || "0");
+    return {
+      tool_name: toolName2,
+      call_count: callCount,
+      error_count: parseInt(data.error_count || "0"),
+      avg_duration_ms: callCount > 0 ? Math.round(totalDuration / callCount) : 0,
+      total_duration_ms: totalDuration,
+      last_called_at: data.last_called_at ?? ""
+    };
+  } catch (err) {
+    logger.warn({ err: String(err), tool: toolName2 }, "Failed to get tool metrics");
+    return null;
+  }
+}
+async function getTopTools(limit = 10) {
+  const redis2 = getRedis();
+  if (!redis2 || !isRedisEnabled()) return [];
+  try {
+    const toolKeys = await redis2.keys(`${REDIS_TOOL_PREFIX}*`);
+    const tools = [];
+    for (const key of toolKeys.slice(0, 50)) {
+      const toolName2 = key.replace(REDIS_TOOL_PREFIX, "");
+      const m = await getToolMetrics(toolName2);
+      if (m) tools.push(m);
+    }
+    return tools.sort((a, b) => b.call_count - a.call_count).slice(0, limit);
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Failed to get top tools");
+    return [];
+  }
+}
+async function getRuntimeSummary() {
+  const agents = await getAllAgentMetrics();
+  const tools = await getTopTools(10);
+  const totalRequests = agents.reduce((s, a) => s + a.total_requests, 0);
+  const totalCost = agents.reduce((s, a) => s + a.total_cost_dkk, 0);
+  const totalTokens = agents.reduce((s, a) => s + a.total_tokens_input + a.total_tokens_output, 0);
+  const totalSuccess = agents.reduce((s, a) => s + a.total_success, 0);
+  return {
+    total_agents: agents.length,
+    total_requests: totalRequests,
+    total_cost_dkk: Math.round(totalCost * 100) / 100,
+    total_tokens: totalTokens,
+    avg_success_rate: totalRequests > 0 ? Math.round(totalSuccess / totalRequests * 1e4) / 100 : 0,
+    top_agents: agents.slice(0, 10),
+    top_tools: tools,
+    generated_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+var REDIS_METRICS_PREFIX, REDIS_TOOL_PREFIX, REDIS_AGENT_LIST, REDIS_TTL2;
+var init_runtime_analytics = __esm({
+  "src/analytics/runtime-analytics.ts"() {
+    "use strict";
+    init_redis();
+    init_logger();
+    REDIS_METRICS_PREFIX = "metrics:agent:";
+    REDIS_TOOL_PREFIX = "metrics:tool:";
+    REDIS_AGENT_LIST = "metrics:agents";
+    REDIS_TTL2 = 30 * 24 * 3600;
+  }
+});
+
 // src/competitive-crawler.ts
 var competitive_crawler_exports = {};
 __export(competitive_crawler_exports, {
@@ -25225,6 +25422,42 @@ ${formatted}`;
         return `Document convert failed: ${err instanceof Error ? err.message : String(err)}`;
       }
     }
+    // ─── analytics.* — Runtime Analytics (Phantom Week 4) ─────
+    case "runtime_summary": {
+      try {
+        const { getRuntimeSummary: getRuntimeSummary2 } = await Promise.resolve().then(() => (init_runtime_analytics(), runtime_analytics_exports));
+        const summary = await getRuntimeSummary2();
+        return JSON.stringify(summary, null, 2);
+      } catch (err) {
+        return `Runtime summary failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "agent_metrics": {
+      try {
+        const { getAgentMetrics: getAgentMetrics2 } = await Promise.resolve().then(() => (init_runtime_analytics(), runtime_analytics_exports));
+        const agentId = String(args.agent_id ?? "");
+        if (!agentId) return "Error: agent_id required";
+        const metrics2 = await getAgentMetrics2(agentId);
+        return metrics2 ? JSON.stringify(metrics2, null, 2) : `No metrics found for agent: ${agentId}`;
+      } catch (err) {
+        return `Agent metrics failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "tool_metrics": {
+      try {
+        const { getToolMetrics: getToolMetrics2, getTopTools: getTopTools2 } = await Promise.resolve().then(() => (init_runtime_analytics(), runtime_analytics_exports));
+        const toolName2 = typeof args.tool_name === "string" ? args.tool_name : void 0;
+        const limit = typeof args.limit === "number" ? Math.min(args.limit, 50) : 10;
+        if (toolName2) {
+          const metrics2 = await getToolMetrics2(toolName2);
+          return metrics2 ? JSON.stringify(metrics2, null, 2) : `No metrics found for tool: ${toolName2}`;
+        }
+        const tools = await getTopTools2(limit);
+        return JSON.stringify({ tools, count: tools.length }, null, 2);
+      } catch (err) {
+        return `Tool metrics failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
     case "failure_harvest": {
       try {
         const { harvestFailures: harvestFailures2, buildFailureSummary: buildFailureSummary2 } = await Promise.resolve().then(() => (init_failure_harvester(), failure_harvester_exports));
@@ -26929,6 +27162,10 @@ var init_mcp_caller = __esm({
       "memory_consolidate",
       // Document converter (Phantom Week 3)
       "document_convert",
+      // Runtime analytics (Phantom Week 4)
+      "runtime_summary",
+      "agent_metrics",
+      "tool_metrics",
       // Model routing
       "model_providers",
       "model_route",

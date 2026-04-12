@@ -100,10 +100,9 @@ export async function recordAgentResponse(
     // Track this agent in the set
     await redis.sadd(REDIS_AGENT_LIST, response.agent_id)
 
-    // Also record per-tool metrics if the response includes tool info
-    if ((response as any).tool_name) {
-      await recordToolMetrics((response as any).tool_name, latencyMs, response.status === 'failed')
-    }
+    // Note: tool-level metrics are recorded separately via recordToolMetrics()
+    // from the call site (e.g. orchestrator-adapter), keeping AgentResponse
+    // contract-clean — tool_name is NOT part of @widgetdc/contracts/agent.
   } catch (err) {
     logger.warn({ err: String(err), agent_id: response.agent_id }, 'Failed to record agent response metrics')
   }
