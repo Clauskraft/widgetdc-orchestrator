@@ -279,7 +279,7 @@ chatRouter.post('/message', (req: Request, res: Response) => {
   res.json({ success: true, data: { id: msg.id, timestamp: msg.timestamp } })
 })
 
-// ─── POST /send — Simple A2A message (alias for /message) ───────────────────
+// ─── POST /send — Simple A2A message (convenience wrapper for /message) ─────
 chatRouter.post('/send', (req: Request, res: Response) => {
   const { from, to, message, thread_id } = req.body
   if (!from || !to || !message) {
@@ -290,12 +290,13 @@ chatRouter.post('/send', (req: Request, res: Response) => {
     return
   }
 
+  // Build full AgentMessage with correct contract types (capitalized)
   const msg = {
     from,
     to,
     message,
     source: 'agent' as const,
-    type: 'message' as const,
+    type: 'Message' as const,  // Capital M per AgentMessageType contract
     id: msgId(),
     timestamp: new Date().toISOString(),
     thread_id: thread_id || `a2a-${Date.now()}`,
