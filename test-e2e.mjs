@@ -1152,6 +1152,13 @@ await test('118b. POST /api/tools/memory_consolidate responds', async () => {
   assert(r.body?.data?.tool_name === 'memory_consolidate', `wrong tool_name`)
 })
 
+// ── 118c. document_convert — exists ──
+await test('118c. POST /api/tools/document_convert responds', async () => {
+  const r = await api('/api/tools/document_convert', { method: 'POST', body: JSON.stringify({ content: '# Test\nHello world', mime_type: 'text/markdown' }) })
+  assert(r.status !== 404, `document_convert not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'document_convert', `wrong tool_name`)
+})
+
 // ── 119. failure_harvest — exists ──
 await test('119. POST /api/tools/failure_harvest responds', async () => {
   const r = await api('/api/tools/failure_harvest', { method: 'POST', body: JSON.stringify({ window_hours: 1 }) })

@@ -1446,6 +1446,44 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    // ─── converter.* — Document conversion (Phantom Week 3) ─────
+
+    case 'document_convert': {
+      try {
+        const { convertDocument } = await import('../converter/document-converter.js')
+        const content = String(args.content ?? '')
+        const mimeType = String(args.mime_type ?? 'text/plain')
+        const sourcePath = typeof args.source_path === 'string' ? args.source_path : undefined
+        const maxTextLength = typeof args.max_text_length === 'number' ? args.max_text_length : undefined
+        const extractHeadings = typeof args.extract_headings === 'boolean' ? args.extract_headings : undefined
+        const extractLinks = typeof args.extract_links === 'boolean' ? args.extract_links : undefined
+
+        const result = await convertDocument({
+          content,
+          mimeType,
+          sourcePath,
+          options: { max_text_length: maxTextLength, extract_headings: extractHeadings, extract_links: extractLinks },
+        })
+
+        // Return compact format — text preview + metadata
+        const preview = result.text.slice(0, 500)
+        return JSON.stringify({
+          source_type: result.source_type,
+          source_path: result.source_path,
+          word_count: result.word_count,
+          char_count: result.char_count,
+          language: result.language,
+          headings: result.headings.length,
+          links: result.links.length,
+          tables: result.tables,
+          images: result.images,
+          preview,
+        }, null, 2)
+      } catch (err) {
+        return `Document convert failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
     case 'failure_harvest': {
       try {
         const { harvestFailures, buildFailureSummary } = await import('../flywheel/failure-harvester.js')

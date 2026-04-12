@@ -187,6 +187,8 @@ const LOCAL_TOOLS = new Set([
   'chat_send', 'chat_read', 'llm_chat', 'llm_providers',
   // Memory (Phantom Week 2 Track B)
   'memory_search', 'memory_consolidate',
+  // Document converter (Phantom Week 3)
+  'document_convert',
   // Model routing
   'model_providers', 'model_route', 'model_cost_estimate', 'model_budget_status', 'model_policy_check',
   // Workflow

@@ -866,6 +866,22 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
   }),
 
   defineTool({
+    name: 'document_convert',
+    namespace: 'converter',
+    description: 'Convert documents (PDF, DOCX, XLSX, PPTX, MD, HTML, TXT) to canonical text + metadata. Steals patterns from markitdown — zero runtime dependency. Output feeds SRAG + Neo4j ingestion. Phantom Week 3.',
+    input: z.object({
+      content: z.string().describe('File content as base64 or plain text'),
+      mime_type: z.string().describe('MIME type for format detection (e.g., application/pdf, text/markdown)'),
+      source_path: z.string().optional().describe('Original file path/URL'),
+      max_text_length: z.number().optional().describe('Cap output text length (default: 50000)'),
+      extract_headings: z.boolean().optional().describe('Extract headings (default: true)'),
+      extract_links: z.boolean().optional().describe('Extract links (default: true)'),
+    }),
+    timeoutMs: 30000,
+    outputDescription: 'ConvertedDocument with text, word_count, headings, links, tables, images, language',
+  }),
+
+  defineTool({
     name: 'failure_harvest',
     namespace: 'intelligence',
     description: 'Harvest recent orchestrator failures (timeouts, 502s, auth errors, MCP errors) for Red Queen learning loop (LIN-567). Returns categorized failure summary with counts and patterns.',

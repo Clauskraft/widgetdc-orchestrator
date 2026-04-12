@@ -94,6 +94,7 @@ Every tool declares governance metadata per the Neural Bridge v2 specification:
 | 50 | `memory_retrieve` | memory | 5s | Retrieve a specific memory entry or list all for agent |
 | 51 | `memory_search` | memory | 15s | Search long-term AgentMemory nodes with filters + relevance scoring |
 | 52 | `memory_consolidate` | memory | 120s | Run memory consolidation: dedup, TTL expiry, budget enforcement |
+| 53 | `document_convert` | converter | 30s | Convert PDF/DOCX/XLSX/PPTX/MD/HTML/TXT → text + metadata |
 | 53 | `llm_chat` | llm | 60s | Direct LLM chat proxy supporting 6 providers |
 | 54 | `llm_providers` | llm | 5s | List available LLM providers with default models |
 | 55 | `decision_certify` | decisions | 30s | Certify an assembly as an architecture decision |
@@ -1303,6 +1304,17 @@ Run memory consolidation for an agent (or all agents). Three-phase process:
 Returns `ConsolidationReport` with `agents_consolidated`, `total_merged`, `total_expired`, `total_pruned`, and per-agent breakdown.
 
 **Weekly cron:** Sunday 04:00 UTC (`memory-consolidation` cron job).
+
+### `document_convert`
+**Namespace:** converter | **Timeout:** 30s | **Handler:** orchestrator | **Phantom Week 3**
+
+Convert documents (PDF, DOCX, XLSX, PPTX, MD, HTML, TXT) to canonical text + structured metadata. Steals patterns from microsoft/markitdown — zero runtime dependency. Output feeds into existing SRAG + Neo4j ingestion pipeline.
+
+**Required:** `content` (base64 or plain text), `mime_type` | **Optional:** `source_path`, `max_text_length` (default 50000), `extract_headings` (default true), `extract_links` (default true)
+
+**Returns:** `source_type`, `source_path`, `text` (truncated to 500 char preview), `word_count`, `char_count`, `language`, `headings` (count), `links` (count), `tables` (count), `images` (count)
+
+**Supported formats:** PDF (via pdf-parse), DOCX (via mammoth), XLSX (via xlsx → markdown tables), PPTX (via xlsx), Markdown (native), HTML (native strip + structure), TXT (native)
 
 ### `failure_harvest`
 **Namespace:** intelligence | **Timeout:** 30s | **Handler:** orchestrator | **LIN-567 Red Queen**
