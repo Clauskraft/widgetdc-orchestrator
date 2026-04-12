@@ -20,8 +20,8 @@ export default defineConfig({
       output: {
         manualChunks(id) {
           if (id.includes('node_modules')) {
-            // React core
-            if (id.includes('node_modules/react/') || id.includes('node_modules/react-dom/')) return 'react-vendor'
+            // React core — must come first to avoid circular chunks
+            if (id.includes('node_modules/react/') || id.includes('node_modules/react-dom/') || id.includes('node_modules/scheduler/')) return 'react-vendor'
             // TanStack
             if (id.includes('@tanstack/react-query')) return 'query-vendor'
             if (id.includes('@tanstack/react-router')) return 'router-vendor'
