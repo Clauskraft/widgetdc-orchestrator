@@ -95,6 +95,9 @@ Every tool declares governance metadata per the Neural Bridge v2 specification:
 | 51 | `memory_search` | memory | 15s | Search long-term AgentMemory nodes with filters + relevance scoring |
 | 52 | `memory_consolidate` | memory | 120s | Run memory consolidation: dedup, TTL expiry, budget enforcement |
 | 53 | `document_convert` | converter | 30s | Convert PDF/DOCX/XLSX/PPTX/MD/HTML/TXT → text + metadata |
+| 54 | `runtime_summary` | analytics | 10s | Runtime analytics: agents, cost, tokens, success rate, top agents/tools |
+| 55 | `agent_metrics` | analytics | 10s | Per-agent metrics: requests, success rate, tokens, cost, latency |
+| 56 | `tool_metrics` | analytics | 10s | Per-tool or top-N tool metrics: call count, error rate, avg duration |
 | 53 | `llm_chat` | llm | 60s | Direct LLM chat proxy supporting 6 providers |
 | 54 | `llm_providers` | llm | 5s | List available LLM providers with default models |
 | 55 | `decision_certify` | decisions | 30s | Certify an assembly as an architecture decision |

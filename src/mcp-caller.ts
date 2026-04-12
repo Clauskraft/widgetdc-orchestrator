@@ -189,6 +189,8 @@ const LOCAL_TOOLS = new Set([
   'memory_search', 'memory_consolidate',
   // Document converter (Phantom Week 3)
   'document_convert',
+  // Runtime analytics (Phantom Week 4)
+  'runtime_summary', 'agent_metrics', 'tool_metrics',
   // Model routing
   'model_providers', 'model_route', 'model_cost_estimate', 'model_budget_status', 'model_policy_check',
   // Workflow

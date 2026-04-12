@@ -881,6 +881,40 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     outputDescription: 'ConvertedDocument with text, word_count, headings, links, tables, images, language',
   }),
 
+  // ─── analytics.* — Runtime Analytics (Phantom Week 4) ────────────
+
+  defineTool({
+    name: 'runtime_summary',
+    namespace: 'analytics',
+    description: 'Get runtime analytics summary: total agents, requests, cost, tokens, success rate, top agents and tools. Phantom Week 4.',
+    input: z.object({}),
+    timeoutMs: 10000,
+    outputDescription: 'RuntimeSummary with totals and top-10 agents/tools',
+  }),
+
+  defineTool({
+    name: 'agent_metrics',
+    namespace: 'analytics',
+    description: 'Get detailed metrics for a specific agent: requests, success/fail rate, tokens, cost, avg latency. Phantom Week 4.',
+    input: z.object({
+      agent_id: z.string().describe('Agent ID to get metrics for'),
+    }),
+    timeoutMs: 10000,
+    outputDescription: 'AgentMetrics with request counts, tokens, cost, latency',
+  }),
+
+  defineTool({
+    name: 'tool_metrics',
+    namespace: 'analytics',
+    description: 'Get metrics for a specific tool (or top N tools): call count, error rate, avg duration. Phantom Week 4.',
+    input: z.object({
+      tool_name: z.string().optional().describe('Tool name (omit for top 10 tools)'),
+      limit: z.number().optional().describe('Max tools to return (default 10)'),
+    }),
+    timeoutMs: 10000,
+    outputDescription: 'ToolMetrics or ToolMetrics[] for top tools',
+  }),
+
   defineTool({
     name: 'failure_harvest',
     namespace: 'intelligence',

@@ -1159,6 +1159,24 @@ await test('118c. POST /api/tools/document_convert responds', async () => {
   assert(r.body?.data?.tool_name === 'document_convert', `wrong tool_name`)
 })
 
+// ── 118d. runtime_summary — exists ──
+await test('118d. POST /api/tools/runtime_summary responds', async () => {
+  const r = await api('/api/tools/runtime_summary', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `runtime_summary not deployed (404)`)
+})
+
+// ── 118e. agent_metrics — exists ──
+await test('118e. POST /api/tools/agent_metrics responds', async () => {
+  const r = await api('/api/tools/agent_metrics', { method: 'POST', body: JSON.stringify({ agent_id: 'test-e2e' }) })
+  assert(r.status !== 404, `agent_metrics not deployed (404)`)
+})
+
+// ── 118f. tool_metrics — exists ──
+await test('118f. POST /api/tools/tool_metrics responds', async () => {
+  const r = await api('/api/tools/tool_metrics', { method: 'POST', body: JSON.stringify({ limit: 5 }) })
+  assert(r.status !== 404, `tool_metrics not deployed (404)`)
+})
+
 // ── 119. failure_harvest — exists ──
 await test('119. POST /api/tools/failure_harvest responds', async () => {
   const r = await api('/api/tools/failure_harvest', { method: 'POST', body: JSON.stringify({ window_hours: 1 }) })

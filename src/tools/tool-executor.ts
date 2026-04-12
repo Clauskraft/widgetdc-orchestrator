@@ -1484,6 +1484,47 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    // ─── analytics.* — Runtime Analytics (Phantom Week 4) ─────
+
+    case 'runtime_summary': {
+      try {
+        const { getRuntimeSummary } = await import('../analytics/runtime-analytics.js')
+        const summary = await getRuntimeSummary()
+        return JSON.stringify(summary, null, 2)
+      } catch (err) {
+        return `Runtime summary failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'agent_metrics': {
+      try {
+        const { getAgentMetrics } = await import('../analytics/runtime-analytics.js')
+        const agentId = String(args.agent_id ?? '')
+        if (!agentId) return 'Error: agent_id required'
+        const metrics = await getAgentMetrics(agentId)
+        return metrics ? JSON.stringify(metrics, null, 2) : `No metrics found for agent: ${agentId}`
+      } catch (err) {
+        return `Agent metrics failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'tool_metrics': {
+      try {
+        const { getToolMetrics, getTopTools } = await import('../analytics/runtime-analytics.js')
+        const toolName = typeof args.tool_name === 'string' ? args.tool_name : undefined
+        const limit = typeof args.limit === 'number' ? Math.min(args.limit, 50) : 10
+
+        if (toolName) {
+          const metrics = await getToolMetrics(toolName)
+          return metrics ? JSON.stringify(metrics, null, 2) : `No metrics found for tool: ${toolName}`
+        }
+        const tools = await getTopTools(limit)
+        return JSON.stringify({ tools, count: tools.length }, null, 2)
+      } catch (err) {
+        return `Tool metrics failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
     case 'failure_harvest': {
       try {
         const { harvestFailures, buildFailureSummary } = await import('../flywheel/failure-harvester.js')
