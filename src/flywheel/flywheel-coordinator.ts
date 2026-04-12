@@ -120,6 +120,22 @@ export async function getFlywheelMetrics(): Promise<{
   return { available: true, report: lastReport, pillars: lastReport.pillars }
 }
 
+// ─── Optimization identification ─────────────────────────────────────────────
+
+function identifyOptimizations(pillars: PillarScore[]): Array<{ title: string; pillar: string; impact: number; action: string }> {
+  return pillars
+    .filter(p => p.score < 0.7)
+    .sort((a, b) => a.score - b.score)
+    .map(p => ({
+      title: p.score < 0.1
+        ? `Improve ${p.name} (score ${Math.round(p.score * 100)}%)`
+        : `Grow ${p.name} (${Math.round(p.score * 100)}% → 70%+)`,
+      pillar: p.name,
+      impact: 1 - p.score,
+      action: p.details[0] ?? `Review ${p.name} metrics and address bottlenecks`,
+    }))
+}
+
 // ─── Pillar helpers ───────────────────────────────────────────────────────────
 
 function fallbackPillar(name: string): PillarScore {
@@ -256,8 +272,8 @@ async function scorePheromone(): Promise<PillarScore> {
 
 async function scorePlatformHealth(): Promise<PillarScore> {
   try {
-    const { getCircuitBreakerStats } = await import('../mcp-caller.js')
-    const cb = getCircuitBreakerStats?.() ?? null
+    const { getBackendCircuitState } = await import('../mcp-caller.js')
+    const cb = getBackendCircuitState?.() ?? null
     const circuitOpen = cb?.open === true
     const failures = cb?.failures ?? 0
 

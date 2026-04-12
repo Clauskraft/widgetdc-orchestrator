@@ -22512,6 +22512,14 @@ async function getFlywheelMetrics() {
   }
   return { available: true, report: lastReport, pillars: lastReport.pillars };
 }
+function identifyOptimizations(pillars) {
+  return pillars.filter((p) => p.score < 0.7).sort((a, b) => a.score - b.score).map((p) => ({
+    title: p.score < 0.1 ? `Improve ${p.name} (score ${Math.round(p.score * 100)}%)` : `Grow ${p.name} (${Math.round(p.score * 100)}% \u2192 70%+)`,
+    pillar: p.name,
+    impact: 1 - p.score,
+    action: p.details[0] ?? `Review ${p.name} metrics and address bottlenecks`
+  }));
+}
 function fallbackPillar(name) {
   return { name, score: 0, trend: "flat", headline: "Data unavailable", details: [] };
 }
@@ -22626,8 +22634,8 @@ async function scorePheromone() {
 }
 async function scorePlatformHealth() {
   try {
-    const { getCircuitBreakerStats } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
-    const cb = getCircuitBreakerStats?.() ?? null;
+    const { getBackendCircuitState: getBackendCircuitState2 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
+    const cb = getBackendCircuitState2?.() ?? null;
     const circuitOpen = cb?.open === true;
     const failures = cb?.failures ?? 0;
     const redis2 = getRedis();
@@ -30846,8 +30854,28 @@ function cleanToSchema(schema, data) {
 }
 
 // src/routes/agents.ts
+init_config();
+init_logger();
 var agentsRouter = Router();
-agentsRouter.post("/register", (req, res) => {
+async function mcpCall(tool, payload) {
+  try {
+    const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+      },
+      body: JSON.stringify({ tool, payload }),
+      signal: AbortSignal.timeout(15e3)
+    });
+    const data = await res.json().catch(() => null);
+    return data?.result ?? data;
+  } catch (err) {
+    logger.warn({ tool, err: String(err) }, "MCP call failed (non-fatal)");
+    return null;
+  }
+}
+agentsRouter.post("/register", async (req, res) => {
   const result = validate(validateHandshake, req.body);
   if (!result.ok) {
     res.status(400).json({
@@ -30868,6 +30896,17 @@ agentsRouter.post("/register", (req, res) => {
     handshake.display_name,
     handshake.allowed_tool_namespaces
   );
+  mcpCall("graph.write_cypher", {
+    query: `MERGE (a:Agent {agentId: $aid}) SET a.displayName = $name, a.status = $status, a.capabilities = $caps, a.namespaces = $ns, a.registeredAt = datetime(), a.lastSeenAt = datetime()`,
+    params: {
+      aid: handshake.agent_id,
+      name: handshake.display_name,
+      status: handshake.status || "online",
+      caps: handshake.capabilities || [],
+      ns: handshake.allowed_tool_namespaces || []
+    }
+  }).catch(() => {
+  });
   res.json({
     success: true,
     data: { agent_id: handshake.agent_id, registered_at: (/* @__PURE__ */ new Date()).toISOString() }
@@ -30909,7 +30948,7 @@ agentsRouter.delete("/", async (_req, res) => {
   const count = await AgentRegistry.purgeAll();
   res.json({ success: true, data: { purged: count } });
 });
-agentsRouter.post("/:id/heartbeat", (req, res) => {
+agentsRouter.post("/:id/heartbeat", async (req, res) => {
   const { id } = req.params;
   const entry = AgentRegistry.get(id);
   if (!entry) {
@@ -30917,7 +30956,37 @@ agentsRouter.post("/:id/heartbeat", (req, res) => {
     return;
   }
   AgentRegistry.heartbeat(id);
+  const a2aChannel = req.body?.a2aChannel;
+  if (a2aChannel) {
+    mcpCall("graph.write_cypher", {
+      query: `MERGE (a:Agent {agentId: $aid}) SET a.lastA2ABroadcast = $broadcast, a.a2AChannel = $channel, a.lastSeenAt = datetime()`,
+      params: {
+        aid: id,
+        broadcast: req.body?.lastBroadcast || "heartbeat",
+        channel: a2aChannel
+      }
+    }).catch(() => {
+    });
+  } else {
+    mcpCall("graph.write_cypher", {
+      query: `MERGE (a:Agent {agentId: $aid}) SET a.lastSeenAt = datetime()`,
+      params: { aid: id }
+    }).catch(() => {
+    });
+  }
   res.json({ success: true, data: { agent_id: id, last_seen_at: (/* @__PURE__ */ new Date()).toISOString() } });
+});
+agentsRouter.get("/a2a", async (_req, res) => {
+  try {
+    const result = await mcpCall("graph.read_cypher", {
+      query: `MATCH (a:Agent) WHERE a.a2AChannel IS NOT NULL OR a.lastA2ABroadcast IS NOT NULL RETURN a.agentId AS agent, a.a2AChannel AS channel, a.lastA2ABroadcast AS broadcast, a.status AS status, a.displayName AS name ORDER BY a.lastSeenAt DESC`,
+      params: {}
+    });
+    const agents = result?.results || result || [];
+    res.json({ success: true, data: { agents, total: agents.length } });
+  } catch (err) {
+    res.json({ success: true, data: { agents: [], total: 0 } });
+  }
 });
 
 // src/routes/tools.ts
@@ -31108,7 +31177,7 @@ init_llm_proxy();
 init_dual_rag();
 init_agent_registry();
 init_routing_engine();
-async function mcpCall(tool, payload) {
+async function mcpCall2(tool, payload) {
   const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
     method: "POST",
     headers: {
@@ -31123,7 +31192,7 @@ async function mcpCall(tool, payload) {
 }
 async function storeEpisode(title, description, events, outcome, tags) {
   try {
-    await mcpCall("memory_operation", {
+    await mcpCall2("memory_operation", {
       action: "RECORD_EPISODE",
       data: {
         title,
@@ -31150,7 +31219,7 @@ async function storeGraphMemory(agentId, type, content, tags) {
       created_at: datetime(),
       source: 'command-center-chat'
     }) RETURN m`;
-    await mcpCall("graph.write_cypher", {
+    await mcpCall2("graph.write_cypher", {
       query: cypher,
       parameters: { agent_id: agentId, type, content: content.slice(0, 4e3), tags }
     });
@@ -31161,7 +31230,7 @@ async function storeGraphMemory(agentId, type, content, tags) {
 }
 async function storeSRAG(content, tags, source) {
   try {
-    await mcpCall("srag.ingest", {
+    await mcpCall2("srag.ingest", {
       content,
       source,
       tags,
@@ -31318,6 +31387,41 @@ chatRouter.post("/message", (req, res) => {
       }
     }
   }
+  res.json({ success: true, data: { id: msg.id, timestamp: msg.timestamp } });
+});
+chatRouter.post("/send", (req, res) => {
+  const { from, to, message, thread_id } = req.body;
+  if (!from || !to || !message) {
+    res.status(400).json({
+      success: false,
+      error: { code: "INVALID_PAYLOAD", message: "from, to, and message are required", status_code: 400 }
+    });
+    return;
+  }
+  const msg = {
+    from,
+    to,
+    message,
+    source: "agent",
+    type: "Message",
+    // Capital M per AgentMessageType contract
+    id: msgId(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    thread_id: thread_id || `a2a-${Date.now()}`,
+    provider: "orchestrator"
+  };
+  broadcastMessage(msg);
+  notifyChatMessage(msg.from, msg.to, msg.message);
+  logger.info({ from: msg.from, to: msg.to, type: msg.type }, "A2A chat message sent");
+  mcpCall2("graph.write_cypher", {
+    query: `MERGE (m:AgentMemory {agentId: $from, key: $key}) SET m.value = $value, m.type = 'a2a_message', m.updatedAt = datetime()`,
+    params: {
+      from: msg.from,
+      key: `a2a-${msg.id}`,
+      value: JSON.stringify({ to: msg.to, message: msg.message.slice(0, 500), thread_id: msg.thread_id })
+    }
+  }).catch(() => {
+  });
   res.json({ success: true, data: { id: msg.id, timestamp: msg.timestamp } });
 });
 chatRouter.get("/history", async (req, res) => {
@@ -45100,6 +45204,7 @@ app.use(auditMiddleware);
 app.use("/agents", requireApiKey, agentsRouter);
 app.use("/tools", requireApiKey, apiRateLimiter, toolsRouter);
 app.use("/chat", requireApiKey, chatRouter);
+app.use("/api/chat", requireApiKey, chatRouter);
 app.use("/chains", requireApiKey, apiRateLimiter, chainsRouter);
 app.use("/cognitive", requireApiKey, apiRateLimiter, cognitiveRouter);
 app.use("/cron", requireApiKey, cronRouter);
