@@ -1177,6 +1177,36 @@ await test('118f. POST /api/tools/tool_metrics responds', async () => {
   assert(r.status !== 404, `tool_metrics not deployed (404)`)
 })
 
+// ── 118g. prompt_add — exists ──
+await test('118g. POST /api/tools/prompt_add responds', async () => {
+  const r = await api('/api/tools/prompt_add', { method: 'POST', body: JSON.stringify({ title: 'Test', content: 'Test prompt', category: 'general' }) })
+  assert(r.status !== 404, `prompt_add not deployed (404)`)
+})
+
+// ── 118h. prompt_query — exists ──
+await test('118h. POST /api/tools/prompt_query responds', async () => {
+  const r = await api('/api/tools/prompt_query', { method: 'POST', body: JSON.stringify({ limit: 5 }) })
+  assert(r.status !== 404, `prompt_query not deployed (404)`)
+})
+
+// ── 118i. prompt_use — exists ──
+await test('118i. POST /api/tools/prompt_use responds', async () => {
+  const r = await api('/api/tools/prompt_use', { method: 'POST', body: JSON.stringify({ prompt_id: 'test', was_helpful: true }) })
+  assert(r.status !== 404, `prompt_use not deployed (404)`)
+})
+
+// ── 118j. knowledge_ingest — exists ──
+await test('118j. POST /api/tools/knowledge_ingest responds', async () => {
+  const r = await api('/api/tools/knowledge_ingest', { method: 'POST', body: JSON.stringify({ title: 'Test', content: 'Test content', source_type: 'txt' }) })
+  assert(r.status !== 404, `knowledge_ingest not deployed (404)`)
+})
+
+// ── 118k. knowledge_query — exists ──
+await test('118k. POST /api/tools/knowledge_query responds', async () => {
+  const r = await api('/api/tools/knowledge_query', { method: 'POST', body: JSON.stringify({ limit: 5 }) })
+  assert(r.status !== 404, `knowledge_query not deployed (404)`)
+})
+
 // ── 119. failure_harvest — exists ──
 await test('119. POST /api/tools/failure_harvest responds', async () => {
   const r = await api('/api/tools/failure_harvest', { method: 'POST', body: JSON.stringify({ window_hours: 1 }) })

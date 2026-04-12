@@ -1525,6 +1525,117 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    // ─── prompts.* — Prompt Library (Phantom Week 5) ─────
+
+    case 'prompt_add': {
+      try {
+        const { addPrompt } = await import('../prompts/prompt-library.js')
+        const title = String(args.title ?? '')
+        const content = String(args.content ?? '')
+        const category = String(args.category ?? 'general')
+        if (!title || !content) return 'Error: title and content required'
+        const prompt = await addPrompt({
+          title,
+          content,
+          category,
+          tags: Array.isArray(args.tags) ? args.tags as string[] : [category],
+          variables: Array.isArray(args.variables) ? args.variables as string[] : undefined,
+          author: typeof args.author === 'string' ? args.author : undefined,
+          quality_score: 0.8, // Default starting quality
+        })
+        return JSON.stringify(prompt, null, 2)
+      } catch (err) {
+        return `Prompt add failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'prompt_query': {
+      try {
+        const { queryPrompts } = await import('../prompts/prompt-library.js')
+        const prompts = await queryPrompts({
+          category: typeof args.category === 'string' ? args.category : undefined,
+          tags: Array.isArray(args.tags) ? args.tags as string[] : undefined,
+          query: typeof args.query === 'string' ? args.query : undefined,
+          min_quality: typeof args.min_quality === 'number' ? args.min_quality : undefined,
+          limit: typeof args.limit === 'number' ? Math.min(args.limit, 50) : 20,
+        })
+        if (prompts.length === 0) return 'No prompts found matching filters'
+        const formatted = prompts.map(p =>
+          `[${p.quality_score.toFixed(2)}] (${p.category}) ${p.title}: ${p.content.slice(0, 150)}...`
+        ).join('\n---\n')
+        return `${prompts.length} prompts found:\n---\n${formatted}`
+      } catch (err) {
+        return `Prompt query failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'prompt_use': {
+      try {
+        const { recordPromptUsage } = await import('../prompts/prompt-library.js')
+        const promptId = String(args.prompt_id ?? '')
+        if (!promptId) return 'Error: prompt_id required'
+        const wasHelpful = typeof args.was_helpful === 'boolean' ? args.was_helpful : true
+        await recordPromptUsage(promptId, wasHelpful)
+        return JSON.stringify({ prompt_id: promptId, recorded: true, was_helpful: wasHelpful }, null, 2)
+      } catch (err) {
+        return `Prompt use recording failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    // ─── knowledge.* — PDF Knowledge Ingestion (Phantom Week 5) ─────
+
+    case 'knowledge_ingest': {
+      try {
+        const { ingestKnowledge } = await import('../prompts/prompt-library.js')
+        const title = String(args.title ?? '')
+        const content = String(args.content ?? '')
+        const sourceType = String(args.source_type ?? 'txt')
+        if (!title || !content) return 'Error: title and content required'
+        const doc = await ingestKnowledge({
+          title,
+          content,
+          source_type: sourceType,
+          source_path: typeof args.source_path === 'string' ? args.source_path : '',
+          language: typeof args.language === 'string' ? args.language : undefined,
+          tags: Array.isArray(args.tags) ? args.tags as string[] : [],
+          headings: Array.isArray(args.headings) ? args.headings as string[] : [],
+          word_count: typeof args.word_count === 'number' ? args.word_count : undefined,
+        })
+        if (!doc) return 'Error: Failed to create Neo4j KnowledgeDocument node (Redis storage may still be available)'
+        return JSON.stringify({
+          id: doc.id,
+          title: doc.title,
+          source_type: doc.source_type,
+          word_count: doc.word_count,
+          language: doc.language,
+          tags: doc.tags.length,
+          headings: doc.headings.length,
+          neo4j_created: true,
+        }, null, 2)
+      } catch (err) {
+        return `Knowledge ingest failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'knowledge_query': {
+      try {
+        const { queryKnowledge } = await import('../prompts/prompt-library.js')
+        const docs = await queryKnowledge({
+          tags: Array.isArray(args.tags) ? args.tags as string[] : undefined,
+          query: typeof args.query === 'string' ? args.query : undefined,
+          source_type: typeof args.source_type === 'string' ? args.source_type : undefined,
+          limit: typeof args.limit === 'number' ? Math.min(args.limit, 50) : 20,
+        })
+        if (docs.length === 0) return 'No knowledge documents found matching filters'
+        const formatted = docs.map(d =>
+          `[${d.source_type}] ${d.title} (${d.word_count} words, ${d.tags.length} tags): ${d.content.slice(0, 150)}...`
+        ).join('\n---\n')
+        return `${docs.length} documents found:\n---\n${formatted}`
+      } catch (err) {
+        return `Knowledge query failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
     case 'failure_harvest': {
       try {
         const { harvestFailures, buildFailureSummary } = await import('../flywheel/failure-harvester.js')

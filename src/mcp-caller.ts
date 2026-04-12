@@ -191,6 +191,8 @@ const LOCAL_TOOLS = new Set([
   'document_convert',
   // Runtime analytics (Phantom Week 4)
   'runtime_summary', 'agent_metrics', 'tool_metrics',
+  // Prompts + Knowledge (Phantom Week 5)
+  'prompt_add', 'prompt_query', 'prompt_use', 'knowledge_ingest', 'knowledge_query',
   // Model routing
   'model_providers', 'model_route', 'model_cost_estimate', 'model_budget_status', 'model_policy_check',
   // Workflow

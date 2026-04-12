@@ -98,6 +98,11 @@ Every tool declares governance metadata per the Neural Bridge v2 specification:
 | 54 | `runtime_summary` | analytics | 10s | Runtime analytics: agents, cost, tokens, success rate, top agents/tools |
 | 55 | `agent_metrics` | analytics | 10s | Per-agent metrics: requests, success rate, tokens, cost, latency |
 | 56 | `tool_metrics` | analytics | 10s | Per-tool or top-N tool metrics: call count, error rate, avg duration |
+| 57 | `prompt_add` | prompts | 15s | Add a prompt to the library (Redis + Neo4j :Prompt) |
+| 58 | `prompt_query` | prompts | 10s | Query prompts: category, tags, full-text, min quality |
+| 59 | `prompt_use` | prompts | 5s | Record prompt usage for quality scoring feedback loop |
+| 60 | `knowledge_ingest` | knowledge | 15s | Ingest document → Neo4j :KnowledgeDocument (from document_convert output) |
+| 61 | `knowledge_query` | knowledge | 10s | Query knowledge documents: tags, full-text, source type |
 | 53 | `llm_chat` | llm | 60s | Direct LLM chat proxy supporting 6 providers |
 | 54 | `llm_providers` | llm | 5s | List available LLM providers with default models |
 | 55 | `decision_certify` | decisions | 30s | Certify an assembly as an architecture decision |

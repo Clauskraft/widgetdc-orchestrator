@@ -915,6 +915,85 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     outputDescription: 'ToolMetrics or ToolMetrics[] for top tools',
   }),
 
+  // ─── prompts.* — Prompt Library (Phantom Week 5) ────────────────
+
+  defineTool({
+    name: 'prompt_add',
+    namespace: 'prompts',
+    description: 'Add a prompt to the library with title, content, category, tags, and optional variables. Stores in Redis + Neo4j :Prompt node. Phantom Week 5.',
+    input: z.object({
+      title: z.string().describe('Prompt title'),
+      content: z.string().describe('Prompt content/template'),
+      category: z.string().describe('Category (code, analysis, writing, architecture, testing, etc.)'),
+      tags: z.array(z.string()).optional().describe('Tags for classification'),
+      variables: z.array(z.string()).optional().describe('Template variables (e.g., ["context", "task"])'),
+      author: z.string().optional().describe('Author name'),
+    }),
+    timeoutMs: 15000,
+    outputDescription: 'Created Prompt with id, quality_score, timestamps',
+  }),
+
+  defineTool({
+    name: 'prompt_query',
+    namespace: 'prompts',
+    description: 'Query prompts from the library with filters: category, tags, full-text search, min quality score. Phantom Week 5.',
+    input: z.object({
+      category: z.string().optional().describe('Filter by category'),
+      tags: z.array(z.string()).optional().describe('Filter by tags (matches ANY)'),
+      query: z.string().optional().describe('Full-text search in title/content'),
+      min_quality: z.number().optional().describe('Minimum quality score (0-1)'),
+      limit: z.number().optional().describe('Max results (default 20)'),
+    }),
+    timeoutMs: 10000,
+    outputDescription: 'Prompt[] sorted by quality_score descending',
+  }),
+
+  defineTool({
+    name: 'prompt_use',
+    namespace: 'prompts',
+    description: 'Record usage of a prompt (feedback loop for quality scoring). Call after using a prompt to adjust its quality score. Phantom Week 5.',
+    input: z.object({
+      prompt_id: z.string().describe('Prompt ID to record usage for'),
+      was_helpful: z.boolean().optional().describe('Whether the prompt was helpful (default: true)'),
+    }),
+    timeoutMs: 5000,
+    outputDescription: 'Confirmation of usage recording',
+  }),
+
+  // ─── knowledge.* — PDF Knowledge Ingestion (Phantom Week 5) ─────
+
+  defineTool({
+    name: 'knowledge_ingest',
+    namespace: 'knowledge',
+    description: 'Ingest a document into the knowledge base. Creates Neo4j :KnowledgeDocument node. Use with output from document_convert. Phantom Week 5.',
+    input: z.object({
+      title: z.string().describe('Document title'),
+      content: z.string().describe('Document text content'),
+      source_type: z.string().describe('Source type (pdf, docx, xlsx, pptx, md, html, txt, url)'),
+      source_path: z.string().optional().describe('Original file path/URL'),
+      language: z.string().optional().describe('Detected language'),
+      tags: z.array(z.string()).optional().describe('Classification tags'),
+      headings: z.array(z.string()).optional().describe('Extracted headings'),
+      word_count: z.number().optional().describe('Word count'),
+    }),
+    timeoutMs: 15000,
+    outputDescription: 'KnowledgeDocument with id, metadata, Neo4j node created',
+  }),
+
+  defineTool({
+    name: 'knowledge_query',
+    namespace: 'knowledge',
+    description: 'Query knowledge documents with filters: tags, full-text search, source type. Phantom Week 5.',
+    input: z.object({
+      tags: z.array(z.string()).optional().describe('Filter by tags (matches ANY)'),
+      query: z.string().optional().describe('Full-text search in title/content'),
+      source_type: z.string().optional().describe('Filter by source type'),
+      limit: z.number().optional().describe('Max results (default 20)'),
+    }),
+    timeoutMs: 10000,
+    outputDescription: 'KnowledgeDocument[] sorted by word_count descending',
+  }),
+
   defineTool({
     name: 'failure_harvest',
     namespace: 'intelligence',
