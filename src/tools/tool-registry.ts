@@ -842,10 +842,11 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
   defineTool({
     name: 'memory_search',
     namespace: 'memory',
-    description: 'Search long-term AgentMemory nodes in Neo4j with structured filters (agentId, type, tags) and optional text query. Returns results scored by relevance (recency × importance). Phantom Week 2 Track B.',
+    description: 'Search long-term AgentMemory nodes in Neo4j with structured filters (agentId, type, tier, tags) and optional text query. Returns results scored by CoALA tier-aware relevance. Phantom Week 2B + W8.5 CoALA taxonomy.',
     input: z.object({
       agent_id: z.string().optional().describe('Filter by agent ID'),
       type: z.string().optional().describe('Filter by memory type (e.g., insight, closure, lesson, claim)'),
+      tier: z.union([z.enum(['working', 'short', 'episodic', 'semantic', 'procedural']), z.array(z.enum(['working', 'short', 'episodic', 'semantic', 'procedural']))]).optional().describe('CoALA tier filter (W8.5)'),
       tags: z.array(z.string()).optional().describe('Filter by tags (matches ANY tag)'),
       query: z.string().optional().describe('Text query for relevance scoring'),
       limit: z.number().optional().describe('Max results (default 50)'),
@@ -857,9 +858,10 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
   defineTool({
     name: 'memory_consolidate',
     namespace: 'memory',
-    description: 'Run memory consolidation for an agent (or all agents). Merges duplicate AgentMemory nodes by semantic similarity (Jaccard ≥0.6), expires nodes >30 days old, enforces <1000 nodes/agent budget. Phantom Week 2 Track B.',
+    description: 'Run CoALA tier-aware memory consolidation. Merges duplicates (Jaccard ≥0.6), expires nodes per tier TTL, enforces <1000 nodes/agent. Never expires semantic/procedural tiers. Phantom Week 2B + W8.5.',
     input: z.object({
       agent_id: z.string().optional().describe('Agent to consolidate (omit for all agents)'),
+      tier: z.union([z.enum(['working', 'short', 'episodic', 'semantic', 'procedural']), z.array(z.enum(['working', 'short', 'episodic', 'semantic', 'procedural']))]).optional().describe('CoALA tier filter (W8.5)'),
     }),
     timeoutMs: 120000,
     outputDescription: 'ConsolidationReport with merged/expired/pruned counts',

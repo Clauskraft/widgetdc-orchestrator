@@ -1395,16 +1395,18 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     case 'memory_search': {
       try {
         const { searchMemories } = await import('../memory/memory-consolidator.js')
+        const tierArg = typeof args.tier === 'string' ? args.tier : (Array.isArray(args.tier) ? args.tier : undefined)
         const results = await searchMemories({
           agentId: typeof args.agent_id === 'string' ? args.agent_id : undefined,
           type: typeof args.type === 'string' ? args.type : undefined,
+          tier: tierArg as any,
           tags: Array.isArray(args.tags) ? args.tags as string[] : undefined,
           query: typeof args.query === 'string' ? args.query : undefined,
           limit: typeof args.limit === 'number' ? Math.min(args.limit, 100) : 50,
         })
         if (results.length === 0) return `No memories found matching filters`
         const formatted = results.map(r =>
-          `[relevance=${r.relevance.toFixed(2)}] (${r.type}) ${r.agentId}/${r.key}: ${(r.value || '').slice(0, 200)}`
+          `[relevance=${r.relevance.toFixed(2)}] (${r.type}${r.tier ? '/' + r.tier : ''}) ${r.agentId}/${r.key}: ${(r.value || '').slice(0, 200)}`
         ).join('\n')
         return `${results.length} memories found:\n---\n${formatted}`
       } catch (err) {

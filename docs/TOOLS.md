@@ -92,8 +92,8 @@ Every tool declares governance metadata per the Neural Bridge v2 specification:
 | 48 | `engagement_list` | engagement | 10s | List recent engagements from Redis + Neo4j |
 | 49 | `memory_store` | memory | 5s | Store an entry in agent working memory |
 | 50 | `memory_retrieve` | memory | 5s | Retrieve a specific memory entry or list all for agent |
-| 51 | `memory_search` | memory | 15s | Search long-term AgentMemory nodes with filters + relevance scoring |
-| 52 | `memory_consolidate` | memory | 120s | Run memory consolidation: dedup, TTL expiry, budget enforcement |
+| 51 | `memory_search` | memory | 15s | Search AgentMemory with CoALA tier filter + relevance scoring |
+| 52 | `memory_consolidate` | memory | 120s | CoALA tier-aware consolidation: TTL per tier, never expire semantic/procedural |
 | 53 | `document_convert` | converter | 30s | Convert PDF/DOCX/XLSX/PPTX/MD/HTML/TXT → text + metadata |
 | 54 | `runtime_summary` | analytics | 10s | Runtime analytics: agents, cost, tokens, success rate, top agents/tools |
 | 55 | `agent_metrics` | analytics | 10s | Per-agent metrics: requests, success rate, tokens, cost, latency |

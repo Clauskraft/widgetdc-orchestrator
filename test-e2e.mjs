@@ -1273,6 +1273,12 @@ await test('118v. POST /api/tools/fact_query responds', async () => {
   assert(r.status !== 404, `fact_query not deployed (404)`)
 })
 
+// ── 118w. memory_search with tier filter — CoALA W8.5 ──
+await test('118w. POST /api/tools/memory_search with tier responds', async () => {
+  const r = await api('/api/tools/memory_search', { method: 'POST', body: JSON.stringify({ tier: 'episodic', limit: 3 }) })
+  assert(r.status !== 404, `memory_search with tier not deployed (404)`)
+})
+
 // ── 119. failure_harvest — exists ──
 await test('119. POST /api/tools/failure_harvest responds', async () => {
   const r = await api('/api/tools/failure_harvest', { method: 'POST', body: JSON.stringify({ window_hours: 1 }) })
