@@ -1699,6 +1699,80 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    // ─── review.* — Multi-Agent PR Review (Phantom Week 7, V2) ─────
+
+    case 'pr_review_parallel': {
+      try {
+        const { handlePRReview } = await import('../review/multi-agent-pr-reviewer.js')
+        const pr = {
+          repo: String(args.repo ?? ''),
+          pr_number: String(args.pr_number ?? ''),
+          title: String(args.title ?? ''),
+          diff: String(args.diff ?? ''),
+          files_changed: Array.isArray(args.files_changed) ? args.files_changed as string[] : [],
+          lines_added: typeof args.lines_added === 'number' ? args.lines_added : 0,
+          lines_deleted: typeof args.lines_deleted === 'number' ? args.lines_deleted : 0,
+          author: typeof args.author === 'string' ? args.author : '',
+          labels: Array.isArray(args.labels) ? args.labels as string[] : [],
+        }
+        if (!pr.diff || !pr.pr_number) return 'Error: diff and pr_number required'
+        const request = {
+          request_id: `pr-review-${pr.pr_number}-${Date.now().toString(36)}`,
+          agent_id: 'orchestrator',
+          task: `Review PR ${pr.pr_number} in ${pr.repo}: ${pr.title}`,
+          capabilities: ['code-review', 'security', 'performance'],
+          context: { diff: pr, categories: args.categories },
+          priority: 'high' as const,
+        }
+        const response = await handlePRReview(request)
+        return response.output
+      } catch (err) {
+        return `PR review failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    // ─── deliverable.* — Deliverable Factory (Phantom Week 7, V4) ────
+
+    case 'deliverable_draft': {
+      try {
+        // Reuse existing generateDeliverable from deliverable-engine (Lego Factory pipeline)
+        const { generateDeliverable } = await import('../engagement/deliverable-engine.js')
+        const prompt = String(args.prompt ?? '')
+        const type = String(args.type ?? 'analysis') as 'analysis' | 'roadmap' | 'assessment'
+        const format = typeof args.format === 'string' ? args.format as 'pdf' | 'markdown' : 'markdown'
+        if (!prompt || prompt.length < 10) return 'Error: prompt required (min 10 chars)'
+
+        const result = await generateDeliverable({
+          prompt,
+          type,
+          format,
+          max_sections: typeof args.max_sections === 'number' ? args.max_sections : undefined,
+          include_citations: typeof args.include_citations === 'boolean' ? args.include_citations : true,
+        })
+
+        if (result.status === 'failed') {
+          return `Deliverable generation failed: ${result.error}`
+        }
+
+        const preview = result.markdown.slice(0, 500)
+        return JSON.stringify({
+          id: result.$id,
+          title: result.title,
+          type: result.type,
+          format: result.format,
+          status: result.status,
+          sections_count: result.sections.length,
+          total_citations: result.metadata.total_citations,
+          generation_ms: result.metadata.generation_ms,
+          preview,
+          url: `/api/deliverables/${encodeURIComponent(result.$id)}`,
+          markdown_url: `/api/deliverables/${encodeURIComponent(result.$id)}/markdown`,
+        }, null, 2)
+      } catch (err) {
+        return `Deliverable draft failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
     case 'failure_harvest': {
       try {
         const { harvestFailures, buildFailureSummary } = await import('../flywheel/failure-harvester.js')

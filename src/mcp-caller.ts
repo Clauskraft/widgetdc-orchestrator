@@ -195,6 +195,8 @@ const LOCAL_TOOLS = new Set([
   'prompt_add', 'prompt_query', 'prompt_use', 'knowledge_ingest', 'knowledge_query',
   // Value-Props (Phantom Week 6)
   'compliance_gap_audit', 'engagement_cost_report', 'agent_drift_report',
+  // Value-Props (Phantom Week 7)
+  'pr_review_parallel', 'deliverable_draft',
   // Model routing
   'model_providers', 'model_route', 'model_cost_estimate', 'model_budget_status', 'model_policy_check',
   // Workflow

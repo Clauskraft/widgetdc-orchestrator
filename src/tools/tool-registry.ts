@@ -1044,6 +1044,45 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     outputDescription: 'Drift report: agents checked, drifts found, Linear issues created',
   }),
 
+  // ─── review.* — Multi-Agent PR Review (Phantom Week 7, V2) ─────
+
+  defineTool({
+    name: 'pr_review_parallel',
+    namespace: 'review',
+    description: 'Parallel multi-agent PR code review. 1 PR → 3 reviewers (security, performance, readability) in parallel with merged verdict. V2: "1 PR → 3 reviewer-agenter parallelt med cost-tracking". Falls back to 1-2 reviewers if fewer available.',
+    input: z.object({
+      repo: z.string().describe('Repository name (e.g., "widgetdc-orchestrator")'),
+      pr_number: z.string().describe('PR number'),
+      title: z.string().describe('PR title'),
+      diff: z.string().describe('Git diff content'),
+      files_changed: z.array(z.string()).optional().describe('List of changed file paths'),
+      lines_added: z.number().optional().describe('Lines added'),
+      lines_deleted: z.number().optional().describe('Lines deleted'),
+      author: z.string().optional().describe('PR author'),
+      labels: z.array(z.string()).optional().describe('PR labels'),
+      categories: z.array(z.string()).optional().describe('Review categories: security, performance, readability, architecture, testing'),
+    }),
+    timeoutMs: 90000,
+    outputDescription: 'Merged review: overall verdict, critical/major/minor counts, per-reviewer breakdown',
+  }),
+
+  // ─── deliverable.* — Deliverable Factory (Phantom Week 7, V4) ────
+
+  defineTool({
+    name: 'deliverable_draft',
+    namespace: 'deliverable',
+    description: 'Generate consulting deliverable from brief using Lego Factory pipeline. 5-step: Plan → Retrieve → Write → Assemble → Render. V4: "PDF brief → McKinsey-kvalitets draft deck". Uses existing deliverable-engine with knowledge graph citations.',
+    input: z.object({
+      prompt: z.string().describe('What the deliverable should cover (min 10 chars)'),
+      type: z.enum(['analysis', 'roadmap', 'assessment']).describe('Deliverable type'),
+      format: z.enum(['pdf', 'markdown']).optional().describe('Output format (default: markdown)'),
+      max_sections: z.number().optional().describe('Max sections (default: 8)'),
+      include_citations: z.boolean().optional().describe('Include knowledge graph citations (default: true)'),
+    }),
+    timeoutMs: 180000,
+    outputDescription: 'Deliverable with title, sections, citations, markdown content, confidence scores',
+  }),
+
   defineTool({
     name: 'failure_harvest',
     namespace: 'intelligence',

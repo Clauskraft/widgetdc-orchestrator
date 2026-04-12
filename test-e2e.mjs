@@ -1225,6 +1225,18 @@ await test('118n. POST /api/tools/agent_drift_report responds', async () => {
   assert(r.status !== 404, `agent_drift_report not deployed (404)`)
 })
 
+// ── 118o. pr_review_parallel — exists ──
+await test('118o. POST /api/tools/pr_review_parallel responds', async () => {
+  const r = await api('/api/tools/pr_review_parallel', { method: 'POST', body: JSON.stringify({ repo: 'test', pr_number: '1', title: 'Test', diff: '+test' }) })
+  assert(r.status !== 404, `pr_review_parallel not deployed (404)`)
+})
+
+// ── 118p. deliverable_draft — exists ──
+await test('118p. POST /api/tools/deliverable_draft responds', async () => {
+  const r = await api('/api/tools/deliverable_draft', { method: 'POST', body: JSON.stringify({ prompt: 'Test deliverable for QA', type: 'analysis' }) })
+  assert(r.status !== 404, `deliverable_draft not deployed (404)`)
+})
+
 // ── 119. failure_harvest — exists ──
 await test('119. POST /api/tools/failure_harvest responds', async () => {
   const r = await api('/api/tools/failure_harvest', { method: 'POST', body: JSON.stringify({ window_hours: 1 }) })
