@@ -223,6 +223,37 @@ Every value-prop leverages ≥2 primitives delivered in Week 1-5. Zero greenfiel
 
 ---
 
+## 7.6 Phantom Integration — closing the loop from harvest to platform improvement
+
+**Important:** Week 5 harvested 85 `:ExternalKnowledge` nodes but v4 had no
+specified path to **actually use them**. See
+**[`PHANTOM_INTEGRATION_v4.md`](PHANTOM_INTEGRATION_v4.md)** for the full
+lifecycle.
+
+Added stages S5–S8 after existing S1–S4:
+
+- **S5 Extract-to-Patch** — `:PhantomPatch` node per extractable pattern,
+  target module, expected metric impact, risk level
+- **S6 Gate** — feature-flag + 10% canary + eval harness (7 days default)
+- **S7 Measure** — `:PhantomMeasurement` with baseline, current, delta, verdict
+- **S8 Rollout or Retire** — attraction pheromone on merge, alert pheromone on
+  retire; feeds next harvest priority
+
+Two new retrofit weeks:
+- **Week 7.5** — phantom integration foundation (`:PhantomPatch` schema +
+  `phantom_patch_propose` tool + priority cron + top-12 backfill)
+- **Week 9.5** — canary + measurement (feature-flag framework + canary routing +
+  auto-promote/retire cron + 2 end-to-end demos)
+
+Plus continuous loop:
+- Monthly phantom retrospective (`/mission/phantoms/retro` UI route)
+- Quarterly harvest refresh (re-run research-mission, deprecate stale)
+
+Target: 100% of score-≥0.85 phantoms reach `:PhantomPatch` within 4 weeks.
+Orphan phantoms >60 days without proposer are escalated.
+
+---
+
 ## 7.5 Adoption Layer — coordination, pheromones, RAG, folding, OODA, teacher/student
 
 **Important:** v4 value-props (V1–V10) must explicitly wire into the existing
