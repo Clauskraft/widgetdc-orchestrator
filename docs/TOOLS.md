@@ -92,11 +92,13 @@ Every tool declares governance metadata per the Neural Bridge v2 specification:
 | 48 | `engagement_list` | engagement | 10s | List recent engagements from Redis + Neo4j |
 | 49 | `memory_store` | memory | 5s | Store an entry in agent working memory |
 | 50 | `memory_retrieve` | memory | 5s | Retrieve a specific memory entry or list all for agent |
-| 51 | `llm_chat` | llm | 60s | Direct LLM chat proxy supporting 6 providers |
-| 52 | `llm_providers` | llm | 5s | List available LLM providers with default models |
-| 53 | `decision_certify` | decisions | 30s | Certify an assembly as an architecture decision |
-| 54 | `decision_list` | decisions | 10s | List all certified decisions from Redis store |
-| 55 | `decision_lineage` | decisions | 20s | Build full lineage chain for a decision or assembly |
+| 51 | `memory_search` | memory | 15s | Search long-term AgentMemory nodes with filters + relevance scoring |
+| 52 | `memory_consolidate` | memory | 120s | Run memory consolidation: dedup, TTL expiry, budget enforcement |
+| 53 | `llm_chat` | llm | 60s | Direct LLM chat proxy supporting 6 providers |
+| 54 | `llm_providers` | llm | 5s | List available LLM providers with default models |
+| 55 | `decision_certify` | decisions | 30s | Certify an assembly as an architecture decision |
+| 56 | `decision_list` | decisions | 10s | List all certified decisions from Redis store |
+| 57 | `decision_lineage` | decisions | 20s | Build full lineage chain for a decision or assembly |
 | 56 | `hyperagent_auto_run` | hyperagent | 300s | Trigger autonomous execution cycle |
 | 57 | `hyperagent_auto_status` | hyperagent | 10s | Get autonomous executor status |
 | 58 | `hyperagent_auto_memory` | hyperagent | 15s | Read/write persistent cross-repo memory |
@@ -1278,6 +1280,29 @@ Store an entry in agent working memory (8-layer memory system). Backed by Redis 
 Retrieve a specific memory entry or list all entries for an agent.
 
 **Required:** `agent_id` | **Optional:** `key` (omit to list all)
+
+### `memory_search`
+**Namespace:** memory | **Timeout:** 15s | **Handler:** orchestrator | **Phantom Week 2 Track B**
+
+Search long-term AgentMemory nodes in Neo4j with structured filters and optional text query. Results are scored by relevance: `recency × importance` where recency = exp(-ageDays/30) and importance is weighted by type (closure=1.0, lesson=0.9, claim=0.8, insight=0.7, heartbeat=0.3, default=0.5).
+
+**Optional:** `agent_id`, `type`, `tags` (array, matches ANY), `query` (text for relevance scoring), `limit` (default 50, max 100)
+
+**Extends existing AgentMemory node type** (per ADR-004: no new node types).
+
+### `memory_consolidate`
+**Namespace:** memory | **Timeout:** 120s | **Handler:** orchestrator | **Phantom Week 2 Track B**
+
+Run memory consolidation for an agent (or all agents). Three-phase process:
+1. **TTL expiry** — deletes AgentMemory nodes >30 days old (except closure/lesson types)
+2. **Dedup merge** — merges nodes with Jaccard similarity ≥0.6, combining content + tags
+3. **Budget enforcement** — prunes least-relevant nodes if agent exceeds 1000-node budget
+
+**Optional:** `agent_id` (omit to consolidate all agents)
+
+Returns `ConsolidationReport` with `agents_consolidated`, `total_merged`, `total_expired`, `total_pruned`, and per-agent breakdown.
+
+**Weekly cron:** Sunday 04:00 UTC (`memory-consolidation` cron job).
 
 ### `failure_harvest`
 **Namespace:** intelligence | **Timeout:** 30s | **Handler:** orchestrator | **LIN-567 Red Queen**

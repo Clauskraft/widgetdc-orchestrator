@@ -1390,6 +1390,62 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    // ─── memory.* — Long-term memory (Phantom Week 2 Track B) ─────
+
+    case 'memory_search': {
+      try {
+        const { searchMemories } = await import('../memory/memory-consolidator.js')
+        const results = await searchMemories({
+          agentId: typeof args.agent_id === 'string' ? args.agent_id : undefined,
+          type: typeof args.type === 'string' ? args.type : undefined,
+          tags: Array.isArray(args.tags) ? args.tags as string[] : undefined,
+          query: typeof args.query === 'string' ? args.query : undefined,
+          limit: typeof args.limit === 'number' ? Math.min(args.limit, 100) : 50,
+        })
+        if (results.length === 0) return `No memories found matching filters`
+        const formatted = results.map(r =>
+          `[relevance=${r.relevance.toFixed(2)}] (${r.type}) ${r.agentId}/${r.key}: ${(r.value || '').slice(0, 200)}`
+        ).join('\n')
+        return `${results.length} memories found:\n---\n${formatted}`
+      } catch (err) {
+        return `Memory search failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'memory_consolidate': {
+      try {
+        const { consolidateAgent, consolidateAll } = await import('../memory/memory-consolidator.js')
+        const agentId = typeof args.agent_id === 'string' ? args.agent_id : undefined
+        const reports = agentId
+          ? [await consolidateAgent(agentId)]
+          : await consolidateAll()
+
+        const totalMerged = reports.reduce((s, r) => s + r.merged, 0)
+        const totalExpired = reports.reduce((s, r) => s + r.expired, 0)
+        const totalPruned = reports.reduce((s, r) => s + r.pruned, 0)
+        const totalTime = reports.reduce((s, r) => s + r.durationMs, 0)
+
+        return JSON.stringify({
+          agents_consolidated: reports.length,
+          total_merged: totalMerged,
+          total_expired: totalExpired,
+          total_pruned: totalPruned,
+          total_duration_ms: totalTime,
+          reports: reports.map(r => ({
+            agent_id: r.agentId,
+            before: r.beforeCount,
+            after: r.afterCount,
+            merged: r.merged,
+            expired: r.expired,
+            pruned: r.pruned,
+            duration_ms: r.durationMs,
+          })),
+        }, null, 2)
+      } catch (err) {
+        return `Memory consolidation failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
     case 'failure_harvest': {
       try {
         const { harvestFailures, buildFailureSummary } = await import('../flywheel/failure-harvester.js')

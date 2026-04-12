@@ -1138,6 +1138,20 @@ await test('118. POST /api/tools/memory_retrieve responds', async () => {
   assert(r.body?.data?.tool_name === 'memory_retrieve', `wrong tool_name`)
 })
 
+// ── 118a. memory_search — exists ──
+await test('118a. POST /api/tools/memory_search responds', async () => {
+  const r = await api('/api/tools/memory_search', { method: 'POST', body: JSON.stringify({ agent_id: 'test-e2e', limit: 5 }) })
+  assert(r.status !== 404, `memory_search not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'memory_search', `wrong tool_name`)
+})
+
+// ── 118b. memory_consolidate — exists ──
+await test('118b. POST /api/tools/memory_consolidate responds', async () => {
+  const r = await api('/api/tools/memory_consolidate', { method: 'POST', body: JSON.stringify({ agent_id: 'test-e2e' }) })
+  assert(r.status !== 404, `memory_consolidate not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'memory_consolidate', `wrong tool_name`)
+})
+
 // ── 119. failure_harvest — exists ──
 await test('119. POST /api/tools/failure_harvest responds', async () => {
   const r = await api('/api/tools/failure_harvest', { method: 'POST', body: JSON.stringify({ window_hours: 1 }) })

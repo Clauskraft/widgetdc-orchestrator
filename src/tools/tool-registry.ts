@@ -840,6 +840,32 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
   }),
 
   defineTool({
+    name: 'memory_search',
+    namespace: 'memory',
+    description: 'Search long-term AgentMemory nodes in Neo4j with structured filters (agentId, type, tags) and optional text query. Returns results scored by relevance (recency × importance). Phantom Week 2 Track B.',
+    input: z.object({
+      agent_id: z.string().optional().describe('Filter by agent ID'),
+      type: z.string().optional().describe('Filter by memory type (e.g., insight, closure, lesson, claim)'),
+      tags: z.array(z.string()).optional().describe('Filter by tags (matches ANY tag)'),
+      query: z.string().optional().describe('Text query for relevance scoring'),
+      limit: z.number().optional().describe('Max results (default 50)'),
+    }),
+    timeoutMs: 15000,
+    outputDescription: 'Array of SearchResult with relevance scores, sorted by relevance',
+  }),
+
+  defineTool({
+    name: 'memory_consolidate',
+    namespace: 'memory',
+    description: 'Run memory consolidation for an agent (or all agents). Merges duplicate AgentMemory nodes by semantic similarity (Jaccard ≥0.6), expires nodes >30 days old, enforces <1000 nodes/agent budget. Phantom Week 2 Track B.',
+    input: z.object({
+      agent_id: z.string().optional().describe('Agent to consolidate (omit for all agents)'),
+    }),
+    timeoutMs: 120000,
+    outputDescription: 'ConsolidationReport with merged/expired/pruned counts',
+  }),
+
+  defineTool({
     name: 'failure_harvest',
     namespace: 'intelligence',
     description: 'Harvest recent orchestrator failures (timeouts, 502s, auth errors, MCP errors) for Red Queen learning loop (LIN-567). Returns categorized failure summary with counts and patterns.',

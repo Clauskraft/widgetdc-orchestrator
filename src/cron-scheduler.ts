@@ -1713,6 +1713,19 @@ export function registerDefaultLoops(): void {
     },
   })
 
+  // Memory Consolidation — Phantom Week 2 Track B: weekly dedup + TTL enforcement
+  registerCronJob({
+    id: 'memory-consolidation',
+    name: 'Memory Consolidation (Weekly AgentMemory Dedup + TTL)',
+    schedule: '0 4 * * 0', // Sunday 04:00 UTC
+    enabled: true,
+    chain: {
+      name: 'Memory Consolidation',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'memory_consolidate', arguments: {} }],
+    },
+  })
+
   // Skill Forge — auto-generate composite MCP tools from usage patterns
   // DISABLED 2026-04-09: backend endpoint not responding, burns capacity
   registerCronJob({

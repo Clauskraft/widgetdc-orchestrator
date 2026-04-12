@@ -185,6 +185,8 @@ const LOCAL_TOOLS = new Set([
   'agent_list', 'agent_status', 'agent_dispatch', 'agent_memory', 'agent_capabilities',
   // Chat + LLM
   'chat_send', 'chat_read', 'llm_chat', 'llm_providers',
+  // Memory (Phantom Week 2 Track B)
+  'memory_search', 'memory_consolidate',
   // Model routing
   'model_providers', 'model_route', 'model_cost_estimate', 'model_budget_status', 'model_policy_check',
   // Workflow
