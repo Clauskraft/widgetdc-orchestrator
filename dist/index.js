@@ -12797,6 +12797,123 @@ var init_tool_registry = __esm({
         timeoutMs: 1e4,
         outputDescription: "ToolMetrics or ToolMetrics[] for top tools"
       }),
+      // ─── prompts.* — Prompt Library (Phantom Week 5) ────────────────
+      defineTool({
+        name: "prompt_add",
+        namespace: "prompts",
+        description: "Add a prompt to the library with title, content, category, tags, and optional variables. Stores in Redis + Neo4j :Prompt node. Phantom Week 5.",
+        input: z.object({
+          title: z.string().describe("Prompt title"),
+          content: z.string().describe("Prompt content/template"),
+          category: z.string().describe("Category (code, analysis, writing, architecture, testing, etc.)"),
+          tags: z.array(z.string()).optional().describe("Tags for classification"),
+          variables: z.array(z.string()).optional().describe('Template variables (e.g., ["context", "task"])'),
+          author: z.string().optional().describe("Author name")
+        }),
+        timeoutMs: 15e3,
+        outputDescription: "Created Prompt with id, quality_score, timestamps"
+      }),
+      defineTool({
+        name: "prompt_query",
+        namespace: "prompts",
+        description: "Query prompts from the library with filters: category, tags, full-text search, min quality score. Phantom Week 5.",
+        input: z.object({
+          category: z.string().optional().describe("Filter by category"),
+          tags: z.array(z.string()).optional().describe("Filter by tags (matches ANY)"),
+          query: z.string().optional().describe("Full-text search in title/content"),
+          min_quality: z.number().optional().describe("Minimum quality score (0-1)"),
+          limit: z.number().optional().describe("Max results (default 20)")
+        }),
+        timeoutMs: 1e4,
+        outputDescription: "Prompt[] sorted by quality_score descending"
+      }),
+      defineTool({
+        name: "prompt_use",
+        namespace: "prompts",
+        description: "Record usage of a prompt (feedback loop for quality scoring). Call after using a prompt to adjust its quality score. Phantom Week 5.",
+        input: z.object({
+          prompt_id: z.string().describe("Prompt ID to record usage for"),
+          was_helpful: z.boolean().optional().describe("Whether the prompt was helpful (default: true)")
+        }),
+        timeoutMs: 5e3,
+        outputDescription: "Confirmation of usage recording"
+      }),
+      // ─── knowledge.* — PDF Knowledge Ingestion (Phantom Week 5) ─────
+      defineTool({
+        name: "knowledge_ingest",
+        namespace: "knowledge",
+        description: "Ingest a document into the knowledge base. Creates Neo4j :KnowledgeDocument node. Use with output from document_convert. Phantom Week 5.",
+        input: z.object({
+          title: z.string().describe("Document title"),
+          content: z.string().describe("Document text content"),
+          source_type: z.string().describe("Source type (pdf, docx, xlsx, pptx, md, html, txt, url)"),
+          source_path: z.string().optional().describe("Original file path/URL"),
+          language: z.string().optional().describe("Detected language"),
+          tags: z.array(z.string()).optional().describe("Classification tags"),
+          headings: z.array(z.string()).optional().describe("Extracted headings"),
+          word_count: z.number().optional().describe("Word count")
+        }),
+        timeoutMs: 15e3,
+        outputDescription: "KnowledgeDocument with id, metadata, Neo4j node created"
+      }),
+      defineTool({
+        name: "knowledge_query",
+        namespace: "knowledge",
+        description: "Query knowledge documents with filters: tags, full-text search, source type. Phantom Week 5.",
+        input: z.object({
+          tags: z.array(z.string()).optional().describe("Filter by tags (matches ANY)"),
+          query: z.string().optional().describe("Full-text search in title/content"),
+          source_type: z.string().optional().describe("Filter by source type"),
+          limit: z.number().optional().describe("Max results (default 20)")
+        }),
+        timeoutMs: 1e4,
+        outputDescription: "KnowledgeDocument[] sorted by word_count descending"
+      }),
+      // ─── compliance.* — EU AI Act Compliance (Phantom Week 6, V1) ──
+      defineTool({
+        name: "compliance_gap_audit",
+        namespace: "compliance",
+        description: 'Run EU AI Act Annex III compliance gap audit on a tech stack. Upload stack JSON \u2192 get gap report with severity, affected articles, remediation steps. V1: "Upload klient-stack \u2192 f\xE5 AI-Act gap-rapport p\xE5 5 min".',
+        input: z.object({
+          stack: z.array(z.object({
+            name: z.string().describe("Component name"),
+            category: z.string().describe("ml-model, data-pipeline, deployment, monitoring, governance"),
+            provider: z.string().optional(),
+            risk_level: z.enum(["minimal", "limited", "high", "unacceptable"]).optional(),
+            data_types: z.array(z.string()).optional().describe("PII categories: personal, biometric, health, financial, behavioral"),
+            has_human_oversight: z.boolean().optional(),
+            has_risk_assessment: z.boolean().optional(),
+            has_transparency_notice: z.boolean().optional(),
+            has_data_governance: z.boolean().optional(),
+            has_monitoring: z.boolean().optional(),
+            has_documentation: z.boolean().optional(),
+            logs_retention_days: z.number().optional()
+          })).describe("Tech stack to audit")
+        }),
+        timeoutMs: 3e4,
+        outputDescription: "Compliance report: score, gap counts, top remediation actions"
+      }),
+      // ─── analytics.* — Engagement Cost + Drift (Phantom Week 6, V3, V5) ──
+      defineTool({
+        name: "engagement_cost_report",
+        namespace: "analytics",
+        description: 'Get cost attribution per client engagement: DKK rollup by agent and tool. V3: "Hvilket engagement brugte hvilken agent \u2014 hvor meget kostede det?"',
+        input: z.object({
+          engagement_id: z.string().describe("Engagement identifier")
+        }),
+        timeoutMs: 15e3,
+        outputDescription: "Cost report: total DKK, by-agent breakdown, by-tool breakdown"
+      }),
+      defineTool({
+        name: "agent_drift_report",
+        namespace: "analytics",
+        description: 'Check all agents for regression drift: success-rate, latency, cost. Creates Linear issues for critical drifts. V5: "Weekly regression flag per agent \u2192 auto Linear issue".',
+        input: z.object({
+          threshold: z.number().optional().describe("Success-rate regression threshold % (default: 15)")
+        }),
+        timeoutMs: 3e4,
+        outputDescription: "Drift report: agents checked, drifts found, Linear issues created"
+      }),
       defineTool({
         name: "failure_harvest",
         namespace: "intelligence",
@@ -21101,6 +21218,1201 @@ var init_runtime_analytics = __esm({
   }
 });
 
+// src/prompts/prompt-library.ts
+var prompt_library_exports = {};
+__export(prompt_library_exports, {
+  PROMPT_CATEGORIES: () => PROMPT_CATEGORIES,
+  addPrompt: () => addPrompt,
+  getKnowledge: () => getKnowledge,
+  getPrompt: () => getPrompt,
+  ingestKnowledge: () => ingestKnowledge,
+  knowledgeStats: () => knowledgeStats,
+  listCategories: () => listCategories,
+  queryKnowledge: () => queryKnowledge,
+  queryPrompts: () => queryPrompts,
+  recordPromptUsage: () => recordPromptUsage,
+  seedPrompts: () => seedPrompts
+});
+function promptId() {
+  return `prompt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+function knowledgeId() {
+  return `knowledge-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+async function mcpCall3(tool, payload) {
+  const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+    },
+    body: JSON.stringify({ tool, payload }),
+    signal: AbortSignal.timeout(15e3)
+  });
+  const data = await res.json().catch(() => null);
+  return data?.result ?? data;
+}
+async function addPrompt(prompt) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const id = promptId();
+  const fullPrompt = {
+    ...prompt,
+    id,
+    created_at: now,
+    updated_at: now,
+    usage_count: 0
+  };
+  if (isRedisEnabled()) {
+    const redis2 = getRedis();
+    if (redis2) {
+      try {
+        await redis2.set(`${REDIS_PROMPT_PREFIX}${id}`, JSON.stringify(fullPrompt), "EX", REDIS_TTL_PROMPTS);
+        await redis2.sadd(REDIS_PROMPT_INDEX, id);
+        await redis2.sadd(`${REDIS_PROMPT_CATEGORY_PREFIX}${prompt.category}`, id);
+      } catch (err) {
+        logger.warn({ err: String(err), prompt_id: id }, "Failed to store prompt in Redis");
+      }
+    }
+  }
+  try {
+    await mcpCall3("graph.write_cypher", {
+      query: `MERGE (p:Prompt {id: $id})
+              SET p.title = $title, p.category = $category, p.content = $content,
+                  p.tags = $tags, p.quality_score = $quality_score,
+                  p.variables = $variables, p.author = $author,
+                  p.updatedAt = datetime()`,
+      params: {
+        id,
+        title: prompt.title,
+        category: prompt.category,
+        content: prompt.content.slice(0, 4e3),
+        tags: prompt.tags,
+        quality_score: prompt.quality_score,
+        variables: prompt.variables ?? [],
+        author: prompt.author ?? "system"
+      }
+    });
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Failed to create Neo4j Prompt node (non-fatal)");
+  }
+  logger.info({ prompt_id: id, category: prompt.category, title: prompt.title }, "Prompt added to library");
+  return fullPrompt;
+}
+async function getPrompt(id) {
+  const redis2 = getRedis();
+  if (!redis2 || !isRedisEnabled()) return null;
+  try {
+    const raw = await redis2.get(`${REDIS_PROMPT_PREFIX}${id}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    logger.warn({ err: String(err), prompt_id: id }, "Failed to get prompt from Redis");
+    return null;
+  }
+}
+async function queryPrompts(q) {
+  const redis2 = getRedis();
+  if (!redis2 || !isRedisEnabled()) return [];
+  try {
+    let ids = [];
+    if (q.category) {
+      ids = await redis2.smembers(`${REDIS_PROMPT_CATEGORY_PREFIX}${q.category}`);
+    } else {
+      ids = await redis2.smembers(REDIS_PROMPT_INDEX);
+    }
+    if (ids.length === 0) return [];
+    const prompts = [];
+    for (const id of ids.slice(0, 200)) {
+      const raw = await redis2.get(`${REDIS_PROMPT_PREFIX}${id}`);
+      if (raw) prompts.push(JSON.parse(raw));
+    }
+    let filtered = prompts;
+    if (q.tags && q.tags.length > 0) {
+      filtered = filtered.filter((p) => q.tags.some((t) => p.tags.includes(t)));
+    }
+    if (q.min_quality !== void 0) {
+      filtered = filtered.filter((p) => p.quality_score >= q.min_quality);
+    }
+    if (q.query) {
+      const queryLower = q.query.toLowerCase();
+      filtered = filtered.filter(
+        (p) => p.title.toLowerCase().includes(queryLower) || p.content.toLowerCase().includes(queryLower)
+      );
+    }
+    filtered.sort((a, b) => b.quality_score - a.quality_score);
+    return filtered.slice(0, q.limit ?? 20);
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Failed to query prompts");
+    return [];
+  }
+}
+async function recordPromptUsage(id, wasHelpful = true) {
+  const redis2 = getRedis();
+  if (!redis2 || !isRedisEnabled()) return;
+  try {
+    const raw = await redis2.get(`${REDIS_PROMPT_PREFIX}${id}`);
+    if (!raw) return;
+    const prompt = JSON.parse(raw);
+    prompt.usage_count++;
+    prompt.updated_at = (/* @__PURE__ */ new Date()).toISOString();
+    const alpha = 0.05;
+    prompt.quality_score = prompt.quality_score + alpha * ((wasHelpful ? 1 : 0) - prompt.quality_score);
+    prompt.quality_score = Math.max(0, Math.min(1, prompt.quality_score));
+    await redis2.set(`${REDIS_PROMPT_PREFIX}${id}`, JSON.stringify(prompt), "EX", REDIS_TTL_PROMPTS);
+  } catch (err) {
+    logger.warn({ err: String(err), prompt_id: id }, "Failed to record prompt usage");
+  }
+}
+async function listCategories() {
+  const redis2 = getRedis();
+  if (!redis2 || !isRedisEnabled()) return PROMPT_CATEGORIES.map((c) => ({ category: c, count: 0 }));
+  try {
+    const categories = [];
+    for (const cat of PROMPT_CATEGORIES) {
+      const count = await redis2.scard(`${REDIS_PROMPT_CATEGORY_PREFIX}${cat}`);
+      categories.push({ category: cat, count });
+    }
+    return categories.filter((c) => c.count > 0).sort((a, b) => b.count - a.count);
+  } catch {
+    return PROMPT_CATEGORIES.map((c) => ({ category: c, count: 0 }));
+  }
+}
+async function seedPrompts() {
+  const redis2 = getRedis();
+  if (!redis2 || !isRedisEnabled()) return 0;
+  try {
+    const existingCount = await redis2.scard(REDIS_PROMPT_INDEX);
+    if (existingCount >= SEED_PROMPTS.length) return 0;
+    let added = 0;
+    for (const seed of SEED_PROMPTS) {
+      const existing = await queryPrompts({ query: seed.title, limit: 1 });
+      if (existing.length === 0) {
+        await addPrompt(seed);
+        added++;
+      }
+    }
+    logger.info({ added, total: SEED_PROMPTS.length }, "Prompt library seeded");
+    return added;
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Failed to seed prompts");
+    return 0;
+  }
+}
+async function ingestKnowledge(doc) {
+  const id = knowledgeId();
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const tags = doc.tags ?? [];
+  const headings = doc.headings ?? [];
+  const knowledgeDoc = {
+    id,
+    title: doc.title,
+    content: doc.content,
+    source_type: doc.source_type,
+    source_path: doc.source_path,
+    language: doc.language,
+    tags,
+    headings,
+    word_count: doc.word_count ?? 0,
+    created_at: now,
+    metadata: doc.metadata ?? {}
+  };
+  if (isRedisEnabled()) {
+    const redis2 = getRedis();
+    if (redis2) {
+      try {
+        await redis2.set(`${REDIS_KNOWLEDGE_PREFIX}${id}`, JSON.stringify(knowledgeDoc), "EX", REDIS_TTL_KNOWLEDGE);
+        await redis2.sadd(REDIS_KNOWLEDGE_INDEX, id);
+      } catch (err) {
+        logger.warn({ err: String(err), knowledge_id: id }, "Failed to store knowledge doc in Redis");
+      }
+    }
+  }
+  try {
+    await mcpCall3("graph.write_cypher", {
+      query: `MERGE (k:KnowledgeDocument {id: $id})
+              SET k.title = $title, k.content = $content, k.source_type = $source_type,
+                  k.source_path = $source_path, k.language = $language, k.tags = $tags,
+                  k.headings = $headings, k.word_count = $word_count,
+                  k.createdAt = datetime(), k.updatedAt = datetime()`,
+      params: {
+        id,
+        title: doc.title.slice(0, 500),
+        content: doc.content.slice(0, 8e3),
+        // Neo4j string limit for properties
+        source_type: doc.source_type,
+        source_path: doc.source_path,
+        language: doc.language ?? null,
+        tags,
+        headings: headings.slice(0, 50),
+        word_count: doc.word_count ?? 0
+      }
+    });
+    logger.info({ knowledge_id: id, source_type: doc.source_type, word_count: doc.word_count }, "Knowledge document ingested");
+    return knowledgeDoc;
+  } catch (err) {
+    logger.warn({ err: String(err), knowledge_id: id }, "Failed to create Neo4j KnowledgeDocument node");
+    return null;
+  }
+}
+async function getKnowledge(id) {
+  const redis2 = getRedis();
+  if (!redis2 || !isRedisEnabled()) return null;
+  try {
+    const raw = await redis2.get(`${REDIS_KNOWLEDGE_PREFIX}${id}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    logger.warn({ err: String(err), knowledge_id: id }, "Failed to get knowledge from Redis");
+    return null;
+  }
+}
+async function queryKnowledge(q) {
+  const redis2 = getRedis();
+  if (!redis2 || !isRedisEnabled()) return [];
+  try {
+    const ids = await redis2.smembers(REDIS_KNOWLEDGE_INDEX);
+    if (ids.length === 0) return [];
+    const docs = [];
+    for (const id of ids.slice(0, 200)) {
+      const raw = await redis2.get(`${REDIS_KNOWLEDGE_PREFIX}${id}`);
+      if (raw) docs.push(JSON.parse(raw));
+    }
+    let filtered = docs;
+    if (q.source_type) {
+      filtered = filtered.filter((d) => d.source_type === q.source_type);
+    }
+    if (q.tags && q.tags.length > 0) {
+      filtered = filtered.filter((d) => q.tags.some((t) => d.tags.includes(t)));
+    }
+    if (q.query) {
+      const queryLower = q.query.toLowerCase();
+      filtered = filtered.filter(
+        (d) => d.title.toLowerCase().includes(queryLower) || d.content.toLowerCase().includes(queryLower)
+      );
+    }
+    filtered.sort((a, b) => b.word_count - a.word_count);
+    return filtered.slice(0, q.limit ?? 20);
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Failed to query knowledge documents");
+    return [];
+  }
+}
+async function knowledgeStats() {
+  const redis2 = getRedis();
+  if (!redis2 || !isRedisEnabled()) return { total: 0, by_source_type: {} };
+  try {
+    const ids = await redis2.smembers(REDIS_KNOWLEDGE_INDEX);
+    const bySource = {};
+    for (const id of ids.slice(0, 500)) {
+      const raw = await redis2.get(`${REDIS_KNOWLEDGE_PREFIX}${id}`);
+      if (raw) {
+        const doc = JSON.parse(raw);
+        bySource[doc.source_type] = (bySource[doc.source_type] || 0) + 1;
+      }
+    }
+    return { total: ids.length, by_source_type: bySource };
+  } catch {
+    return { total: 0, by_source_type: {} };
+  }
+}
+var REDIS_PROMPT_PREFIX, REDIS_PROMPT_INDEX, REDIS_PROMPT_CATEGORY_PREFIX, REDIS_KNOWLEDGE_PREFIX, REDIS_KNOWLEDGE_INDEX, REDIS_TTL_PROMPTS, REDIS_TTL_KNOWLEDGE, PROMPT_CATEGORIES, SEED_PROMPTS;
+var init_prompt_library = __esm({
+  "src/prompts/prompt-library.ts"() {
+    "use strict";
+    init_redis();
+    init_logger();
+    init_config();
+    REDIS_PROMPT_PREFIX = "prompt:";
+    REDIS_PROMPT_INDEX = "prompts:index";
+    REDIS_PROMPT_CATEGORY_PREFIX = "prompt:cat:";
+    REDIS_KNOWLEDGE_PREFIX = "knowledge:";
+    REDIS_KNOWLEDGE_INDEX = "knowledge:index";
+    REDIS_TTL_PROMPTS = 365 * 24 * 3600;
+    REDIS_TTL_KNOWLEDGE = 365 * 24 * 3600;
+    PROMPT_CATEGORIES = [
+      "code",
+      // Code generation, review, debugging
+      "analysis",
+      // Data analysis, research, investigation
+      "writing",
+      // Content creation, editing, translation
+      "architecture",
+      // System design, patterns, decisions
+      "testing",
+      // Test generation, TDD, QA
+      "documentation",
+      // Docs, comments, API specs
+      "governance",
+      // Policy, compliance, audit
+      "memory",
+      // Memory management, context folding
+      "agent",
+      // Agent coordination, dispatch
+      "converter",
+      // Document conversion patterns
+      "analytics",
+      // Metrics, monitoring, dashboards
+      "general"
+      // Catch-all / miscellaneous
+    ];
+    SEED_PROMPTS = [
+      {
+        title: "Code Review",
+        content: "Review the following code for correctness, security, performance, and code quality. Identify bugs, vulnerabilities, and improvement opportunities. Provide specific line references and suggested fixes.",
+        category: "code",
+        tags: ["review", "quality", "security"],
+        quality_score: 0.9,
+        variables: ["code", "language"]
+      },
+      {
+        title: "Architecture Decision",
+        content: "Analyze the following architectural decision. Evaluate trade-offs, alternatives, risks, and long-term implications. Provide a recommendation with justification.",
+        category: "architecture",
+        tags: ["decision", "trade-offs", "design"],
+        quality_score: 0.85,
+        variables: ["context", "decision", "alternatives"]
+      },
+      {
+        title: "Test Generation",
+        content: "Generate comprehensive tests for the following code. Include unit tests, edge cases, error paths, and integration scenarios. Use the existing test framework and conventions.",
+        category: "testing",
+        tags: ["tests", "coverage", "edge-cases"],
+        quality_score: 0.88,
+        variables: ["code", "framework"]
+      },
+      {
+        title: "Document Converter",
+        content: "Convert the following document to canonical text format. Extract headings, links, tables, and metadata. Preserve structure and semantics. Detect language automatically.",
+        category: "converter",
+        tags: ["conversion", "extraction", "metadata"],
+        quality_score: 0.82,
+        variables: ["document", "format"]
+      },
+      {
+        title: "Runtime Analysis",
+        content: "Analyze the following runtime metrics and identify anomalies, bottlenecks, and optimization opportunities. Provide actionable recommendations prioritized by impact.",
+        category: "analytics",
+        tags: ["metrics", "performance", "anomaly"],
+        quality_score: 0.87,
+        variables: ["metrics", "timeframe"]
+      },
+      {
+        title: "Agent Dispatch",
+        content: "Route the following task to the most capable agent based on capabilities, current load, and past performance. Provide the routing decision with justification and fallback chain.",
+        category: "agent",
+        tags: ["routing", "dispatch", "capabilities"],
+        quality_score: 0.84,
+        variables: ["task", "agents", "constraints"]
+      },
+      {
+        title: "Memory Consolidation",
+        content: "Consolidate the following memory entries by semantic similarity. Merge duplicates, expire stale entries, and enforce the node budget. Report merged, expired, and pruned counts.",
+        category: "memory",
+        tags: ["consolidation", "dedup", "ttl"],
+        quality_score: 0.86,
+        variables: ["memories", "threshold", "budget"]
+      },
+      {
+        title: "Governance Audit",
+        content: "Audit the following system state against governance policies. Identify violations, drift, and compliance gaps. Provide a remediation plan with priority and estimated effort.",
+        category: "governance",
+        tags: ["audit", "compliance", "remediation"],
+        quality_score: 0.91,
+        variables: ["state", "policies"]
+      },
+      {
+        title: "Knowledge Ingest",
+        content: "Ingest the following document into the knowledge base. Extract key insights, entities, and relationships. Classify by domain and link to existing knowledge nodes. Produce a summary with tags and confidence scores.",
+        category: "analysis",
+        tags: ["knowledge", "ingestion", "classification"],
+        quality_score: 0.83,
+        variables: ["document", "domain"]
+      },
+      {
+        title: "Contract Compliance",
+        content: "Verify the following implementation against the canonical contract. Check field names (snake_case), required fields, $id presence, additionalProperties:false, and enum values. Report any drift.",
+        category: "governance",
+        tags: ["contract", "compliance", "validation"],
+        quality_score: 0.89,
+        variables: ["implementation", "contract"]
+      }
+    ];
+  }
+});
+
+// src/agent/agent-interface.ts
+function agentSuccess(request, output, tokensUsed = { input: 0, output: 0 }, costDkk = 0) {
+  return {
+    request_id: request.request_id,
+    agent_id: request.agent_id,
+    status: "success",
+    output,
+    tokens_used: tokensUsed,
+    cost_dkk: costDkk,
+    conflicts: []
+  };
+}
+function agentFailure(request, error, tokensUsed = { input: 0, output: 0 }) {
+  return {
+    request_id: request.request_id,
+    agent_id: request.agent_id,
+    status: "failed",
+    output: `Error: ${error}`,
+    tokens_used: tokensUsed,
+    cost_dkk: 0,
+    conflicts: []
+  };
+}
+var init_agent_interface = __esm({
+  "src/agent/agent-interface.ts"() {
+    "use strict";
+  }
+});
+
+// src/compliance/ai-act-auditor.ts
+var ai_act_auditor_exports = {};
+__export(ai_act_auditor_exports, {
+  handleComplianceAudit: () => handleComplianceAudit,
+  runAudit: () => runAudit
+});
+function runAudit(stack) {
+  const allGaps = [];
+  for (const item of stack) {
+    for (const req of ANNEX_III_REQUIREMENTS) {
+      const gap = req.check(item);
+      allGaps.push(gap);
+    }
+  }
+  const criticalGaps = allGaps.filter((g) => g.severity === "critical").length;
+  const highGaps = allGaps.filter((g) => g.severity === "high").length;
+  const mediumGaps = allGaps.filter((g) => g.severity === "medium").length;
+  const lowGaps = allGaps.filter((g) => g.severity === "low").length;
+  const maxPossible = stack.length * ANNEX_III_REQUIREMENTS.length;
+  const weightedScore = (allGaps.filter((g) => g.status === "compliant").length * 1 + allGaps.filter((g) => g.status === "partial").length * 0.5) / maxPossible * 100;
+  const summary = generateSummary(allGaps, stack.length, weightedScore);
+  return {
+    audit_id: `ai-act-${Date.now().toString(36)}`,
+    audited_at: (/* @__PURE__ */ new Date()).toISOString(),
+    stack_items_count: stack.length,
+    total_gaps: allGaps.length,
+    critical_gaps: criticalGaps,
+    high_gaps: highGaps,
+    medium_gaps: mediumGaps,
+    low_gaps: lowGaps,
+    compliance_score: Math.round(weightedScore * 10) / 10,
+    gaps: allGaps,
+    summary
+  };
+}
+function generateSummary(gaps, stackCount, score) {
+  const critical = gaps.filter((g) => g.severity === "critical").length;
+  const high = gaps.filter((g) => g.severity === "high").length;
+  const nonCompliant = gaps.filter((g) => g.status === "non-compliant").length;
+  if (critical > 0) {
+    return `CRITICAL: ${critical} critical gaps found across ${stackCount} component(s). Immediate remediation required before AI Act enforcement deadline (Aug 2026). ${nonCompliant} components are non-compliant.`;
+  }
+  if (high > 0) {
+    return `HIGH RISK: ${high} high-severity gaps found. Score: ${score.toFixed(1)}/100. ${nonCompliant} non-compliant items require prioritized remediation.`;
+  }
+  if (score >= 80) {
+    return `GOOD: ${score.toFixed(1)}/100 compliance score. Minor gaps identified. Continue monitoring and maintain documentation.`;
+  }
+  return `MODERATE: ${score.toFixed(1)}/100 compliance score. ${nonCompliant} non-compliant items. Schedule remediation plan.`;
+}
+async function handleComplianceAudit(request) {
+  try {
+    const stackData = request.context?.stack;
+    if (!stackData) {
+      return agentFailure(request, "No stack data provided. Include stack as JSON in context.stack");
+    }
+    const stack = Array.isArray(stackData) ? stackData : typeof stackData === "string" ? JSON.parse(stackData) : [];
+    if (stack.length === 0) {
+      return agentFailure(request, "Stack must be a non-empty array of StackItem objects");
+    }
+    const report = runAudit(stack);
+    const lines = [
+      `# EU AI Act Annex III Compliance Audit`,
+      ``,
+      `**Audit ID:** ${report.audit_id}`,
+      `**Date:** ${report.audited_at}`,
+      `**Components Audited:** ${report.stack_items_count}`,
+      `**Compliance Score:** ${report.compliance_score}/100`,
+      ``,
+      `## Gap Summary`,
+      `| Severity | Count |`,
+      `|----------|-------|`,
+      `| \u{1F534} Critical | ${report.critical_gaps} |`,
+      `| \u{1F7E0} High | ${report.high_gaps} |`,
+      `| \u{1F7E1} Medium | ${report.medium_gaps} |`,
+      `| \u{1F7E2} Low | ${report.low_gaps} |`,
+      ``,
+      `## Assessment`,
+      report.summary,
+      ``,
+      `## Top Remediation Actions`
+    ];
+    const sorted = [...report.gaps].sort((a, b) => {
+      const sevOrder = { critical: 0, high: 1, medium: 2, low: 3 };
+      return (sevOrder[a.severity] ?? 4) - (sevOrder[b.severity] ?? 4);
+    }).slice(0, 5);
+    for (const gap of sorted) {
+      lines.push(``);
+      lines.push(`### ${gap.article}: ${gap.requirement}`);
+      lines.push(`- **Severity:** ${gap.severity}`);
+      lines.push(`- **Status:** ${gap.status}`);
+      lines.push(`- **Evidence:** ${gap.evidence || "N/A"}`);
+      lines.push(`- **Remediation:** ${gap.remediation}`);
+      lines.push(`- **Deadline:** ${gap.deadline}`);
+      lines.push(`- **Affected:** ${gap.affected_components.join(", ")}`);
+    }
+    return agentSuccess(request, lines.join("\n"), { input: 0, output: lines.length * 10 });
+  } catch (err) {
+    return agentFailure(request, err instanceof Error ? err.message : String(err));
+  }
+}
+var ANNEX_III_REQUIREMENTS;
+var init_ai_act_auditor = __esm({
+  "src/compliance/ai-act-auditor.ts"() {
+    "use strict";
+    init_agent_interface();
+    ANNEX_III_REQUIREMENTS = [
+      {
+        article: "Art. 8",
+        requirement: "Risk Management System",
+        check: (item) => {
+          if (item.risk_level === "high" || item.risk_level === "unacceptable") {
+            return {
+              article: "Art. 8",
+              requirement: "Risk Management System for high-risk AI",
+              severity: item.risk_level === "unacceptable" ? "critical" : "high",
+              status: item.has_risk_assessment ? "partial" : "non-compliant",
+              evidence: item.has_risk_assessment ? "Risk assessment documented" : "No risk assessment found",
+              remediation: "Implement continuous risk management process per Annex III. Document all known and foreseeable risks. Define risk mitigation measures.",
+              affected_components: [item.name],
+              deadline: "2026-08-02"
+            };
+          }
+          return {
+            article: "Art. 8",
+            requirement: "Risk Management System",
+            severity: "low",
+            status: item.has_risk_assessment ? "compliant" : "not-assessed",
+            evidence: item.risk_level ? `Risk level: ${item.risk_level}` : "Risk level not classified",
+            remediation: "Consider risk assessment for future classification",
+            affected_components: [item.name],
+            deadline: "2026-08-02"
+          };
+        }
+      },
+      {
+        article: "Art. 9",
+        requirement: "Data & Data Governance",
+        check: (item) => {
+          const hasPII = item.data_types?.some((d) => ["personal", "biometric", "health", "financial", "behavioral"].includes(d));
+          if (hasPII && !item.has_data_governance) {
+            return {
+              article: "Art. 9",
+              requirement: "Data governance for AI systems using personal data",
+              severity: "high",
+              status: "non-compliant",
+              evidence: `PII data types detected: ${item.data_types?.join(", ")}`,
+              remediation: "Implement data governance framework: data collection, processing, retention policies. Document data lineage and quality controls.",
+              affected_components: [item.name],
+              deadline: "2026-08-02"
+            };
+          }
+          return {
+            article: "Art. 9",
+            requirement: "Data governance",
+            severity: item.has_data_governance ? "low" : "medium",
+            status: item.has_data_governance ? "compliant" : hasPII ? "non-compliant" : "not-assessed",
+            evidence: hasPII ? "PII processing without governance" : "No PII detected",
+            remediation: item.has_data_governance ? "Maintain current governance" : "Document data processing practices",
+            affected_components: [item.name],
+            deadline: "2026-08-02"
+          };
+        }
+      },
+      {
+        article: "Art. 10",
+        requirement: "Technical Documentation",
+        check: (item) => ({
+          article: "Art. 10",
+          requirement: "Technical documentation for high-risk AI systems",
+          severity: item.has_documentation ? "low" : "medium",
+          status: item.has_documentation ? "compliant" : "partial",
+          evidence: item.has_documentation ? "Documentation present" : "Documentation missing or incomplete",
+          remediation: "Create technical documentation per Annex IV: system architecture, training data, performance metrics, validation results.",
+          affected_components: [item.name],
+          deadline: "2026-08-02"
+        })
+      },
+      {
+        article: "Art. 12",
+        requirement: "Record-Keeping & Logging",
+        check: (item) => {
+          const hasLogging = item.logs_retention_days && item.logs_retention_days >= 90;
+          return {
+            article: "Art. 12",
+            requirement: "Automatically generated logs for high-risk AI systems",
+            severity: hasLogging ? "low" : "medium",
+            status: hasLogging ? "compliant" : item.logs_retention_days ? "partial" : "non-compliant",
+            evidence: item.logs_retention_days ? `Logs retained: ${item.logs_retention_days} days` : "No logging configured",
+            remediation: "Implement automatic logging with minimum 90-day retention. Include: input data, output, timestamp, operator ID, system state.",
+            affected_components: [item.name],
+            deadline: "2026-08-02"
+          };
+        }
+      },
+      {
+        article: "Art. 13",
+        requirement: "Transparency & Information to Users",
+        check: (item) => ({
+          article: "Art. 13",
+          requirement: "Transparency obligations \u2014 users must be informed they interact with AI",
+          severity: item.has_transparency_notice ? "low" : "high",
+          status: item.has_transparency_notice ? "compliant" : "non-compliant",
+          evidence: item.has_transparency_notice ? "Transparency notice present" : "No transparency notice found",
+          remediation: 'Implement clear user notification: "This system uses AI technology." Provide instructions for use, performance characteristics, and limitations.',
+          affected_components: [item.name],
+          deadline: "2026-08-02"
+        })
+      },
+      {
+        article: "Art. 14",
+        requirement: "Human Oversight",
+        check: (item) => ({
+          article: "Art. 14",
+          requirement: "Human oversight measures for high-risk AI systems",
+          severity: item.has_human_oversight ? "medium" : "critical",
+          status: item.has_human_oversight ? "compliant" : "non-compliant",
+          evidence: item.has_human_oversight ? "Human oversight implemented" : "No human oversight mechanism found",
+          remediation: "Implement human-in-the-loop oversight: (1) Manual override capability, (2) Human review before critical decisions, (3) Stop/interrupt button, (4) Training for human overseers.",
+          affected_components: [item.name],
+          deadline: "2026-08-02"
+        })
+      },
+      {
+        article: "Art. 15",
+        requirement: "Accuracy, Robustness & Cybersecurity",
+        check: (item) => ({
+          article: "Art. 15",
+          requirement: "Achieve appropriate levels of accuracy, robustness, and cybersecurity",
+          severity: item.has_monitoring ? "medium" : "high",
+          status: item.has_monitoring ? "partial" : "non-compliant",
+          evidence: item.has_monitoring ? "Monitoring in place" : "No accuracy/robustness monitoring detected",
+          remediation: "Implement: (1) Accuracy metrics with thresholds, (2) Robustness testing against adversarial inputs, (3) Cybersecurity measures per ENISA guidelines, (4) Regular performance validation.",
+          affected_components: [item.name],
+          deadline: "2026-08-02"
+        })
+      }
+    ];
+  }
+});
+
+// src/analytics/engagement-cost-tracker.ts
+var engagement_cost_tracker_exports = {};
+__export(engagement_cost_tracker_exports, {
+  getEngagementCostReport: () => getEngagementCostReport,
+  handleEngagementCostReport: () => handleEngagementCostReport,
+  listEngagements: () => listEngagements2,
+  persistCostReport: () => persistCostReport,
+  recordEngagementCost: () => recordEngagementCost
+});
+async function mcpCall4(tool, payload) {
+  const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+    },
+    body: JSON.stringify({ tool, payload }),
+    signal: AbortSignal.timeout(15e3)
+  });
+  const data = await res.json().catch(() => null);
+  return data?.result ?? data;
+}
+async function recordEngagementCost(engagementId, agentId, costDkk, tokensInput, tokensOutput, latencyMs, success, toolName2) {
+  if (!isRedisEnabled()) return;
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const engKey = `${REDIS_ENGAGEMENT_PREFIX}${engagementId}`;
+    const agentKey = `${engKey}:agent:${agentId}`;
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const costMilli = Math.round(costDkk * 1e3);
+    await redis2.hincrby(engKey, "total_cost_milli", costMilli);
+    await redis2.hincrby(engKey, "total_tokens_input", tokensInput);
+    await redis2.hincrby(engKey, "total_tokens_output", tokensOutput);
+    await redis2.hincrby(engKey, "total_requests", 1);
+    await redis2.hincrby(engKey, "latency_sum_ms", latencyMs);
+    if (success) await redis2.hincrby(engKey, "success_count", 1);
+    await redis2.hset(engKey, "last_seen", now);
+    await redis2.hsetnx(engKey, "first_seen", now);
+    await redis2.expire(engKey, REDIS_TTL3);
+    await redis2.sadd(REDIS_ENGAGEMENT_INDEX, engagementId);
+    await redis2.hincrby(agentKey, "requests", 1);
+    await redis2.hincrby(agentKey, "cost_milli", costMilli);
+    await redis2.hincrby(agentKey, "tokens_input", tokensInput);
+    await redis2.hincrby(agentKey, "tokens_output", tokensOutput);
+    await redis2.hincrby(agentKey, "latency_sum_ms", latencyMs);
+    if (success) await redis2.hincrby(agentKey, "success_count", 1);
+    await redis2.hset(agentKey, "last_seen", now);
+    await redis2.hsetnx(agentKey, "first_seen", now);
+    await redis2.expire(agentKey, REDIS_TTL3);
+    if (toolName2) {
+      const toolKey = `${engKey}:tool:${toolName2}`;
+      await redis2.hincrby(toolKey, "calls", 1);
+      await redis2.hincrby(toolKey, "cost_milli", costMilli);
+      await redis2.hincrby(toolKey, "latency_sum_ms", latencyMs);
+      await redis2.expire(toolKey, REDIS_TTL3);
+    }
+  } catch (err) {
+    logger.warn({ err: String(err), engagement_id: engagementId }, "Failed to record engagement cost");
+  }
+}
+async function getEngagementCostReport(engagementId) {
+  const redis2 = getRedis();
+  if (!redis2 || !isRedisEnabled()) return null;
+  try {
+    const engKey = `${REDIS_ENGAGEMENT_PREFIX}${engagementId}`;
+    const data = await redis2.hgetall(engKey);
+    if (!data || Object.keys(data).length === 0) return null;
+    const totalCostMilli = parseInt(data.total_cost_milli || "0");
+    const totalTokensInput = parseInt(data.total_tokens_input || "0");
+    const totalTokensOutput = parseInt(data.total_tokens_output || "0");
+    const totalRequests = parseInt(data.total_requests || "0");
+    const successCount = parseInt(data.success_count || "0");
+    const latencySum = parseInt(data.latency_sum_ms || "0");
+    const agentKeys = await redis2.keys(`${engKey}:agent:*`);
+    const byAgent = [];
+    for (const aKey of agentKeys) {
+      const agentId = aKey.replace(`${engKey}:agent:`, "");
+      const aData = await redis2.hgetall(aKey);
+      const aRequests = parseInt(aData.requests || "0");
+      const aSuccess = parseInt(aData.success_count || "0");
+      const aLatencySum = parseInt(aData.latency_sum_ms || "0");
+      const aCostMilli = parseInt(aData.cost_milli || "0");
+      byAgent.push({
+        agent_id: agentId,
+        requests: aRequests,
+        tokens_input: parseInt(aData.tokens_input || "0"),
+        tokens_output: parseInt(aData.tokens_output || "0"),
+        cost_dkk: aCostMilli / 1e3,
+        avg_latency_ms: aRequests > 0 ? Math.round(aLatencySum / aRequests) : 0,
+        success_rate: aRequests > 0 ? Math.round(aSuccess / aRequests * 1e4) / 100 : 0,
+        first_seen: aData.first_seen ?? "",
+        last_seen: aData.last_seen ?? ""
+      });
+    }
+    const toolKeys = await redis2.keys(`${engKey}:tool:*`);
+    const byTool = {};
+    for (const tKey of toolKeys) {
+      const toolName2 = tKey.replace(`${engKey}:tool:`, "");
+      const tData = await redis2.hgetall(tKey);
+      const tCalls = parseInt(tData.calls || "0");
+      const tCostMilli = parseInt(tData.cost_milli || "0");
+      const tLatencySum = parseInt(tData.latency_sum_ms || "0");
+      byTool[toolName2] = {
+        calls: tCalls,
+        cost_dkk: tCostMilli / 1e3,
+        avg_ms: tCalls > 0 ? Math.round(tLatencySum / tCalls) : 0
+      };
+    }
+    byAgent.sort((a, b) => b.cost_dkk - a.cost_dkk);
+    const totalCost = totalCostMilli / 1e3;
+    const computeCost = totalCost * 0.8;
+    const storageCost = totalCost * 0.15;
+    const overheadCost = totalCost * 0.05;
+    return {
+      report_id: `cost-${engagementId}-${Date.now().toString(36)}`,
+      engagement_id: engagementId,
+      generated_at: (/* @__PURE__ */ new Date()).toISOString(),
+      total_cost_dkk: Math.round(totalCost * 100) / 100,
+      total_tokens: totalTokensInput + totalTokensOutput,
+      total_requests: totalRequests,
+      avg_success_rate: totalRequests > 0 ? Math.round(successCount / totalRequests * 1e4) / 100 : 0,
+      by_agent: byAgent,
+      by_tool: byTool,
+      cost_breakdown: {
+        compute_dkk: Math.round(computeCost * 100) / 100,
+        storage_dkk: Math.round(storageCost * 100) / 100,
+        overhead_dkk: Math.round(overheadCost * 100) / 100
+      }
+    };
+  } catch (err) {
+    logger.warn({ err: String(err), engagement_id: engagementId }, "Failed to generate engagement cost report");
+    return null;
+  }
+}
+async function listEngagements2() {
+  const redis2 = getRedis();
+  if (!redis2 || !isRedisEnabled()) return [];
+  try {
+    const ids = await redis2.smembers(REDIS_ENGAGEMENT_INDEX);
+    const engagements = [];
+    for (const id of ids.slice(0, 100)) {
+      const data = await redis2.hgetall(`${REDIS_ENGAGEMENT_PREFIX}${id}`);
+      if (data && Object.keys(data).length > 0) {
+        engagements.push({
+          engagement_id: id,
+          total_cost_dkk: Math.round(parseInt(data.total_cost_milli || "0") / 1e3 * 100) / 100,
+          total_requests: parseInt(data.total_requests || "0")
+        });
+      }
+    }
+    return engagements.sort((a, b) => b.total_cost_dkk - a.total_cost_dkk);
+  } catch {
+    return [];
+  }
+}
+async function persistCostReport(report) {
+  try {
+    await mcpCall4("graph.write_cypher", {
+      query: `MERGE (c:CostReport {report_id: $report_id})
+              SET c.engagement_id = $engagement_id, c.total_cost_dkk = $total_cost_dkk,
+                  c.total_tokens = $total_tokens, c.total_requests = $total_requests,
+                  c.avg_success_rate = $avg_success_rate,
+                  c.generated_at = datetime(), c.createdAt = COALESCE(c.createdAt, datetime())`,
+      params: {
+        report_id: report.report_id,
+        engagement_id: report.engagement_id,
+        total_cost_dkk: report.total_cost_dkk,
+        total_tokens: report.total_tokens,
+        total_requests: report.total_requests,
+        avg_success_rate: report.avg_success_rate
+      }
+    });
+  } catch (err) {
+    logger.warn({ err: String(err), report_id: report.report_id }, "Failed to persist cost report to Neo4j (non-fatal)");
+  }
+}
+async function handleEngagementCostReport(request) {
+  try {
+    const engagementId = typeof request.context?.engagement_id === "string" ? request.context.engagement_id : null;
+    if (!engagementId) {
+      return agentFailure(request, "No engagement_id provided. Include engagement_id in context.engagement_id");
+    }
+    const report = await getEngagementCostReport(engagementId);
+    if (!report) {
+      return agentSuccess(
+        request,
+        `# Engagement Cost Report: ${engagementId}
+
+No cost data found for this engagement yet. Costs accumulate as agents process requests. Use recordEngagementCost() after each request.`,
+        { input: 0, output: 50 }
+      );
+    }
+    await persistCostReport(report);
+    const lines = [
+      `# Engagement Cost Report`,
+      ``,
+      `**Engagement ID:** ${report.engagement_id}`,
+      `**Report ID:** ${report.report_id}`,
+      `**Generated:** ${report.generated_at}`,
+      ``,
+      `## Summary`,
+      `| Metric | Value |`,
+      `|--------|-------|`,
+      `| Total Cost | ${report.total_cost_dkk.toFixed(4)} DKK |`,
+      `| Total Requests | ${report.total_requests} |`,
+      `| Total Tokens | ${report.total_tokens.toLocaleString()} |`,
+      `| Success Rate | ${report.avg_success_rate.toFixed(1)}% |`,
+      ``,
+      `## Cost Breakdown`,
+      `| Category | DKK |`,
+      `|----------|-----|`,
+      `| Compute | ${report.cost_breakdown.compute_dkk.toFixed(4)} |`,
+      `| Storage | ${report.cost_breakdown.storage_dkk.toFixed(4)} |`,
+      `| Overhead | ${report.cost_breakdown.overhead_dkk.toFixed(4)} |`
+    ];
+    if (report.by_agent.length > 0) {
+      lines.push(``);
+      lines.push(`## By Agent`);
+      lines.push(`| Agent | Requests | Cost (DKK) | Success Rate |`);
+      lines.push(`|-------|----------|------------|--------------|`);
+      for (const agent of report.by_agent) {
+        lines.push(`| ${agent.agent_id} | ${agent.requests} | ${agent.cost_dkk.toFixed(4)} | ${agent.success_rate.toFixed(1)}% |`);
+      }
+    }
+    if (Object.keys(report.by_tool).length > 0) {
+      lines.push(``);
+      lines.push(`## By Tool`);
+      lines.push(`| Tool | Calls | Cost (DKK) | Avg Latency |`);
+      lines.push(`|------|-------|------------|-------------|`);
+      for (const [tool, metrics2] of Object.entries(report.by_tool)) {
+        lines.push(`| ${tool} | ${metrics2.calls} | ${metrics2.cost_dkk.toFixed(4)} | ${metrics2.avg_ms}ms |`);
+      }
+    }
+    return agentSuccess(request, lines.join("\n"), { input: 0, output: lines.length * 10 });
+  } catch (err) {
+    return agentFailure(request, err instanceof Error ? err.message : String(err));
+  }
+}
+var REDIS_ENGAGEMENT_PREFIX, REDIS_ENGAGEMENT_INDEX, REDIS_TTL3;
+var init_engagement_cost_tracker = __esm({
+  "src/analytics/engagement-cost-tracker.ts"() {
+    "use strict";
+    init_redis();
+    init_logger();
+    init_config();
+    init_agent_interface();
+    REDIS_ENGAGEMENT_PREFIX = "engagement:";
+    REDIS_ENGAGEMENT_INDEX = "engagements:index";
+    REDIS_TTL3 = 365 * 24 * 3600;
+  }
+});
+
+// src/analytics/agent-drift-monitor.ts
+var agent_drift_monitor_exports = {};
+__export(agent_drift_monitor_exports, {
+  checkAgentDrift: () => checkAgentDrift,
+  getBaseline: () => getBaseline,
+  handleDriftReport: () => handleDriftReport,
+  snapshotBaseline: () => snapshotBaseline
+});
+async function mcpCall5(tool, payload) {
+  const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+    },
+    body: JSON.stringify({ tool, payload }),
+    signal: AbortSignal.timeout(15e3)
+  });
+  const data = await res.json().catch(() => null);
+  return data?.result ?? data;
+}
+async function snapshotBaseline(agentId, successRate, avgLatencyMs, totalRequests, avgCostPerRequest) {
+  if (!isRedisEnabled()) return;
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const baseline = {
+      agent_id: agentId,
+      success_rate: successRate,
+      avg_latency_ms: avgLatencyMs,
+      total_requests: totalRequests,
+      avg_cost_per_request: avgCostPerRequest,
+      measured_at: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    await redis2.set(`${REDIS_BASELINE_PREFIX}${agentId}`, JSON.stringify(baseline), "EX", REDIS_TTL4);
+    await redis2.sadd(REDIS_BASELINE_INDEX, agentId);
+  } catch (err) {
+    logger.warn({ err: String(err), agent_id: agentId }, "Failed to snapshot agent baseline");
+  }
+}
+async function getBaseline(agentId) {
+  const redis2 = getRedis();
+  if (!redis2 || !isRedisEnabled()) return null;
+  try {
+    const raw = await redis2.get(`${REDIS_BASELINE_PREFIX}${agentId}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+async function checkAgentDrift(cfg = DEFAULT_CONFIG) {
+  const redis2 = getRedis();
+  if (!redis2 || !isRedisEnabled()) {
+    return {
+      report_id: `drift-${Date.now().toString(36)}`,
+      generated_at: (/* @__PURE__ */ new Date()).toISOString(),
+      agents_checked: 0,
+      agents_with_drift: 0,
+      total_drifts: 0,
+      critical_drifts: 0,
+      drifts: [],
+      linear_issues_created: []
+    };
+  }
+  try {
+    const agentIds = await redis2.smembers(REDIS_BASELINE_INDEX);
+    const allDrifts = [];
+    const linearIssues = [];
+    for (const agentId of agentIds) {
+      const baseline = await getBaseline(agentId);
+      if (!baseline) continue;
+      const { getAgentMetrics: getAgentMetrics2 } = await Promise.resolve().then(() => (init_runtime_analytics(), runtime_analytics_exports));
+      const current = await getAgentMetrics2(agentId);
+      if (!current || current.total_requests < cfg.min_requests) continue;
+      const baselineSuccessRate = baseline.success_rate;
+      const currentSuccessRate = current.total_requests > 0 ? current.total_success / current.total_requests * 100 : 0;
+      const successRateChange = currentSuccessRate - baselineSuccessRate;
+      if (successRateChange < -cfg.success_rate_threshold) {
+        const severity = successRateChange < -cfg.success_rate_threshold * 2 ? "critical" : "high";
+        allDrifts.push({
+          agent_id: agentId,
+          metric: "success_rate",
+          baseline_value: Math.round(baselineSuccessRate * 100) / 100,
+          current_value: Math.round(currentSuccessRate * 100) / 100,
+          change_pct: Math.round(successRateChange * 100) / 100,
+          severity,
+          is_regression: true
+        });
+      }
+      if (baseline.avg_latency_ms > 0) {
+        const latencyChangePct = (current.avg_latency_ms - baseline.avg_latency_ms) / baseline.avg_latency_ms * 100;
+        if (latencyChangePct > cfg.latency_threshold) {
+          allDrifts.push({
+            agent_id: agentId,
+            metric: "avg_latency_ms",
+            baseline_value: baseline.avg_latency_ms,
+            current_value: current.avg_latency_ms,
+            change_pct: Math.round(latencyChangePct * 100) / 100,
+            severity: latencyChangePct > cfg.latency_threshold * 2 ? "high" : "medium",
+            is_regression: true
+          });
+        }
+      }
+      if (baseline.avg_cost_per_request > 0 && current.total_requests > 0) {
+        const currentAvgCost = current.total_cost_dkk / current.total_requests;
+        const costChangePct = (currentAvgCost - baseline.avg_cost_per_request) / baseline.avg_cost_per_request * 100;
+        if (costChangePct > cfg.cost_threshold) {
+          allDrifts.push({
+            agent_id: agentId,
+            metric: "avg_cost_per_request",
+            baseline_value: Math.round(baseline.avg_cost_per_request * 1e4) / 1e4,
+            current_value: Math.round(currentAvgCost * 1e4) / 1e4,
+            change_pct: Math.round(costChangePct * 100) / 100,
+            severity: costChangePct > cfg.cost_threshold * 2 ? "high" : "medium",
+            is_regression: true
+          });
+        }
+      }
+    }
+    const criticalDrifts = allDrifts.filter((d) => d.severity === "critical");
+    for (const drift of criticalDrifts) {
+      try {
+        const title = `\u{1F6A8} Agent Drift: ${drift.agent_id} \u2014 ${drift.metric} regression ${drift.change_pct.toFixed(1)}%`;
+        const description = [
+          `## Agent Drift Detected`,
+          ``,
+          `**Agent:** ${drift.agent_id}`,
+          `**Metric:** ${drift.metric}`,
+          `**Baseline:** ${drift.baseline_value}`,
+          `**Current:** ${drift.current_value}`,
+          `**Change:** ${drift.change_pct.toFixed(1)}%`,
+          `**Severity:** ${drift.severity}`,
+          ``,
+          `### Action Required`,
+          `Investigate agent performance regression. Check:`,
+          `- Recent model changes or provider switches`,
+          `- Input data distribution shift`,
+          `- Infrastructure changes (network, compute)`,
+          `- Configuration drift`
+        ].join("\n");
+        const result = await mcpCall5("linear.save_issue", {
+          title,
+          description,
+          team: "Linear-clauskraft",
+          priority: drift.severity === "critical" ? 1 : 2,
+          labels: ["agent-drift", "monitoring"]
+        });
+        if (result) {
+          linearIssues.push(title);
+          logger.info({ agent_id: drift.agent_id, title }, "Linear drift issue created");
+        }
+      } catch (err) {
+        logger.warn({ err: String(err), agent_id: drift.agent_id }, "Failed to create Linear drift issue");
+      }
+    }
+    for (const agentId of agentIds) {
+      const hasDrift = allDrifts.some((d) => d.agent_id === agentId);
+      if (!hasDrift) {
+        const { getAgentMetrics: getAgentMetrics2 } = await Promise.resolve().then(() => (init_runtime_analytics(), runtime_analytics_exports));
+        const current = await getAgentMetrics2(agentId);
+        if (current && current.total_requests >= cfg.min_requests) {
+          const successRate = current.total_requests > 0 ? current.total_success / current.total_requests * 100 : 0;
+          const avgCost = current.total_requests > 0 ? current.total_cost_dkk / current.total_requests : 0;
+          await snapshotBaseline(agentId, successRate, current.avg_latency_ms, current.total_requests, avgCost);
+        }
+      }
+    }
+    const agentsWithDrift = new Set(allDrifts.map((d) => d.agent_id)).size;
+    return {
+      report_id: `drift-${Date.now().toString(36)}`,
+      generated_at: (/* @__PURE__ */ new Date()).toISOString(),
+      agents_checked: agentIds.length,
+      agents_with_drift: agentsWithDrift,
+      total_drifts: allDrifts.length,
+      critical_drifts: criticalDrifts.length,
+      drifts: allDrifts,
+      linear_issues_created: linearIssues
+    };
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Agent drift check failed");
+    return {
+      report_id: `drift-${Date.now().toString(36)}`,
+      generated_at: (/* @__PURE__ */ new Date()).toISOString(),
+      agents_checked: 0,
+      agents_with_drift: 0,
+      total_drifts: 0,
+      critical_drifts: 0,
+      drifts: [],
+      linear_issues_created: []
+    };
+  }
+}
+async function handleDriftReport(request) {
+  try {
+    const threshold = typeof request.context?.threshold === "number" ? request.context.threshold : void 0;
+    const config2 = threshold ? { ...DEFAULT_CONFIG, success_rate_threshold: threshold } : DEFAULT_CONFIG;
+    const report = await checkAgentDrift(config2);
+    const lines = [
+      `# Agent Drift Report`,
+      ``,
+      `**Report ID:** ${report.report_id}`,
+      `**Generated:** ${report.generated_at}`,
+      `**Agents Checked:** ${report.agents_checked}`,
+      `**Agents with Drift:** ${report.agents_with_drift}`,
+      `**Total Drifts:** ${report.total_drifts}`,
+      `**Critical Drifts:** ${report.critical_drifts}`,
+      `**Linear Issues Created:** ${report.linear_issues_created.length}`,
+      ``
+    ];
+    if (report.drifts.length > 0) {
+      lines.push(`## Detected Drifts`);
+      lines.push(``);
+      lines.push(`| Agent | Metric | Baseline | Current | Change | Severity |`);
+      lines.push(`|-------|--------|----------|---------|--------|----------|`);
+      for (const d of report.drifts) {
+        lines.push(`| ${d.agent_id} | ${d.metric} | ${d.baseline_value} | ${d.current_value} | ${d.change_pct.toFixed(1)}% | ${d.severity} |`);
+      }
+    } else {
+      lines.push(`\u2705 **No drift detected.** All agents within acceptable thresholds.`);
+    }
+    if (report.linear_issues_created.length > 0) {
+      lines.push(``);
+      lines.push(`## Linear Issues Created`);
+      for (const title of report.linear_issues_created) {
+        lines.push(`- ${title}`);
+      }
+    }
+    return agentSuccess(request, lines.join("\n"), { input: 0, output: lines.length * 10 });
+  } catch (err) {
+    return agentFailure(request, err instanceof Error ? err.message : String(err));
+  }
+}
+var DEFAULT_CONFIG, REDIS_BASELINE_PREFIX, REDIS_BASELINE_INDEX, REDIS_TTL4;
+var init_agent_drift_monitor = __esm({
+  "src/analytics/agent-drift-monitor.ts"() {
+    "use strict";
+    init_redis();
+    init_logger();
+    init_config();
+    init_agent_interface();
+    DEFAULT_CONFIG = {
+      success_rate_threshold: 15,
+      latency_threshold: 25,
+      cost_threshold: 20,
+      min_requests: 10
+    };
+    REDIS_BASELINE_PREFIX = "drift:baseline:";
+    REDIS_BASELINE_INDEX = "drift:baselines:index";
+    REDIS_TTL4 = 90 * 24 * 3600;
+  }
+});
+
 // src/competitive-crawler.ts
 var competitive_crawler_exports = {};
 __export(competitive_crawler_exports, {
@@ -25294,9 +26606,9 @@ Skills: ${result.required_skills.join(", ")}${gateInfo}`;
     }
     case "engagement_list": {
       try {
-        const { listEngagements: listEngagements2 } = await Promise.resolve().then(() => (init_engagement_engine(), engagement_engine_exports));
+        const { listEngagements: listEngagements3 } = await Promise.resolve().then(() => (init_engagement_engine(), engagement_engine_exports));
         const limit = Math.min(Math.max(typeof args.limit === "number" ? args.limit : 20, 1), 100);
-        const engagements = await listEngagements2(limit);
+        const engagements = await listEngagements3(limit);
         if (engagements.length === 0) return "No engagements found";
         const lines = engagements.map(
           (e, i) => `${i + 1}. ${e.client} (${e.domain}) \u2014 ${e.objective.slice(0, 60)}... [${e.status}]`
@@ -25456,6 +26768,173 @@ ${formatted}`;
         return JSON.stringify({ tools, count: tools.length }, null, 2);
       } catch (err) {
         return `Tool metrics failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    // ─── prompts.* — Prompt Library (Phantom Week 5) ─────
+    case "prompt_add": {
+      try {
+        const { addPrompt: addPrompt2 } = await Promise.resolve().then(() => (init_prompt_library(), prompt_library_exports));
+        const title = String(args.title ?? "");
+        const content = String(args.content ?? "");
+        const category = String(args.category ?? "general");
+        if (!title || !content) return "Error: title and content required";
+        const prompt = await addPrompt2({
+          title,
+          content,
+          category,
+          tags: Array.isArray(args.tags) ? args.tags : [category],
+          variables: Array.isArray(args.variables) ? args.variables : void 0,
+          author: typeof args.author === "string" ? args.author : void 0,
+          quality_score: 0.8
+          // Default starting quality
+        });
+        return JSON.stringify(prompt, null, 2);
+      } catch (err) {
+        return `Prompt add failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "prompt_query": {
+      try {
+        const { queryPrompts: queryPrompts2 } = await Promise.resolve().then(() => (init_prompt_library(), prompt_library_exports));
+        const prompts = await queryPrompts2({
+          category: typeof args.category === "string" ? args.category : void 0,
+          tags: Array.isArray(args.tags) ? args.tags : void 0,
+          query: typeof args.query === "string" ? args.query : void 0,
+          min_quality: typeof args.min_quality === "number" ? args.min_quality : void 0,
+          limit: typeof args.limit === "number" ? Math.min(args.limit, 50) : 20
+        });
+        if (prompts.length === 0) return "No prompts found matching filters";
+        const formatted = prompts.map(
+          (p) => `[${p.quality_score.toFixed(2)}] (${p.category}) ${p.title}: ${p.content.slice(0, 150)}...`
+        ).join("\n---\n");
+        return `${prompts.length} prompts found:
+---
+${formatted}`;
+      } catch (err) {
+        return `Prompt query failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "prompt_use": {
+      try {
+        const { recordPromptUsage: recordPromptUsage2 } = await Promise.resolve().then(() => (init_prompt_library(), prompt_library_exports));
+        const promptId2 = String(args.prompt_id ?? "");
+        if (!promptId2) return "Error: prompt_id required";
+        const wasHelpful = typeof args.was_helpful === "boolean" ? args.was_helpful : true;
+        await recordPromptUsage2(promptId2, wasHelpful);
+        return JSON.stringify({ prompt_id: promptId2, recorded: true, was_helpful: wasHelpful }, null, 2);
+      } catch (err) {
+        return `Prompt use recording failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    // ─── knowledge.* — PDF Knowledge Ingestion (Phantom Week 5) ─────
+    case "knowledge_ingest": {
+      try {
+        const { ingestKnowledge: ingestKnowledge2 } = await Promise.resolve().then(() => (init_prompt_library(), prompt_library_exports));
+        const title = String(args.title ?? "");
+        const content = String(args.content ?? "");
+        const sourceType = String(args.source_type ?? "txt");
+        if (!title || !content) return "Error: title and content required";
+        const doc = await ingestKnowledge2({
+          title,
+          content,
+          source_type: sourceType,
+          source_path: typeof args.source_path === "string" ? args.source_path : "",
+          language: typeof args.language === "string" ? args.language : void 0,
+          tags: Array.isArray(args.tags) ? args.tags : [],
+          headings: Array.isArray(args.headings) ? args.headings : [],
+          word_count: typeof args.word_count === "number" ? args.word_count : void 0
+        });
+        if (!doc) return "Error: Failed to create Neo4j KnowledgeDocument node (Redis storage may still be available)";
+        return JSON.stringify({
+          id: doc.id,
+          title: doc.title,
+          source_type: doc.source_type,
+          word_count: doc.word_count,
+          language: doc.language,
+          tags: doc.tags.length,
+          headings: doc.headings.length,
+          neo4j_created: true
+        }, null, 2);
+      } catch (err) {
+        return `Knowledge ingest failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "knowledge_query": {
+      try {
+        const { queryKnowledge: queryKnowledge2 } = await Promise.resolve().then(() => (init_prompt_library(), prompt_library_exports));
+        const docs = await queryKnowledge2({
+          tags: Array.isArray(args.tags) ? args.tags : void 0,
+          query: typeof args.query === "string" ? args.query : void 0,
+          source_type: typeof args.source_type === "string" ? args.source_type : void 0,
+          limit: typeof args.limit === "number" ? Math.min(args.limit, 50) : 20
+        });
+        if (docs.length === 0) return "No knowledge documents found matching filters";
+        const formatted = docs.map(
+          (d) => `[${d.source_type}] ${d.title} (${d.word_count} words, ${d.tags.length} tags): ${d.content.slice(0, 150)}...`
+        ).join("\n---\n");
+        return `${docs.length} documents found:
+---
+${formatted}`;
+      } catch (err) {
+        return `Knowledge query failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    // ─── compliance.* — EU AI Act Audit (Phantom Week 6, V1) ─────
+    case "compliance_gap_audit": {
+      try {
+        const { handleComplianceAudit: handleComplianceAudit2 } = await Promise.resolve().then(() => (init_ai_act_auditor(), ai_act_auditor_exports));
+        const stack = args.stack;
+        if (!stack) return "Error: stack required \u2014 array of StackItem objects";
+        const request = {
+          request_id: `audit-${Date.now().toString(36)}`,
+          agent_id: "orchestrator",
+          task: "EU AI Act Annex III compliance audit",
+          capabilities: ["compliance", "audit"],
+          context: { stack },
+          priority: "high"
+        };
+        const response = await handleComplianceAudit2(request);
+        return response.output;
+      } catch (err) {
+        return `Compliance audit failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    // ─── analytics.* — Engagement Cost + Drift (Phantom Week 6, V3, V5) ──
+    case "engagement_cost_report": {
+      try {
+        const { handleEngagementCostReport: handleEngagementCostReport2 } = await Promise.resolve().then(() => (init_engagement_cost_tracker(), engagement_cost_tracker_exports));
+        const engagementId = typeof args.engagement_id === "string" ? args.engagement_id : "";
+        if (!engagementId) return "Error: engagement_id required";
+        const request = {
+          request_id: `cost-${Date.now().toString(36)}`,
+          agent_id: "orchestrator",
+          task: `Cost report for engagement: ${engagementId}`,
+          capabilities: ["analytics", "cost-tracking"],
+          context: { engagement_id: engagementId },
+          priority: "normal"
+        };
+        const response = await handleEngagementCostReport2(request);
+        return response.output;
+      } catch (err) {
+        return `Engagement cost report failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "agent_drift_report": {
+      try {
+        const { handleDriftReport: handleDriftReport2 } = await Promise.resolve().then(() => (init_agent_drift_monitor(), agent_drift_monitor_exports));
+        const threshold = typeof args.threshold === "number" ? args.threshold : void 0;
+        const request = {
+          request_id: `drift-${Date.now().toString(36)}`,
+          agent_id: "orchestrator",
+          task: "Agent drift check",
+          capabilities: ["analytics", "monitoring"],
+          context: threshold ? { threshold } : {},
+          priority: "normal"
+        };
+        const response = await handleDriftReport2(request);
+        return response.output;
+      } catch (err) {
+        return `Agent drift report failed: ${err instanceof Error ? err.message : String(err)}`;
       }
     }
     case "failure_harvest": {
@@ -27166,6 +28645,16 @@ var init_mcp_caller = __esm({
       "runtime_summary",
       "agent_metrics",
       "tool_metrics",
+      // Prompts + Knowledge (Phantom Week 5)
+      "prompt_add",
+      "prompt_query",
+      "prompt_use",
+      "knowledge_ingest",
+      "knowledge_query",
+      // Value-Props (Phantom Week 6)
+      "compliance_gap_audit",
+      "engagement_cost_report",
+      "agent_drift_report",
       // Model routing
       "model_providers",
       "model_route",
@@ -32222,7 +33711,7 @@ init_llm_proxy();
 init_dual_rag();
 init_agent_registry();
 init_routing_engine();
-async function mcpCall3(tool, payload) {
+async function mcpCall6(tool, payload) {
   const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
     method: "POST",
     headers: {
@@ -32237,7 +33726,7 @@ async function mcpCall3(tool, payload) {
 }
 async function storeEpisode(title, description, events, outcome, tags) {
   try {
-    await mcpCall3("memory_operation", {
+    await mcpCall6("memory_operation", {
       action: "RECORD_EPISODE",
       data: {
         title,
@@ -32264,7 +33753,7 @@ async function storeGraphMemory(agentId, type, content, tags) {
       created_at: datetime(),
       source: 'command-center-chat'
     }) RETURN m`;
-    await mcpCall3("graph.write_cypher", {
+    await mcpCall6("graph.write_cypher", {
       query: cypher,
       parameters: { agent_id: agentId, type, content: content.slice(0, 4e3), tags }
     });
@@ -32275,7 +33764,7 @@ async function storeGraphMemory(agentId, type, content, tags) {
 }
 async function storeSRAG(content, tags, source) {
   try {
-    await mcpCall3("srag.ingest", {
+    await mcpCall6("srag.ingest", {
       content,
       source,
       tags,
@@ -32458,7 +33947,7 @@ chatRouter.post("/send", (req, res) => {
   broadcastMessage(msg);
   notifyChatMessage(msg.from, msg.to, msg.message);
   logger.info({ from: msg.from, to: msg.to, type: msg.type }, "A2A chat message sent");
-  mcpCall3("graph.write_cypher", {
+  mcpCall6("graph.write_cypher", {
     query: `MERGE (m:AgentMemory {agentId: $from, key: $key}) SET m.value = $value, m.type = 'a2a_message', m.updatedAt = datetime()`,
     params: {
       from: msg.from,
@@ -35506,6 +36995,18 @@ function registerDefaultLoops() {
       name: "Memory Consolidation",
       mode: "sequential",
       steps: [{ agent_id: "orchestrator", tool_name: "memory_consolidate", arguments: {} }]
+    }
+  });
+  registerCronJob({
+    id: "agent-drift-monitor",
+    name: "Agent Drift Monitor (Weekly Success-Rate Regression Check)",
+    schedule: "0 7 * * 1",
+    // Monday 07:00 UTC
+    enabled: true,
+    chain: {
+      name: "Agent Drift Monitor",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "agent_drift_report", arguments: {} }]
     }
   });
   registerCronJob({
