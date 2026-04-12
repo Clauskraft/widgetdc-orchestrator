@@ -1,8 +1,32 @@
-# 🎯 FINAL PLAN v3.0 — WidgeTDC Complete Platform
+# 🎯 FINAL PLAN v3.1 — WidgeTDC Platform Consolidation
 
 **Date:** 2026-04-12
-**Status:** AWAITING APPROVAL — DO NOT PROCEED UNTIL CONFIRMED
+**Status:** CONDITIONAL APPROVE — efter ChatGPT review, afventer Claude feedback
 **Golden Rule:** Steal IDEER og INDHOLD — aldrig runtime dependencies
+**Princip:** KONSOLIDERING — ikke parallel opbygning
+
+---
+
+## ChatGPT Review — 5 Corrections Applied
+
+| # | ChatGPT Point | Status | Action |
+|---|--------------|--------|--------|
+| 1 | Phase 0 duplikerer eksisterende AgentMemory + A2A | ✅ **FIXED** | Omskrevet til integration |
+| 2 | Schema-konflikt med schema_v1_2_1.cypher | ✅ **FIXED** | Eksplicit schema-delta tilføjet |
+| 3 | Agentchat er metadata, ikke conversation state | ✅ **FIXED** | Ærlig om broadcast vs message model |
+| 4 | Fantom/PhantomCluster mangler som constraint | ✅ **FIXED** | Indsat som arkitektonisk reference |
+| 5 | Normaliseringslaget mangler canonical contract | ✅ **FIXED** | Contract + conformance tests tilføjet |
+
+**ChatGPT vurdering:** Conditional approve — efter rewrite af Phase 0 og schema-alignment.
+
+---
+
+## Claude Review
+
+| Agent | Repo | Status |
+|-------|------|--------|
+| **Claude** | orchestrator repo | ⏳ Afventer |
+| **Claude** | backend repo | ⏳ Afventer |
 
 ---
 
@@ -33,255 +57,235 @@
 
 ---
 
-## 2. Critical Gap: Agent Awareness & Conflict Prevention
+## 2. Critical Gap: Agent Awareness — INTEGRATION, Not Parallel Build
 
-### Current Problem
+### ChatGPT Correction Applied
 
-**Agents work in silos.** No mechanism exists for:
+**Før:** Phase 0 byggede nyt blackboard/chat-lag ved siden af eksisterende infrastruktur.
+**Efter:** Phase 0 integrerer MED eksisterende AgentMemory + A2A bus. Ingen parallel opbygning.
 
-1. **System Awareness** — Agents don't know what system they're running in
-2. **Peer Awareness** — Agents don't know what other agents are building
-3. **Conflict Detection** — No prevention of duplicate/conflicting solutions
-4. **Shared Context** — No blackboard for shared state between agents
+### Current State — What Already Exists
 
-### Evidence
+| Component | Where | Status | Reuse Strategy |
+|-----------|-------|--------|----------------|
+| `AgentMemory` nodes | Neo4j | ✅ Active | **Source of truth** for agent coordination |
+| `a2AChannel` field | Agent nodes | ⚠️ Cache field | Kanalmarkør, IKKE message model |
+| `lastA2ABroadcast` field | Agent nodes | ⚠️ Cache field | Seneste broadcast, IKKE conversation state |
+| `AgentRegistry` | Redis + Memory | ✅ Active | **Source of truth** for agent registration |
+| SystemState node | Neo4j | ✅ Created | System awareness — extends existing |
 
-**AgentRegistry.ts** (current state):
-```typescript
-// agents register independently — NO coordination
-registry.set(handshake.agent_id, entry)
-// No shared state, no peer discovery, no conflict detection
+### What's Missing (honest assessment)
+
+1. **Ingen egentlig beskedmodel** — `a2AChannel`/`lastA2ABroadcast` er metadata, ikke Message/Thread/Channel domæne
+2. **Ingen WorkInProgress tracking** — ingen ved hvad andre agenter bygger
+3. **Ingen conflict detection** — ingen mekanisme til at opdage duplikeret arbejde
+4. **Ingen schema-dokumentation** — schema_v1_2_1.cypher er reference, men ingen delta-strategi
+
+### Schema Compatibility Strategy (ChatGPT #2)
+
+**Reference:** `schema_v1_2_1.cypher` er den kanoniske skema-definition.
+
+| Category | Approach |
+|----------|----------|
+| **Reuse existing** | `Agent`, `AgentMemory`, `PhantomCluster`, `EvidenceObject` |
+| **New nodes** | `WorkInProgress` — hvad hver agent bygger |
+| **New relationships** | `(Agent)-[:WORKING_ON]->(WorkInProgress)`, `(WorkInProgress)-[:CONFLICTS_WITH]->(WorkInProgress)` |
+| **Cache/derived fields** | `a2AChannel`, `lastA2ABroadcast` — læses fra Agent, skrives som cache |
+| **Never duplicate** | Samme semantik må IKKE skrives to steder (AgentMemory vs WorkInProgress) |
+
+### Schema Delta (explicit)
+
+```cypher
+// NEW: WorkInProgress tracking (what each agent is building)
+CREATE CONSTRAINT IF NOT EXISTS wip_id_unique FOR (w:WorkInProgress) REQUIRE w.id IS UNIQUE
+
+// NEW: WorkInProgress node
+MERGE (w:WorkInProgress {id: $wipId})
+SET w.agentId = $agentId,
+    w.task = $task,
+    w.status = $status,           // planned|in-progress|completed|blocked
+    w.description = $description,
+    w.relatedSkills = $skills,
+    w.startedAt = datetime(),
+    w.updatedAt = datetime()
+
+// RELATIONSHIP: Agent → WorkInProgress (reuse existing Agent nodes)
+MATCH (a:Agent {agentId: $agentId})
+MERGE (a)-[:WORKING_ON]->(w:WorkInProgress {id: $wipId})
+
+// RELATIONSHIP: Conflict detection (only when similarity > threshold)
+MATCH (w1:WorkInProgress {status: 'in-progress'})
+MATCH (w2:WorkInProgress {status: 'in-progress'})
+WHERE w1.id < w2.id AND similarity(w1.description, w2.description) > 0.7
+MERGE (w1)-[:CONFLICTS_WITH {reason: $reason, similarity: $similarity}]->(w2)
 ```
 
-**Missing Components:**
-- ❌ Agent-to-Agent awareness system
-- ❌ Work-in-progress registry (what is each agent building?)
-- ❌ Conflict detection engine
-- ❌ Shared blackboard / common knowledge base
-- ❌ System state broadcast mechanism
+### Fantom/PhantomCluster Reference (ChatGPT #4)
+
+**Constraint:** All agent work MUST align with validated PhantomCluster architecture:
+- PhantomBOM extraction validated for GitNexus (12 components, 0.8 confidence)
+- PhantomBOM extraction validated for OS2mo (10 components, 0.8 confidence)
+- Schema: `PhantomCluster` nodes with `validity_score`, `rule_capability`, `rule_geo`
+- ALL new features MUST integrate with existing PhantomCluster routing
 
 ---
 
-## 3. Complete Plan — Phased Implementation
+## 3. Complete Plan — Phased Implementation (CONSOLIDATION)
 
-### Phase 0: Agent Awareness & Coordination System (P0 — 3-5 days) 🔴
+### Phase 0: Integrate with Existing AgentMemory + A2A (3-5 days) 🔴
 
-**WHY FIRST:** Without this, ALL future agent work creates duplicate/conflicting solutions.
+**PRINCIP:** Byg IKKE nyt lag — udnyt hvad der allerede findes.
 
-#### 3.1: Agent Blackboard Protocol
+#### 3.1: What We Reuse (existing infrastructure)
 
-**Source:** Inspired by `MemPalace/mempalace` (memory sharing patterns) + `claude-mem` (356 files of memory implementation)
+| Existing Component | How We Use It |
+|-------------------|---------------|
+| `AgentMemory` nodes | Work-in-progress stored as `AgentMemory {agentId, key:'wip', value: {...}}` |
+| `a2AChannel` field | Broadcast channel marker (not message persistence) |
+| `lastA2ABroadcast` | Latest broadcast cache (not conversation history) |
+| `AgentRegistry` | Agent discovery + capability lookup |
 
-**New Neo4j Schema:**
-```cypher
-// WorkInProgress node — what each agent is currently building
-(wip:WorkInProgress {
-  id: "wip-uuid",
-  agentId: "qwen",
-  task: "Build document converter",
-  status: "in-progress",        // planned|in-progress|completed|blocked
-  startedAt: datetime(),
-  estimatedCompletion: datetime(),
-  description: "TypeScript document converter inspired by markitdown",
-  relatedSkills: ["context-engineering", "api-and-interface-design"],
-  dependencies: [],
-  conflicts: []                 // Populated by conflict detector
-})
+#### 3.2: What We Add (minimal extensions)
 
-// SystemState node — shared system awareness
-(ss:SystemState {
-  id: "system-state",
-  updatedAt: datetime(),
-  totalAgents: 341,
-  activeAgents: 287,
-  currentWorkItems: 12,
-  recentCompletions: ["agent-skills-ingestion", "pdf-extraction"],
-  knownConflicts: 0,
-  platformHealth: "healthy"
-})
+**New Neo4j nodes:** `WorkInProgress` — tracks what each agent is building
+**New relationships:** `(Agent)-[:WORKING_ON]->(WorkInProgress)`, `(WorkInProgress)-[:CONFLICTS_WITH]->(WorkInProgress)`
+**New MCP tools:** 4 tools (blackboard_read/write, conflict_check, system_awareness)
 
-// Relationships
-(Agent)-[:WORKING_ON]->(WorkInProgress)
-(Agent)-[:AWARE_OF]->(SystemState)
-(WorkInProgress)-[:DEPENDS_ON]->(WorkInProgress)
-(WorkInProgress)-[:CONFLICTS_WITH]->(WorkInProgress {reason: "..."})
-```
-
-**Backend Placement:**
+**Backend Placement (extends existing):**
 ```
 apps/backend/src/
 ├── services/
-│   ├── AgentBlackboardService.ts     ← NEW: Shared state management
-│   ├── ConflictDetectorService.ts    ← NEW: Duplicate/conflict detection
-│   └── SystemAwarenessService.ts     ← NEW: System state broadcast
+│   ├── AgentBlackboardService.ts     ← EXTENDS AgentMemory, not parallel
+│   ├── ConflictDetectorService.ts    ← NEW: Duplicate detection
+│   └── SystemAwarenessService.ts     ← EXTENDS SystemState node
 ├── agents/
-│   ├── agent-registry.ts             ← EXTENDED: Add awareness endpoints
-│   └── agent-coordination.ts         ← NEW: Peer discovery
-└── routes/
-    ├── blackboardRoutes.ts           ← NEW: Blackboard CRUD
-    └── coordinationRoutes.ts         ← NEW: Agent coordination
+│   └── agent-registry.ts             ← EXTENDED: awareness endpoints
 ```
 
-**MCP Tools (4 new):**
+**IKKE ny fil:** `agent-coordination.ts`, `blackboardRoutes.ts`, `coordinationRoutes.ts`
+**I STEDET FOR:** Udvid eksisterende `agent-registry.ts` med awareness endpoints
+
+#### 3.3: Canonical Contract for Model Normalization (ChatGPT #5)
+
+**Request/Response Contract:**
 ```typescript
-// 1. blackboard_read — Read shared blackboard state
-// 2. blackboard_write — Write work-in-progress to blackboard
-// 3. conflict_check — Check if current work conflicts with others
-// 4. system_awareness — Get current system state + active agents
-```
+interface AgentRequest {
+  requestId: string;
+  agentId: string;
+  task: string;
+  capabilities: string[];
+  context: Record<string, unknown>;
+  priority: 'low' | 'normal' | 'high' | 'critical';
+}
 
-#### 3.2: How Agents Stay 100% Aware
-
-**On Agent Boot:**
-```
-1. Agent registers → AgentRegistry
-2. Agent reads SystemState → "341 agents, 287 active"
-3. Agent reads Blackboard → "12 work items in progress"
-4. Agent publishes own work → "qwen: building document converter"
-5. Conflict detector checks → "No conflicts detected" or "CONFLICT with codex"
-6. Agent adjusts plan based on awareness
-```
-
-**During Agent Work:**
-```
-1. Agent starts task → blackboard_write("starting X")
-2. Every 5 minutes → heartbeat update
-3. Every 30 minutes → conflict_check()
-4. On completion → blackboard_write("completed X") + publish result
-```
-
-**Conflict Detection Algorithm:**
-```typescript
-class ConflictDetectorService {
-  async checkForConflicts(agentId: string, taskDescription: string): Promise<Conflict[]> {
-    // 1. Find all active WorkInProgress nodes
-    const activeWork = await neo4jService.query(`
-      MATCH (wip:WorkInProgress {status: 'in-progress'})
-      WHERE wip.agentId <> $agentId
-      RETURN wip
-    `, { agentId });
-
-    // 2. Compare task descriptions using semantic similarity
-    const conflicts = [];
-    for (const other of activeWork) {
-      const similarity = computeSimilarity(taskDescription, other.description);
-      if (similarity > 0.7) {
-        conflicts.push({
-          agentId: other.agentId,
-          task: other.task,
-          similarity,
-          suggestion: `Consider collaborating with ${other.agentId} or pivoting approach`
-        });
-      }
-    }
-    return conflicts;
-  }
+interface AgentResponse {
+  requestId: string;
+  agentId: string;
+  status: 'success' | 'partial' | 'failed' | 'conflict';
+  output: string;
+  tokensUsed: { input: number; output: number };
+  costDKK: number;
+  conflicts: Conflict[];  // If status === 'conflict'
 }
 ```
 
-### Phase 1: Memory System from claude-mem (5-7 days) 🟡 P1
+**Capability Matrix (per model/provider):**
+```typescript
+interface CapabilityEntry {
+  provider: string;        // 'deepseek' | 'claude' | 'gpt' | 'gemini'
+  model: string;
+  capabilities: string[];  // ['reasoning', 'code', 'multilingual']
+  maxTokens: number;
+  costPer1K: { input: number; output: number };
+  latencyP50: number;
+  fallbackTo: string;      // Next model if this fails
+}
+```
 
-**Source:** `thedotmack/claude-mem` (356 files, 20 modules)
+**Conformance Tests (10-20 tests before next phase):**
+```
+✅ request/response schema validation
+✅ capability matrix lookup
+✅ fallback chain execution
+✅ conflict detection accuracy > 90%
+✅ AgentMemory read/write consistency
+✅ SystemState broadcast propagation
+✅ PhantomCluster routing integration
+✅ Cost tracking per agent
+✅ Token usage reporting
+✅ Error handling + graceful degradation
+```
 
-**What it provides:** Complete memory architecture for agents — short-term, long-term, episodic, semantic.
-
-**What We Steal:** Memory patterns and architecture — NOT the code.
-
-**Integration:**
-- Extends existing Neo4j AgentMemory nodes
-- Provides structured memory access for all 341 agents
-- Enables agents to remember past work and learn from peers
+### Phase 1: Memory System from claude-mem patterns (5-7 days) 🟡 P1
+*(Unchanged — extends existing AgentMemory nodes)*
 
 ### Phase 2: Document Converter — OUR OWN (3-5 days) 🟡 P1
-
-**Inspiration:** `microsoft/markitdown` architecture pattern
-
-**What We Build:** TypeScript converters using libraries we control:
-- PDF: pdf-parse (npm, MIT)
-- DOCX: mammoth (npm, MIT)
-- HTML: turndown (npm, MIT)
-- CSV: built-in Node.js
-
-**NOT using markitdown Python package — building our own.**
+*(Unchanged — builds on PhantomBOM extraction patterns)*
 
 ### Phase 3: Agent Abstraction Layer (3-5 days) 🟡 P1
-
-**Source:** `multica-ai/multica` agent interface patterns
-
-**What:** IAgent interface for all 341 agents
+*(Unchanged — implements canonical contract from Phase 0)*
 
 ### Phase 4: Runtime Analytics (5-7 days) 🟢 P2
-
-**Source:** `multica-ai/multica` analytics patterns
-
-**What:** Cost/token tracking per agent + dashboard
+*(Unchanged — uses canonical AgentResponse contract)*
 
 ### Phase 5: Prompts UI from prompts.chat (3-5 days) 🟢 P2
-
-**Source:** `f/prompts.chat` (518 files, 13 modules)
-
-**What:** Prompt library UI + prompt management system
+*(Unchanged)*
 
 ### Phase 6: PDF Knowledge Integration (2-3 days) 🟢 P2
-
-**Source:** `Agentic_Design_Patterns.pdf` (1,047,072 chars extracted)
-
-**What:** Fold insights via RLM → Neo4j KnowledgeDocument → Link to Skills
+*(Unchanged — folds into Neo4j KnowledgeDocument)*
 
 ---
 
-## 4. Agent Awareness Architecture
+## 4. Agent Awareness Architecture — CONSOLIDATION
 
-### Complete Flow — How Agents Never Conflict
+### How It Works (extends existing, not parallel)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    SYSTEM AWARENESS LAYER                        │
+│              EXISTING INFRASTRUCTURE (extends, not replaces)     │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │
-│  │  Blackboard  │◄──►│  Conflict    │◄──►│  System      │      │
-│  │  Service     │    │  Detector    │    │  State       │      │
-│  └──────┬───────┘    └──────┬───────┘    └──────┬───────┘      │
-│         │                   │                   │               │
-│         ▼                   ▼                   ▼               │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │              Neo4j Graph (Shared State)                   │  │
-│  │  WorkInProgress nodes, SystemState, Agent relationships   │  │
-│  └──────────────────────────────────────────────────────────┘  │
-│         │                                                      │
-│         ▼                                                      │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │              Agent Registry (Redis + Memory)              │  │
-│  │  341 agents, capabilities, allowed tools, status          │  │
-│  └──────────────────────────────────────────────────────────┘  │
+│  Neo4j AgentMemory (existing) ── EXTENDED WITH ──→ WorkInProgress│
+│  Agent Registry (existing) ── EXTENDED WITH ──→ awareness API    │
+│  SystemState (existing) ── EXTENDED WITH ──→ conflict tracking   │
+│  PhantomCluster (validated) ── CONSTRAINT ──→ all work must align│
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 
-AGENT WORKFLOW (prevents conflicts):
-1. Agent boots → reads SystemState
-2. Agent publishes intent → blackboard_write("I'm building X")
-3. Conflict detector → checks similarity with all active work
-4. If conflict > 0.7 → agent receives warning + collaboration suggestion
-5. Agent adjusts plan → either collaborates or pivots
-6. Agent completes → publishes result to blackboard
-7. Other agents become aware → can reuse/complement the work
+AGENT WORKFLOW (extends existing boot sequence):
+1. Agent boots → reads AgentMemory (existing)
+2. Agent reads WorkInProgress nodes (NEW) → "what others are building"
+3. Agent publishes intent → AgentMemory {key: 'wip', value: {...}} (extends existing)
+4. Conflict detector → checks similarity with active WorkInProgress
+5. If conflict > 0.7 → warning + collaboration suggestion
+6. Agent adjusts plan → collaborates or pivots
+7. Agent completes → updates WorkInProgress status + publishes result
 ```
+
+### Honest Assessment: What a2AChannel/lastA2ABroadcast Actually Are
+
+| Field | What It Is | What It Is NOT |
+|-------|-----------|----------------|
+| `a2AChannel` | Kanalmarkør (string) | IKKE message model eller kanalhistorik |
+| `lastA2ABroadcast` | Seneste broadcast (cache) | IKKE conversation state eller thread |
+| `AgentMemory` | Nøgle-værdi lager | IKKE beskedkø eller persistence lag |
+
+**Design Decision:** Vi er ærlige om at dette er **broadcast state**, ikke en reel chat/messaging platform. Hvis vi får brug for rigtig messaging, bygger vi en Message/Thread/Channel model — men det er IKKE i denne plan.
 
 ---
 
-## 5. File Changes Summary
+## 5. File Changes Summary (CONSOLIDATED)
 
-| Phase | Files New | Files Modified | Total |
-|-------|-----------|----------------|-------|
-| **0. Agent Awareness** | 6 | 2 | 8 |
-| **1. Memory System** | 4 | 1 | 5 |
-| **2. Document Converter** | 3 | 1 | 4 |
-| **3. Agent Abstraction** | 5 | 2 | 7 |
-| **4. Runtime Analytics** | 4 | 1 | 5 |
-| **5. Prompts UI** | 6 | 1 | 7 |
-| **6. PDF Knowledge** | 2 | 1 | 3 |
-| **TOTAL** | **30** | **9** | **39** |
+| Phase | Files New | Files Modified | Total | Notes |
+|-------|-----------|----------------|-------|-------|
+| **0. Agent Awareness** | 3 | 3 | 6 | EXTENDS existing, no new routes |
+| **1. Memory System** | 2 | 1 | 3 | Extends AgentMemory |
+| **2. Document Converter** | 3 | 1 | 4 | OWN implementation |
+| **3. Agent Abstraction** | 3 | 2 | 5 | Implements canonical contract |
+| **4. Runtime Analytics** | 3 | 1 | 4 | Uses AgentResponse contract |
+| **5. Prompts UI** | 4 | 1 | 5 | Prompt library |
+| **6. PDF Knowledge** | 1 | 1 | 2 | Folds into KnowledgeDocument |
+| **TOTAL** | **19** | **10** | **29** | ↓ from 39 (consolidated) |
 
 ---
 
@@ -289,27 +293,28 @@ AGENT WORKFLOW (prevents conflicts):
 
 | Week | Phase | Deliverable | Dependencies |
 |------|-------|-------------|--------------|
-| **1** | P0: Agent Awareness | Blackboard + Conflict Detection + System State | None |
-| **2** | P1: Memory System | Memory architecture from claude-mem patterns | Phase 0 |
+| **1** | P0: Agent Awareness (integration) | WorkInProgress + Conflict Detection + 3 new MCP tools | None |
+| **2** | P0: Canonical Contract + Conformance Tests | AgentRequest/Response + 10 tests | Phase 0 |
+| **2** | P1: Memory System | claude-mem patterns → AgentMemory extensions | Parallel |
 | **3** | P1: Document Converter | TypeScript converters (no MS dependency) | Parallel |
-| **3** | P1: Agent Abstraction | IAgent interface + adapters | Parallel |
-| **4** | P2: Runtime Analytics | Cost/token tracking + dashboard | Phase 2-3 |
-| **5** | P2: Prompts UI | Prompt library from prompts.chat | Parallel |
-| **5** | P2: PDF Knowledge | Folded insights → Neo4j | Parallel |
+| **3** | P1: Agent Abstraction | IAgent interface + 3 adapters | P0 contract |
+| **4** | P2: Runtime Analytics | Cost/token tracking + dashboard | P1 abstractions |
+| **5** | P2: Prompts UI + PDF Knowledge | Prompt library + folded insights | Parallel |
 
-**Total: 5 weeks**
+**Total: 5 weeks** (same timeline, fewer files)
 
 ---
 
-## 7. Risk Assessment
+## 7. Risk Assessment (Updated)
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
+| Phase 0 still overlaps with existing | Medium | High | EXTENDS pattern — zero new parallel systems |
+| Schema conflicts | Low | High | Explicit schema delta + schema_v1_2_1.cypher reference |
+| a2AChannel confusion | Medium | Medium | Honest documentation: it's broadcast state, not messaging |
 | RLM folding too slow | High | Low | Use /reason endpoint (works), not /fold |
 | Conflict false positives | Medium | Medium | Tunable similarity threshold (0.7) |
-| Neo4j query performance | Low | Medium | Index WorkInProgress.status, agentId |
-| Agent adoption resistance | Medium | High | Make awareness opt-in initially |
-| Duplicate work during transition | High | High | Phase 0 FIRST — prevents this |
+| Agent adoption resistance | Medium | High | Opt-in initially, demonstrate value |
 
 ---
 
@@ -321,6 +326,8 @@ AGENT WORKFLOW (prevents conflicts):
 | Agent awareness of peers | 0% | 100% |
 | Conflict detection | None | >90% accuracy |
 | Duplicate work | Unknown | <5% |
+| Schema compliance | Unknown | 100% (schema_v1_2_1.cypher) |
+| Conformance tests | 0 | 10+ |
 | Skills available | 21 | 21 + prompt library |
 | Document formats | ~5 | 10+ |
 | Cost visibility | None | Per-agent |
@@ -331,20 +338,21 @@ AGENT WORKFLOW (prevents conflicts):
 
 | # | Decision | Options | Recommendation |
 |---|----------|---------|----------------|
-| 1 | Phase 0 first? | Yes/No | **Yes** — prevents all future conflicts |
+| 1 | Phase 0 as integration? | Yes/No | **Yes** — extends existing, no parallel systems |
 | 2 | Conflict threshold | 0.5/0.7/0.9 | **0.7** — balance false +/- |
-| 3 | Memory system source | claude-mem / build from scratch | **claude-mem patterns** (356 files analyzed) |
+| 3 | Memory system source | claude-mem / build own | **claude-mem patterns** (356 files analyzed) |
 | 4 | Document converter | markitdown / build own | **Build own** — no MS dependency |
-| 5 | Timeline | 4 weeks / 5 weeks / 6 weeks | **5 weeks** — realistic with Phase 0 first |
+| 5 | a2AChannel honesty | Document as broadcast / pretend it's messaging | **Document as broadcast** — be honest |
+| 6 | Timeline | 4/5/6 weeks | **5 weeks** — realistic with integration first |
 
 ---
 
 ## 10. Next Step After Approval
 
-1. Create Neo4j constraints for WorkInProgress and SystemState
-2. Build AgentBlackboardService.ts
-3. Build ConflictDetectorService.ts
-4. Build SystemAwarenessService.ts
-5. Register 4 new MCP tools
-6. Test with 2 agents (Qwen + Codex) working on similar tasks
-7. Verify conflict detection triggers correctly
+1. Create Neo4j constraint for WorkInProgress (wip_id_unique)
+2. Extend AgentRegistry with awareness endpoints
+3. Build ConflictDetectorService (semantic similarity)
+4. Register 3 new MCP tools (blackboard_read, blackboard_write, conflict_check)
+5. Test with 2 agents (Qwen + Codex) working on similar tasks
+6. Verify conflict detection triggers correctly
+7. Write 10 conformance tests before Phase 1
