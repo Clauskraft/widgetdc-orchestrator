@@ -206,6 +206,7 @@ Every value-prop leverages ≥2 primitives delivered in Week 1-5. Zero greenfiel
 | 8 | Self-updating corpus + RAG router | Qwen + Claude QA | V6, V7 |
 | 9 | OSINT DD + prompt loop + bi-temporal | Qwen + Claude QA | V8, V9, V10 |
 | 10-12 | **Frontend Core** — see `FRONTEND_CORE_PLAN.md` | Qwen frontend + Claude QA | UI for V1-V10 |
+| 13-14 | **Mission Control** — cc-v4 as operator cockpit | Qwen frontend + backend (session.* tools) + Claude QA | O1-O10 operator actions, CLI session visibility (Claude/Qwen/Gemini) |
 
 ---
 

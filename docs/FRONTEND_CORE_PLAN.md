@@ -209,21 +209,189 @@ Zero direct MCP calls — every flow is `AgentRequest → IAgent.process() → A
 
 ---
 
-## 9. Success metrics after Week 12
+## 9. Mission Control — cc-v4 as operator cockpit for all agents (Week 13-14)
+
+**Premise:** When the frontend is "live", Claus (and designated operators) must be
+able to steer the entire multi-agent platform from cc-v4 — including the work
+done in CLI sessions (Claude Code, Qwen CLI, Gemini Agent) that currently only
+surface as Neo4j Episodes after the fact.
+
+The frontend becomes the **single pane of glass** across backend agents, CLI
+sessions, research missions, and QA loops.
+
+### 9.1 Operator capabilities exposed in UI
+
+| # | Operator action | Underlying mechanism | Route |
+|---|-----------------|----------------------|-------|
+| **O1** | See every agent online + current claim | `:Agent` + `:AgentMemory {type:'claim'}` via SSE | `/mission/fleet` |
+| **O2** | Dispatch `AgentRequest` to any agent | `IAgent.process()` + A2A broadcast | `/mission/dispatch` |
+| **O3** | Attach to live CLI session (Claude/Qwen/Gemini) | Session heartbeat + SSE token-stream | `/mission/session/[id]` |
+| **O4** | Stream A2A bus in realtime | SSE from `/api/events?topics=a2a,agent,broadcast` | `/mission/a2a-bus` |
+| **O5** | Browse every `:Episode` (QA, build, research) | `graph.read_cypher` paginated | `/mission/episodes` |
+| **O6** | Create + monitor `:AgentHandoff` | Handoff creation API + DISCOVERED_BY tracking | `/mission/handoffs` |
+| **O7** | Launch + monitor `:ResearchMission` | RM creation + candidate stream | `/mission/research` |
+| **O8** | Approve/reject Qwen deliverables (QA loop) | Writes QA Episode + upgrades/blocks | `/mission/qa-queue` |
+| **O9** | Linear + GitHub integration | Existing `linear.*` + `gh` MCP wrappers | `/mission/backlog` |
+| **O10** | Cost + budget control per agent/session | `runtime_summary` + budget alerts | `/mission/budget` |
+
+### 9.2 New backend surface needed (add to Week 13)
+
+The CLI-session control capability needs a small backend extension — 3 new MCP
+tools + 1 Redis stream:
+
+1. **`session.register`** — CLI sessions (Claude Code, Qwen, Gemini) register on
+   startup: `{ session_id, agent_id, tool, capabilities, operator, pid }`. TTL 1h
+   with heartbeat extension. Stored as `:AgentSession` node + Redis hash.
+2. **`session.heartbeat`** — updates `last_seen`, current task, token usage. SSE
+   fan-out to UI subscribers.
+3. **`session.command`** — operator → UI → backend → target session. Uses
+   existing A2A broadcast with `thread_id` routing; session polls for commands
+   or receives via its own SSE connection.
+4. **Redis stream `operator:sessions`** — hot stream of session events for the UI.
+
+Session-side glue (tiny — add to each CLI agent's boot sequence):
+
+```bash
+# Claude Code hook (.claude/hooks/session-start.sh):
+curl -s -H "Authorization: Bearer $OMEGA_KEY" -H "Content-Type: application/json" \
+  -d "{\"tool\":\"session.register\",\"payload\":{\"session_id\":\"$SESSION_ID\",\"agent_id\":\"claude-code\",\"tool\":\"cli\",\"capabilities\":[\"code\",\"qa\",\"orchestration\"]}}" \
+  $BACKEND/api/mcp/route
+
+# Heartbeat cron (every 30s while active):
+curl -s -H "Authorization: Bearer $OMEGA_KEY" -H "Content-Type: application/json" \
+  -d "{\"tool\":\"session.heartbeat\",\"payload\":{\"session_id\":\"$SESSION_ID\",\"current_task\":\"...\",\"tokens_used_total\":1234}}" \
+  $BACKEND/api/mcp/route
+```
+
+Same three-line pattern for Qwen CLI and Gemini Agent — minor per-tool
+wrapper, no heavy integration.
+
+### 9.3 UI components for Mission Control
+
+Extensions to the shared primitives (§3):
+
+- **`<AgentRosterPanel />`** — live grid of all `:Agent`s, status lights, current
+  claim preview. Click → session view.
+- **`<SessionStream />`** — tails a single session's heartbeat stream, shows
+  task, tokens, last action, projected cost.
+- **`<A2AStreamViewer />`** — filterable SSE from A2A bus. Replay last 1h.
+- **`<DispatchDialog />`** — builds `AgentRequest` via form: agent picker,
+  capability filter, context YAML editor, priority slider. Submit → SSE streams
+  result.
+- **`<HandoffComposer />`** — creates `:AgentHandoff` with target agent +
+  phase + content (reuses the Phantom handoff pattern we already use).
+- **`<QAQueue />`** — every QA Episode with outcome=CONDITIONAL or PENDING,
+  approve/reject/escalate buttons.
+- **`<CostBudgetMeter />`** — per-agent spend vs. budget, alert at 80% / 100%.
+
+### 9.4 Delivery — Week 13-14 execution plan
+
+**Week 13 — Session control + A2A stream (backend + 3 routes)**
+
+Deliverables:
+1. Backend: `src/routes/session.ts` — new MCP tools `session.register`,
+   `session.heartbeat`, `session.command`
+2. Backend: `src/events.ts` extension — `operator:sessions` Redis stream
+   + SSE topic
+3. Cypher migration: `:AgentSession {session_id, agent_id, operator, pid,
+   started_at, last_seen, current_task}`
+4. Frontend: `cc-v4/src/features/mission-control/` — `/mission/fleet`,
+   `/mission/session/[id]`, `/mission/a2a-bus`
+5. CLI session registration hooks for all three (Claude Code, Qwen, Gemini)
+6. Runbook §16 — session-register protocol + troubleshooting
+
+Exit gates:
+- [ ] 3 MCP tools live + deploy verified
+- [ ] Claude Code CLI auto-registers on start, sends heartbeat every 30s
+- [ ] Qwen CLI + Gemini Agent register via same pattern
+- [ ] `/mission/fleet` shows all active sessions with <5s lag
+- [ ] `/mission/a2a-bus` streams realtime, pause/resume works
+- [ ] SSE reconnect on network drop
+- [ ] Runbook §16
+
+**Week 14 — Dispatch + Handoff + QA + Budget (4 routes)**
+
+Deliverables:
+1. Frontend: `/mission/dispatch` — any-agent dispatch with context editor
+2. Frontend: `/mission/handoffs` — handoff composer + timeline
+3. Frontend: `/mission/qa-queue` — open QA Episodes approve/reject flow
+4. Frontend: `/mission/budget` — cost meter + 80%/100% threshold alerts
+5. Frontend: `/mission/episodes` — searchable Episode browser with lesson extraction
+6. Frontend: `/mission/research` — ResearchMission console with candidate stream
+7. Feature flag: `VITE_FEATURE_MISSION_CONTROL=1` (roles: operator, owner)
+8. Runbook §17 — operator playbook (one-page cheat sheet)
+
+Exit gates:
+- [ ] Operator can dispatch to any registered agent from UI, receive result
+- [ ] Handoff creation produces `:AgentHandoff` node with proper edges
+- [ ] QA approval writes Episode update, rejection writes FailureMemory
+- [ ] Budget alerts fire at correct thresholds (Slack + UI toast)
+- [ ] Episode search supports full-text + tag filter
+- [ ] ResearchMission launch → candidate injection stream visible
+- [ ] Playwright E2E: dispatch → session response → QA sign-off loop
+- [ ] Accessibility + i18n maintained
+- [ ] Runbook §17
+
+### 9.5 Authorization model
+
+Not every operator should dispatch to every agent. Simple RBAC via existing
+session auth:
+
+| Role | Can | Cannot |
+|------|-----|--------|
+| `owner` (Claus) | Everything | — |
+| `operator` | Dispatch, QA approve, session attach | Change budget caps, kill sessions |
+| `viewer` | Read-only mission control | Any write |
+
+Implemented via `useSessionStore.role` + route guards. Audit all dispatch
+actions to `:OperatorAction` nodes for traceability.
+
+### 9.6 Constraints for Mission Control
+
+- **Read-first UI**: every destructive action (kill session, reject QA,
+  revoke claim) requires confirmation modal
+- **Zero hidden state**: UI must reflect Neo4j + Redis truth, never cache
+  more than 30s
+- **Session transparency**: operator always sees which CLI + model a given
+  agent is running (Claude Opus, Qwen Coder, Gemini Pro)
+- **Graceful degradation**: if SSE drops, UI shows "stale" indicator and
+  falls back to 30s polling
+- **Immutable audit trail**: `:OperatorAction` nodes never DELETE, only
+  supersede (aligns with V10 bi-temporal pattern)
+
+### 9.7 Risk register — Mission Control
+
+| Risk | Mitigation |
+|------|-----------|
+| CLI session registration fails silently | Hook must `exit 1` if register fails; CI gate verifies hook exists |
+| Operator accidentally broadcasts to 60 agents | Dispatch dialog requires target selection; "broadcast to all" is a separate audited action |
+| Budget alert fatigue | Per-agent thresholds + quiet-hours + alert dedup (max 1 per hour) |
+| A2A stream volume overwhelms browser | Server-side filter; client paginates, max 500 msgs in DOM |
+| Session heartbeat thrashes Redis | Use Redis TTL + `hset` (single op), not stream-per-heartbeat |
+
+---
+
+## 10. Success metrics after Week 12 (foundation) + Week 14 (Mission Control)
 
 | Metric | Target |
 |--------|--------|
-| All 10 V-props reachable in UI | ✅ |
+| All 10 V-props reachable in UI | ✅ (Week 12) |
 | TypeScript strict, 0 `any` in new code | ✅ |
 | Vitest coverage on new modules | ≥80% |
 | Lighthouse Performance / A11y | ≥85 / ≥95 |
 | Mean time to first value on V1 (cold) | <15 s |
 | Cost visibility latency | <5 s drift vs server |
 | New runtime dependencies added | ≤3 |
+| **Mission Control (Week 14):** all 3 CLI tools auto-register | ✅ |
+| Live agent roster lag (fleet view) | <5 s |
+| Operator can dispatch → receive result in UI | ✅ |
+| QA approval loop (UI → Episode write) | ≤3 clicks |
+| SSE reconnect recovery | <5 s |
+| Audit trail completeness (every dispatch → OperatorAction) | 100% |
 
 ---
 
-## 10. Handoff + QA (same protocol as backend)
+## 11. Handoff + QA (same protocol as backend)
 
 1. Qwen builds — deliverable table + constraints + Neo4j Episode
 2. Claude QAs — type safety + live probe + Playwright test run + accessibility audit
