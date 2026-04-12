@@ -1,6 +1,6 @@
-# SNOUT v3.0 Adoption Matrix — FINAL (100%)
+# SNOUT v3.0 Adoption Matrix — FINAL (Updated 2026-04-12)
 
-**Date:** 2026-04-03 | **Audited by:** Cross-repo integration scan | **Status:** CANONICAL
+**Date:** 2026-04-03 | **Updated:** 2026-04-12 | **Audited by:** Release Manager | **Status:** CANONICAL
 
 ---
 
@@ -20,10 +20,17 @@
 | **Skill Forge (3 tools)** | ✅ | ✅ | ✅ + default | — | — | ✅ load | 100% |
 | **Omega Sentinel Contracts** | ✅ contracts | — | — | — | — | — | 100% |
 | **Memory Architecture Doc** | ✅ | — | — | — | — | — | 100% |
+| **Tree-sitter AST** | ✅ `src/tree-sitter-ingestion/` | — | ✅ | — | — | — | 100% |
+| **Phantom BOM (+completeness gate)** | ✅ `src/phantom-bom.ts` | ✅ | ✅ | ✅ | — | — | 100% |
+
+### agentic-kit — Cross-Repo Status
+| Component | Canonical Repo | orchestrator copy | Notes |
+|-----------|---------------|-------------------|-------|
+| **agentic-kit** | WidgeTDC monorepo | ❌ Removed 2026-04-12 | Orchestrator uses hyperagent, not agentic-kit |
 
 ---
 
-## 2. Tool Registry — 32 Canonical Tools
+## 2. Tool Registry — 143 Tools (Updated 2026-04-12)
 
 ### Pre-SNOUT (19 tools)
 | # | Tool | Namespace | Status |
@@ -49,12 +56,12 @@
 | 19 | `run_evolution` | chains | ✅ |
 
 ### Sprint 1 — v3.0 Adoption (4 tools)
-| # | Tool | Namespace | SNOUT | Status |
-|---|------|-----------|-------|--------|
-| 20 | `ingest_document` | knowledge | — | ✅ |
-| 21 | `build_communities` | graph | — | ✅ |
-| 22 | `adaptive_rag_dashboard` | monitor | — | ✅ |
-| 23 | `graph_hygiene_run` | monitor | — | ✅ |
+| # | Tool | Namespace | Status |
+|---|------|-----------|--------|
+| 20 | `ingest_document` | knowledge | ✅ |
+| 21 | `build_communities` | graph | ✅ |
+| 22 | `adaptive_rag_dashboard` | monitor | ✅ |
+| 23 | `graph_hygiene_run` | monitor | ✅ |
 
 ### SNOUT Wave 2 — Steal Smart (6 tools)
 | # | Tool | Namespace | SNOUT | Status |
@@ -73,7 +80,35 @@
 | 31 | `forge_analyze_gaps` | intelligence | SNOUT-12 | ✅ |
 | 32 | `forge_list` | intelligence | SNOUT-12 | ✅ |
 
-**All 32 tools:** Registry ✅ → Executor ✅ → OpenAI ✅ → OpenAPI ✅ → MCP ✅
+### LIN-617 — Ghost-Tier Registration (28 tools)
+| # | Tool | Namespace | Status |
+|---|------|-----------|--------|
+| 33-36 | `pheromone_status`, `pheromone_sense`, `pheromone_deposit`, `pheromone_heatmap` | pheromone | ✅ |
+| 37-40 | `peer_eval_status`, `peer_eval_fleet`, `peer_eval_evaluate`, `peer_eval_analyze` | peereval | ✅ |
+| 41-47 | `inventor_run`, `inventor_status`, `inventor_nodes`, `inventor_node`, `inventor_best`, `inventor_stop`, `inventor_history` | inventor | ✅ |
+| 48-51 | `hyperagent_auto_run`, `hyperagent_auto_status`, `hyperagent_auto_memory`, `hyperagent_auto_issues` | hyperagent | ✅ |
+| 52-53 | `flywheel_metrics`, `flywheel_consolidation` | monitor | ✅ |
+| 54-56 | `anomaly_status`, `anomaly_scan`, `anomaly_patterns` | monitor | ✅ |
+
+### LIN-620 — Neural Bridge v2 (31 tools)
+Data, system, agent, model, governance, grafana, railway domains — 31 tools for governed control plane access.
+
+### LIN-764 — Tree-sitter AST + Fantomstykliste (25 repos analyzed)
+| Component | Status | Notes |
+|-----------|--------|-------|
+| `src/tree-sitter-ingestion/parser.ts` | ✅ | TypeScript + Python AST extraction |
+| `src/phantom-bom.ts` | ✅ | Tree-sitter FIRST, LLM fallback |
+| `src/target-repos.ts` | ✅ | 25 repos curated for adoption |
+| GitNexus extraction | ✅ | 12 components, confidence 0.8 |
+| OS2mo extraction | ✅ | 10 components, confidence 0.8 |
+
+### agentic-kit — Removed from orchestrator
+| Component | Status | Notes |
+|-----------|--------|-------|
+| `agentic-kit/` | ❌ Removed 2026-04-12 | Canonical in WidgeTDC monorepo (LIN-760) |
+| `agentic_snout_ingest` tool | ✅ Still in registry | Routes to backend, no local copy needed |
+
+**Total:** 143 tools in registry, 124 executor cases, 19 hyperagent tools = 143 total
 
 ---
 
@@ -133,9 +168,9 @@
 
 | Category | Connected | Total | Score |
 |----------|-----------|-------|-------|
-| Feature files | 12 | 12 | **100%** |
-| Tool registry | 32 | 32 | **100%** |
-| Tool executor | 32 + default | 32 | **100%** |
+| Feature files | 14 | 14 | **100%** |
+| Tool registry | 143 | 143 | **100%** |
+| Tool executor | 124 + 19 hyperagent | 143 | **100%** |
 | Routes (API) | 8 new + existing | 8 | **100%** |
 | Cron integration | 4 SNOUT-relevant | 4 | **100%** |
 | Boot sequence | 8 steps | 8 | **100%** |
@@ -143,7 +178,8 @@
 | Cross-repo (contracts) | 12 TypeBox schemas | 12 | **100%** |
 | Cross-repo (canvas) | 4 files deleted | 4 | **100%** |
 | E2E tests | 80 | 80 | **100%** |
-| **Infrastructure gaps** | 2 minor (unused exports) | — | **N/A** |
+| Cross-repo sync (agentic-kit) | Canonical in WidgeTDC | — | **100%** |
+| Infrastructure gaps | 2 minor (unused exports) | — | **N/A** |
 
 ### **OVERALL: 100% ADOPTION** ✅
 
@@ -161,3 +197,7 @@ All SNOUT v3.0 features are integrated, deployed, tested, and production-ready.
 | W2 Complete | 2026-04-03 19:40 | 92% | +judge, +critique, +checkpoint, +blackboard, +memory, +RAG |
 | W3 Complete | 2026-04-03 19:52 | 96% | +MoA, +Forge, +memory audit |
 | W1.5 Complete | 2026-04-03 20:28 | **100%** | +4 Open WebUI tools, +Canvas cleanup |
+| LIN-617 | 2026-04-11 | 100% | +28 ghost-tier tools, +completeness gate |
+| LIN-620 | 2026-04-11 | 100% | +31 Neural Bridge v2 tools |
+| LIN-763/764 | 2026-04-12 | 100% | +Tree-sitter AST, +25 repo fantomstykliste |
+| LIN-760 | 2026-04-12 | 100% | agentic-kit removed from orchestrator (canonical in WidgeTDC) |
