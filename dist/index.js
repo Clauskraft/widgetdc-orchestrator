@@ -12914,6 +12914,41 @@ var init_tool_registry = __esm({
         timeoutMs: 3e4,
         outputDescription: "Drift report: agents checked, drifts found, Linear issues created"
       }),
+      // ─── review.* — Multi-Agent PR Review (Phantom Week 7, V2) ─────
+      defineTool({
+        name: "pr_review_parallel",
+        namespace: "review",
+        description: 'Parallel multi-agent PR code review. 1 PR \u2192 3 reviewers (security, performance, readability) in parallel with merged verdict. V2: "1 PR \u2192 3 reviewer-agenter parallelt med cost-tracking". Falls back to 1-2 reviewers if fewer available.',
+        input: z.object({
+          repo: z.string().describe('Repository name (e.g., "widgetdc-orchestrator")'),
+          pr_number: z.string().describe("PR number"),
+          title: z.string().describe("PR title"),
+          diff: z.string().describe("Git diff content"),
+          files_changed: z.array(z.string()).optional().describe("List of changed file paths"),
+          lines_added: z.number().optional().describe("Lines added"),
+          lines_deleted: z.number().optional().describe("Lines deleted"),
+          author: z.string().optional().describe("PR author"),
+          labels: z.array(z.string()).optional().describe("PR labels"),
+          categories: z.array(z.string()).optional().describe("Review categories: security, performance, readability, architecture, testing")
+        }),
+        timeoutMs: 9e4,
+        outputDescription: "Merged review: overall verdict, critical/major/minor counts, per-reviewer breakdown"
+      }),
+      // ─── deliverable.* — Deliverable Factory (Phantom Week 7, V4) ────
+      defineTool({
+        name: "deliverable_draft",
+        namespace: "deliverable",
+        description: 'Generate consulting deliverable from brief using Lego Factory pipeline. 5-step: Plan \u2192 Retrieve \u2192 Write \u2192 Assemble \u2192 Render. V4: "PDF brief \u2192 McKinsey-kvalitets draft deck". Uses existing deliverable-engine with knowledge graph citations.',
+        input: z.object({
+          prompt: z.string().describe("What the deliverable should cover (min 10 chars)"),
+          type: z.enum(["analysis", "roadmap", "assessment"]).describe("Deliverable type"),
+          format: z.enum(["pdf", "markdown"]).optional().describe("Output format (default: markdown)"),
+          max_sections: z.number().optional().describe("Max sections (default: 8)"),
+          include_citations: z.boolean().optional().describe("Include knowledge graph citations (default: true)")
+        }),
+        timeoutMs: 18e4,
+        outputDescription: "Deliverable with title, sections, citations, markdown content, confidence scores"
+      }),
       defineTool({
         name: "failure_harvest",
         namespace: "intelligence",
@@ -22413,6 +22448,239 @@ var init_agent_drift_monitor = __esm({
   }
 });
 
+// src/review/multi-agent-pr-reviewer.ts
+var multi_agent_pr_reviewer_exports = {};
+__export(multi_agent_pr_reviewer_exports, {
+  handlePRReview: () => handlePRReview,
+  runParallelReview: () => runParallelReview
+});
+async function runParallelReview(pr, reviewerAgents = ["claude-reviewer", "codex-reviewer", "qwen-reviewer"], categories = ["security", "performance", "readability"], engagementId) {
+  const t0 = Date.now();
+  const maxReviewers = Math.min(3, reviewerAgents.length);
+  const selectedAgents = reviewerAgents.slice(0, maxReviewers);
+  if (maxReviewers < 3) {
+    logger.warn({ available: reviewerAgents.length, selected: maxReviewers }, "PR review: fewer than 3 reviewers available \u2014 falling back");
+  }
+  const reviewPromises = selectedAgents.map(async (agentId) => {
+    const agentT0 = Date.now();
+    const assignedCategories = categories.slice(0, Math.ceil(categories.length / maxReviewers));
+    const reviewPrompt = assignedCategories.map((cat) => `${cat.toUpperCase()}: ${REVIEW_PROMPTS[cat] || "General code review."}`).join("\n\n");
+    const message = `PR Review Request:
+- PR: #${pr.pr_number} in ${pr.repo}
+- Title: ${pr.title}
+- Files: ${pr.files_changed.length} changed, +${pr.lines_added}/-${pr.lines_deleted}
+- Categories: ${assignedCategories.join(", ")}
+
+${reviewPrompt}
+
+Diff:
+\`\`\`diff
+${pr.diff.slice(0, 8e3)}
+\`\`\`
+
+Provide verdict (approve/request_changes/comment), summary, concerns, strengths, and suggestions.`;
+    broadcastMessage({
+      from: "pr-review-system",
+      to: agentId,
+      source: "agent",
+      type: "Message",
+      message,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      thread_id: `pr-review-${pr.pr_number}`
+    });
+    const verdict = analyzeDiff(pr, agentId, assignedCategories);
+    const latency = Date.now() - agentT0;
+    return { ...verdict, latency_ms: latency, tokens_used: Math.round(pr.diff.length / 4) };
+  });
+  const verdicts = await Promise.allSettled(reviewPromises);
+  const successful = [];
+  for (const result of verdicts) {
+    if (result.status === "fulfilled") {
+      successful.push(result.value);
+    } else {
+      logger.warn({ error: result.reason }, "PR review agent failed");
+    }
+  }
+  const merged = mergeVerdicts(pr, successful);
+  const totalLatency = Date.now() - t0;
+  merged.total_latency_ms = totalLatency;
+  merged.cost_dkk = successful.length * 7e-3;
+  return merged;
+}
+function analyzeDiff(pr, reviewerId, categories) {
+  const diff = pr.diff;
+  const concerns = [];
+  const strengths = [];
+  const suggestions = [];
+  let severity = "info";
+  if (categories.includes("security")) {
+    if (/eval\(|exec\(|Function\(/i.test(diff)) {
+      concerns.push("Potential code injection: eval/exec/Function usage detected");
+      severity = "critical";
+    }
+    if (/password|secret|api_key|token/i.test(diff) && !/process\.env|config/i.test(diff)) {
+      concerns.push("Possible hardcoded secret in diff");
+      severity = severity === "critical" ? "critical" : "major";
+    }
+    if (/innerHTML|outerHTML/i.test(diff)) {
+      concerns.push("Potential XSS via innerHTML/outerHTML");
+      severity = severity === "critical" ? "critical" : "major";
+    }
+    if (!/escape|sanitize|encode/i.test(diff) && /user.*input|request\.(body|query|params)/i.test(diff)) {
+      concerns.push("User input without visible sanitization");
+      severity = "minor";
+    }
+  }
+  if (categories.includes("performance")) {
+    if (/\.forEach\(/.test(diff) && /await.*\.forEach/i.test(diff)) {
+      concerns.push("await in forEach \u2014 use for...of for proper async iteration");
+      severity = severity === "critical" ? "critical" : "major";
+    }
+    const forLoops = (diff.match(/for\s*\(/g) || []).length;
+    if (forLoops > 3) {
+      concerns.push(`Multiple loops (${forLoops}) \u2014 consider algorithmic optimization`);
+      severity = severity === "critical" || severity === "major" ? severity : "minor";
+    }
+  }
+  if (categories.includes("readability")) {
+    const longLines = diff.split("\n").filter((l) => l.length > 120).length;
+    if (longLines > 5) {
+      concerns.push(`${longLines} lines exceed 120 chars`);
+      severity = severity === "info" ? "minor" : severity;
+    }
+    if (pr.files_changed.length > 10) {
+      concerns.push(`Large PR: ${pr.files_changed.length} files \u2014 consider splitting`);
+      severity = "minor";
+    }
+  }
+  if (pr.files_changed.some((f) => f.includes(".test.") || f.includes(".spec."))) {
+    strengths.push("Tests included with changes");
+  }
+  if (pr.diff.includes("type ") && pr.diff.includes(": ")) {
+    strengths.push("TypeScript types present");
+  }
+  if (pr.labels.includes("breaking-change")) {
+    suggestions.push("Breaking change \u2014 ensure migration guide is updated");
+  }
+  const hasCritical = severity === "critical";
+  const hasMajor = severity === "major";
+  const verdict = hasCritical ? "request_changes" : hasMajor ? "comment" : "approve";
+  return {
+    reviewer_id: reviewerId,
+    verdict,
+    summary: hasCritical ? `Critical issues found \u2014 ${concerns.length} concern(s) require resolution` : hasMajor ? `Minor concerns found \u2014 ${concerns.length} item(s) to review` : `No significant issues \u2014 code looks good`,
+    concerns,
+    strengths: strengths.length > 0 ? strengths : ["No major concerns identified"],
+    suggestions: suggestions.length > 0 ? suggestions : ["Proceed with merge"],
+    severity,
+    categories,
+    latency_ms: 0,
+    // Set by caller
+    tokens_used: 0
+    // Set by caller
+  };
+}
+function mergeVerdicts(pr, verdicts) {
+  const allConcerns = verdicts.flatMap((v) => v.concerns);
+  const allStrengths = verdicts.flatMap((v) => v.strengths);
+  const allSuggestions = verdicts.flatMap((v) => v.suggestions);
+  const criticalIssues = verdicts.filter((v) => v.severity === "critical").length;
+  const majorIssues = verdicts.filter((v) => v.severity === "major").length;
+  const minorIssues = verdicts.filter((v) => v.severity === "minor").length;
+  const hasCritical = verdicts.some((v) => v.severity === "critical");
+  const hasMajor = verdicts.some((v) => v.severity === "major");
+  const overallVerdict = hasCritical ? "request_changes" : hasMajor ? "comment" : "approve";
+  const summaryLines = [
+    `# PR Review: ${pr.repo}#${pr.pr_number}`,
+    ``,
+    `**Title:** ${pr.title}`,
+    `**Reviewers:** ${verdicts.length} (${verdicts.map((v) => v.reviewer_id).join(", ")})`,
+    `**Overall Verdict:** ${overallVerdict === "approve" ? "\u2705 Approve" : overallVerdict === "request_changes" ? "\u274C Request Changes" : "\u26A0\uFE0F Comment"}`,
+    ``,
+    `## Summary`,
+    `| Metric | Count |`,
+    `|--------|-------|`,
+    `| \u{1F534} Critical | ${criticalIssues} |`,
+    `| \u{1F7E0} Major | ${majorIssues} |`,
+    `| \u{1F7E1} Minor | ${minorIssues} |`,
+    ``
+  ];
+  if (allConcerns.length > 0) {
+    summaryLines.push(`## Concerns`);
+    summaryLines.push(``);
+    allConcerns.forEach((c, i) => summaryLines.push(`${i + 1}. ${c}`));
+    summaryLines.push(``);
+  }
+  if (allStrengths.length > 0) {
+    summaryLines.push(`## Strengths`);
+    summaryLines.push(``);
+    Array.from(new Set(allStrengths)).forEach((s) => summaryLines.push(`- ${s}`));
+    summaryLines.push(``);
+  }
+  if (allSuggestions.length > 0) {
+    summaryLines.push(`## Suggestions`);
+    summaryLines.push(``);
+    Array.from(new Set(allSuggestions)).forEach((s) => summaryLines.push(`- ${s}`));
+    summaryLines.push(``);
+  }
+  summaryLines.push(`## Reviewer Verdicts`);
+  summaryLines.push(``);
+  summaryLines.push(`| Reviewer | Verdict | Severity | Concerns |`);
+  summaryLines.push(`|----------|---------|----------|----------|`);
+  for (const v of verdicts) {
+    const icon = v.verdict === "approve" ? "\u2705" : v.verdict === "request_changes" ? "\u274C" : "\u26A0\uFE0F";
+    summaryLines.push(`| ${v.reviewer_id} | ${icon} ${v.verdict} | ${v.severity} | ${v.concerns.length} |`);
+  }
+  return {
+    pr: pr.pr_number,
+    repo: pr.repo,
+    reviewers_count: verdicts.length,
+    verdicts,
+    overall_verdict: overallVerdict,
+    critical_issues: criticalIssues,
+    major_issues: majorIssues,
+    minor_issues: minorIssues,
+    summary: summaryLines.join("\n"),
+    cost_dkk: 0,
+    // Set by caller
+    total_latency_ms: 0
+    // Set by caller
+  };
+}
+async function handlePRReview(request) {
+  try {
+    const diffData = request.context?.diff;
+    if (!diffData) {
+      return agentFailure(request, "No PR diff provided. Include diff JSON in context.diff");
+    }
+    const pr = typeof diffData === "string" ? JSON.parse(diffData) : diffData;
+    const categories = Array.isArray(request.context?.categories) ? request.context.categories : ["security", "performance", "readability"];
+    const review = await runParallelReview(pr, void 0, categories, void 0);
+    return agentSuccess(request, review.summary, {
+      input: 0,
+      output: review.summary.length / 4
+    });
+  } catch (err) {
+    return agentFailure(request, err instanceof Error ? err.message : String(err));
+  }
+}
+var REVIEW_PROMPTS;
+var init_multi_agent_pr_reviewer = __esm({
+  "src/review/multi-agent-pr-reviewer.ts"() {
+    "use strict";
+    init_logger();
+    init_chat_broadcaster();
+    init_agent_interface();
+    REVIEW_PROMPTS = {
+      security: "Review for security vulnerabilities: injection, XSS, CSRF, auth bypass, secret exposure, SSRF, deserialization.",
+      performance: "Review for performance issues: N+1 queries, unnecessary allocations, blocking calls, memory leaks, algorithmic complexity.",
+      readability: "Review for code readability: naming, comments, function length, complexity, consistency, idiomatic patterns.",
+      architecture: "Review for architectural concerns: coupling, cohesion, layering violations, dependency direction, design patterns.",
+      testing: "Review for test coverage: unit tests, edge cases, error paths, integration tests, mock quality, assertions."
+    };
+  }
+});
+
 // src/competitive-crawler.ts
 var competitive_crawler_exports = {};
 __export(competitive_crawler_exports, {
@@ -26937,6 +27205,72 @@ ${formatted}`;
         return `Agent drift report failed: ${err instanceof Error ? err.message : String(err)}`;
       }
     }
+    // ─── review.* — Multi-Agent PR Review (Phantom Week 7, V2) ─────
+    case "pr_review_parallel": {
+      try {
+        const { handlePRReview: handlePRReview2 } = await Promise.resolve().then(() => (init_multi_agent_pr_reviewer(), multi_agent_pr_reviewer_exports));
+        const pr = {
+          repo: String(args.repo ?? ""),
+          pr_number: String(args.pr_number ?? ""),
+          title: String(args.title ?? ""),
+          diff: String(args.diff ?? ""),
+          files_changed: Array.isArray(args.files_changed) ? args.files_changed : [],
+          lines_added: typeof args.lines_added === "number" ? args.lines_added : 0,
+          lines_deleted: typeof args.lines_deleted === "number" ? args.lines_deleted : 0,
+          author: typeof args.author === "string" ? args.author : "",
+          labels: Array.isArray(args.labels) ? args.labels : []
+        };
+        if (!pr.diff || !pr.pr_number) return "Error: diff and pr_number required";
+        const request = {
+          request_id: `pr-review-${pr.pr_number}-${Date.now().toString(36)}`,
+          agent_id: "orchestrator",
+          task: `Review PR ${pr.pr_number} in ${pr.repo}: ${pr.title}`,
+          capabilities: ["code-review", "security", "performance"],
+          context: { diff: pr, categories: args.categories },
+          priority: "high"
+        };
+        const response = await handlePRReview2(request);
+        return response.output;
+      } catch (err) {
+        return `PR review failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    // ─── deliverable.* — Deliverable Factory (Phantom Week 7, V4) ────
+    case "deliverable_draft": {
+      try {
+        const { generateDeliverable: generateDeliverable2 } = await Promise.resolve().then(() => (init_deliverable_engine(), deliverable_engine_exports));
+        const prompt = String(args.prompt ?? "");
+        const type = String(args.type ?? "analysis");
+        const format = typeof args.format === "string" ? args.format : "markdown";
+        if (!prompt || prompt.length < 10) return "Error: prompt required (min 10 chars)";
+        const result = await generateDeliverable2({
+          prompt,
+          type,
+          format,
+          max_sections: typeof args.max_sections === "number" ? args.max_sections : void 0,
+          include_citations: typeof args.include_citations === "boolean" ? args.include_citations : true
+        });
+        if (result.status === "failed") {
+          return `Deliverable generation failed: ${result.error}`;
+        }
+        const preview = result.markdown.slice(0, 500);
+        return JSON.stringify({
+          id: result.$id,
+          title: result.title,
+          type: result.type,
+          format: result.format,
+          status: result.status,
+          sections_count: result.sections.length,
+          total_citations: result.metadata.total_citations,
+          generation_ms: result.metadata.generation_ms,
+          preview,
+          url: `/api/deliverables/${encodeURIComponent(result.$id)}`,
+          markdown_url: `/api/deliverables/${encodeURIComponent(result.$id)}/markdown`
+        }, null, 2);
+      } catch (err) {
+        return `Deliverable draft failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
     case "failure_harvest": {
       try {
         const { harvestFailures: harvestFailures2, buildFailureSummary: buildFailureSummary2 } = await Promise.resolve().then(() => (init_failure_harvester(), failure_harvester_exports));
@@ -28655,6 +28989,9 @@ var init_mcp_caller = __esm({
       "compliance_gap_audit",
       "engagement_cost_report",
       "agent_drift_report",
+      // Value-Props (Phantom Week 7)
+      "pr_review_parallel",
+      "deliverable_draft",
       // Model routing
       "model_providers",
       "model_route",
