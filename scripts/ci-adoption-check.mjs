@@ -302,6 +302,39 @@ if (!existsSync(path.join(ROOT, 'scripts/check-matrix-drift.mjs'))) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// CHECK 8 — ACI compliance (SWE-agent paradigm, Phantom Priority Pick #1)
+// ══════════════════════════════════════════════════════════════════════════════
+
+console.log(label('CHECK 8 — ACI compliance (tool surface hygiene)'))
+
+if (!existsSync(path.join(ROOT, 'scripts/check-aci-compliance.mjs'))) {
+  console.log(`  ${warn('scripts/check-aci-compliance.mjs not found — skipping')}`)
+  addResult('ACI compliance', true, ['Skipped — script not present'])
+} else {
+  const aciResult = run('node scripts/check-aci-compliance.mjs')
+  // Parse summary from output — last line has emoji-less summary
+  const summaryLines = (aciResult.out + aciResult.err).trim().split('\n').map(l => l.replace(/\x1b\[[0-9;]*m/g, ''))
+  const hardLine = summaryLines.find(l => /\d+ hard errors/.test(l))
+  const warnLine = summaryLines.find(l => /\d+ warnings/.test(l))
+  const hardCount = hardLine ? parseInt(hardLine.match(/(\d+) hard errors/)?.[1] ?? '0') : 0
+  const warnCount = warnLine ? parseInt(warnLine.match(/(\d+) warnings/)?.[1] ?? '0') : 0
+
+  if (aciResult.ok && hardCount === 0) {
+    console.log(`  ${ok('Zero hard ACI errors across all tool definitions')}`)
+    if (warnCount > 0) {
+      console.log(`  ${warn(`${warnCount} advisory warnings tracked in aci-report.json`)}`)
+    }
+    addResult('ACI compliance', true, warnCount > 0 ? [`${warnCount} advisory warnings (non-blocking)`] : [])
+  } else {
+    console.log(`  ${fail(`${hardCount} hard ACI errors — must fix before merge`)}`)
+    addResult('ACI compliance', false, [
+      `${hardCount} hard errors: missing name / bad snake_case / missing namespace`,
+      'Fix: see aci-report.json for details, or run scripts/check-aci-compliance.mjs standalone',
+    ])
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // SUMMARY TABLE
 // ══════════════════════════════════════════════════════════════════════════════
 

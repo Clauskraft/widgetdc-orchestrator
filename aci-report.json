@@ -1,0 +1,359 @@
+{
+  "total": 165,
+  "clean": 122,
+  "hard_errors": 0,
+  "warnings": 49,
+  "findings": [
+    {
+      "name": "adaptive_rag_query",
+      "namespace": "knowledge",
+      "errors": [],
+      "warnings": [
+        "description 290 chars > 200"
+      ]
+    },
+    {
+      "name": "adaptive_rag_retrain",
+      "namespace": "intelligence",
+      "errors": [],
+      "warnings": [
+        "description 204 chars > 200"
+      ]
+    },
+    {
+      "name": "adaptive_rag_reward",
+      "namespace": "intelligence",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"send\")"
+      ]
+    },
+    {
+      "name": "agentic_canary_evaluate",
+      "namespace": "agentic",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"evaluate\")"
+      ]
+    },
+    {
+      "name": "agentic_contract_issue",
+      "namespace": "agentic",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"issue\")"
+      ]
+    },
+    {
+      "name": "agentic_mrp_recalculate",
+      "namespace": "agentic",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"recalculate\")"
+      ]
+    },
+    {
+      "name": "agentic_mrp_route",
+      "namespace": "agentic",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"dynamic\")"
+      ]
+    },
+    {
+      "name": "build_communities",
+      "namespace": "graph",
+      "errors": [],
+      "warnings": [
+        "description 215 chars > 200"
+      ]
+    },
+    {
+      "name": "chat_send",
+      "namespace": "agent",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"send\")"
+      ]
+    },
+    {
+      "name": "context_fold",
+      "namespace": "cognitive",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"compress\")"
+      ]
+    },
+    {
+      "name": "data_redis_inspect",
+      "namespace": "data",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"inspect\")"
+      ]
+    },
+    {
+      "name": "decision_certify",
+      "namespace": "decisions",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"certify\")"
+      ]
+    },
+    {
+      "name": "document_convert",
+      "namespace": "converter",
+      "errors": [],
+      "warnings": [
+        "description 224 chars > 200"
+      ]
+    },
+    {
+      "name": "drill_down",
+      "namespace": "graph",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"drill\")"
+      ]
+    },
+    {
+      "name": "drill_up",
+      "namespace": "graph",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"navigate\")"
+      ]
+    },
+    {
+      "name": "due_diligence",
+      "namespace": "value-props",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"osintbacked\")"
+      ]
+    },
+    {
+      "name": "engagement_create",
+      "namespace": "engagement",
+      "errors": [],
+      "warnings": [
+        "description 231 chars > 200"
+      ]
+    },
+    {
+      "name": "engagement_match",
+      "namespace": "engagement",
+      "errors": [],
+      "warnings": [
+        "description 219 chars > 200",
+        "description does not start with action verb (got \"find\")"
+      ]
+    },
+    {
+      "name": "engagement_outcome",
+      "namespace": "engagement",
+      "errors": [],
+      "warnings": [
+        "description 211 chars > 200"
+      ]
+    },
+    {
+      "name": "engagement_plan",
+      "namespace": "engagement",
+      "errors": [],
+      "warnings": [
+        "description 305 chars > 200"
+      ]
+    },
+    {
+      "name": "fact_assert",
+      "namespace": "value-props",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"assert\")"
+      ]
+    },
+    {
+      "name": "forge_tool",
+      "namespace": "intelligence",
+      "errors": [],
+      "warnings": [
+        "description 255 chars > 200",
+        "description does not start with action verb (got \"forge\")"
+      ]
+    },
+    {
+      "name": "generate_deliverable",
+      "namespace": "assembly",
+      "errors": [],
+      "warnings": [
+        "description 212 chars > 200"
+      ]
+    },
+    {
+      "name": "governance_plan_evaluate",
+      "namespace": "governance",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"evaluate\")"
+      ]
+    },
+    {
+      "name": "hyperagent_auto_memory",
+      "namespace": "hyperagent",
+      "errors": [],
+      "warnings": [
+        "description 214 chars > 200",
+        "description does not start with action verb (got \"readwrite\")"
+      ]
+    },
+    {
+      "name": "hyperagent_auto_memory",
+      "namespace": "hyperagent",
+      "errors": [],
+      "warnings": [
+        "description 214 chars > 200",
+        "description does not start with action verb (got \"readwrite\")"
+      ]
+    },
+    {
+      "name": "hyperagent_auto_run",
+      "namespace": "hyperagent",
+      "errors": [],
+      "warnings": [
+        "description 267 chars > 200"
+      ]
+    },
+    {
+      "name": "hyperagent_auto_run",
+      "namespace": "hyperagent",
+      "errors": [],
+      "warnings": [
+        "description 267 chars > 200"
+      ]
+    },
+    {
+      "name": "inventor_run",
+      "namespace": "inventor",
+      "errors": [],
+      "warnings": [
+        "description 211 chars > 200"
+      ]
+    },
+    {
+      "name": "inventor_run",
+      "namespace": "inventor",
+      "errors": [],
+      "warnings": [
+        "description 211 chars > 200"
+      ]
+    },
+    {
+      "name": "llm_chat",
+      "namespace": "llm",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"direct\")"
+      ]
+    },
+    {
+      "name": "memory_consolidate",
+      "namespace": "memory",
+      "errors": [],
+      "warnings": [
+        "description 215 chars > 200"
+      ]
+    },
+    {
+      "name": "moa_query",
+      "namespace": "intelligence",
+      "errors": [],
+      "warnings": [
+        "description 235 chars > 200",
+        "description does not start with action verb (got \"mixtureofagents\")"
+      ]
+    },
+    {
+      "name": "pr_review_parallel",
+      "namespace": "review",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"parallel\")"
+      ]
+    },
+    {
+      "name": "precedent_search",
+      "namespace": "knowledge",
+      "errors": [],
+      "warnings": [
+        "description 245 chars > 200",
+        "description does not start with action verb (got \"find\")"
+      ]
+    },
+    {
+      "name": "prompt_ab_test",
+      "namespace": "value-props",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"miprovlite\")"
+      ]
+    },
+    {
+      "name": "rag_route",
+      "namespace": "rag",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"adaptive\")"
+      ]
+    },
+    {
+      "name": "reason_deeply",
+      "namespace": "cognitive",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"send\")"
+      ]
+    },
+    {
+      "name": "search_knowledge",
+      "namespace": "knowledge",
+      "errors": [],
+      "warnings": [
+        "description 223 chars > 200"
+      ]
+    },
+    {
+      "name": "system_health",
+      "namespace": "system",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"alias\")"
+      ]
+    },
+    {
+      "name": "system_service_status",
+      "namespace": "system",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"alias\")"
+      ]
+    },
+    {
+      "name": "workflow_context_compact",
+      "namespace": "model",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"compact\")"
+      ]
+    },
+    {
+      "name": "workflow_premium_escalation_check",
+      "namespace": "model",
+      "errors": [],
+      "warnings": [
+        "name length 33 > 25"
+      ]
+    }
+  ],
+  "generated_at": "2026-04-12T23:39:34.389Z"
+}
