@@ -25,8 +25,38 @@
 
 | Agent | Repo | Status |
 |-------|------|--------|
-| **Claude** | orchestrator repo | ⏳ Afventer |
-| **Claude** | backend repo | ⏳ Afventer |
+| **Claude** | orchestrator repo | ✅ Full ACK (10/10 points confirmed) |
+| **Claude** | backend repo | ✅ Full ACK (I1-I5 + normalization layer) |
+
+**ChatGPT:** ✅ Conditional approve (5/5 corrections applied)
+**Claude:** ✅ Full ACK (10/10 binding directives confirmed)
+
+---
+
+## Post-ACK Plan Changes
+
+| Original v3.1 | Revised (post-ACK) | Rationale |
+|---------------|-------------------|-----------|
+| Phase 0: 3 new services + 2 new node types | Phase 0: Extend AgentMemory + PhantomCluster queries | Zero new node types, zero parallel infrastructure |
+| Phase 0: 4 new MCP tools | Phase 0: 3 new MCP tools (blackboard_read, blackboard_write, conflict_check) | system_awareness → existing health endpoint |
+| Phase 0: Build from scratch | Phase 0: MERGE into existing | Uses existing AgentMemory + chat bus + health |
+| Phase 3: IAgent abstraction | Phase 3: HELD → thin wrapper after normalization | ADR-005 required before start |
+| Timeline: 5 weeks | Timeline: 6 weeks (sequential Phase 2→3) | Claude condition: sequential, not parallel |
+
+### What Qwen Will NOT Build
+
+- ❌ New Neo4j node types (`WorkInProgress`, `SystemState`)
+- ❌ New parallel services (`AgentBlackboardService.ts`, `ConflictDetectorService.ts`, `SystemAwarenessService.ts`)
+- ❌ IAgent abstraction layer (until ADR-005 approved)
+- ❌ Any dispatch mechanism that bypasses `DynamicRouter`
+
+### What Qwen Will Build First (Week 1)
+
+1. **Auto-materialization extension** in `agentic-kit/` — extends `mrp_engine.py` + `snout_ingestor.py`
+2. **Fantom spec format** — `open-spec/fantom-spec-v1.yaml`
+3. **AgentMemory-based WIP tracking** — `AgentMemory {agentId, key: 'wip'}`
+4. **Graph-query conflict detection** — `srag.query`-backed semantic similarity
+5. **Capability self-registration** — agents write capabilities on boot → MRP recalc
 
 ---
 
