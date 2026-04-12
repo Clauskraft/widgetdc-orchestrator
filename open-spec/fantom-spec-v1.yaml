@@ -1,0 +1,215 @@
+# FantomModule Spec v1.0 — Declarative Agent Registration
+# Schema for auto-materialization pipeline
+# See: docs/FINAL_PLAN_v3.0.md — Post-ACK Plan Changes
+#
+# Gate 6: Versioning and Compatibility
+# - Version follows semver: MAJOR.MINOR.PATCH
+# - MAJOR: breaking changes (new required fields, renamed fields)
+# - MINOR: additive changes (new optional fields)
+# - PATCH: bug fixes, clarifications
+# - Backwards compatibility: v1.x specs are compatible with v1.0 materialization pipeline
+# - Forward compatibility: v1.0 pipeline ignores unknown fields from v1.x specs
+
+$compatibility:
+  spec_version: "v1.0.0"
+  minimum_pipeline_version: "v1.0.0"
+  breaking_changes_in: "v2.0.0"
+  rules:
+    - "v1.x specs are fully compatible with v1.0 pipeline"
+    - "Unknown fields in v1.x specs are silently ignored by v1.0 pipeline"
+    - "New required fields require MAJOR version bump"
+    - "New optional fields require MINOR version bump"
+    - "Removed fields require MAJOR version bump"
+
+$schema: "http://json-schema.org/draft-07/schema#"
+$id: "https://spec.widgetdc.io/v1/fantom-spec-v1.yaml"
+title: FantomModule Specification
+description: >
+  Declarative specification for an AI agent module.
+  When registered, the auto-materialization pipeline automatically
+  binds the agent to a PhantomCluster based on capability + geo + quality.
+
+type: object
+required:
+  - name
+  - version
+  - capabilities
+  - sovereignty
+  - quality
+  - sla
+
+properties:
+  name:
+    type: string
+    description: Unique agent/module name (e.g., "qwen-eu-reasoning-v2")
+    pattern: "^[a-z][a-z0-9-]*$"
+    maxLength: 64
+
+  version:
+    type: string
+    description: Semantic version (e.g., "2.1.0")
+    pattern: "^\\d+\\.\\d+\\.\\d+(-[a-z0-9.]+)?$"
+
+  description:
+    type: string
+    description: Human-readable description of what this agent does
+    maxLength: 500
+
+  capabilities:
+    type: array
+    description: Capabilities this agent provides
+    minItems: 1
+    maxItems: 20
+    items:
+      type: string
+      enum:
+        - reasoning
+        - code
+        - multilingual
+        - math
+        - vision
+        - embedding
+        - text_generation
+        - multimodal
+        - tool_use
+        - coordination
+
+  sovereignty:
+    type: object
+    required:
+      - data_residency
+      - exec_residency
+    properties:
+      data_residency:
+        type: string
+        description: Where agent's training/inference data resides
+        enum: [EU, US, CN, ANY]
+      exec_residency:
+        type: string
+        description: Where agent's inference execution runs
+        enum: [EU, US, CN, ANY]
+      gdpr_compliant:
+        type: boolean
+        description: Whether agent is GDPR Article 44 compliant
+        default: false
+
+  quality:
+    type: object
+    required:
+      - confidence
+    properties:
+      confidence:
+        type: number
+        description: Confidence score 0.0–1.0 (from validation/testing)
+        minimum: 0.0
+        maximum: 1.0
+      eval_framework:
+        type: string
+        description: Framework used to measure confidence (e.g., "MMLU", "HumanEval")
+      eval_score:
+        type: number
+        description: Raw evaluation score from the eval framework
+        minimum: 0.0
+        maximum: 100.0
+      last_evaluated:
+        type: string
+        format: date-time
+        description: When quality was last measured
+
+  sla:
+    type: object
+    required:
+      - latency_p50_ms
+      - latency_p99_ms
+      - max_cost_per_1k_tokens
+    properties:
+      latency_p50_ms:
+        type: integer
+        description: 50th percentile latency in milliseconds
+        minimum: 100
+        maximum: 30000
+      latency_p99_ms:
+        type: integer
+        description: 99th percentile latency in milliseconds
+        minimum: 500
+        maximum: 120000
+      max_cost_per_1k_tokens:
+        type: number
+        description: Maximum cost per 1K tokens in DKK
+        minimum: 0.0
+        maximum: 1.0
+      availability:
+        type: number
+        description: Target availability (e.g., 0.999 for 99.9%)
+        minimum: 0.9
+        maximum: 1.0
+        default: 0.999
+
+  provider:
+    type: object
+    required:
+      - name
+      - model
+    properties:
+      name:
+        type: string
+        description: Provider name (e.g., "Alibaba", "DeepSeek", "Anthropic")
+      model:
+        type: string
+        description: Model name (e.g., "qwen-eu-v2.5", "claude-sonnet-4-6")
+      api_endpoint:
+        type: string
+        format: uri
+        description: API endpoint URL
+      context_window:
+        type: integer
+        description: Model context window in tokens
+        minimum: 4096
+        maximum: 10000000
+
+  metadata:
+    type: object
+    description: Optional metadata for discovery and routing
+    properties:
+      tags:
+        type: array
+        items:
+          type: string
+      source_repo:
+        type: string
+      license:
+        type: string
+      homepage:
+        type: string
+        format: uri
+
+---
+# Example: Qwen EU Reasoning Agent
+example:
+  name: "qwen-eu-reasoning-v2"
+  version: "2.1.0"
+  description: "EU-sovereign reasoning agent with multilingual support"
+  capabilities: ["reasoning", "code", "multilingual"]
+  sovereignty:
+    data_residency: "EU"
+    exec_residency: "EU"
+    gdpr_compliant: true
+  quality:
+    confidence: 0.92
+    eval_framework: "MMLU"
+    eval_score: 87.5
+    last_evaluated: "2026-04-12T00:00:00Z"
+  sla:
+    latency_p50_ms: 2500
+    latency_p99_ms: 8000
+    max_cost_per_1k_tokens: 0.000004
+    availability: 0.999
+  provider:
+    name: "Alibaba Cloud"
+    model: "qwen-eu-v2.5"
+    api_endpoint: "https://dashscope.aliyuncs.com/api/v1"
+    context_window: 128000
+  metadata:
+    tags: ["eu-sovereign", "reasoning", "production"]
+    source_repo: "https://github.com/QwenLM/qwen-eu"
+    license: "Apache-2.0"
