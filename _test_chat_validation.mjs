@@ -1,8 +1,15 @@
 /** Test that call_mcp_tool works with BOTH payload and flat args formats */
 
+function uuid() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+}
+
 async function test() {
   const BASE = 'https://orchestrator-production-c27e.up.railway.app';
-  const API_KEY = 'Heravej_22';
+  const API_KEY = process.env.ORCHESTRATOR_API_KEY || 'WidgeTDC_Orch_2026';
   
   const headers = {
     'Content-Type': 'application/json',
@@ -11,7 +18,7 @@ async function test() {
 
   // Test 1: call_mcp_tool WITH payload (internal format)
   console.log('\n=== Test 1: call_mcp_tool WITH payload ===');
-  const r1 = await fetch(`${BASE}/api/tools/call`, {
+  const r1 = await fetch(`${BASE}/tools/call`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -21,7 +28,7 @@ async function test() {
         tool_name: 'chat_read',
         payload: { thread_id: 'general', limit: 2 }
       },
-      call_id: 'test-payload-1'
+      call_id: uuid()
     })
   });
   const d1 = await r1.json();
@@ -29,7 +36,7 @@ async function test() {
 
   // Test 2: call_mcp_tool WITH FLAT args (external agent format — this was broken)
   console.log('\n=== Test 2: call_mcp_tool with FLAT args (external format) ===');
-  const r2 = await fetch(`${BASE}/api/tools/call`, {
+  const r2 = await fetch(`${BASE}/tools/call`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -40,7 +47,7 @@ async function test() {
         thread_id: 'general',
         limit: 2
       },
-      call_id: 'test-flat-2'
+      call_id: uuid()
     })
   });
   const d2 = await r2.json();
@@ -48,7 +55,7 @@ async function test() {
 
   // Test 3: chat_send directly with flat args
   console.log('\n=== Test 3: chat_send direct (flat args) ===');
-  const r3 = await fetch(`${BASE}/api/tools/call`, {
+  const r3 = await fetch(`${BASE}/tools/call`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -60,7 +67,7 @@ async function test() {
         message: 'Direct flat args test',
         thread_id: 'test-validation'
       },
-      call_id: 'test-direct-3'
+      call_id: uuid()
     })
   });
   const d3 = await r3.json();
