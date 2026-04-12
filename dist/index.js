@@ -12753,6 +12753,21 @@ var init_tool_registry = __esm({
         outputDescription: "ConsolidationReport with merged/expired/pruned counts"
       }),
       defineTool({
+        name: "document_convert",
+        namespace: "converter",
+        description: "Convert documents (PDF, DOCX, XLSX, PPTX, MD, HTML, TXT) to canonical text + metadata. Original TS implementation with zero markitdown dep (uses pdf-parse, mammoth, xlsx). Output feeds SRAG + Neo4j ingestion. Phantom Week 3.",
+        input: z.object({
+          content: z.string().describe("File content as base64 or plain text"),
+          mime_type: z.string().describe("MIME type for format detection (e.g., application/pdf, text/markdown)"),
+          source_path: z.string().optional().describe("Original file path/URL"),
+          max_text_length: z.number().optional().describe("Cap output text length (default: 50000)"),
+          extract_headings: z.boolean().optional().describe("Extract headings (default: true)"),
+          extract_links: z.boolean().optional().describe("Extract links (default: true)")
+        }),
+        timeoutMs: 3e4,
+        outputDescription: "ConvertedDocument with text, word_count, headings, links, tables, images, language"
+      }),
+      defineTool({
         name: "failure_harvest",
         namespace: "intelligence",
         description: "Harvest recent orchestrator failures (timeouts, 502s, auth errors, MCP errors) for Red Queen learning loop (LIN-567). Returns categorized failure summary with counts and patterns.",
@@ -20516,6 +20531,379 @@ var init_memory_consolidator = __esm({
   }
 });
 
+// src/converter/document-converter.ts
+var document_converter_exports = {};
+__export(document_converter_exports, {
+  convertDocument: () => convertDocument,
+  convertToText: () => convertToText
+});
+function truncate(text, max) {
+  if (text.length <= max) return text;
+  return text.slice(0, max) + `
+
+--- [truncated at ${max} chars] ---`;
+}
+function countWords(text) {
+  return text.split(/\s+/).filter(Boolean).length;
+}
+function extractMarkdownHeadings(text) {
+  const headings = [];
+  for (const line of text.split("\n")) {
+    const match = line.match(/^(#{1,6})\s+(.+)$/);
+    if (match) headings.push(match[2].trim());
+  }
+  return headings;
+}
+function extractMarkdownLinks(text) {
+  const links = [];
+  const regex = /\[([^\]]+)\]\(([^)]+)\)/g;
+  let m;
+  while ((m = regex.exec(text)) !== null) {
+    links.push({ text: m[1], url: m[2] });
+  }
+  return links;
+}
+function countMarkdownTables(text) {
+  let count = 0;
+  for (const line of text.split("\n")) {
+    if (/^\|/.test(line) && line.includes("|")) count++;
+  }
+  return Math.max(0, Math.floor(count / 3));
+}
+function countMarkdownImages(text) {
+  let count = 0;
+  const regex = /!\[.*?\]\(.*?\)/g;
+  while (regex.exec(text)) count++;
+  return count;
+}
+function extractHtmlHeadings(html) {
+  const headings = [];
+  const regex = /<h([1-6])[^>]*>(.*?)<\/h\1>/gi;
+  let m;
+  while ((m = regex.exec(html)) !== null) {
+    headings.push(m[2].replace(/<[^>]*>/g, "").trim());
+  }
+  return headings;
+}
+function extractHtmlLinks(html) {
+  const links = [];
+  const regex = /<a[^>]+href=["']([^"']+)["'][^>]*>(.*?)<\/a>/gi;
+  let m;
+  while ((m = regex.exec(html)) !== null) {
+    links.push({ text: m[2].replace(/<[^>]*>/g, "").trim(), url: m[1] });
+  }
+  return links;
+}
+function countHtmlTables(html) {
+  let count = 0;
+  const regex = /<table[\s>]/gi;
+  while (regex.exec(html)) count++;
+  return count;
+}
+function countHtmlImages(html) {
+  let count = 0;
+  const regex = /<img[\s>]/gi;
+  while (regex.exec(html)) count++;
+  return count;
+}
+function stripHtml(html) {
+  let text = html.replace(/<script[\s\S]*?<\/script>/gi, "");
+  text = text.replace(/<style[\s\S]*?<\/style>/gi, "");
+  text = text.replace(/<[^>]+>/g, " ");
+  text = text.replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+  text = text.replace(/\s+/g, " ").trim();
+  return text;
+}
+function detectLanguage(text) {
+  const markers = {
+    "da": /\b(og|den|der|for|som|med|til|at|en|det|er)\b/gi,
+    "en": /\b(the|and|for|that|this|with|are|was|have|been)\b/gi,
+    "de": /\b(und|der|die|das|ist|ein|eine|von|mit|sich|auf)\b/gi,
+    "fr": /\b(les|des|est|sont|dans|pour|une|que|pas|avec|plus)\b/gi,
+    "no": /\b(og|det|er|som|for|til|med|på|en|den|ikke|har)\b/gi,
+    "sv": /\b(och|det|är|som|för|till|med|på|en|den|inte|har)\b/gi
+  };
+  let bestLang;
+  let bestScore2 = 0;
+  const sample = text.slice(0, 2e3);
+  for (const [lang, regex] of Object.entries(markers)) {
+    const matches = sample.match(regex);
+    const score = matches ? matches.length : 0;
+    if (score > bestScore2) {
+      bestScore2 = score;
+      bestLang = lang;
+    }
+  }
+  return bestScore2 > 3 ? bestLang : void 0;
+}
+function convertText(content, opts) {
+  const text = truncate(content.replace(/\r\n/g, "\n"), opts.max_text_length ?? DEFAULT_MAX_TEXT);
+  return {
+    source_type: "txt",
+    source_path: "",
+    text,
+    word_count: countWords(text),
+    char_count: text.length,
+    language: opts.language ?? detectLanguage(text),
+    headings: [],
+    links: [],
+    tables: 0,
+    images: 0,
+    metadata: {}
+  };
+}
+function convertMarkdown(content, opts) {
+  const text = truncate(content, opts.max_text_length ?? DEFAULT_MAX_TEXT);
+  return {
+    source_type: "md",
+    source_path: "",
+    text,
+    word_count: countWords(text),
+    char_count: text.length,
+    language: opts.language ?? detectLanguage(text),
+    headings: opts.extract_headings !== false ? extractMarkdownHeadings(text) : [],
+    links: opts.extract_links !== false ? extractMarkdownLinks(text) : [],
+    tables: countMarkdownTables(text),
+    images: countMarkdownImages(text),
+    metadata: {}
+  };
+}
+function convertHtml(content, opts) {
+  const text = truncate(stripHtml(content), opts.max_text_length ?? DEFAULT_MAX_TEXT);
+  return {
+    source_type: "html",
+    source_path: "",
+    text,
+    word_count: countWords(text),
+    char_count: text.length,
+    language: opts.language ?? detectLanguage(text),
+    headings: opts.extract_headings !== false ? extractHtmlHeadings(content) : [],
+    links: opts.extract_links !== false ? extractHtmlLinks(content) : [],
+    tables: countHtmlTables(content),
+    images: countHtmlImages(content),
+    metadata: {}
+  };
+}
+async function convertPdf(content, opts) {
+  let text = "";
+  try {
+    const pdfParse = (await import("pdf-parse")).default;
+    const buffer = typeof content === "string" ? Buffer.from(content, "base64") : content;
+    const data = await pdfParse(buffer);
+    text = data.text;
+  } catch (err) {
+    logger.warn({ err: String(err) }, "PDF text extraction failed, returning raw content");
+    text = typeof content === "string" ? content : content.toString("utf-8");
+  }
+  text = truncate(text, opts.max_text_length ?? DEFAULT_MAX_TEXT);
+  return {
+    source_type: "pdf",
+    source_path: "",
+    text,
+    word_count: countWords(text),
+    char_count: text.length,
+    language: opts.language ?? detectLanguage(text),
+    headings: extractMarkdownHeadings(text),
+    // PDFs sometimes contain markdown
+    links: opts.extract_links !== false ? extractMarkdownLinks(text) : [],
+    tables: countMarkdownTables(text),
+    images: 0,
+    // PDF images require OCR — out of scope
+    metadata: {}
+  };
+}
+async function convertDocx(content, opts) {
+  let text = "";
+  let headings = [];
+  try {
+    const mammoth = await import("mammoth");
+    const buffer = typeof content === "string" ? Buffer.from(content, "base64") : content;
+    const result = await mammoth.extractRawText({ buffer });
+    text = result.value;
+    const docResult = await mammoth.convertToHtml({ buffer });
+    headings = extractHtmlHeadings(docResult.value);
+  } catch (err) {
+    logger.warn({ err: String(err) }, "DOCX text extraction failed, returning raw content");
+    text = typeof content === "string" ? content : content.toString("utf-8");
+  }
+  text = truncate(text, opts.max_text_length ?? DEFAULT_MAX_TEXT);
+  return {
+    source_type: "docx",
+    source_path: "",
+    text,
+    word_count: countWords(text),
+    char_count: text.length,
+    language: opts.language ?? detectLanguage(text),
+    headings: opts.extract_headings !== false ? headings : [],
+    links: opts.extract_links !== false ? extractMarkdownLinks(text) : [],
+    tables: 0,
+    // Would require full OOXML parsing — defer to Phase 4
+    images: 0,
+    metadata: {}
+  };
+}
+async function convertXlsx(content, opts) {
+  let text = "";
+  let tableCount = 0;
+  try {
+    const xlsx = await import("xlsx");
+    const buffer = typeof content === "string" ? Buffer.from(content, "base64") : content;
+    const workbook = xlsx.read(buffer, { type: "buffer" });
+    const parts = [];
+    for (const sheetName of workbook.SheetNames) {
+      const sheet = workbook.Sheets[sheetName];
+      const json = xlsx.utils.sheet_to_json(sheet, { header: 1 });
+      if (json.length === 0) continue;
+      tableCount++;
+      const headers = json[0]?.map((h) => String(h ?? "")) ?? [];
+      const headerRow = `| ${headers.join(" | ")} |`;
+      const separator = `| ${headers.map(() => "---").join(" | ")} |`;
+      const dataRows = json.slice(1).map(
+        (row) => `| ${headers.map((_, i) => String(row[i] ?? "")).join(" | ")} |`
+      );
+      parts.push(`## ${sheetName}
+
+${headerRow}
+${separator}
+${dataRows.join("\n")}`);
+    }
+    text = parts.join("\n\n");
+  } catch (err) {
+    logger.warn({ err: String(err) }, "XLSX conversion failed");
+    text = typeof content === "string" ? content : content.toString("utf-8");
+  }
+  text = truncate(text, opts.max_text_length ?? DEFAULT_MAX_TEXT);
+  return {
+    source_type: "xlsx",
+    source_path: "",
+    text,
+    word_count: countWords(text),
+    char_count: text.length,
+    language: opts.language ?? detectLanguage(text),
+    headings: opts.extract_headings !== false ? extractMarkdownHeadings(text) : [],
+    links: [],
+    tables: tableCount,
+    images: 0,
+    metadata: {}
+  };
+}
+async function convertPptx(content, opts) {
+  let text = "";
+  let slideCount = 0;
+  try {
+    const xlsx = await import("xlsx");
+    const buffer = typeof content === "string" ? Buffer.from(content, "base64") : content;
+    const workbook = xlsx.read(buffer, { type: "buffer" });
+    const parts = [];
+    for (const sheetName of workbook.SheetNames) {
+      slideCount++;
+      const sheet = workbook.Sheets[sheetName];
+      const json = xlsx.utils.sheet_to_json(sheet, { header: 1 });
+      const slideText = json.map((row) => row.filter(Boolean).join(" ")).filter(Boolean).join("\n");
+      if (slideText) {
+        parts.push(`## Slide ${slideCount}
+
+${slideText}`);
+      }
+    }
+    text = parts.join("\n\n");
+  } catch (err) {
+    logger.warn({ err: String(err) }, "PPTX conversion failed");
+    text = typeof content === "string" ? content : content.toString("utf-8");
+  }
+  text = truncate(text, opts.max_text_length ?? DEFAULT_MAX_TEXT);
+  return {
+    source_type: "pptx",
+    source_path: "",
+    text,
+    word_count: countWords(text),
+    char_count: text.length,
+    language: opts.language ?? detectLanguage(text),
+    headings: opts.extract_headings !== false ? extractMarkdownHeadings(text) : [],
+    links: [],
+    tables: 0,
+    images: 0,
+    metadata: { slide_count: slideCount }
+  };
+}
+async function convertDocument(input) {
+  const { content, mimeType, sourcePath, options = {} } = input;
+  const opts = {
+    maxTextLength: options.maxTextLength ?? DEFAULT_MAX_TEXT,
+    extractHeadings: options.extractHeadings ?? true,
+    extractLinks: options.extractLinks ?? true,
+    language: options.language
+  };
+  let format = mimeType.toLowerCase();
+  if (format.includes("markdown") || format.includes("x-markdown")) format = "markdown";
+  else if (format.includes("html") || format.includes("xml")) format = "html";
+  else if (format.includes("pdf")) format = "pdf";
+  else if (format.includes("wordprocessingml") || format.includes("docx")) format = "docx";
+  else if (format.includes("spreadsheetml") || format.includes("xlsx")) format = "xlsx";
+  else if (format.includes("presentationml") || format.includes("pptx")) format = "pptx";
+  else if (format.includes("text/plain") || format === "txt") format = "txt";
+  if (format === "application/octet-stream" || format === "binary") {
+    const ext = sourcePath?.split(".").pop()?.toLowerCase() ?? "";
+    if (["md", "markdown"].includes(ext)) format = "markdown";
+    else if (["html", "htm"].includes(ext)) format = "html";
+    else if (ext === "pdf") format = "pdf";
+    else if (ext === "docx") format = "docx";
+    else if (ext === "xlsx") format = "xlsx";
+    else if (ext === "pptx") format = "pptx";
+    else if (ext === "txt") format = "txt";
+  }
+  let result;
+  switch (format) {
+    case "markdown":
+      result = convertMarkdown(typeof content === "string" ? content : content.toString("utf-8"), opts);
+      break;
+    case "html":
+      result = convertHtml(typeof content === "string" ? content : content.toString("utf-8"), opts);
+      break;
+    case "txt":
+      result = convertText(typeof content === "string" ? content : content.toString("utf-8"), opts);
+      break;
+    case "pdf":
+      result = await convertPdf(content, opts);
+      break;
+    case "docx":
+      result = await convertDocx(content, opts);
+      break;
+    case "xlsx":
+      result = await convertXlsx(content, opts);
+      break;
+    case "pptx":
+      result = await convertPptx(content, opts);
+      break;
+    default:
+      logger.warn({ mimeType, sourcePath }, "Unknown format, treating as plain text");
+      result = convertText(typeof content === "string" ? content : content.toString("utf-8"), opts);
+  }
+  result.source_path = sourcePath ?? "";
+  logger.info({
+    source_type: result.source_type,
+    source_path: sourcePath,
+    word_count: result.word_count,
+    char_count: result.char_count,
+    headings: result.headings.length,
+    links: result.links.length,
+    tables: result.tables
+  }, "Document converted");
+  return result;
+}
+async function convertToText(input) {
+  const result = await convertDocument(input);
+  return result.text;
+}
+var DEFAULT_MAX_TEXT;
+var init_document_converter = __esm({
+  "src/converter/document-converter.ts"() {
+    "use strict";
+    init_logger();
+    DEFAULT_MAX_TEXT = 5e4;
+  }
+});
+
 // src/competitive-crawler.ts
 var competitive_crawler_exports = {};
 __export(competitive_crawler_exports, {
@@ -24804,6 +25192,39 @@ ${formatted}`;
         return `Memory consolidation failed: ${err instanceof Error ? err.message : String(err)}`;
       }
     }
+    // ─── converter.* — Document conversion (Phantom Week 3) ─────
+    case "document_convert": {
+      try {
+        const { convertDocument: convertDocument2 } = await Promise.resolve().then(() => (init_document_converter(), document_converter_exports));
+        const content = String(args.content ?? "");
+        const mimeType = String(args.mime_type ?? "text/plain");
+        const sourcePath = typeof args.source_path === "string" ? args.source_path : void 0;
+        const maxTextLength = typeof args.max_text_length === "number" ? args.max_text_length : void 0;
+        const extractHeadings = typeof args.extract_headings === "boolean" ? args.extract_headings : void 0;
+        const extractLinks = typeof args.extract_links === "boolean" ? args.extract_links : void 0;
+        const result = await convertDocument2({
+          content,
+          mimeType,
+          sourcePath,
+          options: { max_text_length: maxTextLength, extract_headings: extractHeadings, extract_links: extractLinks }
+        });
+        const preview = result.text.slice(0, 500);
+        return JSON.stringify({
+          source_type: result.source_type,
+          source_path: result.source_path,
+          word_count: result.word_count,
+          char_count: result.char_count,
+          language: result.language,
+          headings: result.headings.length,
+          links: result.links.length,
+          tables: result.tables,
+          images: result.images,
+          preview
+        }, null, 2);
+      } catch (err) {
+        return `Document convert failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
     case "failure_harvest": {
       try {
         const { harvestFailures: harvestFailures2, buildFailureSummary: buildFailureSummary2 } = await Promise.resolve().then(() => (init_failure_harvester(), failure_harvester_exports));
@@ -26506,6 +26927,8 @@ var init_mcp_caller = __esm({
       // Memory (Phantom Week 2 Track B)
       "memory_search",
       "memory_consolidate",
+      // Document converter (Phantom Week 3)
+      "document_convert",
       // Model routing
       "model_providers",
       "model_route",
@@ -43968,7 +44391,7 @@ function getParser(language) {
   }
   return parsers.get(language).parser;
 }
-function detectLanguage(filePath) {
+function detectLanguage2(filePath) {
   const ext = filePath.split(".").pop()?.toLowerCase();
   switch (ext) {
     case "ts":
@@ -44117,7 +44540,7 @@ function extractCallSites(root, filePath) {
   return calls;
 }
 function parseFile(filePath, baseDir) {
-  const language = detectLanguage(filePath);
+  const language = detectLanguage2(filePath);
   if (!language) return null;
   const parser = getParser(language);
   if (!parser) return null;
@@ -44171,7 +44594,7 @@ function parseDirectory(dir, maxFiles = 500) {
       const full = join2(d, entry.name);
       if (entry.isDirectory()) {
         walk(full);
-      } else if (detectLanguage(entry.name)) {
+      } else if (detectLanguage2(entry.name)) {
         const result2 = parseFile(full, dir);
         if (result2) files.push(result2);
         count++;

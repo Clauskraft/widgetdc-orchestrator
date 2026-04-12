@@ -868,7 +868,7 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
   defineTool({
     name: 'document_convert',
     namespace: 'converter',
-    description: 'Convert documents (PDF, DOCX, XLSX, PPTX, MD, HTML, TXT) to canonical text + metadata. Steals patterns from markitdown — zero runtime dependency. Output feeds SRAG + Neo4j ingestion. Phantom Week 3.',
+    description: 'Convert documents (PDF, DOCX, XLSX, PPTX, MD, HTML, TXT) to canonical text + metadata. Original TS implementation with zero markitdown dep (uses pdf-parse, mammoth, xlsx). Output feeds SRAG + Neo4j ingestion. Phantom Week 3.',
     input: z.object({
       content: z.string().describe('File content as base64 or plain text'),
       mime_type: z.string().describe('MIME type for format detection (e.g., application/pdf, text/markdown)'),
