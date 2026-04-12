@@ -199,6 +199,8 @@ const LOCAL_TOOLS = new Set([
   'pr_review_parallel', 'deliverable_draft',
   // Value-Props (Phantom Week 8)
   'rag_route', 'skill_corpus_sync',
+  // Value-Props (Phantom Week 9)
+  'due_diligence', 'prompt_ab_test', 'fact_assert', 'fact_query',
   // Model routing
   'model_providers', 'model_route', 'model_cost_estimate', 'model_budget_status', 'model_policy_check',
   // Workflow

@@ -1106,6 +1106,62 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     outputDescription: 'Sync results: ingested count, skipped count, errors',
   }),
 
+  // ─── value-props.* — OSINT DD + DSPy + Bi-temporal (Week 9, V8-V10) ──
+
+  defineTool({
+    name: 'due_diligence',
+    namespace: 'value-props',
+    description: 'OSINT-backed pre-engagement due diligence. Runs domain scan + MITRE ATLAS AI risk assessment. V8: "Upload target → få DD rapport med risk score på 2 min".',
+    input: z.object({
+      target: z.string().describe('Target company/domain to investigate'),
+    }),
+    timeoutMs: 30000,
+    outputDescription: 'Due diligence report: risk score, OSINT findings, MITRE ATLAS techniques',
+  }),
+
+  defineTool({
+    name: 'prompt_ab_test',
+    namespace: 'value-props',
+    description: 'MIPROv2-lite prompt A/B testing. Submits challenger prompt with quality score → automatically selects champion. V9: "DSPy-style prompt optimization".',
+    input: z.object({
+      task_type: z.string().describe('Task type (e.g., "code-review", "summarization")'),
+      prompt: z.string().describe('Challenger prompt to test'),
+      score: z.number().describe('Quality score 0-1 for this prompt variant'),
+    }),
+    timeoutMs: 10000,
+    outputDescription: 'A/B test result: champion ID, scores, improvement percentage',
+  }),
+
+  defineTool({
+    name: 'fact_assert',
+    namespace: 'value-props',
+    description: 'Assert a bi-temporal fact with valid_from/valid_to timeline. Supersedes existing valid facts for same subject+predicate. V10: "Bi-temporal fact graph (Graphiti pattern)".',
+    input: z.object({
+      subject: z.string().describe('Fact subject (e.g., "agent:omega-sentinel")'),
+      predicate: z.string().describe('Fact predicate (e.g., "has_capability")'),
+      object: z.string().describe('Fact object (e.g., "threat-hunting")'),
+      valid_from: z.string().optional().describe('When fact became true (ISO datetime, default: now)'),
+      confidence: z.number().optional().describe('Confidence 0-1 (default: 0.8)'),
+      source: z.string().optional().describe('Fact source (default: "manual")'),
+    }),
+    timeoutMs: 15000,
+    outputDescription: 'Bi-temporal fact with id, asserted_at, valid_from, superseded_by',
+  }),
+
+  defineTool({
+    name: 'fact_query',
+    namespace: 'value-props',
+    description: 'Query bi-temporal facts with optional temporal filters (as_of). Returns facts valid at specified time. V10: "What was true on date X?"',
+    input: z.object({
+      subject: z.string().optional().describe('Filter by fact subject'),
+      predicate: z.string().optional().describe('Filter by fact predicate'),
+      as_of: z.string().optional().describe('What was true at this time? (ISO datetime)'),
+      limit: z.number().optional().describe('Max results (default 50)'),
+    }),
+    timeoutMs: 10000,
+    outputDescription: 'Array of bi-temporal facts matching filters',
+  }),
+
   defineTool({
     name: 'failure_harvest',
     namespace: 'intelligence',

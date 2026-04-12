@@ -110,6 +110,10 @@ Every tool declares governance metadata per the Neural Bridge v2 specification:
 | 66 | `deliverable_draft` | deliverable | 180s | Lego Factory pipeline: brief → McKinsey-quality draft with citations |
 | 67 | `rag_route` | rag | 30s | Adaptive RAG router: simple/multi-hop/ppr/community strategy selection |
 | 68 | `skill_corpus_sync` | rag | 60s | Nightly skill corpus sync: crawl awesome-lists → knowledge ingestion |
+| 69 | `due_diligence` | value-props | 30s | OSINT DD + MITRE ATLAS AI risk assessment → risk score 0-100 |
+| 70 | `prompt_ab_test` | value-props | 10s | MIPROv2-lite prompt A/B testing with auto-champion selection |
+| 71 | `fact_assert` | value-props | 15s | Assert bi-temporal fact with valid_from/valid_to + supersession chain |
+| 72 | `fact_query` | value-props | 10s | Query bi-temporal facts with temporal filters (as_of) |
 | 53 | `llm_chat` | llm | 60s | Direct LLM chat proxy supporting 6 providers |
 | 54 | `llm_providers` | llm | 5s | List available LLM providers with default models |
 | 55 | `decision_certify` | decisions | 30s | Certify an assembly as an architecture decision |

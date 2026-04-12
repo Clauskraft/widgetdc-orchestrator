@@ -1813,6 +1813,98 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    // ─── value-props.* — OSINT DD + DSPy + Bi-temporal (Week 9, V8-V10) ──
+
+    case 'due_diligence': {
+      try {
+        const { handleDueDiligence } = await import('../value-props/v8-v10-value-props.js')
+        const target = typeof args.target === 'string' ? args.target : ''
+        if (!target) return 'Error: target required'
+        const request = {
+          request_id: `dd-${Date.now().toString(36)}`,
+          agent_id: 'orchestrator',
+          task: `Due diligence on ${target}`,
+          capabilities: ['osint', 'risk-assessment'],
+          context: { target },
+          priority: 'high' as const,
+        }
+        const response = await handleDueDiligence(request)
+        return response.output
+      } catch (err) {
+        return `Due diligence failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'prompt_ab_test': {
+      try {
+        const { handlePromptABTest } = await import('../value-props/v8-v10-value-props.js')
+        const request = {
+          request_id: `ab-${Date.now().toString(36)}`,
+          agent_id: 'orchestrator',
+          task: 'Prompt A/B test',
+          capabilities: ['prompt-optimization'],
+          context: {
+            task_type: args.task_type,
+            prompt: args.prompt,
+            score: args.score,
+          },
+          priority: 'normal' as const,
+        }
+        const response = await handlePromptABTest(request)
+        return response.output
+      } catch (err) {
+        return `Prompt A/B test failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'fact_assert': {
+      try {
+        const { handleFactAssertion } = await import('../value-props/v8-v10-value-props.js')
+        const request = {
+          request_id: `fact-${Date.now().toString(36)}`,
+          agent_id: 'orchestrator',
+          task: 'Assert bi-temporal fact',
+          capabilities: ['knowledge-management'],
+          context: {
+            subject: args.subject,
+            predicate: args.predicate,
+            object: args.object,
+            valid_from: args.valid_from,
+            confidence: args.confidence,
+            source: args.source,
+          },
+          priority: 'normal' as const,
+        }
+        const response = await handleFactAssertion(request)
+        return response.output
+      } catch (err) {
+        return `Fact assertion failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'fact_query': {
+      try {
+        const { handleFactQuery } = await import('../value-props/v8-v10-value-props.js')
+        const request = {
+          request_id: `fact-q-${Date.now().toString(36)}`,
+          agent_id: 'orchestrator',
+          task: 'Query bi-temporal facts',
+          capabilities: ['knowledge-management'],
+          context: {
+            subject: args.subject,
+            predicate: args.predicate,
+            as_of: args.as_of,
+            limit: args.limit,
+          },
+          priority: 'normal' as const,
+        }
+        const response = await handleFactQuery(request)
+        return response.output
+      } catch (err) {
+        return `Fact query failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
     case 'failure_harvest': {
       try {
         const { harvestFailures, buildFailureSummary } = await import('../flywheel/failure-harvester.js')

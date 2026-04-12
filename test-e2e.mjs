@@ -1249,6 +1249,30 @@ await test('118r. POST /api/tools/skill_corpus_sync responds', async () => {
   assert(r.status !== 404, `skill_corpus_sync not deployed (404)`)
 })
 
+// ── 118s. due_diligence — exists ──
+await test('118s. POST /api/tools/due_diligence responds', async () => {
+  const r = await api('/api/tools/due_diligence', { method: 'POST', body: JSON.stringify({ target: 'test.dk' }) })
+  assert(r.status !== 404, `due_diligence not deployed (404)`)
+})
+
+// ── 118t. prompt_ab_test — exists ──
+await test('118t. POST /api/tools/prompt_ab_test responds', async () => {
+  const r = await api('/api/tools/prompt_ab_test', { method: 'POST', body: JSON.stringify({ task_type: 'test', prompt: 'Test prompt', score: 0.8 }) })
+  assert(r.status !== 404, `prompt_ab_test not deployed (404)`)
+})
+
+// ── 118u. fact_assert — exists ──
+await test('118u. POST /api/tools/fact_assert responds', async () => {
+  const r = await api('/api/tools/fact_assert', { method: 'POST', body: JSON.stringify({ subject: 'test', predicate: 'has_prop', object: 'value' }) })
+  assert(r.status !== 404, `fact_assert not deployed (404)`)
+})
+
+// ── 118v. fact_query — exists ──
+await test('118v. POST /api/tools/fact_query responds', async () => {
+  const r = await api('/api/tools/fact_query', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `fact_query not deployed (404)`)
+})
+
 // ── 119. failure_harvest — exists ──
 await test('119. POST /api/tools/failure_harvest responds', async () => {
   const r = await api('/api/tools/failure_harvest', { method: 'POST', body: JSON.stringify({ window_hours: 1 }) })
