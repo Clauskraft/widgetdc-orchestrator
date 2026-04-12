@@ -223,6 +223,36 @@ Every value-prop leverages ≥2 primitives delivered in Week 1-5. Zero greenfiel
 
 ---
 
+## 7.5 Adoption Layer — coordination, pheromones, RAG, folding, OODA, teacher/student
+
+**Important:** v4 value-props (V1–V10) must explicitly wire into the existing
+coordination substrate, not build parallel primitives. See
+**[`ADOPTION_LAYER_v4.md`](ADOPTION_LAYER_v4.md)** for the full spec.
+
+Summary of the 8 non-negotiables every v4 tool must satisfy:
+
+1. **Claim** before work (`:AgentMemory {type:'claim'}`), **close** after
+2. **Sense pheromones** before routing, **deposit** after outcome
+3. **Route through RAG** (SRAG / KG-RAG / autonomous.graphrag) for evidence —
+   never raw LLM calls
+4. **Fold context** when input or intermediate buffer >2000 tokens
+5. **OODA via Loop Orchestrator** — no inline `while`/`for` around LLM calls
+6. **`audit.lessons`** at tool boot + **`audit.run`** on major outputs
+7. **Adoption telemetry** (auto — inherited from existing tool-executor wrapper)
+8. **Peer-eval** on quality-sensitive output (V1, V4, V8)
+
+Retrofit into current plan:
+
+- **Week 6.5** (2 days) — coordination patch for V1/V3/V5 (already shipped)
+- **Week 8.5** (2 days) — coordination patch for V2/V4
+- **Week 8 + 9** — adoption baked in inline (normative exit gates)
+- **Week 10–14 frontend** — 3 new UI primitives (`ClaimBanner`, `PheromoneStrip`,
+  `LessonChain`) + adoption widgets on existing routes
+
+See ADOPTION_LAYER_v4.md §3, §4, §6 for week-by-week detail and QA checklist.
+
+---
+
 ## 8. Decision point before Week 10
 
 After Week 9 sign-off, evaluate:
