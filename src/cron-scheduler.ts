@@ -1739,6 +1739,19 @@ export function registerDefaultLoops(): void {
     },
   })
 
+  // Skill Corpus Sync — V6: nightly crawl of awesome-lists → knowledge ingestion
+  registerCronJob({
+    id: 'skill-corpus-sync',
+    name: 'Skill Corpus Sync (Nightly Awesome-List Crawl)',
+    schedule: '0 3 * * *', // Daily 03:00 UTC
+    enabled: true,
+    chain: {
+      name: 'Skill Corpus Sync',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'skill_corpus_sync', arguments: {} }],
+    },
+  })
+
   // Skill Forge — auto-generate composite MCP tools from usage patterns
   // DISABLED 2026-04-09: backend endpoint not responding, burns capacity
   registerCronJob({

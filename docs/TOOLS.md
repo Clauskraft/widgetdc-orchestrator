@@ -108,6 +108,8 @@ Every tool declares governance metadata per the Neural Bridge v2 specification:
 | 64 | `agent_drift_report` | analytics | 30s | Agent regression drift check → auto Linear issue on critical |
 | 65 | `pr_review_parallel` | review | 90s | Multi-agent PR review: 3 parallel reviewers with merged verdict |
 | 66 | `deliverable_draft` | deliverable | 180s | Lego Factory pipeline: brief → McKinsey-quality draft with citations |
+| 67 | `rag_route` | rag | 30s | Adaptive RAG router: simple/multi-hop/ppr/community strategy selection |
+| 68 | `skill_corpus_sync` | rag | 60s | Nightly skill corpus sync: crawl awesome-lists → knowledge ingestion |
 | 53 | `llm_chat` | llm | 60s | Direct LLM chat proxy supporting 6 providers |
 | 54 | `llm_providers` | llm | 5s | List available LLM providers with default models |
 | 55 | `decision_certify` | decisions | 30s | Certify an assembly as an architecture decision |

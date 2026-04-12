@@ -1237,6 +1237,18 @@ await test('118p. POST /api/tools/deliverable_draft responds', async () => {
   assert(r.status !== 404, `deliverable_draft not deployed (404)`)
 })
 
+// ── 118q. rag_route — exists ──
+await test('118q. POST /api/tools/rag_route responds', async () => {
+  const r = await api('/api/tools/rag_route', { method: 'POST', body: JSON.stringify({ query: 'How to improve agent performance?' }) })
+  assert(r.status !== 404, `rag_route not deployed (404)`)
+})
+
+// ── 118r. skill_corpus_sync — exists ──
+await test('118r. POST /api/tools/skill_corpus_sync responds', async () => {
+  const r = await api('/api/tools/skill_corpus_sync', { method: 'POST', body: JSON.stringify({}) })
+  assert(r.status !== 404, `skill_corpus_sync not deployed (404)`)
+})
+
 // ── 119. failure_harvest — exists ──
 await test('119. POST /api/tools/failure_harvest responds', async () => {
   const r = await api('/api/tools/failure_harvest', { method: 'POST', body: JSON.stringify({ window_hours: 1 }) })

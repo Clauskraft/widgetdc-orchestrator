@@ -1773,6 +1773,46 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    // ─── rag.* — RAG Router + Corpus Sync (Phantom Week 8, V6, V7) ──
+
+    case 'rag_route': {
+      try {
+        const { handleRAGRoute } = await import('../rag/adaptive-rag-router.js')
+        const query = String(args.query ?? '')
+        if (!query || query.length < 3) return 'Error: query required (min 3 chars)'
+        const request = {
+          request_id: `rag-${Date.now().toString(36)}`,
+          agent_id: 'orchestrator',
+          task: `RAG route and query: ${query.slice(0, 80)}`,
+          capabilities: ['rag', 'retrieval'],
+          context: { query, limit: args.limit },
+          priority: 'normal' as const,
+        }
+        const response = await handleRAGRoute(request)
+        return response.output
+      } catch (err) {
+        return `RAG route failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'skill_corpus_sync': {
+      try {
+        const { handleCorpusSync } = await import('../rag/adaptive-rag-router.js')
+        const request = {
+          request_id: `corpus-sync-${Date.now().toString(36)}`,
+          agent_id: 'orchestrator',
+          task: 'Skill corpus sync',
+          capabilities: ['corpus', 'ingestion'],
+          context: {},
+          priority: 'low' as const,
+        }
+        const response = await handleCorpusSync(request)
+        return response.output
+      } catch (err) {
+        return `Corpus sync failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
     case 'failure_harvest': {
       try {
         const { harvestFailures, buildFailureSummary } = await import('../flywheel/failure-harvester.js')

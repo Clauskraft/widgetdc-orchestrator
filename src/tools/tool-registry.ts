@@ -1083,6 +1083,29 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     outputDescription: 'Deliverable with title, sections, citations, markdown content, confidence scores',
   }),
 
+  // ─── rag.* — RAG Router + Corpus Sync (Phantom Week 8, V6, V7) ──
+
+  defineTool({
+    name: 'rag_route',
+    namespace: 'rag',
+    description: 'Adaptive RAG router: classifies query into strategy (simple/multi-hop/ppr/community) and dispatches to optimal retrieval channels. Uses Q-learning weights from adaptive-rag. V7: "GraphRAG-Anywhere router".',
+    input: z.object({
+      query: z.string().describe('Search query to route and execute'),
+      limit: z.number().optional().describe('Max results (default 10)'),
+    }),
+    timeoutMs: 30000,
+    outputDescription: 'Route decision + retrieval results with confidence scores',
+  }),
+
+  defineTool({
+    name: 'skill_corpus_sync',
+    namespace: 'rag',
+    description: 'Trigger nightly skill corpus sync: crawls configured awesome-lists/repos → ingests into knowledge base. MERGE idempotent (content hash dedup). V6: "Self-updating SKILL.md corpus".',
+    input: z.object({}),
+    timeoutMs: 60000,
+    outputDescription: 'Sync results: ingested count, skipped count, errors',
+  }),
+
   defineTool({
     name: 'failure_harvest',
     namespace: 'intelligence',
