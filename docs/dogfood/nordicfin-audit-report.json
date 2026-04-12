@@ -1,0 +1,434 @@
+{
+  "audit_id": "ai-act-mnwf44go",
+  "audited_at": "2026-04-12T23:51:48.120Z",
+  "stack_items_count": 5,
+  "total_gaps": 35,
+  "critical_gaps": 2,
+  "high_gaps": 10,
+  "medium_gaps": 11,
+  "low_gaps": 12,
+  "compliance_score": 48.6,
+  "gaps": [
+    {
+      "article": "Art. 8",
+      "requirement": "Risk Management System for high-risk AI",
+      "severity": "high",
+      "status": "non-compliant",
+      "evidence": "No risk assessment found",
+      "remediation": "Implement continuous risk management process per Annex III. Document all known and foreseeable risks. Define risk mitigation measures.",
+      "affected_components": [
+        "credit-scorer-ml"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 9",
+      "requirement": "Data governance",
+      "severity": "low",
+      "status": "compliant",
+      "evidence": "PII processing without governance",
+      "remediation": "Maintain current governance",
+      "affected_components": [
+        "credit-scorer-ml"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 10",
+      "requirement": "Technical documentation for high-risk AI systems",
+      "severity": "low",
+      "status": "compliant",
+      "evidence": "Documentation present",
+      "remediation": "Create technical documentation per Annex IV: system architecture, training data, performance metrics, validation results.",
+      "affected_components": [
+        "credit-scorer-ml"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 12",
+      "requirement": "Automatically generated logs for high-risk AI systems",
+      "severity": "low",
+      "status": "compliant",
+      "evidence": "Logs retained: 90 days",
+      "remediation": "Implement automatic logging with minimum 90-day retention. Include: input data, output, timestamp, operator ID, system state.",
+      "affected_components": [
+        "credit-scorer-ml"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 13",
+      "requirement": "Transparency obligations — users must be informed they interact with AI",
+      "severity": "high",
+      "status": "non-compliant",
+      "evidence": "No transparency notice found",
+      "remediation": "Implement clear user notification: \"This system uses AI technology.\" Provide instructions for use, performance characteristics, and limitations.",
+      "affected_components": [
+        "credit-scorer-ml"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 14",
+      "requirement": "Human oversight measures for high-risk AI systems",
+      "severity": "critical",
+      "status": "non-compliant",
+      "evidence": "No human oversight mechanism found",
+      "remediation": "Implement human-in-the-loop oversight: (1) Manual override capability, (2) Human review before critical decisions, (3) Stop/interrupt button, (4) Training for human overseers.",
+      "affected_components": [
+        "credit-scorer-ml"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 15",
+      "requirement": "Achieve appropriate levels of accuracy, robustness, and cybersecurity",
+      "severity": "high",
+      "status": "non-compliant",
+      "evidence": "No accuracy/robustness monitoring detected",
+      "remediation": "Implement: (1) Accuracy metrics with thresholds, (2) Robustness testing against adversarial inputs, (3) Cybersecurity measures per ENISA guidelines, (4) Regular performance validation.",
+      "affected_components": [
+        "credit-scorer-ml"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 8",
+      "requirement": "Risk Management System for high-risk AI",
+      "severity": "high",
+      "status": "partial",
+      "evidence": "Risk assessment documented",
+      "remediation": "Implement continuous risk management process per Annex III. Document all known and foreseeable risks. Define risk mitigation measures.",
+      "affected_components": [
+        "aml-transaction-monitor"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 9",
+      "requirement": "Data governance",
+      "severity": "low",
+      "status": "compliant",
+      "evidence": "PII processing without governance",
+      "remediation": "Maintain current governance",
+      "affected_components": [
+        "aml-transaction-monitor"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 10",
+      "requirement": "Technical documentation for high-risk AI systems",
+      "severity": "medium",
+      "status": "partial",
+      "evidence": "Documentation missing or incomplete",
+      "remediation": "Create technical documentation per Annex IV: system architecture, training data, performance metrics, validation results.",
+      "affected_components": [
+        "aml-transaction-monitor"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 12",
+      "requirement": "Automatically generated logs for high-risk AI systems",
+      "severity": "low",
+      "status": "compliant",
+      "evidence": "Logs retained: 365 days",
+      "remediation": "Implement automatic logging with minimum 90-day retention. Include: input data, output, timestamp, operator ID, system state.",
+      "affected_components": [
+        "aml-transaction-monitor"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 13",
+      "requirement": "Transparency obligations — users must be informed they interact with AI",
+      "severity": "high",
+      "status": "non-compliant",
+      "evidence": "No transparency notice found",
+      "remediation": "Implement clear user notification: \"This system uses AI technology.\" Provide instructions for use, performance characteristics, and limitations.",
+      "affected_components": [
+        "aml-transaction-monitor"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 14",
+      "requirement": "Human oversight measures for high-risk AI systems",
+      "severity": "medium",
+      "status": "compliant",
+      "evidence": "Human oversight implemented",
+      "remediation": "Implement human-in-the-loop oversight: (1) Manual override capability, (2) Human review before critical decisions, (3) Stop/interrupt button, (4) Training for human overseers.",
+      "affected_components": [
+        "aml-transaction-monitor"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 15",
+      "requirement": "Achieve appropriate levels of accuracy, robustness, and cybersecurity",
+      "severity": "medium",
+      "status": "partial",
+      "evidence": "Monitoring in place",
+      "remediation": "Implement: (1) Accuracy metrics with thresholds, (2) Robustness testing against adversarial inputs, (3) Cybersecurity measures per ENISA guidelines, (4) Regular performance validation.",
+      "affected_components": [
+        "aml-transaction-monitor"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 8",
+      "requirement": "Risk Management System",
+      "severity": "low",
+      "status": "not-assessed",
+      "evidence": "Risk level: limited",
+      "remediation": "Consider risk assessment for future classification",
+      "affected_components": [
+        "customer-chatbot"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 9",
+      "requirement": "Data governance",
+      "severity": "medium",
+      "status": "not-assessed",
+      "evidence": "No PII detected",
+      "remediation": "Document data processing practices",
+      "affected_components": [
+        "customer-chatbot"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 10",
+      "requirement": "Technical documentation for high-risk AI systems",
+      "severity": "medium",
+      "status": "partial",
+      "evidence": "Documentation missing or incomplete",
+      "remediation": "Create technical documentation per Annex IV: system architecture, training data, performance metrics, validation results.",
+      "affected_components": [
+        "customer-chatbot"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 12",
+      "requirement": "Automatically generated logs for high-risk AI systems",
+      "severity": "medium",
+      "status": "partial",
+      "evidence": "Logs retained: 30 days",
+      "remediation": "Implement automatic logging with minimum 90-day retention. Include: input data, output, timestamp, operator ID, system state.",
+      "affected_components": [
+        "customer-chatbot"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 13",
+      "requirement": "Transparency obligations — users must be informed they interact with AI",
+      "severity": "low",
+      "status": "compliant",
+      "evidence": "Transparency notice present",
+      "remediation": "Implement clear user notification: \"This system uses AI technology.\" Provide instructions for use, performance characteristics, and limitations.",
+      "affected_components": [
+        "customer-chatbot"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 14",
+      "requirement": "Human oversight measures for high-risk AI systems",
+      "severity": "medium",
+      "status": "compliant",
+      "evidence": "Human oversight implemented",
+      "remediation": "Implement human-in-the-loop oversight: (1) Manual override capability, (2) Human review before critical decisions, (3) Stop/interrupt button, (4) Training for human overseers.",
+      "affected_components": [
+        "customer-chatbot"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 15",
+      "requirement": "Achieve appropriate levels of accuracy, robustness, and cybersecurity",
+      "severity": "medium",
+      "status": "partial",
+      "evidence": "Monitoring in place",
+      "remediation": "Implement: (1) Accuracy metrics with thresholds, (2) Robustness testing against adversarial inputs, (3) Cybersecurity measures per ENISA guidelines, (4) Regular performance validation.",
+      "affected_components": [
+        "customer-chatbot"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 8",
+      "requirement": "Risk Management System for high-risk AI",
+      "severity": "high",
+      "status": "non-compliant",
+      "evidence": "No risk assessment found",
+      "remediation": "Implement continuous risk management process per Annex III. Document all known and foreseeable risks. Define risk mitigation measures.",
+      "affected_components": [
+        "kyc-document-parser"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 9",
+      "requirement": "Data governance for AI systems using personal data",
+      "severity": "high",
+      "status": "non-compliant",
+      "evidence": "PII data types detected: pii, biometric, financial",
+      "remediation": "Implement data governance framework: data collection, processing, retention policies. Document data lineage and quality controls.",
+      "affected_components": [
+        "kyc-document-parser"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 10",
+      "requirement": "Technical documentation for high-risk AI systems",
+      "severity": "medium",
+      "status": "partial",
+      "evidence": "Documentation missing or incomplete",
+      "remediation": "Create technical documentation per Annex IV: system architecture, training data, performance metrics, validation results.",
+      "affected_components": [
+        "kyc-document-parser"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 12",
+      "requirement": "Automatically generated logs for high-risk AI systems",
+      "severity": "low",
+      "status": "compliant",
+      "evidence": "Logs retained: 180 days",
+      "remediation": "Implement automatic logging with minimum 90-day retention. Include: input data, output, timestamp, operator ID, system state.",
+      "affected_components": [
+        "kyc-document-parser"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 13",
+      "requirement": "Transparency obligations — users must be informed they interact with AI",
+      "severity": "high",
+      "status": "non-compliant",
+      "evidence": "No transparency notice found",
+      "remediation": "Implement clear user notification: \"This system uses AI technology.\" Provide instructions for use, performance characteristics, and limitations.",
+      "affected_components": [
+        "kyc-document-parser"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 14",
+      "requirement": "Human oversight measures for high-risk AI systems",
+      "severity": "critical",
+      "status": "non-compliant",
+      "evidence": "No human oversight mechanism found",
+      "remediation": "Implement human-in-the-loop oversight: (1) Manual override capability, (2) Human review before critical decisions, (3) Stop/interrupt button, (4) Training for human overseers.",
+      "affected_components": [
+        "kyc-document-parser"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 15",
+      "requirement": "Achieve appropriate levels of accuracy, robustness, and cybersecurity",
+      "severity": "high",
+      "status": "non-compliant",
+      "evidence": "No accuracy/robustness monitoring detected",
+      "remediation": "Implement: (1) Accuracy metrics with thresholds, (2) Robustness testing against adversarial inputs, (3) Cybersecurity measures per ENISA guidelines, (4) Regular performance validation.",
+      "affected_components": [
+        "kyc-document-parser"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 8",
+      "requirement": "Risk Management System",
+      "severity": "low",
+      "status": "not-assessed",
+      "evidence": "Risk level: limited",
+      "remediation": "Consider risk assessment for future classification",
+      "affected_components": [
+        "fraud-alert-queue"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 9",
+      "requirement": "Data governance",
+      "severity": "low",
+      "status": "compliant",
+      "evidence": "PII processing without governance",
+      "remediation": "Maintain current governance",
+      "affected_components": [
+        "fraud-alert-queue"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 10",
+      "requirement": "Technical documentation for high-risk AI systems",
+      "severity": "low",
+      "status": "compliant",
+      "evidence": "Documentation present",
+      "remediation": "Create technical documentation per Annex IV: system architecture, training data, performance metrics, validation results.",
+      "affected_components": [
+        "fraud-alert-queue"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 12",
+      "requirement": "Automatically generated logs for high-risk AI systems",
+      "severity": "low",
+      "status": "compliant",
+      "evidence": "Logs retained: 730 days",
+      "remediation": "Implement automatic logging with minimum 90-day retention. Include: input data, output, timestamp, operator ID, system state.",
+      "affected_components": [
+        "fraud-alert-queue"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 13",
+      "requirement": "Transparency obligations — users must be informed they interact with AI",
+      "severity": "high",
+      "status": "non-compliant",
+      "evidence": "No transparency notice found",
+      "remediation": "Implement clear user notification: \"This system uses AI technology.\" Provide instructions for use, performance characteristics, and limitations.",
+      "affected_components": [
+        "fraud-alert-queue"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 14",
+      "requirement": "Human oversight measures for high-risk AI systems",
+      "severity": "medium",
+      "status": "compliant",
+      "evidence": "Human oversight implemented",
+      "remediation": "Implement human-in-the-loop oversight: (1) Manual override capability, (2) Human review before critical decisions, (3) Stop/interrupt button, (4) Training for human overseers.",
+      "affected_components": [
+        "fraud-alert-queue"
+      ],
+      "deadline": "2026-08-02"
+    },
+    {
+      "article": "Art. 15",
+      "requirement": "Achieve appropriate levels of accuracy, robustness, and cybersecurity",
+      "severity": "medium",
+      "status": "partial",
+      "evidence": "Monitoring in place",
+      "remediation": "Implement: (1) Accuracy metrics with thresholds, (2) Robustness testing against adversarial inputs, (3) Cybersecurity measures per ENISA guidelines, (4) Regular performance validation.",
+      "affected_components": [
+        "fraud-alert-queue"
+      ],
+      "deadline": "2026-08-02"
+    }
+  ],
+  "summary": "CRITICAL: 2 critical gaps found across 5 component(s). Immediate remediation required before AI Act enforcement deadline (Aug 2026). 11 components are non-compliant."
+}
