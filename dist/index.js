@@ -12729,6 +12729,30 @@ var init_tool_registry = __esm({
         outputDescription: "MemoryEntry or MemoryEntry[] if no key provided"
       }),
       defineTool({
+        name: "memory_search",
+        namespace: "memory",
+        description: "Search long-term AgentMemory nodes in Neo4j with structured filters (agentId, type, tags) and optional text query. Returns results scored by relevance (recency \xD7 importance). Phantom Week 2 Track B.",
+        input: z.object({
+          agent_id: z.string().optional().describe("Filter by agent ID"),
+          type: z.string().optional().describe("Filter by memory type (e.g., insight, closure, lesson, claim)"),
+          tags: z.array(z.string()).optional().describe("Filter by tags (matches ANY tag)"),
+          query: z.string().optional().describe("Text query for relevance scoring"),
+          limit: z.number().optional().describe("Max results (default 50)")
+        }),
+        timeoutMs: 15e3,
+        outputDescription: "Array of SearchResult with relevance scores, sorted by relevance"
+      }),
+      defineTool({
+        name: "memory_consolidate",
+        namespace: "memory",
+        description: "Run memory consolidation for an agent (or all agents). Merges duplicate AgentMemory nodes by semantic similarity (Jaccard \u22650.6), expires nodes >30 days old, enforces <1000 nodes/agent budget. Phantom Week 2 Track B.",
+        input: z.object({
+          agent_id: z.string().optional().describe("Agent to consolidate (omit for all agents)")
+        }),
+        timeoutMs: 12e4,
+        outputDescription: "ConsolidationReport with merged/expired/pruned counts"
+      }),
+      defineTool({
         name: "failure_harvest",
         namespace: "intelligence",
         description: "Harvest recent orchestrator failures (timeouts, 502s, auth errors, MCP errors) for Red Queen learning loop (LIN-567). Returns categorized failure summary with counts and patterns.",
@@ -20185,6 +20209,313 @@ var init_working_memory = __esm({
   }
 });
 
+// src/memory/memory-consolidator.ts
+var memory_consolidator_exports = {};
+__export(memory_consolidator_exports, {
+  computeRelevance: () => computeRelevance,
+  consolidateAgent: () => consolidateAgent,
+  consolidateAll: () => consolidateAll,
+  fetchAgentMemories: () => fetchAgentMemories,
+  findDuplicates: () => findDuplicates,
+  searchMemories: () => searchMemories,
+  storeMemoryLongTerm: () => storeMemoryLongTerm
+});
+async function mcpCall2(tool, payload) {
+  const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+    },
+    body: JSON.stringify({ tool, payload }),
+    signal: AbortSignal.timeout(3e4)
+  });
+  const data = await res.json().catch(() => null);
+  return data?.result ?? data;
+}
+async function fetchAgentMemories(agentId, limit = 2e3) {
+  const result = await mcpCall2("graph.read_cypher", {
+    query: `MATCH (m:AgentMemory {agentId: $agentId})
+            RETURN m.elementId AS elementId, m.agentId AS agentId, m.key AS key,
+                   m.value AS value, m.type AS type, m.tags AS tags,
+                   toString(m.createdAt) AS createdAt, toString(m.updatedAt) AS updatedAt
+            ORDER BY m.updatedAt DESC
+            LIMIT $limit`,
+    params: { agentId, limit }
+  });
+  const results = result?.results ?? (Array.isArray(result) ? result : []);
+  return results.map((r) => ({
+    elementId: String(r.elementId ?? ""),
+    agentId: String(r.agentId ?? agentId),
+    key: String(r.key ?? ""),
+    value: String(r.value ?? ""),
+    type: String(r.type ?? "unknown"),
+    tags: Array.isArray(r.tags) ? r.tags : void 0,
+    createdAt: String(r.createdAt ?? ""),
+    updatedAt: String(r.updatedAt ?? "")
+  }));
+}
+function tokenize(text) {
+  return new Set(text.toLowerCase().replace(/[^a-z0-9æøå\s]/g, "").split(/\s+/).filter(Boolean));
+}
+function jaccardSimilarity(a, b) {
+  const setA = tokenize(a);
+  const setB = tokenize(b);
+  if (setA.size === 0 || setB.size === 0) return 0;
+  let intersection = 0;
+  for (const t of setA) {
+    if (setB.has(t)) intersection++;
+  }
+  return intersection / (setA.size + setB.size - intersection);
+}
+function computeRelevance(updatedAt, type, similarityToBest = 1) {
+  const ageMs = Date.now() - new Date(updatedAt).getTime();
+  const ageDays = Math.max(0, ageMs / (1e3 * 60 * 60 * 24));
+  const recency = Math.exp(-ageDays / 30);
+  const importance = IMPORTANCE_WEIGHTS[type] ?? IMPORTANCE_WEIGHTS.default;
+  return Math.round(recency * importance * similarityToBest * 1e3) / 1e3;
+}
+function findDuplicates(memories) {
+  const groups = [];
+  const used = /* @__PURE__ */ new Set();
+  for (let i = 0; i < memories.length; i++) {
+    if (used.has(memories[i].elementId)) continue;
+    const group = { survivor: memories[i], victims: [], similarity: 0 };
+    for (let j = i + 1; j < memories.length; j++) {
+      if (used.has(memories[j].elementId)) continue;
+      const sim = jaccardSimilarity(memories[i].value, memories[j].value);
+      if (sim >= SIMILARITY_THRESHOLD) {
+        used.add(memories[j].elementId);
+        group.victims.push(memories[j]);
+        group.similarity = Math.max(group.similarity, sim);
+      }
+    }
+    if (group.victims.length > 0) {
+      used.add(memories[i].elementId);
+      groups.push(group);
+    }
+  }
+  return groups;
+}
+async function consolidateAgent(agentId) {
+  const t0 = Date.now();
+  const memories = await fetchAgentMemories(agentId);
+  const beforeCount = memories.length;
+  let merged = 0;
+  let expired = 0;
+  let pruned = 0;
+  const cutoff = new Date(Date.now() - TTL_DAYS * 24 * 60 * 60 * 1e3).toISOString();
+  const expiryCandidates = memories.filter(
+    (m) => m.updatedAt < cutoff && m.type !== "closure" && m.type !== "lesson"
+  );
+  for (const m of expiryCandidates) {
+    await mcpCall2("graph.write_cypher", {
+      query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key}) WHERE m.updatedAt < datetime($cutoff) DETACH DELETE m`,
+      params: { agentId, key: m.key, cutoff }
+    });
+    expired++;
+  }
+  const active = memories.filter((m) => !expiryCandidates.includes(m));
+  const groups = findDuplicates(active);
+  for (const group of groups) {
+    const mergedValue = group.victims.map((v) => v.value).join("\n---\n");
+    const mergedTags = [.../* @__PURE__ */ new Set([
+      ...group.survivor.tags ?? [],
+      ...group.victims.flatMap((v) => v.tags ?? [])
+    ])];
+    const MAX_MERGED_VALUE = 4e3;
+    let finalValue = mergedValue;
+    let truncated = false;
+    if (mergedValue.length > MAX_MERGED_VALUE) {
+      finalValue = mergedValue.slice(0, MAX_MERGED_VALUE);
+      truncated = true;
+      logger.warn({
+        agentId,
+        key: group.survivor.key,
+        originalLength: mergedValue.length,
+        truncatedTo: MAX_MERGED_VALUE,
+        victims: group.victims.length
+      }, "Memory consolidation truncated merged value");
+    }
+    await mcpCall2("graph.write_cypher", {
+      query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key})
+              SET m.value = $value, m.tags = $tags, m.updatedAt = datetime(),
+                  m.consolidatedFrom = $victimCount, m.consolidatedAt = datetime(),
+                  m.consolidationTruncated = $truncated`,
+      params: {
+        agentId,
+        key: group.survivor.key,
+        value: finalValue,
+        tags: mergedTags,
+        victimCount: group.victims.length,
+        truncated
+      }
+    });
+    for (const victim of group.victims) {
+      await mcpCall2("graph.write_cypher", {
+        query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key}) DETACH DELETE m`,
+        params: { agentId, key: victim.key }
+      });
+    }
+    merged += group.victims.length;
+  }
+  const remaining = await fetchAgentMemories(agentId);
+  if (remaining.length > MAX_MEMORIES_PER_AGENT) {
+    const scored = remaining.map((m) => ({
+      ...m,
+      relevance: computeRelevance(m.updatedAt, m.type)
+    }));
+    scored.sort((a, b) => a.relevance - b.relevance);
+    const toPrune = scored.slice(0, scored.length - MAX_MEMORIES_PER_AGENT);
+    for (const m of toPrune) {
+      await mcpCall2("graph.write_cypher", {
+        query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key}) DETACH DELETE m`,
+        params: { agentId, key: m.key }
+      });
+      pruned++;
+    }
+  }
+  const countResult = await mcpCall2("graph.read_cypher", {
+    query: `MATCH (m:AgentMemory {agentId: $agentId}) RETURN count(m) AS total`,
+    params: { agentId }
+  });
+  const countRows = countResult?.results ?? [];
+  const afterCount = Number(countRows[0]?.total ?? 0);
+  const durationMs = Date.now() - t0;
+  const report = {
+    agentId,
+    beforeCount,
+    afterCount,
+    merged,
+    expired,
+    pruned,
+    relevanceThreshold: computeRelevance(
+      new Date(Date.now() - TTL_DAYS * 24 * 60 * 60 * 1e3).toISOString(),
+      "default"
+    ),
+    durationMs
+  };
+  logger.info(report, "Memory consolidation complete");
+  return report;
+}
+async function consolidateAll() {
+  const result = await mcpCall2("graph.read_cypher", {
+    query: `MATCH (m:AgentMemory) RETURN DISTINCT m.agentId AS agentId ORDER BY m.agentId`,
+    params: {}
+  });
+  const agentIds = (result?.results ?? (Array.isArray(result) ? result : [])).map((r) => String(r.agentId ?? "")).filter(Boolean);
+  const reports = [];
+  for (const agentId of agentIds) {
+    try {
+      const report = await consolidateAgent(agentId);
+      reports.push(report);
+    } catch (err) {
+      logger.error({ agentId, err: String(err) }, "Consolidation failed for agent");
+    }
+  }
+  return reports;
+}
+async function searchMemories(opts) {
+  const { agentId, type, tags, query, limit = 50, minRelevance = 0 } = opts;
+  let whereClauses = [];
+  let params = {};
+  if (agentId) {
+    whereClauses.push("m.agentId = $agentId");
+    params.agentId = agentId;
+  }
+  if (type) {
+    whereClauses.push("m.type = $type");
+    params.type = type;
+  }
+  if (tags && tags.length > 0) {
+    whereClauses.push("ANY(t IN m.tags WHERE t IN $tags)");
+    params.tags = tags;
+  }
+  const where = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
+  const result = await mcpCall2("graph.read_cypher", {
+    query: `MATCH (m:AgentMemory) ${where}
+            RETURN m.elementId AS elementId, m.agentId AS agentId, m.key AS key,
+                   m.value AS value, m.type AS type, m.tags AS tags,
+                   toString(m.createdAt) AS createdAt, toString(m.updatedAt) AS updatedAt
+            ORDER BY m.updatedAt DESC
+            LIMIT $limit`,
+    params: { ...params, limit: limit * 3 }
+    // Fetch extra for relevance filtering
+  });
+  const results = result?.results ?? (Array.isArray(result) ? result : []);
+  const memories = results.map((r) => ({
+    elementId: String(r.elementId ?? ""),
+    agentId: String(r.agentId ?? ""),
+    key: String(r.key ?? ""),
+    value: String(r.value ?? ""),
+    type: String(r.type ?? "unknown"),
+    tags: Array.isArray(r.tags) ? r.tags : void 0,
+    createdAt: String(r.createdAt ?? ""),
+    updatedAt: String(r.updatedAt ?? "")
+  }));
+  let scored = memories.map((m) => ({
+    elementId: m.elementId,
+    agentId: m.agentId,
+    key: m.key,
+    value: m.value,
+    type: m.type,
+    tags: m.tags,
+    relevance: computeRelevance(m.updatedAt, m.type),
+    createdAt: m.createdAt
+  }));
+  if (query) {
+    scored = scored.map((s) => {
+      const textSim = jaccardSimilarity(query, s.value);
+      const boosted = s.relevance * 0.7 + textSim * 0.3;
+      return { ...s, relevance: Math.round(boosted * 1e3) / 1e3 };
+    });
+  }
+  scored = scored.filter((s) => s.relevance >= minRelevance);
+  scored.sort((a, b) => b.relevance - a.relevance);
+  return scored.slice(0, limit);
+}
+async function storeMemoryLongTerm(opts) {
+  const { agentId, key, value, type = "insight", tags = [], scope } = opts;
+  const allTags = [.../* @__PURE__ */ new Set([...tags, ...scope ? [`scope:${scope}`] : []])];
+  await mcpCall2("graph.write_cypher", {
+    query: `MERGE (m:AgentMemory {agentId: $agentId, key: $key})
+            SET m.value = $value, m.type = $type, m.tags = $tags,
+                m.scope = $scope, m.updatedAt = datetime(),
+                m.createdAt = COALESCE(m.createdAt, datetime())`,
+    params: {
+      agentId,
+      key,
+      value: value.slice(0, 4e3),
+      // Cap at 4KB
+      type,
+      tags: allTags,
+      scope: scope ?? null
+    }
+  });
+  logger.info({ agentId, key, type, tags: allTags.length }, "Long-term memory stored");
+  return { stored: true, key };
+}
+var IMPORTANCE_WEIGHTS, SIMILARITY_THRESHOLD, MAX_MEMORIES_PER_AGENT, TTL_DAYS;
+var init_memory_consolidator = __esm({
+  "src/memory/memory-consolidator.ts"() {
+    "use strict";
+    init_logger();
+    init_config();
+    IMPORTANCE_WEIGHTS = {
+      closure: 1,
+      lesson: 0.9,
+      claim: 0.8,
+      insight: 0.7,
+      heartbeat: 0.3,
+      a2a_message: 0.4,
+      default: 0.5
+    };
+    SIMILARITY_THRESHOLD = 0.6;
+    MAX_MEMORIES_PER_AGENT = 1e3;
+    TTL_DAYS = 30;
+  }
+});
+
 // src/competitive-crawler.ts
 var competitive_crawler_exports = {};
 __export(competitive_crawler_exports, {
@@ -24422,6 +24753,57 @@ ${entries.map((e) => `- ${e.key}`).join("\n")}`;
         return `Memory retrieve failed: ${err instanceof Error ? err.message : String(err)}`;
       }
     }
+    // ─── memory.* — Long-term memory (Phantom Week 2 Track B) ─────
+    case "memory_search": {
+      try {
+        const { searchMemories: searchMemories2 } = await Promise.resolve().then(() => (init_memory_consolidator(), memory_consolidator_exports));
+        const results = await searchMemories2({
+          agentId: typeof args.agent_id === "string" ? args.agent_id : void 0,
+          type: typeof args.type === "string" ? args.type : void 0,
+          tags: Array.isArray(args.tags) ? args.tags : void 0,
+          query: typeof args.query === "string" ? args.query : void 0,
+          limit: typeof args.limit === "number" ? Math.min(args.limit, 100) : 50
+        });
+        if (results.length === 0) return `No memories found matching filters`;
+        const formatted = results.map(
+          (r) => `[relevance=${r.relevance.toFixed(2)}] (${r.type}) ${r.agentId}/${r.key}: ${(r.value || "").slice(0, 200)}`
+        ).join("\n");
+        return `${results.length} memories found:
+---
+${formatted}`;
+      } catch (err) {
+        return `Memory search failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "memory_consolidate": {
+      try {
+        const { consolidateAgent: consolidateAgent2, consolidateAll: consolidateAll2 } = await Promise.resolve().then(() => (init_memory_consolidator(), memory_consolidator_exports));
+        const agentId = typeof args.agent_id === "string" ? args.agent_id : void 0;
+        const reports = agentId ? [await consolidateAgent2(agentId)] : await consolidateAll2();
+        const totalMerged = reports.reduce((s, r) => s + r.merged, 0);
+        const totalExpired = reports.reduce((s, r) => s + r.expired, 0);
+        const totalPruned = reports.reduce((s, r) => s + r.pruned, 0);
+        const totalTime = reports.reduce((s, r) => s + r.durationMs, 0);
+        return JSON.stringify({
+          agents_consolidated: reports.length,
+          total_merged: totalMerged,
+          total_expired: totalExpired,
+          total_pruned: totalPruned,
+          total_duration_ms: totalTime,
+          reports: reports.map((r) => ({
+            agent_id: r.agentId,
+            before: r.beforeCount,
+            after: r.afterCount,
+            merged: r.merged,
+            expired: r.expired,
+            pruned: r.pruned,
+            duration_ms: r.durationMs
+          }))
+        }, null, 2);
+      } catch (err) {
+        return `Memory consolidation failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
     case "failure_harvest": {
       try {
         const { harvestFailures: harvestFailures2, buildFailureSummary: buildFailureSummary2 } = await Promise.resolve().then(() => (init_failure_harvester(), failure_harvester_exports));
@@ -26121,6 +26503,9 @@ var init_mcp_caller = __esm({
       "chat_read",
       "llm_chat",
       "llm_providers",
+      // Memory (Phantom Week 2 Track B)
+      "memory_search",
+      "memory_consolidate",
       // Model routing
       "model_providers",
       "model_route",
@@ -31177,7 +31562,7 @@ init_llm_proxy();
 init_dual_rag();
 init_agent_registry();
 init_routing_engine();
-async function mcpCall2(tool, payload) {
+async function mcpCall3(tool, payload) {
   const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
     method: "POST",
     headers: {
@@ -31192,7 +31577,7 @@ async function mcpCall2(tool, payload) {
 }
 async function storeEpisode(title, description, events, outcome, tags) {
   try {
-    await mcpCall2("memory_operation", {
+    await mcpCall3("memory_operation", {
       action: "RECORD_EPISODE",
       data: {
         title,
@@ -31219,7 +31604,7 @@ async function storeGraphMemory(agentId, type, content, tags) {
       created_at: datetime(),
       source: 'command-center-chat'
     }) RETURN m`;
-    await mcpCall2("graph.write_cypher", {
+    await mcpCall3("graph.write_cypher", {
       query: cypher,
       parameters: { agent_id: agentId, type, content: content.slice(0, 4e3), tags }
     });
@@ -31230,7 +31615,7 @@ async function storeGraphMemory(agentId, type, content, tags) {
 }
 async function storeSRAG(content, tags, source) {
   try {
-    await mcpCall2("srag.ingest", {
+    await mcpCall3("srag.ingest", {
       content,
       source,
       tags,
@@ -31413,7 +31798,7 @@ chatRouter.post("/send", (req, res) => {
   broadcastMessage(msg);
   notifyChatMessage(msg.from, msg.to, msg.message);
   logger.info({ from: msg.from, to: msg.to, type: msg.type }, "A2A chat message sent");
-  mcpCall2("graph.write_cypher", {
+  mcpCall3("graph.write_cypher", {
     query: `MERGE (m:AgentMemory {agentId: $from, key: $key}) SET m.value = $value, m.type = 'a2a_message', m.updatedAt = datetime()`,
     params: {
       from: msg.from,
@@ -34449,6 +34834,18 @@ function registerDefaultLoops() {
       name: "Graph Overflow",
       mode: "sequential",
       steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
+    }
+  });
+  registerCronJob({
+    id: "memory-consolidation",
+    name: "Memory Consolidation (Weekly AgentMemory Dedup + TTL)",
+    schedule: "0 4 * * 0",
+    // Sunday 04:00 UTC
+    enabled: true,
+    chain: {
+      name: "Memory Consolidation",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "memory_consolidate", arguments: {} }]
     }
   });
   registerCronJob({

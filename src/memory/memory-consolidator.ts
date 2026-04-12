@@ -68,7 +68,7 @@ export async function fetchAgentMemories(agentId: string, limit = 2000): Promise
     query: `MATCH (m:AgentMemory {agentId: $agentId})
             RETURN m.elementId AS elementId, m.agentId AS agentId, m.key AS key,
                    m.value AS value, m.type AS type, m.tags AS tags,
-                   m.createdAt AS createdAt, m.updatedAt AS updatedAt
+                   toString(m.createdAt) AS createdAt, toString(m.updatedAt) AS updatedAt
             ORDER BY m.updatedAt DESC
             LIMIT $limit`,
     params: { agentId, limit },
@@ -194,7 +194,7 @@ export async function consolidateAgent(agentId: string): Promise<ConsolidationRe
 
   for (const m of expiryCandidates) {
     await mcpCall('graph.write_cypher', {
-      query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key}) WHERE m.updatedAt < datetime($cutoff) DELETE m`,
+      query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key}) WHERE m.updatedAt < datetime($cutoff) DETACH DELETE m`,
       params: { agentId, key: m.key, cutoff },
     })
     expired++
@@ -212,23 +212,41 @@ export async function consolidateAgent(agentId: string): Promise<ConsolidationRe
       ...group.victims.flatMap(v => v.tags ?? []),
     ])]
 
+    // P1 fix: warn on silent truncation instead of dropping data
+    const MAX_MERGED_VALUE = 4000
+    let finalValue = mergedValue
+    let truncated = false
+    if (mergedValue.length > MAX_MERGED_VALUE) {
+      finalValue = mergedValue.slice(0, MAX_MERGED_VALUE)
+      truncated = true
+      logger.warn({
+        agentId,
+        key: group.survivor.key,
+        originalLength: mergedValue.length,
+        truncatedTo: MAX_MERGED_VALUE,
+        victims: group.victims.length,
+      }, 'Memory consolidation truncated merged value')
+    }
+
     await mcpCall('graph.write_cypher', {
       query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key})
               SET m.value = $value, m.tags = $tags, m.updatedAt = datetime(),
-                  m.consolidatedFrom = $victimCount, m.consolidatedAt = datetime()`,
+                  m.consolidatedFrom = $victimCount, m.consolidatedAt = datetime(),
+                  m.consolidationTruncated = $truncated`,
       params: {
         agentId,
         key: group.survivor.key,
-        value: mergedValue.slice(0, 4000), // Cap at 4KB
+        value: finalValue,
         tags: mergedTags,
         victimCount: group.victims.length,
+        truncated,
       },
     })
 
-    // Delete victim nodes
+    // Delete victim nodes (DETACH to handle relationships)
     for (const victim of group.victims) {
       await mcpCall('graph.write_cypher', {
-        query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key}) DELETE m`,
+        query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key}) DETACH DELETE m`,
         params: { agentId, key: victim.key },
       })
     }
@@ -248,14 +266,20 @@ export async function consolidateAgent(agentId: string): Promise<ConsolidationRe
     const toPrune = scored.slice(0, scored.length - MAX_MEMORIES_PER_AGENT)
     for (const m of toPrune) {
       await mcpCall('graph.write_cypher', {
-        query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key}) DELETE m`,
+        query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key}) DETACH DELETE m`,
         params: { agentId, key: m.key },
       })
       pruned++
     }
   }
 
-  const afterCount = (await fetchAgentMemories(agentId, 10)).length // Quick count check
+  // P1 fix: actual count via COUNT query (was capped at 10 via limited fetch)
+  const countResult = await mcpCall('graph.read_cypher', {
+    query: `MATCH (m:AgentMemory {agentId: $agentId}) RETURN count(m) AS total`,
+    params: { agentId },
+  }) as { results?: Array<Record<string, unknown>> } | unknown
+  const countRows = (countResult as any)?.results ?? []
+  const afterCount = Number((countRows[0] as Record<string, unknown> | undefined)?.total ?? 0)
   const durationMs = Date.now() - t0
 
   const report: ConsolidationReport = {
@@ -339,7 +363,7 @@ export async function searchMemories(opts: MemorySearchOpts): Promise<SearchResu
     query: `MATCH (m:AgentMemory) ${where}
             RETURN m.elementId AS elementId, m.agentId AS agentId, m.key AS key,
                    m.value AS value, m.type AS type, m.tags AS tags,
-                   m.createdAt AS createdAt, m.updatedAt AS updatedAt
+                   toString(m.createdAt) AS createdAt, toString(m.updatedAt) AS updatedAt
             ORDER BY m.updatedAt DESC
             LIMIT $limit`,
     params: { ...params, limit: limit * 3 }, // Fetch extra for relevance filtering
