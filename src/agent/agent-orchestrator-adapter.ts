@@ -14,6 +14,7 @@ import { broadcastMessage } from '../chat-broadcaster.js'
 import { msgId } from '../chat-store.js'
 import { logger } from '../logger.js'
 import { recordAgentResponse, recordToolMetrics } from '../analytics/runtime-analytics.js'
+import { recordEngagementCost } from '../analytics/engagement-cost-tracker.js'
 
 export class OrchestratorAgentAdapter implements IAgent {
   readonly agentId = 'orchestrator'
@@ -63,6 +64,16 @@ export class OrchestratorAgentAdapter implements IAgent {
       const durationMs = Date.now() - t0
       const response = agentSuccess(request, output, { input: 0, output: Math.round(output.length / 4) }, 0)
       await recordAgentResponse(response, durationMs)
+
+      // V3: if request has engagement_id in context, roll up cost
+      const engagementId = typeof context.engagement_id === 'string' ? context.engagement_id : null
+      if (engagementId) {
+        await recordEngagementCost(
+          engagementId, this.agentId, response.cost_dkk,
+          response.tokens_used.input, response.tokens_used.output,
+          durationMs, true, invokedTool ?? undefined,
+        )
+      }
       return response
     } catch (err) {
       const durationMs = Date.now() - t0
@@ -72,6 +83,14 @@ export class OrchestratorAgentAdapter implements IAgent {
         { input: 0, output: 0 },
       )
       await recordAgentResponse(response, durationMs)
+
+      // V3: record failure cost too
+      const engagementId = typeof context.engagement_id === 'string' ? context.engagement_id : null
+      if (engagementId) {
+        await recordEngagementCost(
+          engagementId, this.agentId, 0, 0, 0, durationMs, false, invokedTool ?? undefined,
+        )
+      }
       return response
     }
   }
