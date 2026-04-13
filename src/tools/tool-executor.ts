@@ -1974,7 +1974,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'loose_ends_scan': {
       try {
-        const { runLooseEndScan } = await import('./routes/loose-ends.js')
+        const { runLooseEndScan } = await import('../routes/loose-ends.js')
         const result = await runLooseEndScan()
         return JSON.stringify({
           total_findings: result.total_findings ?? 0,
@@ -2019,7 +2019,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'decision_certify': {
       try {
-        const { storeDecision, buildLineageChain } = await import('./routes/decisions.js')
+        const { storeDecision, buildLineageChain } = await import('../routes/decisions.js')
         const assemblyId = String(args.assembly_id ?? '')
         const title = String(args.title ?? '')
         if (!assemblyId || !title) return 'Error: assembly_id and title required'
@@ -2046,7 +2046,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'decision_list': {
       try {
-        const { listAllDecisionIds, loadDecision } = await import('./routes/decisions.js')
+        const { listAllDecisionIds, loadDecision } = await import('../routes/decisions.js')
         const limit = typeof args.limit === 'number' ? args.limit : 50
         const ids = await listAllDecisionIds()
         const sliced = ids.slice(0, Math.min(limit, 100))
@@ -2063,7 +2063,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'decision_lineage': {
       try {
-        const { buildLineageChain } = await import('./routes/decisions.js')
+        const { buildLineageChain } = await import('../routes/decisions.js')
         const assemblyId = String(args.assembly_id ?? '')
         if (!assemblyId) return 'Error: assembly_id required'
         const lineage = await buildLineageChain(assemblyId)
@@ -2077,7 +2077,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'artifact_list': {
       try {
-        const { listAllArtifactIds, loadArtifact } = await import('./routes/artifacts.js')
+        const { listAllArtifactIds, loadArtifact } = await import('../routes/artifacts.js')
         const limit = typeof args.limit === 'number' ? args.limit : 20
         const ids = await listAllArtifactIds()
         const sliced = ids.slice(0, Math.min(limit, 100))
@@ -2094,7 +2094,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'artifact_get': {
       try {
-        const { loadArtifact } = await import('./routes/artifacts.js')
+        const { loadArtifact } = await import('../routes/artifacts.js')
         const artifactId = String(args.artifact_id ?? '')
         if (!artifactId) return 'Error: artifact_id required'
         const artifact = await loadArtifact(artifactId)
@@ -2109,7 +2109,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'drill_start': {
       try {
-        const { saveDrillContext, fetchDrillChildren } = await import('./routes/drill.js')
+        const { saveDrillContext, fetchDrillChildren } = await import('../routes/drill.js')
         const domain = String(args.domain ?? '')
         if (!domain) return 'Error: domain required'
         const sessionId = uuid()
@@ -2131,7 +2131,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'drill_down': {
       try {
-        const { loadDrillContext, saveDrillContext, fetchDrillChildren } = await import('./routes/drill.js')
+        const { loadDrillContext, saveDrillContext, fetchDrillChildren } = await import('../routes/drill.js')
         const sessionId = String(args.session_id ?? '')
         const targetId = String(args.target_id ?? '')
         const targetLevel = String(args.target_level ?? '')
@@ -2152,7 +2152,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'drill_up': {
       try {
-        const { loadDrillContext, saveDrillContext, fetchDrillChildren } = await import('./routes/drill.js')
+        const { loadDrillContext, saveDrillContext, fetchDrillChildren } = await import('../routes/drill.js')
         const sessionId = String(args.session_id ?? '')
         if (!sessionId) return 'Error: session_id required'
         const ctx = await loadDrillContext(sessionId)
@@ -2172,7 +2172,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'drill_children': {
       try {
-        const { loadDrillContext, fetchDrillChildren } = await import('./routes/drill.js')
+        const { loadDrillContext, fetchDrillChildren } = await import('../routes/drill.js')
         const sessionId = String(args.session_id ?? '')
         if (!sessionId) return 'Error: session_id required'
         const ctx = await loadDrillContext(sessionId)

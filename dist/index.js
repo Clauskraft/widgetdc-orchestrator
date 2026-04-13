@@ -23880,6 +23880,1293 @@ Page content:
   }
 });
 
+// src/routes/loose-ends.ts
+var loose_ends_exports = {};
+__export(loose_ends_exports, {
+  looseEndsRouter: () => looseEndsRouter,
+  runLooseEndScan: () => runLooseEndScan
+});
+import { Router as Router2 } from "express";
+import { v4 as uuid21 } from "uuid";
+async function runLooseEndScan() {
+  const scanId = uuid21();
+  const t0 = Date.now();
+  const findings = [];
+  logger.info({ scan_id: scanId }, "Loose-end scan started");
+  const queryResults = await Promise.allSettled(
+    DETECTION_QUERIES.map(async (dq) => {
+      try {
+        const result = await callMcpTool({
+          toolName: "graph.read_cypher",
+          args: { query: dq.cypher },
+          callId: uuid21(),
+          timeoutMs: 15e3
+        });
+        if (result.status !== "success") return [];
+        const records = Array.isArray(result.result) ? result.result : Array.isArray(result.result?.records) ? result.result.records : [];
+        return dq.buildFinding(records);
+      } catch (err) {
+        logger.warn({ query: dq.name, err: String(err) }, "Loose-end detection query failed");
+        return [];
+      }
+    })
+  );
+  for (const qr of queryResults) {
+    if (qr.status === "fulfilled") {
+      findings.push(...qr.value);
+    }
+  }
+  const summary = {
+    critical: findings.filter((f) => f.severity === "critical").length,
+    warning: findings.filter((f) => f.severity === "warning").length,
+    info: findings.filter((f) => f.severity === "info").length,
+    total: findings.length
+  };
+  const scanResult = {
+    scan_id: scanId,
+    scanned_at: (/* @__PURE__ */ new Date()).toISOString(),
+    duration_ms: Date.now() - t0,
+    findings,
+    summary,
+    auto_fixed: 0
+  };
+  const redis2 = getRedis();
+  if (redis2) {
+    try {
+      await redis2.set(REDIS_KEY3, JSON.stringify(scanResult), "EX", 86400);
+      await redis2.zadd(REDIS_HISTORY, Date.now(), JSON.stringify(scanResult));
+      const count = await redis2.zcard(REDIS_HISTORY);
+      if (count > 30) {
+        await redis2.zremrangebyrank(REDIS_HISTORY, 0, count - 31);
+      }
+    } catch (err) {
+      logger.warn({ err: String(err) }, "Failed to persist loose-end scan");
+    }
+  }
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (s:LooseEndScan {id: $id})
+SET s.scanned_at = datetime(), s.duration_ms = $duration,
+    s.critical = $critical, s.warning = $warning, s.info = $info,
+    s.total = $total, s.auto_fixed = 0`,
+        params: {
+          id: scanId,
+          duration: scanResult.duration_ms,
+          critical: summary.critical,
+          warning: summary.warning,
+          info: summary.info,
+          total: summary.total
+        }
+      },
+      callId: uuid21(),
+      timeoutMs: 1e4
+    });
+  } catch {
+  }
+  broadcastSSE("loose-end-scan", {
+    scan_id: scanId,
+    summary,
+    duration_ms: scanResult.duration_ms
+  });
+  logger.info({
+    scan_id: scanId,
+    ...summary,
+    duration_ms: scanResult.duration_ms
+  }, "Loose-end scan complete");
+  return scanResult;
+}
+var looseEndsRouter, REDIS_KEY3, REDIS_HISTORY, DETECTION_QUERIES;
+var init_loose_ends = __esm({
+  "src/routes/loose-ends.ts"() {
+    "use strict";
+    init_redis();
+    init_logger();
+    init_mcp_caller();
+    init_sse();
+    looseEndsRouter = Router2();
+    REDIS_KEY3 = "orchestrator:loose-ends:latest";
+    REDIS_HISTORY = "orchestrator:loose-ends:history";
+    DETECTION_QUERIES = [
+      {
+        name: "Orphan Blocks (no assembly)",
+        category: "orphan_block",
+        severity: "warning",
+        cypher: `MATCH (b) WHERE (b:Block OR b:ArchitectureBlock OR b:LegoBlock)
+AND NOT (b)<-[:COMPOSED_OF]-(:Assembly)
+RETURN b.id AS id, b.name AS name, b.domain AS domain, labels(b)[0] AS type
+LIMIT 25`,
+        buildFinding: (records) => records.map((r) => ({
+          id: `orphan-${r.id ?? uuid21().slice(0, 8)}`,
+          severity: "warning",
+          category: "orphan_block",
+          title: `Orphan block: ${r.name ?? r.id}`,
+          description: `Block "${r.name}" (${r.type}, domain: ${r.domain}) is not part of any assembly`,
+          node_ids: [String(r.id)],
+          suggested_action: "Include in an assembly via POST /api/assembly/compose or archive if obsolete"
+        }))
+      },
+      {
+        name: "Assemblies without decisions",
+        category: "dangling_assembly",
+        severity: "warning",
+        cypher: `MATCH (a:Assembly) WHERE a.status = 'accepted'
+AND NOT (a)<-[:BASED_ON]-(:Decision)
+RETURN a.id AS id, a.name AS name, a.composite AS score
+LIMIT 15`,
+        buildFinding: (records) => records.map((r) => ({
+          id: `dangling-asm-${r.id ?? uuid21().slice(0, 8)}`,
+          severity: "warning",
+          category: "dangling_assembly",
+          title: `Accepted assembly without decision: ${r.name ?? r.id}`,
+          description: `Assembly "${r.name}" was accepted (score: ${r.score}) but no Decision node references it`,
+          node_ids: [String(r.id)],
+          suggested_action: "Create a Decision via POST /api/decisions/certify or reject the assembly"
+        }))
+      },
+      {
+        name: "Decisions without lineage",
+        category: "missing_lineage",
+        severity: "critical",
+        cypher: `MATCH (d:Decision) WHERE NOT (d)-[:BASED_ON]->(:Assembly)
+AND NOT (d)-[:DERIVES_FROM]->()
+RETURN d.id AS id, d.title AS title, d.certified_at AS certified_at
+LIMIT 10`,
+        buildFinding: (records) => records.map((r) => ({
+          id: `no-lineage-${r.id ?? uuid21().slice(0, 8)}`,
+          severity: "critical",
+          category: "missing_lineage",
+          title: `Decision without lineage: ${r.title ?? r.id}`,
+          description: `Decision "${r.title}" has no traceable lineage to assemblies or source signals`,
+          node_ids: [String(r.id)],
+          suggested_action: "Link decision to source assembly or re-certify with proper lineage"
+        }))
+      },
+      {
+        name: "Disconnected high-value nodes",
+        category: "disconnected_node",
+        severity: "info",
+        cypher: `MATCH (n) WHERE (n:StrategicInsight OR n:Pattern OR n:Signal)
+AND NOT (n)-[]-()
+RETURN n.id AS id, labels(n)[0] AS type, n.domain AS domain, n.insight AS title
+LIMIT 20`,
+        buildFinding: (records) => records.map((r) => ({
+          id: `disconnected-${r.id ?? uuid21().slice(0, 8)}`,
+          severity: "info",
+          category: "disconnected_node",
+          title: `Disconnected ${r.type}: ${(r.title ?? r.id ?? "").toString().slice(0, 60)}`,
+          description: `${r.type} node in domain "${r.domain}" has no relationships \u2014 may be a missed connection`,
+          node_ids: [String(r.id)],
+          suggested_action: "Review and connect to related blocks or mark as processed"
+        }))
+      },
+      {
+        name: "Unresolved decisions (stale drafts)",
+        category: "unresolved_decision",
+        severity: "warning",
+        cypher: `MATCH (d:Decision) WHERE d.status = 'draft'
+AND d.created_at < datetime() - duration('P7D')
+RETURN d.id AS id, d.title AS title, d.created_at AS created_at
+LIMIT 10`,
+        buildFinding: (records) => records.map((r) => ({
+          id: `stale-decision-${r.id ?? uuid21().slice(0, 8)}`,
+          severity: "warning",
+          category: "unresolved_decision",
+          title: `Stale draft decision: ${r.title ?? r.id}`,
+          description: `Decision "${r.title}" has been in draft for >7 days (created: ${r.created_at})`,
+          node_ids: [String(r.id)],
+          suggested_action: "Certify, reject, or archive the stale decision"
+        }))
+      }
+    ];
+    looseEndsRouter.post("/scan", async (_req, res) => {
+      try {
+        const result = await runLooseEndScan();
+        res.json({ success: true, data: result });
+      } catch (err) {
+        logger.error({ err: String(err) }, "Loose-end scan failed");
+        res.status(500).json({
+          success: false,
+          error: { code: "SCAN_ERROR", message: String(err), status_code: 500 }
+        });
+      }
+    });
+    looseEndsRouter.get("/", async (_req, res) => {
+      const redis2 = getRedis();
+      if (!redis2) {
+        res.json({ success: true, data: null, message: "No scan results available" });
+        return;
+      }
+      try {
+        const raw = await redis2.get(REDIS_KEY3);
+        if (!raw) {
+          res.json({ success: true, data: null, message: "No scan has been run yet" });
+          return;
+        }
+        res.json({ success: true, data: JSON.parse(raw) });
+      } catch (err) {
+        res.status(500).json({ success: false, error: String(err) });
+      }
+    });
+    looseEndsRouter.get("/history", async (req, res) => {
+      const redis2 = getRedis();
+      const limit = Math.min(parseInt(String(req.query.limit ?? "10")), 30);
+      if (!redis2) {
+        res.json({ success: true, data: { scans: [], total: 0 } });
+        return;
+      }
+      try {
+        const raw = await redis2.zrevrange(REDIS_HISTORY, 0, limit - 1);
+        const scans = raw.map((r) => {
+          const parsed = JSON.parse(r);
+          return {
+            scan_id: parsed.scan_id,
+            scanned_at: parsed.scanned_at,
+            duration_ms: parsed.duration_ms,
+            summary: parsed.summary,
+            auto_fixed: parsed.auto_fixed
+          };
+        });
+        res.json({ success: true, data: { scans, total: scans.length } });
+      } catch (err) {
+        res.status(500).json({ success: false, error: String(err) });
+      }
+    });
+  }
+});
+
+// src/routes/decisions.ts
+var decisions_exports = {};
+__export(decisions_exports, {
+  buildLineageChain: () => buildLineageChain,
+  decisionsRouter: () => decisionsRouter,
+  listAllDecisionIds: () => listAllDecisionIds,
+  loadDecision: () => loadDecision,
+  storeDecision: () => storeDecision
+});
+import { Router as Router3 } from "express";
+import { v4 as uuid22 } from "uuid";
+async function storeDecision(decision) {
+  const redis2 = getRedis();
+  if (!redis2) return false;
+  try {
+    await redis2.set(`${REDIS_PREFIX9}${decision.$id}`, JSON.stringify(decision), "EX", TTL_SECONDS5);
+    await redis2.sadd(REDIS_INDEX4, decision.$id);
+    return true;
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Redis store failed for decision");
+    return false;
+  }
+}
+async function loadDecision(id) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${REDIS_PREFIX9}${id}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+async function listAllDecisionIds() {
+  const redis2 = getRedis();
+  if (!redis2) return [];
+  try {
+    return await redis2.smembers(REDIS_INDEX4);
+  } catch {
+    return [];
+  }
+}
+async function buildLineageChain(assemblyId) {
+  const lineage = [];
+  try {
+    const result = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: `MATCH (a:Assembly {id: $assemblyId})
+OPTIONAL MATCH (a)-[:COMPOSED_OF]->(b)
+WHERE b:Block OR b:ArchitectureBlock OR b:LegoBlock
+OPTIONAL MATCH (b)-[:DERIVED_FROM|EXTRACTED_FROM]->(p)
+WHERE p:Pattern OR p:Signal OR p:StrategicInsight
+RETURN a.id AS asm_id, a.name AS asm_name, a.created_at AS asm_ts,
+       b.id AS block_id, b.name AS block_name, labels(b)[0] AS block_type, b.created_at AS block_ts,
+       p.id AS source_id, p.name AS source_name, labels(p)[0] AS source_type, p.createdAt AS source_ts
+ORDER BY b.name`,
+        params: { assemblyId }
+      },
+      callId: uuid22(),
+      timeoutMs: 15e3
+    });
+    if (result.status === "success") {
+      const records = Array.isArray(result.result) ? result.result : Array.isArray(result.result?.records) ? result.result.records : [];
+      if (records.length > 0) {
+        const r = records[0];
+        lineage.push({
+          stage: "assembly",
+          node_id: String(r.asm_id ?? assemblyId),
+          node_type: "Assembly",
+          name: String(r.asm_name ?? assemblyId),
+          timestamp: r.asm_ts ? String(r.asm_ts) : void 0
+        });
+      }
+      const seenBlocks = /* @__PURE__ */ new Set();
+      const seenSources = /* @__PURE__ */ new Set();
+      for (const r of records) {
+        if (r.block_id && !seenBlocks.has(String(r.block_id))) {
+          seenBlocks.add(String(r.block_id));
+          lineage.push({
+            stage: "block",
+            node_id: String(r.block_id),
+            node_type: String(r.block_type ?? "Block"),
+            name: String(r.block_name ?? r.block_id),
+            timestamp: r.block_ts ? String(r.block_ts) : void 0
+          });
+        }
+        if (r.source_id && !seenSources.has(String(r.source_id))) {
+          seenSources.add(String(r.source_id));
+          const sourceType = String(r.source_type ?? "Unknown");
+          const stage = sourceType.includes("Signal") ? "signal" : sourceType.includes("Pattern") ? "pattern" : "signal";
+          lineage.push({
+            stage,
+            node_id: String(r.source_id),
+            node_type: sourceType,
+            name: String(r.source_name ?? r.source_id),
+            timestamp: r.source_ts ? String(r.source_ts) : void 0
+          });
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn({ err: String(err), assemblyId }, "Failed to build lineage chain");
+  }
+  return lineage;
+}
+var decisionsRouter, REDIS_PREFIX9, REDIS_INDEX4, TTL_SECONDS5;
+var init_decisions = __esm({
+  "src/routes/decisions.ts"() {
+    "use strict";
+    init_redis();
+    init_logger();
+    init_mcp_caller();
+    init_cognitive_proxy();
+    init_sse();
+    decisionsRouter = Router3();
+    REDIS_PREFIX9 = "orchestrator:decision:";
+    REDIS_INDEX4 = "orchestrator:decisions:index";
+    TTL_SECONDS5 = 7776e3;
+    decisionsRouter.post("/certify", async (req, res) => {
+      const body = req.body;
+      if (!body.assembly_id || !body.title) {
+        res.status(400).json({
+          success: false,
+          error: { code: "VALIDATION_ERROR", message: "Required: assembly_id, title", status_code: 400 }
+        });
+        return;
+      }
+      const assemblyId = String(body.assembly_id);
+      const title = String(body.title);
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const decisionId = `widgetdc:decision:${uuid22()}`;
+      const lineageChain = await buildLineageChain(assemblyId);
+      let rationale = String(body.rationale ?? "");
+      let summary = String(body.summary ?? "");
+      if (!rationale || !summary) {
+        try {
+          const result = await callCognitive("analyze", {
+            prompt: `You are a decision certifier for an architecture synthesis platform.
+
+Decision: "${title}"
+Assembly: ${assemblyId}
+Lineage: ${lineageChain.length} nodes traced (${lineageChain.map((l) => `${l.stage}:${l.name}`).join(" \u2192 ")})
+${body.context ? `Context: ${JSON.stringify(body.context)}` : ""}
+
+Generate:
+1. A concise summary (1-2 sentences)
+2. A rationale explaining why this decision was made based on the evidence chain
+
+Reply as JSON: {"summary": "...", "rationale": "..."}`,
+            context: { assembly_id: assemblyId, lineage: lineageChain },
+            agent_id: "orchestrator"
+          }, 2e4);
+          const text = String(result ?? "");
+          const match = text.match(/\{[\s\S]*\}/);
+          if (match) {
+            const parsed = JSON.parse(match[0]);
+            if (!summary) summary = parsed.summary ?? title;
+            if (!rationale) rationale = parsed.rationale ?? "Auto-certified based on assembly lineage";
+          }
+        } catch {
+          if (!summary) summary = title;
+          if (!rationale) rationale = "Certified from accepted assembly with verified lineage";
+        }
+      }
+      const proof = {
+        verified_at: now,
+        verified_by: String(body.certifier ?? "orchestrator:decision-engine")
+      };
+      try {
+        const [healthResult] = await Promise.allSettled([
+          fetch("https://orchestrator-production-c27e.up.railway.app/health", { signal: AbortSignal.timeout(5e3) }).then((r) => r.json())
+        ]);
+        if (healthResult.status === "fulfilled") {
+          const h = healthResult.value;
+          proof.service_health = {
+            orchestrator: String(h.status ?? "unknown"),
+            redis: h.redis_enabled ? "connected" : "disconnected",
+            rlm: h.rlm_available ? "available" : "unavailable"
+          };
+        }
+      } catch {
+      }
+      if (body.test_results && typeof body.test_results === "object") {
+        proof.test_results = body.test_results;
+      }
+      if (body.deploy_sha) proof.deploy_sha = String(body.deploy_sha);
+      const certificate = {
+        $id: decisionId,
+        $schema: "widgetdc:decision:v1",
+        title,
+        summary,
+        rationale,
+        assembly_id: assemblyId,
+        lineage_chain: lineageChain,
+        evidence_refs: Array.isArray(body.evidence_refs) ? body.evidence_refs : lineageChain.map((l) => l.node_id),
+        arbitration_outcome: String(body.arbitration_outcome ?? "accepted"),
+        production_proof: proof,
+        certified_at: now,
+        certifier_agent: String(body.certifier ?? "orchestrator:decision-engine"),
+        status: "certified",
+        tags: Array.isArray(body.tags) ? body.tags : []
+      };
+      await storeDecision(certificate);
+      try {
+        await callMcpTool({
+          toolName: "graph.write_cypher",
+          args: {
+            query: `CREATE (d:Decision {
+  id: $id, title: $title, summary: $summary, rationale: $rationale,
+  assembly_id: $assemblyId, status: 'certified',
+  certified_at: datetime(), certifier_agent: $certifier,
+  lineage_depth: $lineageDepth, evidence_count: $evidenceCount
+})
+WITH d
+MATCH (a:Assembly {id: $assemblyId})
+CREATE (d)-[:BASED_ON]->(a)
+WITH d
+UNWIND $evidenceIds AS eid
+MATCH (e) WHERE e.id = eid
+CREATE (d)-[:CERTIFIED_BY_EVIDENCE]->(e)`,
+            params: {
+              id: decisionId,
+              title,
+              summary,
+              rationale,
+              assemblyId,
+              certifier: certificate.certifier_agent,
+              lineageDepth: lineageChain.length,
+              evidenceCount: certificate.evidence_refs.length,
+              evidenceIds: certificate.evidence_refs.slice(0, 20)
+              // Cap for query size
+            }
+          },
+          callId: uuid22(),
+          timeoutMs: 15e3
+        });
+      } catch (err) {
+        logger.warn({ err: String(err), decision_id: decisionId }, "Failed to write decision to Neo4j");
+      }
+      broadcastSSE("decision-certified", {
+        decision_id: decisionId,
+        title,
+        assembly_id: assemblyId,
+        lineage_depth: lineageChain.length
+      });
+      logger.info({
+        decision_id: decisionId,
+        title,
+        assembly_id: assemblyId,
+        lineage_depth: lineageChain.length
+      }, "Decision certified");
+      res.status(201).json({ success: true, data: certificate });
+    });
+    decisionsRouter.get("/", async (req, res) => {
+      const statusFilter = req.query.status;
+      const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "50")), 1), 200);
+      const offset = Math.max(parseInt(String(req.query.offset ?? "0")), 0);
+      const allIds = await listAllDecisionIds();
+      const redis2 = getRedis();
+      if (!redis2 || allIds.length === 0) {
+        res.json({ decisions: [], total: 0, limit, offset });
+        return;
+      }
+      const decisions = [];
+      try {
+        const pipeline = redis2.pipeline();
+        for (const id of allIds) {
+          pipeline.get(`${REDIS_PREFIX9}${id}`);
+        }
+        const results = await pipeline.exec();
+        if (results) {
+          for (const [err, raw] of results) {
+            if (!err && typeof raw === "string") {
+              try {
+                decisions.push(JSON.parse(raw));
+              } catch {
+              }
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn({ err: String(err) }, "Redis pipeline failed for decisions list");
+      }
+      let filtered = decisions;
+      if (statusFilter) {
+        filtered = filtered.filter((d) => d.status === statusFilter);
+      }
+      filtered.sort((a, b) => b.certified_at.localeCompare(a.certified_at));
+      const total = filtered.length;
+      const page = filtered.slice(offset, offset + limit);
+      res.json({ decisions: page, total, limit, offset });
+    });
+    decisionsRouter.get("/:id", async (req, res) => {
+      const id = req.params.id;
+      if (id === "lineage") {
+        res.status(400).json({ success: false, error: "Provide a decision ID" });
+        return;
+      }
+      const decision = await loadDecision(id);
+      if (!decision) {
+        res.status(404).json({ success: false, error: "Decision not found" });
+        return;
+      }
+      res.json({ success: true, data: decision });
+    });
+    decisionsRouter.get("/:id/lineage", async (req, res) => {
+      const decision = await loadDecision(req.params.id);
+      if (!decision) {
+        res.status(404).json({ success: false, error: "Decision not found" });
+        return;
+      }
+      const stages = {};
+      for (const entry of decision.lineage_chain) {
+        if (!stages[entry.stage]) stages[entry.stage] = [];
+        stages[entry.stage].push(entry);
+      }
+      res.json({
+        success: true,
+        data: {
+          decision_id: decision.$id,
+          title: decision.title,
+          certified_at: decision.certified_at,
+          assembly_id: decision.assembly_id,
+          lineage_chain: decision.lineage_chain,
+          lineage_by_stage: stages,
+          depth: decision.lineage_chain.length,
+          stages_covered: Object.keys(stages),
+          production_proof: decision.production_proof
+        }
+      });
+    });
+  }
+});
+
+// src/routes/artifacts.ts
+var artifacts_exports = {};
+__export(artifacts_exports, {
+  artifactRouter: () => artifactRouter,
+  listAllArtifactIds: () => listAllArtifactIds,
+  loadArtifact: () => loadArtifact,
+  storeArtifact: () => storeArtifact
+});
+import { Router as Router4 } from "express";
+import { randomUUID } from "crypto";
+async function storeArtifact(artifact) {
+  const redis2 = getRedis();
+  if (!redis2) return false;
+  const key = `${ARTIFACT_PREFIX}${artifact.$id}`;
+  try {
+    await redis2.set(key, JSON.stringify(artifact), "EX", TTL_SECONDS6);
+    await redis2.sadd(ARTIFACT_INDEX, artifact.$id);
+    return true;
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Redis store failed for artifact");
+    return false;
+  }
+}
+async function loadArtifact(id) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${ARTIFACT_PREFIX}${id}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    logger.warn({ err: String(err), id }, "Redis load failed for artifact");
+    return null;
+  }
+}
+async function listAllArtifactIds() {
+  const redis2 = getRedis();
+  if (!redis2) return [];
+  try {
+    return await redis2.smembers(ARTIFACT_INDEX);
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Redis list failed for artifact index");
+    return [];
+  }
+}
+function trendEmoji(trend) {
+  if (trend === "up") return "\u2191";
+  if (trend === "down") return "\u2193";
+  return "\u2192";
+}
+function blockToMarkdown(block) {
+  const c = block.content;
+  switch (block.type) {
+    case "text":
+      return String(c.body ?? c.text ?? c ?? "");
+    case "table": {
+      const headers = c.headers ?? c.columns ?? [];
+      const rows = c.rows ?? c.data ?? [];
+      if (headers.length === 0) return "";
+      const headerLine = `| ${headers.join(" | ")} |`;
+      const separatorLine = `| ${headers.map(() => "---").join(" | ")} |`;
+      const dataLines = rows.map((r) => `| ${r.map(String).join(" | ")} |`);
+      return [headerLine, separatorLine, ...dataLines].join("\n");
+    }
+    case "chart":
+      return `\`\`\`widgetdc-query
+type: ${String(c.chart_type ?? c.type ?? "bar")}
+data: ${JSON.stringify(c.data ?? c)}
+\`\`\``;
+    case "cypher":
+      return `\`\`\`widgetdc-query
+cypher: ${String(c.query ?? c.cypher ?? c)}
+\`\`\``;
+    case "mermaid":
+      return "```mermaid\n" + String(c.diagram ?? c.code ?? c) + "\n```";
+    case "kpi_card": {
+      const label = String(c.label ?? block.label ?? "KPI");
+      const value = String(c.value ?? "");
+      const trend = trendEmoji(c.trend);
+      return `**${label}**: ${value} ${trend}`;
+    }
+    case "deep_link": {
+      const label = String(c.label ?? c.title ?? "Link");
+      const uri = String(c.uri ?? c.url ?? c.href ?? "#");
+      return `[${label}](${uri})`;
+    }
+    default:
+      return `<!-- unknown block type: ${block.type} -->
+${JSON.stringify(c, null, 2)}`;
+  }
+}
+async function renderMarkdown(req, res, id) {
+  const artifact = await loadArtifact(id);
+  if (!artifact) {
+    res.status(404).json({ success: false, error: "Artifact not found" });
+    return;
+  }
+  const lines = [];
+  lines.push(`# ${artifact.title}`);
+  lines.push("");
+  lines.push(`> Source: ${artifact.source} | Status: ${artifact.status} | Created: ${artifact.created_at}`);
+  if (artifact.tags?.length) {
+    lines.push(`> Tags: ${artifact.tags.map((t) => `#${t}`).join(" ")}`);
+  }
+  lines.push("");
+  for (const block of artifact.blocks) {
+    if (block.label) {
+      lines.push(`## ${block.label}`);
+      lines.push("");
+    }
+    lines.push(blockToMarkdown(block));
+    lines.push("");
+  }
+  if (artifact.graph_refs?.length) {
+    lines.push("---");
+    lines.push("## Graph References");
+    for (const ref of artifact.graph_refs) {
+      lines.push(`- \`${ref}\``);
+    }
+  }
+  res.type("text/markdown").send(lines.join("\n"));
+}
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function blockToHtml(block) {
+  const c = block.content;
+  const labelHtml = block.label ? `<h3>${escapeHtml(block.label)}</h3>
+` : "";
+  switch (block.type) {
+    case "text":
+      return `${labelHtml}<div class="wad-text">${escapeHtml(String(c.body ?? c.text ?? c ?? ""))}</div>`;
+    case "table": {
+      const headers = c.headers ?? c.columns ?? [];
+      const rows = c.rows ?? c.data ?? [];
+      const thRow = headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("");
+      const bodyRows = rows.map(
+        (r) => `<tr>${r.map((cell) => `<td>${escapeHtml(String(cell))}</td>`).join("")}</tr>`
+      ).join("\n");
+      return `${labelHtml}<table><thead><tr>${thRow}</tr></thead><tbody>
+${bodyRows}
+</tbody></table>`;
+    }
+    case "chart": {
+      const chartType = String(c.chart_type ?? c.type ?? "bar");
+      const config2 = JSON.stringify(c.data ?? c);
+      return `${labelHtml}<div class="wad-chart" data-type="${escapeHtml(chartType)}" data-config="${escapeHtml(config2)}">Chart: ${escapeHtml(chartType)}</div>`;
+    }
+    case "kpi_card": {
+      const label = String(c.label ?? block.label ?? "KPI");
+      const value = String(c.value ?? "");
+      const trend = trendEmoji(c.trend);
+      return `${labelHtml}<div class="wad-kpi"><span class="label">${escapeHtml(label)}</span><span class="value">${escapeHtml(value)}</span><span class="trend">${trend}</span></div>`;
+    }
+    case "cypher":
+      return `${labelHtml}<pre class="wad-cypher"><code>${escapeHtml(String(c.query ?? c.cypher ?? c))}</code></pre>`;
+    case "mermaid":
+      return `${labelHtml}<div class="wad-mermaid"><pre class="mermaid">${escapeHtml(String(c.diagram ?? c.code ?? c))}</pre></div>`;
+    case "deep_link": {
+      const label = String(c.label ?? c.title ?? "Link");
+      const uri = String(c.uri ?? c.url ?? c.href ?? "#");
+      return `${labelHtml}<a class="wad-link" href="${escapeHtml(uri)}">${escapeHtml(label)}</a>`;
+    }
+    default:
+      return `${labelHtml}<div class="wad-unknown"><pre>${escapeHtml(JSON.stringify(c, null, 2))}</pre></div>`;
+  }
+}
+async function renderHtml(_req, res, id) {
+  const artifact = await loadArtifact(id);
+  if (!artifact) {
+    res.status(404).json({ success: false, error: "Artifact not found" });
+    return;
+  }
+  const parts = [];
+  parts.push(`<article class="wad-artifact" data-id="${escapeHtml(artifact.$id)}" data-status="${artifact.status}">`);
+  parts.push(`  <h1>${escapeHtml(artifact.title)}</h1>`);
+  parts.push(`  <div class="wad-meta">Source: ${escapeHtml(artifact.source)} | Status: ${artifact.status} | ${artifact.created_at}</div>`);
+  if (artifact.tags?.length) {
+    parts.push(`  <div class="wad-tags">${artifact.tags.map((t) => `<span class="wad-tag">${escapeHtml(t)}</span>`).join(" ")}</div>`);
+  }
+  for (const block of artifact.blocks) {
+    parts.push(`  <section class="wad-block wad-block-${block.type}">`);
+    parts.push(`    ${blockToHtml(block)}`);
+    parts.push("  </section>");
+  }
+  if (artifact.graph_refs?.length) {
+    parts.push('  <footer class="wad-graph-refs">');
+    parts.push("    <h3>Graph References</h3>");
+    parts.push("    <ul>");
+    for (const ref of artifact.graph_refs) {
+      parts.push(`      <li><code>${escapeHtml(ref)}</code></li>`);
+    }
+    parts.push("    </ul>");
+    parts.push("  </footer>");
+  }
+  parts.push("</article>");
+  res.type("text/html").send(parts.join("\n"));
+}
+var artifactRouter, ARTIFACT_PREFIX, ARTIFACT_INDEX, TTL_SECONDS6;
+var init_artifacts = __esm({
+  "src/routes/artifacts.ts"() {
+    "use strict";
+    init_redis();
+    init_logger();
+    artifactRouter = Router4();
+    ARTIFACT_PREFIX = "orchestrator:artifact:";
+    ARTIFACT_INDEX = "orchestrator:artifacts:index";
+    TTL_SECONDS6 = 2592e3;
+    artifactRouter.post("/", async (req, res) => {
+      const body = req.body;
+      if (!body.title || !body.source || !Array.isArray(body.blocks) || !body.created_by) {
+        res.status(400).json({ success: false, error: "Missing required fields: title, source, blocks, created_by" });
+        return;
+      }
+      const id = `widgetdc:artifact:${randomUUID()}`;
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const artifact = {
+        $id: id,
+        $schema: "widgetdc:analysis:v1",
+        title: String(body.title),
+        source: String(body.source),
+        blocks: body.blocks,
+        graph_refs: Array.isArray(body.graph_refs) ? body.graph_refs : void 0,
+        tags: Array.isArray(body.tags) ? body.tags : void 0,
+        status: "draft",
+        created_by: String(body.created_by),
+        created_at: now,
+        updated_at: now
+      };
+      const stored = await storeArtifact(artifact);
+      if (!stored) {
+        res.status(503).json({ success: false, error: "Redis not available" });
+        return;
+      }
+      logger.info({ id: artifact.$id, title: artifact.title }, "Artifact created");
+      res.status(201).json({ success: true, artifact });
+    });
+    artifactRouter.get("/", async (req, res) => {
+      const statusFilter = req.query.status;
+      const tagFilter = req.query.tag;
+      const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 200);
+      const offset = Math.max(parseInt(req.query.offset) || 0, 0);
+      const allIds = await listAllArtifactIds();
+      const redis2 = getRedis();
+      if (!redis2) {
+        res.json({ artifacts: [], total: 0, limit, offset });
+        return;
+      }
+      const artifacts = [];
+      try {
+        const pipeline = redis2.pipeline();
+        for (const id of allIds) {
+          pipeline.get(`${ARTIFACT_PREFIX}${id}`);
+        }
+        const results = await pipeline.exec();
+        if (results) {
+          for (const [err, raw] of results) {
+            if (!err && typeof raw === "string") {
+              try {
+                artifacts.push(JSON.parse(raw));
+              } catch {
+              }
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn({ err: String(err) }, "Redis pipeline failed for artifact list");
+      }
+      let filtered = artifacts.filter((a) => a.status !== "archived");
+      if (statusFilter) {
+        filtered = filtered.filter((a) => a.status === statusFilter);
+      }
+      if (tagFilter) {
+        filtered = filtered.filter((a) => a.tags?.includes(tagFilter));
+      }
+      filtered.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+      const total = filtered.length;
+      const page = filtered.slice(offset, offset + limit);
+      res.json({ artifacts: page, total, limit, offset });
+    });
+    artifactRouter.get("/:id", async (req, res) => {
+      const id = req.params.id;
+      if (id.endsWith(".md")) {
+        return renderMarkdown(req, res, id.replace(/\.md$/, ""));
+      }
+      if (id.endsWith(".html")) {
+        return renderHtml(req, res, id.replace(/\.html$/, ""));
+      }
+      const artifact = await loadArtifact(id);
+      if (!artifact) {
+        res.status(404).json({ success: false, error: "Artifact not found" });
+        return;
+      }
+      res.json(artifact);
+    });
+    artifactRouter.put("/:id", async (req, res) => {
+      const id = req.params.id;
+      const existing = await loadArtifact(id);
+      if (!existing) {
+        res.status(404).json({ success: false, error: "Artifact not found" });
+        return;
+      }
+      const body = req.body;
+      if (body.title) existing.title = body.title;
+      if (body.source) existing.source = body.source;
+      if (body.blocks) existing.blocks = body.blocks;
+      if (body.graph_refs !== void 0) existing.graph_refs = body.graph_refs;
+      if (body.tags !== void 0) existing.tags = body.tags;
+      if (body.status && ["draft", "published", "archived"].includes(body.status)) {
+        existing.status = body.status;
+      }
+      existing.updated_at = (/* @__PURE__ */ new Date()).toISOString();
+      const stored = await storeArtifact(existing);
+      if (!stored) {
+        res.status(503).json({ success: false, error: "Redis not available" });
+        return;
+      }
+      logger.info({ id, title: existing.title }, "Artifact updated");
+      res.json({ success: true, artifact: existing });
+    });
+    artifactRouter.delete("/:id", async (req, res) => {
+      const id = req.params.id;
+      const existing = await loadArtifact(id);
+      if (!existing) {
+        res.status(404).json({ success: false, error: "Artifact not found" });
+        return;
+      }
+      existing.status = "archived";
+      existing.updated_at = (/* @__PURE__ */ new Date()).toISOString();
+      const stored = await storeArtifact(existing);
+      if (!stored) {
+        res.status(503).json({ success: false, error: "Redis not available" });
+        return;
+      }
+      logger.info({ id }, "Artifact archived");
+      res.json({ success: true });
+    });
+  }
+});
+
+// src/routes/drill.ts
+var drill_exports = {};
+__export(drill_exports, {
+  drillRouter: () => drillRouter,
+  fetchDrillChildren: () => fetchDrillChildren,
+  loadDrillContext: () => loadDrillContext,
+  saveDrillContext: () => saveDrillContext
+});
+import { Router as Router5 } from "express";
+import { randomUUID as randomUUID2 } from "crypto";
+async function callMcp(tool, payload) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MCP_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.backendApiKey}`
+      },
+      body: JSON.stringify({ tool, payload }),
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      return { ok: false, error: `MCP ${tool} returned ${res.status}` };
+    }
+    const data = await res.json();
+    return { ok: true, data };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `MCP ${tool} failed: ${msg}` };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function extractRecords(data) {
+  if (Array.isArray(data)) return data;
+  if (data && typeof data === "object") {
+    const d = data;
+    if (Array.isArray(d.records)) return d.records;
+    if (Array.isArray(d.data)) return d.data;
+    if (Array.isArray(d.results)) return d.results;
+  }
+  return [];
+}
+function nextLevel(current) {
+  const idx = LEVEL_ORDER.indexOf(current);
+  return idx >= 0 && idx < LEVEL_ORDER.length - 1 ? LEVEL_ORDER[idx + 1] : null;
+}
+function childrenQuery(level, id) {
+  switch (level) {
+    case "domain":
+      return {
+        query: `MATCH (d:ConsultingDomain {name: $name})-[:HAS_SEGMENT]->(s) RETURN s.name AS label, elementId(s) AS id, 'segment' AS level`,
+        params: { name: id }
+      };
+    case "segment":
+      return {
+        query: `MATCH (s {name: $name})-[:HAS_FRAMEWORK]->(f:ConsultingFramework) RETURN f.name AS label, elementId(f) AS id, 'framework' AS level`,
+        params: { name: id }
+      };
+    case "framework":
+      return {
+        query: `MATCH (f:ConsultingFramework {name: $name})-[:HAS_KPI]->(k:KPI) RETURN k.name AS label, elementId(k) AS id, 'kpi' AS level`,
+        params: { name: id }
+      };
+    case "kpi":
+      return {
+        query: `MATCH (k:KPI {name: $name})-[:HAS_TREND]->(t) RETURN t.name AS label, elementId(t) AS id, 'trend' AS level`,
+        params: { name: id }
+      };
+    case "trend":
+      return {
+        query: `MATCH (t {name: $name})-[:HAS_RECOMMENDATION]->(r) RETURN r.name AS label, elementId(r) AS id, 'recommendation' AS level`,
+        params: { name: id }
+      };
+    default:
+      return null;
+  }
+}
+function domainFrameworksFallback() {
+  return {
+    query: `MATCH (d:ConsultingDomain {name: $name})-[:HAS_FRAMEWORK]->(f:ConsultingFramework) RETURN f.name AS label, elementId(f) AS id, 'framework' AS level`,
+    params: { name: "" }
+    // filled at call site
+  };
+}
+async function fetchDrillChildren(level, label) {
+  const q = childrenQuery(level, label);
+  if (!q) return [];
+  const result = await callMcp("graph.read_cypher", { query: q.query, params: q.params });
+  if (!result.ok) {
+    logger.warn({ level, label, error: result.error }, "Drill children query failed");
+    return [];
+  }
+  let records = extractRecords(result.data);
+  if (level === "domain" && records.length === 0) {
+    const fb = domainFrameworksFallback();
+    fb.params.name = label;
+    const fbResult = await callMcp("graph.read_cypher", { query: fb.query, params: fb.params });
+    if (fbResult.ok) {
+      records = extractRecords(fbResult.data);
+    }
+  }
+  return records.map((r) => ({
+    id: String(r.id ?? ""),
+    label: String(r.label ?? ""),
+    type: String(r.level ?? nextLevel(level) ?? "unknown"),
+    count: typeof r.count === "number" ? r.count : void 0
+  }));
+}
+async function saveDrillContext(sessionId, ctx) {
+  const redis2 = getRedis();
+  if (!redis2) return false;
+  try {
+    await redis2.set(`${DRILL_PREFIX}${sessionId}`, JSON.stringify(ctx), "EX", SESSION_TTL);
+    return true;
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Redis save failed for drill context");
+    return false;
+  }
+}
+async function loadDrillContext(sessionId) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${DRILL_PREFIX}${sessionId}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Redis load failed for drill context");
+    return null;
+  }
+}
+function buildBreadcrumbs(ctx) {
+  return [
+    ...ctx.stack,
+    { level: ctx.current_level, id: ctx.current_id, label: ctx.current_label }
+  ];
+}
+function trendArrow(trend) {
+  if (!trend) return "\u2192";
+  const t = trend.toLowerCase();
+  if (t === "up" || t === "rising" || t === "increasing") return "\u2191";
+  if (t === "down" || t === "falling" || t === "decreasing") return "\u2193";
+  return "\u2192";
+}
+var drillRouter, DRILL_PREFIX, SESSION_TTL, MCP_TIMEOUT_MS, LEVEL_ORDER;
+var init_drill = __esm({
+  "src/routes/drill.ts"() {
+    "use strict";
+    init_redis();
+    init_config();
+    init_logger();
+    drillRouter = Router5();
+    DRILL_PREFIX = "orchestrator:drill:";
+    SESSION_TTL = 3600;
+    MCP_TIMEOUT_MS = 12e3;
+    LEVEL_ORDER = ["domain", "segment", "framework", "kpi", "trend", "recommendation"];
+    drillRouter.post("/start", async (req, res) => {
+      const { domain } = req.body;
+      if (!domain) {
+        res.status(400).json({ success: false, error: "Missing required field: domain" });
+        return;
+      }
+      const sessionId = randomUUID2();
+      const ctx = {
+        stack: [],
+        current_level: "domain",
+        current_id: domain,
+        current_label: domain,
+        domain
+      };
+      const saved = await saveDrillContext(sessionId, ctx);
+      if (!saved) {
+        res.status(503).json({ success: false, error: "Redis not available" });
+        return;
+      }
+      const children = await fetchDrillChildren("domain", domain);
+      logger.info({ session_id: sessionId, domain, children_count: children.length }, "Drill session started");
+      res.json({
+        success: true,
+        session_id: sessionId,
+        context: ctx,
+        children,
+        breadcrumbs: buildBreadcrumbs(ctx)
+      });
+    });
+    drillRouter.post("/down", async (req, res) => {
+      const { session_id, target_id, target_level } = req.body;
+      if (!session_id || !target_id || !target_level) {
+        res.status(400).json({ success: false, error: "Missing required fields: session_id, target_id, target_level" });
+        return;
+      }
+      const ctx = await loadDrillContext(session_id);
+      if (!ctx) {
+        res.status(404).json({ success: false, error: "Drill session not found or expired" });
+        return;
+      }
+      ctx.stack.push({
+        level: ctx.current_level,
+        id: ctx.current_id,
+        label: ctx.current_label
+      });
+      ctx.current_level = target_level;
+      ctx.current_id = target_id;
+      ctx.current_label = target_id;
+      await saveDrillContext(session_id, ctx);
+      const children = await fetchDrillChildren(target_level, target_id);
+      logger.info({ session_id, target_level, target_id, depth: ctx.stack.length }, "Drill down");
+      res.json({
+        success: true,
+        context: ctx,
+        children,
+        breadcrumbs: buildBreadcrumbs(ctx)
+      });
+    });
+    drillRouter.post("/up", async (req, res) => {
+      const { session_id } = req.body;
+      if (!session_id) {
+        res.status(400).json({ success: false, error: "Missing required field: session_id" });
+        return;
+      }
+      const ctx = await loadDrillContext(session_id);
+      if (!ctx) {
+        res.status(404).json({ success: false, error: "Drill session not found or expired" });
+        return;
+      }
+      if (ctx.stack.length === 0) {
+        res.status(400).json({ success: false, error: "Already at top level" });
+        return;
+      }
+      const parent = ctx.stack.pop();
+      ctx.current_level = parent.level;
+      ctx.current_id = parent.id;
+      ctx.current_label = parent.label;
+      await saveDrillContext(session_id, ctx);
+      const children = await fetchDrillChildren(ctx.current_level, ctx.current_label);
+      logger.info({ session_id, level: ctx.current_level, label: ctx.current_label }, "Drill up");
+      res.json({
+        success: true,
+        context: ctx,
+        children,
+        breadcrumbs: buildBreadcrumbs(ctx)
+      });
+    });
+    drillRouter.get("/children", async (req, res) => {
+      const sessionId = req.query.session_id;
+      if (!sessionId) {
+        res.status(400).json({ success: false, error: "Missing required query param: session_id" });
+        return;
+      }
+      const ctx = await loadDrillContext(sessionId);
+      if (!ctx) {
+        res.status(404).json({ success: false, error: "Drill session not found or expired" });
+        return;
+      }
+      const children = await fetchDrillChildren(ctx.current_level, ctx.current_label);
+      res.json({
+        success: true,
+        children,
+        context: ctx,
+        breadcrumbs: buildBreadcrumbs(ctx)
+      });
+    });
+    drillRouter.get("/moc", async (req, res) => {
+      const domain = req.query.domain;
+      if (!domain) {
+        res.status(400).json({ success: false, error: "Missing required query param: domain" });
+        return;
+      }
+      const hierarchyQuery = `
+    MATCH (d:ConsultingDomain {name: $domain})
+    OPTIONAL MATCH (d)-[:HAS_FRAMEWORK]->(f:ConsultingFramework)
+    OPTIONAL MATCH (f)-[:HAS_KPI]->(k:KPI)
+    RETURN d.name AS domain_name, f.name AS framework_name, k.name AS kpi_name, k.value AS kpi_value, k.trend AS kpi_trend
+    ORDER BY f.name, k.name
+  `;
+      const result = await callMcp("graph.read_cypher", {
+        query: hierarchyQuery,
+        params: { domain }
+      });
+      if (!result.ok) {
+        res.status(502).json({ success: false, error: result.error ?? "Neo4j query failed" });
+        return;
+      }
+      const records = extractRecords(result.data);
+      const frameworks = /* @__PURE__ */ new Map();
+      for (const rec of records) {
+        const fName = rec.framework_name ? String(rec.framework_name) : null;
+        if (!fName) continue;
+        if (!frameworks.has(fName)) {
+          frameworks.set(fName, { kpis: [] });
+        }
+        const kName = rec.kpi_name ? String(rec.kpi_name) : null;
+        if (kName) {
+          frameworks.get(fName).kpis.push({
+            name: kName,
+            value: String(rec.kpi_value ?? ""),
+            trend: trendArrow(rec.kpi_trend)
+          });
+        }
+      }
+      const lines = [];
+      lines.push(`# ${domain} \u2014 Map of Content`);
+      lines.push("");
+      lines.push(`> Generated: ${(/* @__PURE__ */ new Date()).toISOString()}`);
+      lines.push(`> Source: WidgeTDC Neo4j Knowledge Graph`);
+      lines.push("");
+      if (frameworks.size > 0) {
+        lines.push("## Frameworks");
+        lines.push("");
+        for (const [fName, fData] of frameworks) {
+          lines.push(`- [[${fName}]] (${fData.kpis.length} KPIs)`);
+        }
+        lines.push("");
+        lines.push("## KPIs");
+        lines.push("");
+        for (const [fName, fData] of frameworks) {
+          if (fData.kpis.length === 0) continue;
+          lines.push(`### ${fName}`);
+          lines.push("");
+          for (const kpi of fData.kpis) {
+            const valueStr = kpi.value ? `: ${kpi.value} ${kpi.trend}` : ` ${kpi.trend}`;
+            lines.push(`- ${kpi.name}${valueStr}`);
+          }
+          lines.push("");
+        }
+      } else {
+        lines.push("*No frameworks found for this domain.*");
+        lines.push("");
+      }
+      const recsQuery = `
+    MATCH (d:ConsultingDomain {name: $domain})-[:HAS_FRAMEWORK]->(f)-[:HAS_KPI]->(k)-[:HAS_RECOMMENDATION]->(r)
+    RETURN r.name AS rec_name, r.description AS rec_desc, elementId(r) AS rec_id
+    LIMIT 20
+  `;
+      const recsResult = await callMcp("graph.read_cypher", { query: recsQuery, params: { domain } });
+      const recs = recsResult.ok ? extractRecords(recsResult.data) : [];
+      if (recs.length > 0) {
+        lines.push("## Recommendations");
+        lines.push("");
+        for (const rec of recs) {
+          const name = String(rec.rec_name ?? "Unnamed");
+          const desc = rec.rec_desc ? ` \u2014 ${String(rec.rec_desc)}` : "";
+          const id = String(rec.rec_id ?? "");
+          lines.push(`- [${name}](obsidian://widgetdc-open?artifact=${encodeURIComponent(id)})${desc}`);
+        }
+        lines.push("");
+      }
+      lines.push("---");
+      lines.push(`*Map of Content for ${domain} \u2014 WidgeTDC Adoption Blueprint*`);
+      logger.info({ domain, frameworks: frameworks.size, records: records.length }, "MOC generated");
+      res.type("text/markdown").send(lines.join("\n"));
+    });
+  }
+});
+
 // src/hyperagent/hyperagent-autonomous.ts
 var hyperagent_autonomous_exports = {};
 __export(hyperagent_autonomous_exports, {
@@ -23892,7 +25179,7 @@ __export(hyperagent_autonomous_exports, {
   runAutonomousCycle: () => runAutonomousCycle,
   setPhase: () => setPhase
 });
-import { v4 as uuid21 } from "uuid";
+import { v4 as uuid23 } from "uuid";
 function stream(event, data) {
   const payload = {
     ...data,
@@ -24292,7 +25579,7 @@ async function runAutonomousCycle(phase, maxTargets) {
       }
     }
   }
-  const cycleId = `auto-${uuid21().slice(0, 8)}`;
+  const cycleId = `auto-${uuid23().slice(0, 8)}`;
   const effectivePhase = phase ?? currentPhase;
   const batchSize = maxTargets ?? CYCLE_BATCH_SIZE[effectivePhase];
   const profileId = PHASE_POLICY[effectivePhase];
@@ -24942,6 +26229,152 @@ var init_inventor_sampler = __esm({
   }
 });
 
+// src/intelligence/circle-packing-evaluator.ts
+var circle_packing_evaluator_exports = {};
+__export(circle_packing_evaluator_exports, {
+  circlesToArtifact: () => circlesToArtifact,
+  evaluatePacking: () => evaluatePacking,
+  hexagonalInitialSolution: () => hexagonalInitialSolution,
+  parseCircles: () => parseCircles
+});
+function parseCircles(artifact) {
+  const circles = [];
+  try {
+    const parsed = JSON.parse(artifact);
+    if (Array.isArray(parsed)) {
+      for (const item of parsed) {
+        if (Array.isArray(item) && item.length >= 3) {
+          circles.push({ x: Number(item[0]), y: Number(item[1]), r: Number(item[2]) });
+        } else if (typeof item === "object" && item !== null) {
+          const x = Number(item.x ?? item[0] ?? 0);
+          const y = Number(item.y ?? item[1] ?? 0);
+          const r = Number(item.r ?? item[2] ?? item.radius ?? 0);
+          if (!isNaN(x) && !isNaN(y) && !isNaN(r)) {
+            circles.push({ x, y, r });
+          }
+        }
+      }
+      if (circles.length > 0) return circles;
+    }
+  } catch {
+  }
+  const tupleRegex = /\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*\)/g;
+  let m;
+  while ((m = tupleRegex.exec(artifact)) !== null) {
+    const x = parseFloat(m[1]);
+    const y = parseFloat(m[2]);
+    const r = parseFloat(m[3]);
+    if (!isNaN(x) && !isNaN(y) && !isNaN(r)) {
+      circles.push({ x, y, r });
+    }
+  }
+  if (circles.length > 0) return circles;
+  const lines = artifact.split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const parts = trimmed.split(/[,\s]+/).filter(Boolean);
+    if (parts.length >= 3) {
+      const x = parseFloat(parts[0]);
+      const y = parseFloat(parts[1]);
+      const r = parseFloat(parts[2]);
+      if (!isNaN(x) && !isNaN(y) && !isNaN(r) && r > 0) {
+        circles.push({ x, y, r });
+      }
+    }
+  }
+  return circles;
+}
+function evaluatePacking(circles) {
+  const overlapViolations = [];
+  const boundaryViolations = [];
+  let sumRadii = 0;
+  for (let i = 0; i < circles.length; i++) {
+    const c = circles[i];
+    sumRadii += c.r;
+    if (c.x - c.r < -1e-9) boundaryViolations.push(`Circle ${i}: x-r=${(c.x - c.r).toFixed(6)} < 0`);
+    if (c.x + c.r > 1 + 1e-9) boundaryViolations.push(`Circle ${i}: x+r=${(c.x + c.r).toFixed(6)} > 1`);
+    if (c.y - c.r < -1e-9) boundaryViolations.push(`Circle ${i}: y-r=${(c.y - c.r).toFixed(6)} < 0`);
+    if (c.y + c.r > 1 + 1e-9) boundaryViolations.push(`Circle ${i}: y+r=${(c.y + c.r).toFixed(6)} > 1`);
+    for (let j = i + 1; j < circles.length; j++) {
+      const d = Math.sqrt((c.x - circles[j].x) ** 2 + (c.y - circles[j].y) ** 2);
+      const minDist = c.r + circles[j].r;
+      if (d < minDist - 1e-9) {
+        overlapViolations.push(`Circles ${i},${j}: dist=${d.toFixed(6)} < r_i+r_j=${minDist.toFixed(6)} (overlap=${(minDist - d).toFixed(6)})`);
+      }
+    }
+  }
+  const totalViolations = overlapViolations.length + boundaryViolations.length;
+  const feasible = totalViolations === 0;
+  const maxPenalty = totalViolations > 0 ? Math.min(1, totalViolations * 0.05 + overlapViolations.length * 0.1) : 0;
+  const rawScore = feasible ? sumRadii / 4 : 0;
+  const score = Math.max(0, rawScore * (1 - maxPenalty));
+  const details = [
+    `Circles: ${circles.length}`,
+    `Sum radii: ${sumRadii.toFixed(6)}`,
+    `Feasible: ${feasible}`,
+    `Boundary violations: ${boundaryViolations.length}`,
+    `Overlap violations: ${overlapViolations.length}`,
+    `Score: ${score.toFixed(6)}`
+  ].join("\n");
+  return {
+    circles,
+    sum_radii: sumRadii,
+    violations: totalViolations,
+    overlap_violations: overlapViolations.length,
+    boundary_violations: boundaryViolations.length,
+    feasible,
+    score: Math.min(1, score),
+    max_penalty: maxPenalty,
+    details
+  };
+}
+function hexagonalInitialSolution(n, radius) {
+  const circles = [];
+  const rowHeight = radius * Math.sqrt(3);
+  const rows = [6, 5, 6, 5, 4];
+  let count = 0;
+  for (let row = 0; row < rows.length && count < n; row++) {
+    const cols = rows[row];
+    const y = 0.1 + row * rowHeight;
+    const offsetX = row % 2 === 1 ? radius : 0;
+    for (let col = 0; col < cols && count < n; col++) {
+      const x = 0.1 + offsetX + col * 2 * radius;
+      if (x + radius <= 1 && y + radius <= 1) {
+        circles.push({ x, y, r: radius });
+        count++;
+      }
+    }
+  }
+  while (circles.length < n) {
+    const idx = circles.length;
+    const gridSize = Math.ceil(Math.sqrt(n));
+    const spacing = 2 * radius;
+    const row = Math.floor(idx / gridSize);
+    const col = idx % gridSize;
+    const x = radius + col * spacing;
+    const y = radius + row * spacing;
+    if (x + radius <= 1 && y + radius <= 1) {
+      circles.push({ x, y, r: radius });
+    } else {
+      break;
+    }
+  }
+  return circles.slice(0, n);
+}
+function circlesToArtifact(circles) {
+  const lines = circles.map((c) => `  (${c.x.toFixed(6)}, ${c.y.toFixed(6)}, ${c.r.toFixed(6)}),`);
+  return `circles = [
+${lines.join("\n")}
+]
+# Sum of radii: ${circles.reduce((s, c) => s + c.r, 0).toFixed(6)}`;
+}
+var init_circle_packing_evaluator = __esm({
+  "src/intelligence/circle-packing-evaluator.ts"() {
+    "use strict";
+  }
+});
+
 // src/intelligence/inventor-loop.ts
 var inventor_loop_exports = {};
 __export(inventor_loop_exports, {
@@ -24954,7 +26387,7 @@ __export(inventor_loop_exports, {
   runInventor: () => runInventor,
   stopInventor: () => stopInventor
 });
-import { v4 as uuid22 } from "uuid";
+import { v4 as uuid24 } from "uuid";
 function stream2(event, data) {
   broadcastSSE("inventor", { event, ...data, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
 }
@@ -25034,7 +26467,34 @@ async function runResearcher(task, parentNodes, cognitionItems, config2) {
     (c) => `[${c.source}] ${c.title}
   ${c.content.slice(0, 200)}`
   ).join("\n\n");
-  const prompt = `You are the Researcher agent in an evolutionary AI system.
+  const isCirclePacking = /circle\s*pack|26\s*circles|maximise\s+sum\s+of\s+radii|maximize\s+sum\s+of\s*radii/i.test(task);
+  const basePrompt = isCirclePacking ? `You are a circle packing optimization researcher.
+
+TASK: ${task}
+
+PARENT SOLUTIONS (sampled via ${config2.sampling.algorithm}):
+${parentContext || "(no parents yet \u2014 generate an initial solution)"}
+
+RELEVANT KNOWLEDGE:
+${cognitionContext || "(no prior knowledge available)"}
+
+Generate a NEW circle packing configuration that improves on the best parent.
+
+OUTPUT FORMAT \u2014 EXACT JSON (no other text, no markdown):
+{
+  "motivation": "1-2 sentences on what changed and why it improves",
+  "artifact": "[(x1, y1, r1), (x2, y2, r2), ...]"
+}
+
+CIRCLE PACKING RULES:
+- 26 circles total, each as (x, y, r) where x,y = center, r = radius
+- All circles must fit in unit square: x-r>=0, x+r<=1, y-r>=0, y+r<=1
+- No overlap: for all i\u2260j, sqrt((xi-xj)\xB2+(yi-yj)\xB2) >= ri+rj
+- Objective: maximize sum of all radii
+- SOTA sum_radii \u2248 2.635
+- Use hexagonal close-packing as baseline (row spacing = r*sqrt(3))
+- Vary radii: larger circles at corners/edges, smaller in center
+- Output ONLY the JSON with the list of 26 (x,y,r) tuples` : `You are the Researcher agent in an evolutionary AI system.
 
 TASK: ${task}
 
@@ -25066,7 +26526,7 @@ RULES:
       provider: "deepseek",
       messages: [
         { role: "system", content: "You are a JSON-only API for an evolutionary AI system. Respond with ONLY valid JSON. No markdown code blocks, no explanation text, no extra commentary. The response must parse as valid JSON." },
-        { role: "user", content: prompt }
+        { role: "user", content: base_prompt }
       ],
       model: "deepseek-chat",
       max_tokens: 4e3,
@@ -25139,6 +26599,45 @@ async function runEngineer(node, config2) {
       return { aggregate, scores };
     };
     var parsePrismText = parsePrismText2;
+    const isCirclePacking = /circle\s*pack|26\s*circles|maximise\s+sum\s+of\s+radii|maximize\s+sum\s+of\s*radii/i.test(config2.taskDescription);
+    if (isCirclePacking) {
+      const { parseCircles: parseCircles2, evaluatePacking: evaluatePacking2, circlesToArtifact: circlesToArtifact2, hexagonalInitialSolution: hexagonalInitialSolution2 } = await Promise.resolve().then(() => (init_circle_packing_evaluator(), circle_packing_evaluator_exports));
+      const circles = parseCircles2(node.artifact);
+      if (circles.length === 0) {
+        const initial = hexagonalInitialSolution2(26, 0.06);
+        node.artifact = circlesToArtifact2(initial);
+        const eval_2 = evaluatePacking2(initial);
+        return {
+          nodeId: node.id,
+          success: eval_2.feasible,
+          score: eval_2.score,
+          metrics: {
+            sum_radii: eval_2.sum_radii,
+            violations: eval_2.violations,
+            feasible: eval_2.feasible,
+            sota_gap: (2.635 - eval_2.sum_radii).toFixed(4)
+          },
+          output: eval_2.details,
+          durationMs: Date.now() - t0,
+          tokensUsed: 0
+        };
+      }
+      const eval_ = evaluatePacking2(circles);
+      return {
+        nodeId: node.id,
+        success: eval_.feasible,
+        score: eval_.score,
+        metrics: {
+          sum_radii: eval_.sum_radii,
+          violations: eval_.violations,
+          feasible: eval_.feasible,
+          sota_gap: (2.635 - eval_.sum_radii).toFixed(4)
+        },
+        output: eval_.details,
+        durationMs: Date.now() - t0,
+        tokensUsed: 0
+      };
+    }
     const result = await callMcpTool({
       toolName: "judge_response",
       args: {
@@ -25300,7 +26799,7 @@ async function runStep(config2) {
     cognitionItems,
     config2
   );
-  const nodeId = `inv-${uuid22().slice(0, 8)}`;
+  const nodeId = `inv-${uuid24().slice(0, 8)}`;
   const parentId = parentNodes.length > 0 ? parentNodes[0].id : null;
   const node = {
     id: nodeId,
@@ -25561,7 +27060,7 @@ async function runInventor(config2, resume = false) {
   });
   if (config2.initialArtifact && nodes.size === 0) {
     const seedNode = {
-      id: `inv-seed-${uuid22().slice(0, 8)}`,
+      id: `inv-seed-${uuid24().slice(0, 8)}`,
       parentId: null,
       artifact: config2.initialArtifact,
       taskDescription: config2.taskDescription,
@@ -25711,7 +27210,7 @@ async function getExperimentHistory(limit = 20) {
     return [];
   }
 }
-var isRunning3, currentConfig, currentStep2, bestScore, bestNodeId, startedAt, lastStepAt, lastError, sampler, abortRequested, nodes, REDIS_PREFIX9, nodeKey, stateKey, samplerKey, historyKey;
+var isRunning3, currentConfig, currentStep2, bestScore, bestNodeId, startedAt, lastStepAt, lastError, sampler, abortRequested, nodes, REDIS_PREFIX10, nodeKey, stateKey, samplerKey, historyKey;
 var init_inventor_loop = __esm({
   "src/intelligence/inventor-loop.ts"() {
     "use strict";
@@ -25736,11 +27235,11 @@ var init_inventor_loop = __esm({
     sampler = null;
     abortRequested = false;
     nodes = /* @__PURE__ */ new Map();
-    REDIS_PREFIX9 = "inventor:";
-    nodeKey = (expName) => `${REDIS_PREFIX9}${expName}:nodes`;
-    stateKey = (expName) => `${REDIS_PREFIX9}${expName}:state`;
-    samplerKey = (expName) => `${REDIS_PREFIX9}${expName}:sampler`;
-    historyKey = () => `${REDIS_PREFIX9}history`;
+    REDIS_PREFIX10 = "inventor:";
+    nodeKey = (expName) => `${REDIS_PREFIX10}${expName}:nodes`;
+    stateKey = (expName) => `${REDIS_PREFIX10}${expName}:state`;
+    samplerKey = (expName) => `${REDIS_PREFIX10}${expName}:sampler`;
+    historyKey = () => `${REDIS_PREFIX10}history`;
   }
 });
 
@@ -26743,7 +28242,7 @@ async function persistState2() {
   const redis2 = getRedis();
   if (!redis2) return;
   try {
-    await redis2.set(REDIS_KEY3, JSON.stringify({ ...state3, _schemaVersion: 1 }), "EX", 86400);
+    await redis2.set(REDIS_KEY4, JSON.stringify({ ...state3, _schemaVersion: 1 }), "EX", 86400);
   } catch {
   }
 }
@@ -26751,7 +28250,7 @@ async function loadState3() {
   const redis2 = getRedis();
   if (!redis2) return;
   try {
-    const raw = await redis2.get(REDIS_KEY3);
+    const raw = await redis2.get(REDIS_KEY4);
     if (raw) {
       const loaded = JSON.parse(raw);
       if (loaded._schemaVersion !== 1) {
@@ -26791,7 +28290,7 @@ async function initAnomalyWatcher() {
     "Anomaly-watcher initialized"
   );
 }
-var REDIS_KEY3, MAX_ACTIVE_ANOMALIES, MAX_PATTERNS, state3, KNOWN_FAILURE_PATTERNS;
+var REDIS_KEY4, MAX_ACTIVE_ANOMALIES, MAX_PATTERNS, state3, KNOWN_FAILURE_PATTERNS;
 var init_anomaly_watcher = __esm({
   "src/swarm/anomaly-watcher.ts"() {
     "use strict";
@@ -26804,7 +28303,7 @@ var init_anomaly_watcher = __esm({
     init_sse();
     init_chat_broadcaster();
     init_pheromone_layer();
-    REDIS_KEY3 = "anomaly-watcher:state";
+    REDIS_KEY4 = "anomaly-watcher:state";
     MAX_ACTIVE_ANOMALIES = 50;
     MAX_PATTERNS = 100;
     state3 = {
@@ -26892,7 +28391,7 @@ __export(tool_executor_exports, {
   executeToolUnified: () => executeToolUnified,
   getTokenSavings: () => getTokenSavings
 });
-import { v4 as uuid23 } from "uuid";
+import { v4 as uuid25 } from "uuid";
 async function enforceHyperAgentGate(toolName2, opts) {
   const toolDef = getTool(toolName2);
   if (!toolDef) return null;
@@ -26918,7 +28417,7 @@ function getTokenSavings() {
 async function saveFullToolOutput(content, toolName2) {
   const redis2 = getRedis();
   if (!redis2) return null;
-  const id = uuid23();
+  const id = uuid25();
   try {
     const payload = JSON.stringify({
       $id: `tool-output-${id}`,
@@ -27036,7 +28535,7 @@ function buildToolFallback(toolName2, error) {
   }
 }
 async function executeToolUnified(toolName2, args, opts) {
-  const callId = opts?.call_id ?? uuid23();
+  const callId = opts?.call_id ?? uuid25();
   const t0 = Date.now();
   let deprecation_notice;
   const toolDef = getTool(toolName2);
@@ -27128,7 +28627,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher, params: args.params ?? {} },
-        callId: uuid23(),
+        callId: uuid25(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
@@ -27149,7 +28648,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher },
-        callId: uuid23(),
+        callId: uuid25(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Task query failed: ${result.error_message}`;
@@ -27167,7 +28666,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: toolName2,
         args: mcpArgs ?? {},
-        callId: uuid23(),
+        callId: uuid25(),
         timeoutMs: 3e4
       });
       if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
@@ -27175,8 +28674,8 @@ ${result.merged_context}`;
     }
     case "get_platform_health": {
       const [backendHealth, graphHealth] = await Promise.allSettled([
-        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid23(), timeoutMs: 1e4 }),
-        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid23(), timeoutMs: 1e4 })
+        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid25(), timeoutMs: 1e4 }),
+        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid25(), timeoutMs: 1e4 })
       ]);
       const parts = [];
       if (backendHealth.status === "fulfilled" && backendHealth.value.status === "success") {
@@ -27192,7 +28691,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: args.query },
-        callId: uuid23(),
+        callId: uuid25(),
         timeoutMs: 2e4
       });
       if (result.status !== "success") return `Document search failed: ${result.error_message}`;
@@ -27210,7 +28709,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issues",
         args: payload,
-        callId: uuid23(),
+        callId: uuid25(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
@@ -27226,7 +28725,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issue_get",
         args: { identifier },
-        callId: uuid23(),
+        callId: uuid25(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
@@ -27237,7 +28736,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.labels",
         args: { limit },
-        callId: uuid23(),
+        callId: uuid25(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Linear labels fetch failed: ${result.error_message}`;
@@ -27251,7 +28750,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.save_issue",
         args: body,
-        callId: uuid23(),
+        callId: uuid25(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear save issue failed: ${result.error_message}`;
@@ -27263,7 +28762,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.get_issue",
         args: { id },
-        callId: uuid23(),
+        callId: uuid25(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Linear get issue failed: ${result.error_message}`;
@@ -28372,7 +29871,7 @@ ${formatted}`;
             max_tokens: budget,
             domain
           },
-          callId: uuid23(),
+          callId: uuid25(),
           timeoutMs: 25e3
         });
         if (result.status !== "success") return `Folding failed: ${result.error_message}`;
@@ -28406,7 +29905,7 @@ ${summary}`;
     }
     case "loose_ends_scan": {
       try {
-        const { runLooseEndScan: runLooseEndScan2 } = await import("./routes/loose-ends.js");
+        const { runLooseEndScan: runLooseEndScan2 } = await Promise.resolve().then(() => (init_loose_ends(), loose_ends_exports));
         const result = await runLooseEndScan2();
         return JSON.stringify({
           total_findings: result.total_findings ?? 0,
@@ -28447,14 +29946,14 @@ ${summary}`;
     }
     case "decision_certify": {
       try {
-        const { storeDecision: storeDecision2, buildLineageChain: buildLineageChain2 } = await import("./routes/decisions.js");
+        const { storeDecision: storeDecision2, buildLineageChain: buildLineageChain2 } = await Promise.resolve().then(() => (init_decisions(), decisions_exports));
         const assemblyId = String(args.assembly_id ?? "");
         const title = String(args.title ?? "");
         if (!assemblyId || !title) return "Error: assembly_id and title required";
         const lineage = await buildLineageChain2(assemblyId);
         const now = (/* @__PURE__ */ new Date()).toISOString();
         const decision = {
-          $id: `widgetdc:decision:${uuid23()}`,
+          $id: `widgetdc:decision:${uuid25()}`,
           $schema: "https://widgetdc.io/schemas/decision/v1",
           title,
           description: typeof args.description === "string" ? args.description : "",
@@ -28473,7 +29972,7 @@ ${summary}`;
     }
     case "decision_list": {
       try {
-        const { listAllDecisionIds: listAllDecisionIds2, loadDecision: loadDecision2 } = await import("./routes/decisions.js");
+        const { listAllDecisionIds: listAllDecisionIds2, loadDecision: loadDecision2 } = await Promise.resolve().then(() => (init_decisions(), decisions_exports));
         const limit = typeof args.limit === "number" ? args.limit : 50;
         const ids = await listAllDecisionIds2();
         const sliced = ids.slice(0, Math.min(limit, 100));
@@ -28490,7 +29989,7 @@ ${lines.join("\n")}`;
     }
     case "decision_lineage": {
       try {
-        const { buildLineageChain: buildLineageChain2 } = await import("./routes/decisions.js");
+        const { buildLineageChain: buildLineageChain2 } = await Promise.resolve().then(() => (init_decisions(), decisions_exports));
         const assemblyId = String(args.assembly_id ?? "");
         if (!assemblyId) return "Error: assembly_id required";
         const lineage = await buildLineageChain2(assemblyId);
@@ -28504,7 +30003,7 @@ ${lines.join("\n")}`;
     }
     case "artifact_list": {
       try {
-        const { listAllArtifactIds: listAllArtifactIds2, loadArtifact: loadArtifact2 } = await import("./routes/artifacts.js");
+        const { listAllArtifactIds: listAllArtifactIds2, loadArtifact: loadArtifact2 } = await Promise.resolve().then(() => (init_artifacts(), artifacts_exports));
         const limit = typeof args.limit === "number" ? args.limit : 20;
         const ids = await listAllArtifactIds2();
         const sliced = ids.slice(0, Math.min(limit, 100));
@@ -28521,7 +30020,7 @@ ${lines.join("\n")}`;
     }
     case "artifact_get": {
       try {
-        const { loadArtifact: loadArtifact2 } = await import("./routes/artifacts.js");
+        const { loadArtifact: loadArtifact2 } = await Promise.resolve().then(() => (init_artifacts(), artifacts_exports));
         const artifactId = String(args.artifact_id ?? "");
         if (!artifactId) return "Error: artifact_id required";
         const artifact = await loadArtifact2(artifactId);
@@ -28534,10 +30033,10 @@ ${lines.join("\n")}`;
     // ─── v4.0.7 — Ghost-tier sweep round 3 (LIN-619) ───────────────────────
     case "drill_start": {
       try {
-        const { saveDrillContext: saveDrillContext2, fetchDrillChildren: fetchDrillChildren2 } = await import("./routes/drill.js");
+        const { saveDrillContext: saveDrillContext2, fetchDrillChildren: fetchDrillChildren2 } = await Promise.resolve().then(() => (init_drill(), drill_exports));
         const domain = String(args.domain ?? "");
         if (!domain) return "Error: domain required";
-        const sessionId = uuid23();
+        const sessionId = uuid25();
         const ctx = {
           stack: [],
           current_level: "domain",
@@ -28555,7 +30054,7 @@ ${lines.join("\n")}`;
     }
     case "drill_down": {
       try {
-        const { loadDrillContext: loadDrillContext2, saveDrillContext: saveDrillContext2, fetchDrillChildren: fetchDrillChildren2 } = await import("./routes/drill.js");
+        const { loadDrillContext: loadDrillContext2, saveDrillContext: saveDrillContext2, fetchDrillChildren: fetchDrillChildren2 } = await Promise.resolve().then(() => (init_drill(), drill_exports));
         const sessionId = String(args.session_id ?? "");
         const targetId = String(args.target_id ?? "");
         const targetLevel = String(args.target_level ?? "");
@@ -28575,7 +30074,7 @@ ${lines.join("\n")}`;
     }
     case "drill_up": {
       try {
-        const { loadDrillContext: loadDrillContext2, saveDrillContext: saveDrillContext2, fetchDrillChildren: fetchDrillChildren2 } = await import("./routes/drill.js");
+        const { loadDrillContext: loadDrillContext2, saveDrillContext: saveDrillContext2, fetchDrillChildren: fetchDrillChildren2 } = await Promise.resolve().then(() => (init_drill(), drill_exports));
         const sessionId = String(args.session_id ?? "");
         if (!sessionId) return "Error: session_id required";
         const ctx = await loadDrillContext2(sessionId);
@@ -28594,7 +30093,7 @@ ${lines.join("\n")}`;
     }
     case "drill_children": {
       try {
-        const { loadDrillContext: loadDrillContext2, fetchDrillChildren: fetchDrillChildren2 } = await import("./routes/drill.js");
+        const { loadDrillContext: loadDrillContext2, fetchDrillChildren: fetchDrillChildren2 } = await Promise.resolve().then(() => (init_drill(), drill_exports));
         const sessionId = String(args.session_id ?? "");
         if (!sessionId) return "Error: session_id required";
         const ctx = await loadDrillContext2(sessionId);
@@ -28773,7 +30272,7 @@ ${lines.join("\n")}`;
     case "peer_eval_evaluate": {
       const { hookIntoExecution: hookIntoExecution2 } = await Promise.resolve().then(() => (init_peer_eval(), peer_eval_exports));
       const agentId = args.agent_id;
-      const taskId = args.task_id ?? uuid23();
+      const taskId = args.task_id ?? uuid25();
       const taskType = args.task_type ?? "manual-eval";
       const success = args.success ?? true;
       const latencyMs = typeof args.latency_ms === "number" ? args.latency_ms : 1e3;
@@ -29312,7 +30811,7 @@ ${lines.join("\n")}`;
       if (!["read_only", "staged_write", "production_write"].includes(scope)) {
         throw new Error("scope must be read_only, staged_write, or production_write");
       }
-      const sessionId = `gov-${uuid23().slice(0, 8)}`;
+      const sessionId = `gov-${uuid25().slice(0, 8)}`;
       const plan = await createPlan2(description, sessionId, scope, {
         targetServices: targetService ? [targetService] : [],
         successMetrics: `Plan approved and executed under ${scope} profile`,
@@ -29375,7 +30874,7 @@ ${lines.join("\n")}`;
       const scoreMap = { success: 90, partial: 60, failed: 20 };
       const score = scoreMap[outcome] ?? 50;
       const plan = getPlan3(planId);
-      const kpi = await evaluatePlan2(`eval-${uuid23().slice(0, 8)}`, planId, score, "governance");
+      const kpi = await evaluatePlan2(`eval-${uuid25().slice(0, 8)}`, planId, score, "governance");
       return JSON.stringify({
         plan_id: planId,
         outcome,
@@ -34945,11 +36444,11 @@ init_chat_broadcaster();
 init_config();
 init_logger();
 init_slack();
-import { Router as Router2 } from "express";
+import { Router as Router6 } from "express";
 init_redis();
 init_tool_executor();
 init_adoption_telemetry();
-var toolsRouter = Router2();
+var toolsRouter = Router6();
 toolsRouter.post("/call", async (req, res) => {
   const result = validate(validateToolCall, req.body);
   if (!result.ok) {
@@ -35117,7 +36616,7 @@ toolsRouter.get("/catalog", async (_req, res) => {
 init_chat_broadcaster();
 init_logger();
 init_slack();
-import { Router as Router3 } from "express";
+import { Router as Router7 } from "express";
 init_chat_store();
 init_config();
 init_chain_engine();
@@ -35267,7 +36766,7 @@ ${context}` },
     });
   }
 }
-var chatRouter = Router3();
+var chatRouter = Router7();
 function shouldRouteViaOrchestrator(target) {
   if (!target) return false;
   return target === "master" || target === "Orchestrator";
@@ -35886,8 +37385,8 @@ chatRouter.get("/ws-stats", (_req, res) => {
 // src/routes/chains.ts
 init_chain_engine();
 init_logger();
-import { Router as Router4 } from "express";
-var chainsRouter = Router4();
+import { Router as Router8 } from "express";
+var chainsRouter = Router8();
 chainsRouter.post("/execute", async (req, res) => {
   const body = req.body;
   const validModes = ["sequential", "parallel", "loop", "debate", "adaptive", "funnel"];
@@ -35994,8 +37493,8 @@ chainsRouter.get("/", (_req, res) => {
 // src/routes/cognitive.ts
 init_cognitive_proxy();
 init_logger();
-import { Router as Router5 } from "express";
-var cognitiveRouter = Router5();
+import { Router as Router9 } from "express";
+var cognitiveRouter = Router9();
 cognitiveRouter.post("/:action", async (req, res) => {
   const { action } = req.params;
   const body = req.body;
@@ -36045,7 +37544,7 @@ cognitiveRouter.get("/health", async (_req, res) => {
 });
 
 // src/routes/cron.ts
-import { Router as Router8 } from "express";
+import { Router as Router11 } from "express";
 
 // src/cron-scheduler.ts
 init_chain_engine();
@@ -36059,12 +37558,12 @@ import cron from "node-cron";
 // src/graph/graph-self-correct.ts
 init_mcp_caller();
 init_logger();
-import { v4 as uuid24 } from "uuid";
+import { v4 as uuid26 } from "uuid";
 async function graphRead(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid24(),
+    callId: uuid26(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -36075,7 +37574,7 @@ async function graphWrite(cypher, params, force = true) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {}, _force: force },
-    callId: uuid24(),
+    callId: uuid26(),
     timeoutMs: 15e3
   });
   return result.status === "success";
@@ -36535,10 +38034,10 @@ init_redis();
 init_logger();
 init_mcp_caller();
 init_adoption_telemetry();
-import { Router as Router6 } from "express";
-import { v4 as uuid25 } from "uuid";
-var adoptionRouter = Router6();
-var REDIS_KEY4 = "orchestrator:adoption-metrics";
+import { Router as Router10 } from "express";
+import { v4 as uuid27 } from "uuid";
+var adoptionRouter = Router10();
+var REDIS_KEY5 = "orchestrator:adoption-metrics";
 var REDIS_TRENDS_KEY = "orchestrator:adoption-trends";
 var DEFAULT_METRICS = {
   features_done: 14,
@@ -36568,7 +38067,7 @@ adoptionRouter.get("/metrics", async (_req, res) => {
   const redis2 = getRedis();
   if (redis2) {
     try {
-      const cached = await redis2.get(REDIS_KEY4);
+      const cached = await redis2.get(REDIS_KEY5);
       if (cached) {
         res.json(JSON.parse(cached));
         return;
@@ -36583,7 +38082,7 @@ adoptionRouter.get("/metrics", async (_req, res) => {
   };
   if (redis2) {
     try {
-      await redis2.set(REDIS_KEY4, JSON.stringify(metrics2));
+      await redis2.set(REDIS_KEY5, JSON.stringify(metrics2));
     } catch (err) {
       logger.warn({ err: String(err) }, "Redis write failed for adoption metrics");
     }
@@ -36596,7 +38095,7 @@ adoptionRouter.put("/metrics", async (req, res) => {
   let current = { ...DEFAULT_METRICS, generated_at: (/* @__PURE__ */ new Date()).toISOString() };
   if (redis2) {
     try {
-      const cached = await redis2.get(REDIS_KEY4);
+      const cached = await redis2.get(REDIS_KEY5);
       if (cached) current = JSON.parse(cached);
     } catch (err) {
       logger.warn({ err: String(err) }, "Redis read failed during adoption metrics update");
@@ -36614,7 +38113,7 @@ adoptionRouter.put("/metrics", async (req, res) => {
   current.generated_at = (/* @__PURE__ */ new Date()).toISOString();
   if (redis2) {
     try {
-      await redis2.set(REDIS_KEY4, JSON.stringify(current));
+      await redis2.set(REDIS_KEY5, JSON.stringify(current));
     } catch (err) {
       logger.warn({ err: String(err) }, "Redis write failed for adoption metrics update");
       res.status(500).json({ success: false, error: "Failed to persist metrics" });
@@ -36633,7 +38132,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (c:Conversation) WHERE c.createdAt > datetime() - duration('P1D') RETURN count(c) AS count"
       },
-      callId: uuid25(),
+      callId: uuid27(),
       timeoutMs: 1e4
     }),
     // Count artifacts from last 24h
@@ -36642,7 +38141,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (a:AnalysisArtifact) WHERE a.createdAt > datetime() - duration('P1D') RETURN count(a) AS count"
       },
-      callId: uuid25(),
+      callId: uuid27(),
       timeoutMs: 1e4
     }),
     // Count tool calls from audit trail
@@ -36651,7 +38150,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (e:AuditEvent) WHERE e.timestamp > datetime() - duration('P1D') AND e.action = 'tool_call' RETURN count(e) AS count"
       },
-      callId: uuid25(),
+      callId: uuid27(),
       timeoutMs: 1e4
     })
   ]);
@@ -36665,7 +38164,7 @@ async function captureAdoptionSnapshot() {
   let current = { ...DEFAULT_METRICS, generated_at: (/* @__PURE__ */ new Date()).toISOString() };
   if (redis2) {
     try {
-      const cached = await redis2.get(REDIS_KEY4);
+      const cached = await redis2.get(REDIS_KEY5);
       if (cached) current = JSON.parse(cached);
     } catch {
     }
@@ -36756,7 +38255,7 @@ SET m.conversations_24h = $conversations,
           featuresPct: snapshot.features_pct
         }
       },
-      callId: uuid25(),
+      callId: uuid27(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -36797,252 +38296,8 @@ adoptionRouter.get("/trends", async (req, res) => {
   }
 });
 
-// src/routes/loose-ends.ts
-init_redis();
-init_logger();
-init_mcp_caller();
-init_sse();
-import { Router as Router7 } from "express";
-import { v4 as uuid26 } from "uuid";
-var looseEndsRouter = Router7();
-var REDIS_KEY5 = "orchestrator:loose-ends:latest";
-var REDIS_HISTORY = "orchestrator:loose-ends:history";
-var DETECTION_QUERIES = [
-  {
-    name: "Orphan Blocks (no assembly)",
-    category: "orphan_block",
-    severity: "warning",
-    cypher: `MATCH (b) WHERE (b:Block OR b:ArchitectureBlock OR b:LegoBlock)
-AND NOT (b)<-[:COMPOSED_OF]-(:Assembly)
-RETURN b.id AS id, b.name AS name, b.domain AS domain, labels(b)[0] AS type
-LIMIT 25`,
-    buildFinding: (records) => records.map((r) => ({
-      id: `orphan-${r.id ?? uuid26().slice(0, 8)}`,
-      severity: "warning",
-      category: "orphan_block",
-      title: `Orphan block: ${r.name ?? r.id}`,
-      description: `Block "${r.name}" (${r.type}, domain: ${r.domain}) is not part of any assembly`,
-      node_ids: [String(r.id)],
-      suggested_action: "Include in an assembly via POST /api/assembly/compose or archive if obsolete"
-    }))
-  },
-  {
-    name: "Assemblies without decisions",
-    category: "dangling_assembly",
-    severity: "warning",
-    cypher: `MATCH (a:Assembly) WHERE a.status = 'accepted'
-AND NOT (a)<-[:BASED_ON]-(:Decision)
-RETURN a.id AS id, a.name AS name, a.composite AS score
-LIMIT 15`,
-    buildFinding: (records) => records.map((r) => ({
-      id: `dangling-asm-${r.id ?? uuid26().slice(0, 8)}`,
-      severity: "warning",
-      category: "dangling_assembly",
-      title: `Accepted assembly without decision: ${r.name ?? r.id}`,
-      description: `Assembly "${r.name}" was accepted (score: ${r.score}) but no Decision node references it`,
-      node_ids: [String(r.id)],
-      suggested_action: "Create a Decision via POST /api/decisions/certify or reject the assembly"
-    }))
-  },
-  {
-    name: "Decisions without lineage",
-    category: "missing_lineage",
-    severity: "critical",
-    cypher: `MATCH (d:Decision) WHERE NOT (d)-[:BASED_ON]->(:Assembly)
-AND NOT (d)-[:DERIVES_FROM]->()
-RETURN d.id AS id, d.title AS title, d.certified_at AS certified_at
-LIMIT 10`,
-    buildFinding: (records) => records.map((r) => ({
-      id: `no-lineage-${r.id ?? uuid26().slice(0, 8)}`,
-      severity: "critical",
-      category: "missing_lineage",
-      title: `Decision without lineage: ${r.title ?? r.id}`,
-      description: `Decision "${r.title}" has no traceable lineage to assemblies or source signals`,
-      node_ids: [String(r.id)],
-      suggested_action: "Link decision to source assembly or re-certify with proper lineage"
-    }))
-  },
-  {
-    name: "Disconnected high-value nodes",
-    category: "disconnected_node",
-    severity: "info",
-    cypher: `MATCH (n) WHERE (n:StrategicInsight OR n:Pattern OR n:Signal)
-AND NOT (n)-[]-()
-RETURN n.id AS id, labels(n)[0] AS type, n.domain AS domain, n.insight AS title
-LIMIT 20`,
-    buildFinding: (records) => records.map((r) => ({
-      id: `disconnected-${r.id ?? uuid26().slice(0, 8)}`,
-      severity: "info",
-      category: "disconnected_node",
-      title: `Disconnected ${r.type}: ${(r.title ?? r.id ?? "").toString().slice(0, 60)}`,
-      description: `${r.type} node in domain "${r.domain}" has no relationships \u2014 may be a missed connection`,
-      node_ids: [String(r.id)],
-      suggested_action: "Review and connect to related blocks or mark as processed"
-    }))
-  },
-  {
-    name: "Unresolved decisions (stale drafts)",
-    category: "unresolved_decision",
-    severity: "warning",
-    cypher: `MATCH (d:Decision) WHERE d.status = 'draft'
-AND d.created_at < datetime() - duration('P7D')
-RETURN d.id AS id, d.title AS title, d.created_at AS created_at
-LIMIT 10`,
-    buildFinding: (records) => records.map((r) => ({
-      id: `stale-decision-${r.id ?? uuid26().slice(0, 8)}`,
-      severity: "warning",
-      category: "unresolved_decision",
-      title: `Stale draft decision: ${r.title ?? r.id}`,
-      description: `Decision "${r.title}" has been in draft for >7 days (created: ${r.created_at})`,
-      node_ids: [String(r.id)],
-      suggested_action: "Certify, reject, or archive the stale decision"
-    }))
-  }
-];
-async function runLooseEndScan() {
-  const scanId = uuid26();
-  const t0 = Date.now();
-  const findings = [];
-  logger.info({ scan_id: scanId }, "Loose-end scan started");
-  const queryResults = await Promise.allSettled(
-    DETECTION_QUERIES.map(async (dq) => {
-      try {
-        const result = await callMcpTool({
-          toolName: "graph.read_cypher",
-          args: { query: dq.cypher },
-          callId: uuid26(),
-          timeoutMs: 15e3
-        });
-        if (result.status !== "success") return [];
-        const records = Array.isArray(result.result) ? result.result : Array.isArray(result.result?.records) ? result.result.records : [];
-        return dq.buildFinding(records);
-      } catch (err) {
-        logger.warn({ query: dq.name, err: String(err) }, "Loose-end detection query failed");
-        return [];
-      }
-    })
-  );
-  for (const qr of queryResults) {
-    if (qr.status === "fulfilled") {
-      findings.push(...qr.value);
-    }
-  }
-  const summary = {
-    critical: findings.filter((f) => f.severity === "critical").length,
-    warning: findings.filter((f) => f.severity === "warning").length,
-    info: findings.filter((f) => f.severity === "info").length,
-    total: findings.length
-  };
-  const scanResult = {
-    scan_id: scanId,
-    scanned_at: (/* @__PURE__ */ new Date()).toISOString(),
-    duration_ms: Date.now() - t0,
-    findings,
-    summary,
-    auto_fixed: 0
-  };
-  const redis2 = getRedis();
-  if (redis2) {
-    try {
-      await redis2.set(REDIS_KEY5, JSON.stringify(scanResult), "EX", 86400);
-      await redis2.zadd(REDIS_HISTORY, Date.now(), JSON.stringify(scanResult));
-      const count = await redis2.zcard(REDIS_HISTORY);
-      if (count > 30) {
-        await redis2.zremrangebyrank(REDIS_HISTORY, 0, count - 31);
-      }
-    } catch (err) {
-      logger.warn({ err: String(err) }, "Failed to persist loose-end scan");
-    }
-  }
-  try {
-    await callMcpTool({
-      toolName: "graph.write_cypher",
-      args: {
-        query: `MERGE (s:LooseEndScan {id: $id})
-SET s.scanned_at = datetime(), s.duration_ms = $duration,
-    s.critical = $critical, s.warning = $warning, s.info = $info,
-    s.total = $total, s.auto_fixed = 0`,
-        params: {
-          id: scanId,
-          duration: scanResult.duration_ms,
-          critical: summary.critical,
-          warning: summary.warning,
-          info: summary.info,
-          total: summary.total
-        }
-      },
-      callId: uuid26(),
-      timeoutMs: 1e4
-    });
-  } catch {
-  }
-  broadcastSSE("loose-end-scan", {
-    scan_id: scanId,
-    summary,
-    duration_ms: scanResult.duration_ms
-  });
-  logger.info({
-    scan_id: scanId,
-    ...summary,
-    duration_ms: scanResult.duration_ms
-  }, "Loose-end scan complete");
-  return scanResult;
-}
-looseEndsRouter.post("/scan", async (_req, res) => {
-  try {
-    const result = await runLooseEndScan();
-    res.json({ success: true, data: result });
-  } catch (err) {
-    logger.error({ err: String(err) }, "Loose-end scan failed");
-    res.status(500).json({
-      success: false,
-      error: { code: "SCAN_ERROR", message: String(err), status_code: 500 }
-    });
-  }
-});
-looseEndsRouter.get("/", async (_req, res) => {
-  const redis2 = getRedis();
-  if (!redis2) {
-    res.json({ success: true, data: null, message: "No scan results available" });
-    return;
-  }
-  try {
-    const raw = await redis2.get(REDIS_KEY5);
-    if (!raw) {
-      res.json({ success: true, data: null, message: "No scan has been run yet" });
-      return;
-    }
-    res.json({ success: true, data: JSON.parse(raw) });
-  } catch (err) {
-    res.status(500).json({ success: false, error: String(err) });
-  }
-});
-looseEndsRouter.get("/history", async (req, res) => {
-  const redis2 = getRedis();
-  const limit = Math.min(parseInt(String(req.query.limit ?? "10")), 30);
-  if (!redis2) {
-    res.json({ success: true, data: { scans: [], total: 0 } });
-    return;
-  }
-  try {
-    const raw = await redis2.zrevrange(REDIS_HISTORY, 0, limit - 1);
-    const scans = raw.map((r) => {
-      const parsed = JSON.parse(r);
-      return {
-        scan_id: parsed.scan_id,
-        scanned_at: parsed.scanned_at,
-        duration_ms: parsed.duration_ms,
-        summary: parsed.summary,
-        auto_fixed: parsed.auto_fixed
-      };
-    });
-    res.json({ success: true, data: { scans, total: scans.length } });
-  } catch (err) {
-    res.status(500).json({ success: false, error: String(err) });
-  }
-});
-
 // src/cron-scheduler.ts
+init_loose_ends();
 init_slack();
 init_graph_hygiene_cron();
 init_hierarchical_intelligence();
@@ -38536,7 +39791,7 @@ function registerDefaultLoops() {
 }
 
 // src/routes/cron.ts
-var cronRouter = Router8();
+var cronRouter = Router11();
 cronRouter.get("/", (_req, res) => {
   const jobs2 = listCronJobs();
   res.json({ success: true, data: { jobs: jobs2, total: jobs2.length } });
@@ -38605,14 +39860,14 @@ cronRouter.delete("/:id", (req, res) => {
 init_agent_registry();
 init_chat_broadcaster();
 init_chain_engine();
-import { Router as Router10 } from "express";
+import { Router as Router13 } from "express";
 init_cognitive_proxy();
 
 // src/routes/openclaw.ts
 init_config();
 init_logger();
-import { Router as Router9 } from "express";
-var openclawRouter = Router9();
+import { Router as Router12 } from "express";
+var openclawRouter = Router12();
 var healthStatus = {
   healthy: false,
   checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -38788,7 +40043,7 @@ openclawRouter.all("/proxy/*", async (req, res) => {
 init_config();
 init_routing_engine();
 init_redis();
-var dashboardRouter = Router10();
+var dashboardRouter = Router13();
 var CACHE_KEY = "orchestrator:dashboard-cache";
 var CACHE_TTL = 15;
 dashboardRouter.get("/data", async (_req, res) => {
@@ -38876,8 +40131,8 @@ init_llm_proxy();
 init_chat_broadcaster();
 init_chat_store();
 init_logger();
-import { Router as Router11 } from "express";
-var llmRouter = Router11();
+import { Router as Router14 } from "express";
+var llmRouter = Router14();
 llmRouter.get("/providers", (_req, res) => {
   res.json({ success: true, data: { providers: listProviders() } });
 });
@@ -38968,14 +40223,14 @@ llmRouter.post("/conversation", async (req, res) => {
 });
 
 // src/routes/audit.ts
-import { Router as Router12 } from "express";
+import { Router as Router15 } from "express";
 
 // src/audit.ts
 init_redis();
 init_logger();
 var REDIS_KEY6 = "orchestrator:audit";
 var MAX_ENTRIES = 1e3;
-var TTL_SECONDS5 = 30 * 24 * 3600;
+var TTL_SECONDS7 = 30 * 24 * 3600;
 var memoryAudit = [];
 async function logAudit(entry) {
   try {
@@ -38984,7 +40239,7 @@ async function logAudit(entry) {
       if (redis2) {
         await redis2.lpush(REDIS_KEY6, JSON.stringify(entry));
         await redis2.ltrim(REDIS_KEY6, 0, MAX_ENTRIES - 1);
-        await redis2.expire(REDIS_KEY6, TTL_SECONDS5);
+        await redis2.expire(REDIS_KEY6, TTL_SECONDS7);
         return;
       }
     }
@@ -39050,7 +40305,7 @@ function auditMiddleware(req, res, next) {
 }
 
 // src/routes/audit.ts
-var auditRouter = Router12();
+var auditRouter = Router15();
 auditRouter.get("/log", async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 100, 500);
   const offset = parseInt(req.query.offset) || 0;
@@ -39068,8 +40323,8 @@ auditRouter.get("/log", async (req, res) => {
 // src/routes/tool-output.ts
 init_redis();
 init_logger();
-import { Router as Router13 } from "express";
-var toolOutputRouter = Router13();
+import { Router as Router16 } from "express";
+var toolOutputRouter = Router16();
 var TOOL_OUTPUT_PREFIX2 = "orchestrator:tool-output:";
 var ID_PATTERN = /^[a-f0-9-]{36}$/;
 toolOutputRouter.get("/:id", async (req, res) => {
@@ -39144,15 +40399,15 @@ toolOutputRouter.get("/:id/raw", async (req, res) => {
 init_config();
 init_redis();
 init_logger();
-import { Router as Router14 } from "express";
-var knowledgeRouter = Router14();
+import { Router as Router17 } from "express";
+var knowledgeRouter = Router17();
 var FEED_CACHE_KEY = "orchestrator:knowledge-feed";
 var BRIEFING_CACHE_KEY = "orchestrator:knowledge-briefing-prompt";
 var FEED_TTL_SECONDS = 86400;
-var MCP_TIMEOUT_MS = 1e4;
-async function callMcp(tool, payload) {
+var MCP_TIMEOUT_MS2 = 1e4;
+async function callMcp2(tool, payload) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), MCP_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), MCP_TIMEOUT_MS2);
   try {
     const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
       method: "POST",
@@ -39198,7 +40453,7 @@ knowledgeRouter.get("/cards", async (req, res) => {
   }
   const topK = Math.min(Math.max(parseInt(req.query.top_k) || 5, 1), 50);
   const domains = req.query.domains || "all";
-  const kgResult = await callMcp("kg_rag.query", { question: q, top_k: topK });
+  const kgResult = await callMcp2("kg_rag.query", { question: q, top_k: topK });
   if (kgResult.ok) {
     const cards = normalizeCards(kgResult.data, "kg_rag");
     if (cards.length > 0) {
@@ -39207,7 +40462,7 @@ knowledgeRouter.get("/cards", async (req, res) => {
     }
   }
   logger.info({ query: q }, "kg_rag empty or failed, falling back to srag.query");
-  const sragResult = await callMcp("srag.query", { query: q, domains });
+  const sragResult = await callMcp2("srag.query", { query: q, domains });
   if (sragResult.ok) {
     const cards = normalizeCards(sragResult.data, "srag");
     res.json({ cards, source: "srag", query: q, count: cards.length });
@@ -39237,7 +40492,7 @@ knowledgeRouter.get("/feed", async (_req, res) => {
     domain_coverage: {}
   };
   const errors = [];
-  const graphResult = await callMcp("graph.read_cypher", {
+  const graphResult = await callMcp2("graph.read_cypher", {
     query: "MATCH (n) RETURN labels(n) AS type, count(*) AS count ORDER BY count DESC LIMIT 20"
   });
   if (graphResult.ok) {
@@ -39256,7 +40511,7 @@ knowledgeRouter.get("/feed", async (_req, res) => {
   } else {
     errors.push(graphResult.error ?? "graph.read_cypher failed");
   }
-  const insightResult = await callMcp("kg_rag.query", {
+  const insightResult = await callMcp2("kg_rag.query", {
     question: "What are the most important recent insights and gaps?",
     top_k: 10
   });
@@ -39304,9 +40559,9 @@ knowledgeRouter.get("/briefing", async (_req, res) => {
 // src/routes/neural-bus.ts
 init_logger();
 init_redis();
-import { Router as Router15 } from "express";
-import { v4 as uuid27 } from "uuid";
-var neuralBusRouter = Router15();
+import { Router as Router18 } from "express";
+import { v4 as uuid28 } from "uuid";
+var neuralBusRouter = Router18();
 var BUS_MESSAGES_KEY = "neural-bus:messages";
 var BUS_AGENTS_KEY = "neural-bus:agents";
 var BUS_INBOX_KEY = "neural-bus:inbox";
@@ -39321,7 +40576,7 @@ neuralBusRouter.post("/broadcast", async (req, res) => {
     const redis2 = await getRedisClient();
     const msg = {
       ...req.body,
-      id: uuid27(),
+      id: uuid28(),
       acknowledgedBy: []
     };
     await redis2.hset(BUS_MESSAGES_KEY, msg.id, JSON.stringify(msg));
@@ -39343,7 +40598,7 @@ neuralBusRouter.post("/send", async (req, res) => {
     const redis2 = await getRedisClient();
     const msg = {
       ...req.body,
-      id: uuid27(),
+      id: uuid28(),
       acknowledgedBy: []
     };
     if (!msg.to) {
@@ -39365,7 +40620,7 @@ neuralBusRouter.post("/publish", async (req, res) => {
     const redis2 = await getRedisClient();
     const msg = {
       ...req.body,
-      id: uuid27(),
+      id: uuid28(),
       acknowledgedBy: []
     };
     await redis2.hset(BUS_MESSAGES_KEY, msg.id, JSON.stringify(msg));
@@ -39497,350 +40752,27 @@ neuralBusRouter.post("/register", async (req, res) => {
   }
 });
 
-// src/routes/artifacts.ts
-init_redis();
-init_logger();
-import { Router as Router16 } from "express";
-import { randomUUID } from "crypto";
-var artifactRouter = Router16();
-var ARTIFACT_PREFIX = "orchestrator:artifact:";
-var ARTIFACT_INDEX = "orchestrator:artifacts:index";
-var TTL_SECONDS6 = 2592e3;
-async function storeArtifact(artifact) {
-  const redis2 = getRedis();
-  if (!redis2) return false;
-  const key = `${ARTIFACT_PREFIX}${artifact.$id}`;
-  try {
-    await redis2.set(key, JSON.stringify(artifact), "EX", TTL_SECONDS6);
-    await redis2.sadd(ARTIFACT_INDEX, artifact.$id);
-    return true;
-  } catch (err) {
-    logger.warn({ err: String(err) }, "Redis store failed for artifact");
-    return false;
-  }
-}
-async function loadArtifact(id) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
-  try {
-    const raw = await redis2.get(`${ARTIFACT_PREFIX}${id}`);
-    return raw ? JSON.parse(raw) : null;
-  } catch (err) {
-    logger.warn({ err: String(err), id }, "Redis load failed for artifact");
-    return null;
-  }
-}
-async function listAllArtifactIds() {
-  const redis2 = getRedis();
-  if (!redis2) return [];
-  try {
-    return await redis2.smembers(ARTIFACT_INDEX);
-  } catch (err) {
-    logger.warn({ err: String(err) }, "Redis list failed for artifact index");
-    return [];
-  }
-}
-artifactRouter.post("/", async (req, res) => {
-  const body = req.body;
-  if (!body.title || !body.source || !Array.isArray(body.blocks) || !body.created_by) {
-    res.status(400).json({ success: false, error: "Missing required fields: title, source, blocks, created_by" });
-    return;
-  }
-  const id = `widgetdc:artifact:${randomUUID()}`;
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  const artifact = {
-    $id: id,
-    $schema: "widgetdc:analysis:v1",
-    title: String(body.title),
-    source: String(body.source),
-    blocks: body.blocks,
-    graph_refs: Array.isArray(body.graph_refs) ? body.graph_refs : void 0,
-    tags: Array.isArray(body.tags) ? body.tags : void 0,
-    status: "draft",
-    created_by: String(body.created_by),
-    created_at: now,
-    updated_at: now
-  };
-  const stored = await storeArtifact(artifact);
-  if (!stored) {
-    res.status(503).json({ success: false, error: "Redis not available" });
-    return;
-  }
-  logger.info({ id: artifact.$id, title: artifact.title }, "Artifact created");
-  res.status(201).json({ success: true, artifact });
-});
-artifactRouter.get("/", async (req, res) => {
-  const statusFilter = req.query.status;
-  const tagFilter = req.query.tag;
-  const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 200);
-  const offset = Math.max(parseInt(req.query.offset) || 0, 0);
-  const allIds = await listAllArtifactIds();
-  const redis2 = getRedis();
-  if (!redis2) {
-    res.json({ artifacts: [], total: 0, limit, offset });
-    return;
-  }
-  const artifacts = [];
-  try {
-    const pipeline = redis2.pipeline();
-    for (const id of allIds) {
-      pipeline.get(`${ARTIFACT_PREFIX}${id}`);
-    }
-    const results = await pipeline.exec();
-    if (results) {
-      for (const [err, raw] of results) {
-        if (!err && typeof raw === "string") {
-          try {
-            artifacts.push(JSON.parse(raw));
-          } catch {
-          }
-        }
-      }
-    }
-  } catch (err) {
-    logger.warn({ err: String(err) }, "Redis pipeline failed for artifact list");
-  }
-  let filtered = artifacts.filter((a) => a.status !== "archived");
-  if (statusFilter) {
-    filtered = filtered.filter((a) => a.status === statusFilter);
-  }
-  if (tagFilter) {
-    filtered = filtered.filter((a) => a.tags?.includes(tagFilter));
-  }
-  filtered.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-  const total = filtered.length;
-  const page = filtered.slice(offset, offset + limit);
-  res.json({ artifacts: page, total, limit, offset });
-});
-artifactRouter.get("/:id", async (req, res) => {
-  const id = req.params.id;
-  if (id.endsWith(".md")) {
-    return renderMarkdown(req, res, id.replace(/\.md$/, ""));
-  }
-  if (id.endsWith(".html")) {
-    return renderHtml(req, res, id.replace(/\.html$/, ""));
-  }
-  const artifact = await loadArtifact(id);
-  if (!artifact) {
-    res.status(404).json({ success: false, error: "Artifact not found" });
-    return;
-  }
-  res.json(artifact);
-});
-artifactRouter.put("/:id", async (req, res) => {
-  const id = req.params.id;
-  const existing = await loadArtifact(id);
-  if (!existing) {
-    res.status(404).json({ success: false, error: "Artifact not found" });
-    return;
-  }
-  const body = req.body;
-  if (body.title) existing.title = body.title;
-  if (body.source) existing.source = body.source;
-  if (body.blocks) existing.blocks = body.blocks;
-  if (body.graph_refs !== void 0) existing.graph_refs = body.graph_refs;
-  if (body.tags !== void 0) existing.tags = body.tags;
-  if (body.status && ["draft", "published", "archived"].includes(body.status)) {
-    existing.status = body.status;
-  }
-  existing.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-  const stored = await storeArtifact(existing);
-  if (!stored) {
-    res.status(503).json({ success: false, error: "Redis not available" });
-    return;
-  }
-  logger.info({ id, title: existing.title }, "Artifact updated");
-  res.json({ success: true, artifact: existing });
-});
-artifactRouter.delete("/:id", async (req, res) => {
-  const id = req.params.id;
-  const existing = await loadArtifact(id);
-  if (!existing) {
-    res.status(404).json({ success: false, error: "Artifact not found" });
-    return;
-  }
-  existing.status = "archived";
-  existing.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-  const stored = await storeArtifact(existing);
-  if (!stored) {
-    res.status(503).json({ success: false, error: "Redis not available" });
-    return;
-  }
-  logger.info({ id }, "Artifact archived");
-  res.json({ success: true });
-});
-function trendEmoji(trend) {
-  if (trend === "up") return "\u2191";
-  if (trend === "down") return "\u2193";
-  return "\u2192";
-}
-function blockToMarkdown(block) {
-  const c = block.content;
-  switch (block.type) {
-    case "text":
-      return String(c.body ?? c.text ?? c ?? "");
-    case "table": {
-      const headers = c.headers ?? c.columns ?? [];
-      const rows = c.rows ?? c.data ?? [];
-      if (headers.length === 0) return "";
-      const headerLine = `| ${headers.join(" | ")} |`;
-      const separatorLine = `| ${headers.map(() => "---").join(" | ")} |`;
-      const dataLines = rows.map((r) => `| ${r.map(String).join(" | ")} |`);
-      return [headerLine, separatorLine, ...dataLines].join("\n");
-    }
-    case "chart":
-      return `\`\`\`widgetdc-query
-type: ${String(c.chart_type ?? c.type ?? "bar")}
-data: ${JSON.stringify(c.data ?? c)}
-\`\`\``;
-    case "cypher":
-      return `\`\`\`widgetdc-query
-cypher: ${String(c.query ?? c.cypher ?? c)}
-\`\`\``;
-    case "mermaid":
-      return "```mermaid\n" + String(c.diagram ?? c.code ?? c) + "\n```";
-    case "kpi_card": {
-      const label = String(c.label ?? block.label ?? "KPI");
-      const value = String(c.value ?? "");
-      const trend = trendEmoji(c.trend);
-      return `**${label}**: ${value} ${trend}`;
-    }
-    case "deep_link": {
-      const label = String(c.label ?? c.title ?? "Link");
-      const uri = String(c.uri ?? c.url ?? c.href ?? "#");
-      return `[${label}](${uri})`;
-    }
-    default:
-      return `<!-- unknown block type: ${block.type} -->
-${JSON.stringify(c, null, 2)}`;
-  }
-}
-async function renderMarkdown(req, res, id) {
-  const artifact = await loadArtifact(id);
-  if (!artifact) {
-    res.status(404).json({ success: false, error: "Artifact not found" });
-    return;
-  }
-  const lines = [];
-  lines.push(`# ${artifact.title}`);
-  lines.push("");
-  lines.push(`> Source: ${artifact.source} | Status: ${artifact.status} | Created: ${artifact.created_at}`);
-  if (artifact.tags?.length) {
-    lines.push(`> Tags: ${artifact.tags.map((t) => `#${t}`).join(" ")}`);
-  }
-  lines.push("");
-  for (const block of artifact.blocks) {
-    if (block.label) {
-      lines.push(`## ${block.label}`);
-      lines.push("");
-    }
-    lines.push(blockToMarkdown(block));
-    lines.push("");
-  }
-  if (artifact.graph_refs?.length) {
-    lines.push("---");
-    lines.push("## Graph References");
-    for (const ref of artifact.graph_refs) {
-      lines.push(`- \`${ref}\``);
-    }
-  }
-  res.type("text/markdown").send(lines.join("\n"));
-}
-function escapeHtml(s) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
-function blockToHtml(block) {
-  const c = block.content;
-  const labelHtml = block.label ? `<h3>${escapeHtml(block.label)}</h3>
-` : "";
-  switch (block.type) {
-    case "text":
-      return `${labelHtml}<div class="wad-text">${escapeHtml(String(c.body ?? c.text ?? c ?? ""))}</div>`;
-    case "table": {
-      const headers = c.headers ?? c.columns ?? [];
-      const rows = c.rows ?? c.data ?? [];
-      const thRow = headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("");
-      const bodyRows = rows.map(
-        (r) => `<tr>${r.map((cell) => `<td>${escapeHtml(String(cell))}</td>`).join("")}</tr>`
-      ).join("\n");
-      return `${labelHtml}<table><thead><tr>${thRow}</tr></thead><tbody>
-${bodyRows}
-</tbody></table>`;
-    }
-    case "chart": {
-      const chartType = String(c.chart_type ?? c.type ?? "bar");
-      const config2 = JSON.stringify(c.data ?? c);
-      return `${labelHtml}<div class="wad-chart" data-type="${escapeHtml(chartType)}" data-config="${escapeHtml(config2)}">Chart: ${escapeHtml(chartType)}</div>`;
-    }
-    case "kpi_card": {
-      const label = String(c.label ?? block.label ?? "KPI");
-      const value = String(c.value ?? "");
-      const trend = trendEmoji(c.trend);
-      return `${labelHtml}<div class="wad-kpi"><span class="label">${escapeHtml(label)}</span><span class="value">${escapeHtml(value)}</span><span class="trend">${trend}</span></div>`;
-    }
-    case "cypher":
-      return `${labelHtml}<pre class="wad-cypher"><code>${escapeHtml(String(c.query ?? c.cypher ?? c))}</code></pre>`;
-    case "mermaid":
-      return `${labelHtml}<div class="wad-mermaid"><pre class="mermaid">${escapeHtml(String(c.diagram ?? c.code ?? c))}</pre></div>`;
-    case "deep_link": {
-      const label = String(c.label ?? c.title ?? "Link");
-      const uri = String(c.uri ?? c.url ?? c.href ?? "#");
-      return `${labelHtml}<a class="wad-link" href="${escapeHtml(uri)}">${escapeHtml(label)}</a>`;
-    }
-    default:
-      return `${labelHtml}<div class="wad-unknown"><pre>${escapeHtml(JSON.stringify(c, null, 2))}</pre></div>`;
-  }
-}
-async function renderHtml(_req, res, id) {
-  const artifact = await loadArtifact(id);
-  if (!artifact) {
-    res.status(404).json({ success: false, error: "Artifact not found" });
-    return;
-  }
-  const parts = [];
-  parts.push(`<article class="wad-artifact" data-id="${escapeHtml(artifact.$id)}" data-status="${artifact.status}">`);
-  parts.push(`  <h1>${escapeHtml(artifact.title)}</h1>`);
-  parts.push(`  <div class="wad-meta">Source: ${escapeHtml(artifact.source)} | Status: ${artifact.status} | ${artifact.created_at}</div>`);
-  if (artifact.tags?.length) {
-    parts.push(`  <div class="wad-tags">${artifact.tags.map((t) => `<span class="wad-tag">${escapeHtml(t)}</span>`).join(" ")}</div>`);
-  }
-  for (const block of artifact.blocks) {
-    parts.push(`  <section class="wad-block wad-block-${block.type}">`);
-    parts.push(`    ${blockToHtml(block)}`);
-    parts.push("  </section>");
-  }
-  if (artifact.graph_refs?.length) {
-    parts.push('  <footer class="wad-graph-refs">');
-    parts.push("    <h3>Graph References</h3>");
-    parts.push("    <ul>");
-    for (const ref of artifact.graph_refs) {
-      parts.push(`      <li><code>${escapeHtml(ref)}</code></li>`);
-    }
-    parts.push("    </ul>");
-    parts.push("  </footer>");
-  }
-  parts.push("</article>");
-  res.type("text/html").send(parts.join("\n"));
-}
+// src/index.ts
+init_artifacts();
 
 // src/routes/notebooks.ts
 init_redis();
 init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
-import { Router as Router17 } from "express";
-import { randomUUID as randomUUID2 } from "crypto";
-import { v4 as uuid28 } from "uuid";
-var notebookRouter = Router17();
+import { Router as Router19 } from "express";
+import { randomUUID as randomUUID3 } from "crypto";
+import { v4 as uuid29 } from "uuid";
+var notebookRouter = Router19();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
-var TTL_SECONDS7 = 2592e3;
+var TTL_SECONDS8 = 2592e3;
 async function storeNotebook(notebook) {
   const redis2 = getRedis();
   if (!redis2) return false;
   const key = `${NOTEBOOK_PREFIX}${notebook.$id}`;
   try {
-    await redis2.set(key, JSON.stringify(notebook), "EX", TTL_SECONDS7);
+    await redis2.set(key, JSON.stringify(notebook), "EX", TTL_SECONDS8);
     await redis2.sadd(NOTEBOOK_INDEX, notebook.$id);
     return true;
   } catch (err) {
@@ -39870,7 +40802,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query, params: {} },
-        callId: uuid28(),
+        callId: uuid29(),
         timeoutMs: 15e3
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -39878,7 +40810,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "kg_rag.query",
         args: { question: query, max_evidence: 10 },
-        callId: uuid28(),
+        callId: uuid29(),
         timeoutMs: 2e4
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -39938,7 +40870,7 @@ notebookRouter.post("/execute", async (req, res) => {
     res.status(400).json({ success: false, error: "Missing required fields: title, cells (non-empty array)" });
     return;
   }
-  const id = `widgetdc:notebook:${randomUUID2()}`;
+  const id = `widgetdc:notebook:${randomUUID3()}`;
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const cells = body.cells;
   for (let i = 0; i < cells.length; i++) {
@@ -40082,353 +41014,12 @@ async function renderNotebookMarkdown(_req, res, id) {
   res.type("text/markdown").send(lines.join("\n"));
 }
 
-// src/routes/drill.ts
-init_redis();
-init_config();
-init_logger();
-import { Router as Router18 } from "express";
-import { randomUUID as randomUUID3 } from "crypto";
-var drillRouter = Router18();
-var DRILL_PREFIX = "orchestrator:drill:";
-var SESSION_TTL = 3600;
-var MCP_TIMEOUT_MS2 = 12e3;
-async function callMcp2(tool, payload) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), MCP_TIMEOUT_MS2);
-  try {
-    const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${config.backendApiKey}`
-      },
-      body: JSON.stringify({ tool, payload }),
-      signal: controller.signal
-    });
-    if (!res.ok) {
-      return { ok: false, error: `MCP ${tool} returned ${res.status}` };
-    }
-    const data = await res.json();
-    return { ok: true, data };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: `MCP ${tool} failed: ${msg}` };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-function extractRecords(data) {
-  if (Array.isArray(data)) return data;
-  if (data && typeof data === "object") {
-    const d = data;
-    if (Array.isArray(d.records)) return d.records;
-    if (Array.isArray(d.data)) return d.data;
-    if (Array.isArray(d.results)) return d.results;
-  }
-  return [];
-}
-var LEVEL_ORDER = ["domain", "segment", "framework", "kpi", "trend", "recommendation"];
-function nextLevel(current) {
-  const idx = LEVEL_ORDER.indexOf(current);
-  return idx >= 0 && idx < LEVEL_ORDER.length - 1 ? LEVEL_ORDER[idx + 1] : null;
-}
-function childrenQuery(level, id) {
-  switch (level) {
-    case "domain":
-      return {
-        query: `MATCH (d:ConsultingDomain {name: $name})-[:HAS_SEGMENT]->(s) RETURN s.name AS label, elementId(s) AS id, 'segment' AS level`,
-        params: { name: id }
-      };
-    case "segment":
-      return {
-        query: `MATCH (s {name: $name})-[:HAS_FRAMEWORK]->(f:ConsultingFramework) RETURN f.name AS label, elementId(f) AS id, 'framework' AS level`,
-        params: { name: id }
-      };
-    case "framework":
-      return {
-        query: `MATCH (f:ConsultingFramework {name: $name})-[:HAS_KPI]->(k:KPI) RETURN k.name AS label, elementId(k) AS id, 'kpi' AS level`,
-        params: { name: id }
-      };
-    case "kpi":
-      return {
-        query: `MATCH (k:KPI {name: $name})-[:HAS_TREND]->(t) RETURN t.name AS label, elementId(t) AS id, 'trend' AS level`,
-        params: { name: id }
-      };
-    case "trend":
-      return {
-        query: `MATCH (t {name: $name})-[:HAS_RECOMMENDATION]->(r) RETURN r.name AS label, elementId(r) AS id, 'recommendation' AS level`,
-        params: { name: id }
-      };
-    default:
-      return null;
-  }
-}
-function domainFrameworksFallback() {
-  return {
-    query: `MATCH (d:ConsultingDomain {name: $name})-[:HAS_FRAMEWORK]->(f:ConsultingFramework) RETURN f.name AS label, elementId(f) AS id, 'framework' AS level`,
-    params: { name: "" }
-    // filled at call site
-  };
-}
-async function fetchDrillChildren(level, label) {
-  const q = childrenQuery(level, label);
-  if (!q) return [];
-  const result = await callMcp2("graph.read_cypher", { query: q.query, params: q.params });
-  if (!result.ok) {
-    logger.warn({ level, label, error: result.error }, "Drill children query failed");
-    return [];
-  }
-  let records = extractRecords(result.data);
-  if (level === "domain" && records.length === 0) {
-    const fb = domainFrameworksFallback();
-    fb.params.name = label;
-    const fbResult = await callMcp2("graph.read_cypher", { query: fb.query, params: fb.params });
-    if (fbResult.ok) {
-      records = extractRecords(fbResult.data);
-    }
-  }
-  return records.map((r) => ({
-    id: String(r.id ?? ""),
-    label: String(r.label ?? ""),
-    type: String(r.level ?? nextLevel(level) ?? "unknown"),
-    count: typeof r.count === "number" ? r.count : void 0
-  }));
-}
-async function saveDrillContext(sessionId, ctx) {
-  const redis2 = getRedis();
-  if (!redis2) return false;
-  try {
-    await redis2.set(`${DRILL_PREFIX}${sessionId}`, JSON.stringify(ctx), "EX", SESSION_TTL);
-    return true;
-  } catch (err) {
-    logger.warn({ err: String(err) }, "Redis save failed for drill context");
-    return false;
-  }
-}
-async function loadDrillContext(sessionId) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
-  try {
-    const raw = await redis2.get(`${DRILL_PREFIX}${sessionId}`);
-    return raw ? JSON.parse(raw) : null;
-  } catch (err) {
-    logger.warn({ err: String(err) }, "Redis load failed for drill context");
-    return null;
-  }
-}
-function buildBreadcrumbs(ctx) {
-  return [
-    ...ctx.stack,
-    { level: ctx.current_level, id: ctx.current_id, label: ctx.current_label }
-  ];
-}
-drillRouter.post("/start", async (req, res) => {
-  const { domain } = req.body;
-  if (!domain) {
-    res.status(400).json({ success: false, error: "Missing required field: domain" });
-    return;
-  }
-  const sessionId = randomUUID3();
-  const ctx = {
-    stack: [],
-    current_level: "domain",
-    current_id: domain,
-    current_label: domain,
-    domain
-  };
-  const saved = await saveDrillContext(sessionId, ctx);
-  if (!saved) {
-    res.status(503).json({ success: false, error: "Redis not available" });
-    return;
-  }
-  const children = await fetchDrillChildren("domain", domain);
-  logger.info({ session_id: sessionId, domain, children_count: children.length }, "Drill session started");
-  res.json({
-    success: true,
-    session_id: sessionId,
-    context: ctx,
-    children,
-    breadcrumbs: buildBreadcrumbs(ctx)
-  });
-});
-drillRouter.post("/down", async (req, res) => {
-  const { session_id, target_id, target_level } = req.body;
-  if (!session_id || !target_id || !target_level) {
-    res.status(400).json({ success: false, error: "Missing required fields: session_id, target_id, target_level" });
-    return;
-  }
-  const ctx = await loadDrillContext(session_id);
-  if (!ctx) {
-    res.status(404).json({ success: false, error: "Drill session not found or expired" });
-    return;
-  }
-  ctx.stack.push({
-    level: ctx.current_level,
-    id: ctx.current_id,
-    label: ctx.current_label
-  });
-  ctx.current_level = target_level;
-  ctx.current_id = target_id;
-  ctx.current_label = target_id;
-  await saveDrillContext(session_id, ctx);
-  const children = await fetchDrillChildren(target_level, target_id);
-  logger.info({ session_id, target_level, target_id, depth: ctx.stack.length }, "Drill down");
-  res.json({
-    success: true,
-    context: ctx,
-    children,
-    breadcrumbs: buildBreadcrumbs(ctx)
-  });
-});
-drillRouter.post("/up", async (req, res) => {
-  const { session_id } = req.body;
-  if (!session_id) {
-    res.status(400).json({ success: false, error: "Missing required field: session_id" });
-    return;
-  }
-  const ctx = await loadDrillContext(session_id);
-  if (!ctx) {
-    res.status(404).json({ success: false, error: "Drill session not found or expired" });
-    return;
-  }
-  if (ctx.stack.length === 0) {
-    res.status(400).json({ success: false, error: "Already at top level" });
-    return;
-  }
-  const parent = ctx.stack.pop();
-  ctx.current_level = parent.level;
-  ctx.current_id = parent.id;
-  ctx.current_label = parent.label;
-  await saveDrillContext(session_id, ctx);
-  const children = await fetchDrillChildren(ctx.current_level, ctx.current_label);
-  logger.info({ session_id, level: ctx.current_level, label: ctx.current_label }, "Drill up");
-  res.json({
-    success: true,
-    context: ctx,
-    children,
-    breadcrumbs: buildBreadcrumbs(ctx)
-  });
-});
-drillRouter.get("/children", async (req, res) => {
-  const sessionId = req.query.session_id;
-  if (!sessionId) {
-    res.status(400).json({ success: false, error: "Missing required query param: session_id" });
-    return;
-  }
-  const ctx = await loadDrillContext(sessionId);
-  if (!ctx) {
-    res.status(404).json({ success: false, error: "Drill session not found or expired" });
-    return;
-  }
-  const children = await fetchDrillChildren(ctx.current_level, ctx.current_label);
-  res.json({
-    success: true,
-    children,
-    context: ctx,
-    breadcrumbs: buildBreadcrumbs(ctx)
-  });
-});
-drillRouter.get("/moc", async (req, res) => {
-  const domain = req.query.domain;
-  if (!domain) {
-    res.status(400).json({ success: false, error: "Missing required query param: domain" });
-    return;
-  }
-  const hierarchyQuery = `
-    MATCH (d:ConsultingDomain {name: $domain})
-    OPTIONAL MATCH (d)-[:HAS_FRAMEWORK]->(f:ConsultingFramework)
-    OPTIONAL MATCH (f)-[:HAS_KPI]->(k:KPI)
-    RETURN d.name AS domain_name, f.name AS framework_name, k.name AS kpi_name, k.value AS kpi_value, k.trend AS kpi_trend
-    ORDER BY f.name, k.name
-  `;
-  const result = await callMcp2("graph.read_cypher", {
-    query: hierarchyQuery,
-    params: { domain }
-  });
-  if (!result.ok) {
-    res.status(502).json({ success: false, error: result.error ?? "Neo4j query failed" });
-    return;
-  }
-  const records = extractRecords(result.data);
-  const frameworks = /* @__PURE__ */ new Map();
-  for (const rec of records) {
-    const fName = rec.framework_name ? String(rec.framework_name) : null;
-    if (!fName) continue;
-    if (!frameworks.has(fName)) {
-      frameworks.set(fName, { kpis: [] });
-    }
-    const kName = rec.kpi_name ? String(rec.kpi_name) : null;
-    if (kName) {
-      frameworks.get(fName).kpis.push({
-        name: kName,
-        value: String(rec.kpi_value ?? ""),
-        trend: trendArrow(rec.kpi_trend)
-      });
-    }
-  }
-  const lines = [];
-  lines.push(`# ${domain} \u2014 Map of Content`);
-  lines.push("");
-  lines.push(`> Generated: ${(/* @__PURE__ */ new Date()).toISOString()}`);
-  lines.push(`> Source: WidgeTDC Neo4j Knowledge Graph`);
-  lines.push("");
-  if (frameworks.size > 0) {
-    lines.push("## Frameworks");
-    lines.push("");
-    for (const [fName, fData] of frameworks) {
-      lines.push(`- [[${fName}]] (${fData.kpis.length} KPIs)`);
-    }
-    lines.push("");
-    lines.push("## KPIs");
-    lines.push("");
-    for (const [fName, fData] of frameworks) {
-      if (fData.kpis.length === 0) continue;
-      lines.push(`### ${fName}`);
-      lines.push("");
-      for (const kpi of fData.kpis) {
-        const valueStr = kpi.value ? `: ${kpi.value} ${kpi.trend}` : ` ${kpi.trend}`;
-        lines.push(`- ${kpi.name}${valueStr}`);
-      }
-      lines.push("");
-    }
-  } else {
-    lines.push("*No frameworks found for this domain.*");
-    lines.push("");
-  }
-  const recsQuery = `
-    MATCH (d:ConsultingDomain {name: $domain})-[:HAS_FRAMEWORK]->(f)-[:HAS_KPI]->(k)-[:HAS_RECOMMENDATION]->(r)
-    RETURN r.name AS rec_name, r.description AS rec_desc, elementId(r) AS rec_id
-    LIMIT 20
-  `;
-  const recsResult = await callMcp2("graph.read_cypher", { query: recsQuery, params: { domain } });
-  const recs = recsResult.ok ? extractRecords(recsResult.data) : [];
-  if (recs.length > 0) {
-    lines.push("## Recommendations");
-    lines.push("");
-    for (const rec of recs) {
-      const name = String(rec.rec_name ?? "Unnamed");
-      const desc = rec.rec_desc ? ` \u2014 ${String(rec.rec_desc)}` : "";
-      const id = String(rec.rec_id ?? "");
-      lines.push(`- [${name}](obsidian://widgetdc-open?artifact=${encodeURIComponent(id)})${desc}`);
-    }
-    lines.push("");
-  }
-  lines.push("---");
-  lines.push(`*Map of Content for ${domain} \u2014 WidgeTDC Adoption Blueprint*`);
-  logger.info({ domain, frameworks: frameworks.size, records: records.length }, "MOC generated");
-  res.type("text/markdown").send(lines.join("\n"));
-});
-function trendArrow(trend) {
-  if (!trend) return "\u2192";
-  const t = trend.toLowerCase();
-  if (t === "up" || t === "rising" || t === "increasing") return "\u2191";
-  if (t === "down" || t === "falling" || t === "decreasing") return "\u2193";
-  return "\u2192";
-}
+// src/index.ts
+init_drill();
 
 // src/routes/monitor.ts
 init_mcp_caller();
-import { Router as Router19 } from "express";
+import { Router as Router20 } from "express";
 
 // src/memory/context-compress.ts
 init_cognitive_proxy();
@@ -40554,13 +41145,13 @@ ${compressed}`,
 init_chain_engine();
 init_cognitive_proxy();
 init_logger();
-import { v4 as uuid29 } from "uuid";
-var monitorRouter = Router19();
+import { v4 as uuid30 } from "uuid";
+var monitorRouter = Router20();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid29(),
+    callId: uuid30(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];
@@ -40838,18 +41429,18 @@ init_redis();
 init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
-import { Router as Router20 } from "express";
-import { v4 as uuid30 } from "uuid";
-var assemblyRouter = Router20();
-var REDIS_PREFIX10 = "orchestrator:assembly:";
-var REDIS_INDEX4 = "orchestrator:assemblies:index";
-var TTL_SECONDS8 = 2592e3;
+import { Router as Router21 } from "express";
+import { v4 as uuid31 } from "uuid";
+var assemblyRouter = Router21();
+var REDIS_PREFIX11 = "orchestrator:assembly:";
+var REDIS_INDEX5 = "orchestrator:assemblies:index";
+var TTL_SECONDS9 = 2592e3;
 async function storeAssembly(assembly) {
   const redis2 = getRedis();
   if (!redis2) return false;
   try {
-    await redis2.set(`${REDIS_PREFIX10}${assembly.$id}`, JSON.stringify(assembly), "EX", TTL_SECONDS8);
-    await redis2.sadd(REDIS_INDEX4, assembly.$id);
+    await redis2.set(`${REDIS_PREFIX11}${assembly.$id}`, JSON.stringify(assembly), "EX", TTL_SECONDS9);
+    await redis2.sadd(REDIS_INDEX5, assembly.$id);
     return true;
   } catch (err) {
     logger.warn({ err: String(err) }, "Redis store failed for assembly");
@@ -40860,7 +41451,7 @@ async function loadAssembly(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX10}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX11}${id}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -40870,7 +41461,7 @@ async function listAllIds() {
   const redis2 = getRedis();
   if (!redis2) return [];
   try {
-    return await redis2.smembers(REDIS_INDEX4);
+    return await redis2.smembers(REDIS_INDEX5);
   } catch {
     return [];
   }
@@ -40903,7 +41494,7 @@ ORDER BY b.domain, b.name LIMIT 50`;
     const graphResult = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params },
-      callId: uuid30(),
+      callId: uuid31(),
       timeoutMs: 15e3
     });
     if (graphResult.status === "success" && graphResult.result) {
@@ -40969,7 +41560,7 @@ Reply as JSON:
   const assemblies = [];
   const now = (/* @__PURE__ */ new Date()).toISOString();
   for (const candidate of analysis.candidates.slice(0, maxCandidates)) {
-    const assemblyId = `widgetdc:assembly:${uuid30()}`;
+    const assemblyId = `widgetdc:assembly:${uuid31()}`;
     const selectedBlocks = blocks.filter((b) => candidate.block_ids.includes(b.block_id));
     const conflictCount = candidate.conflicts?.length ?? 0;
     const coherence = Math.max(0, Math.min(1, candidate.coherence ?? 0.5));
@@ -41028,7 +41619,7 @@ MERGE (a)-[:COMPOSED_OF]->(b)`,
             blockIds: selectedBlocks.map((b) => b.block_id)
           }
         },
-        callId: uuid30(),
+        callId: uuid31(),
         timeoutMs: 1e4
       });
     } catch (err) {
@@ -41064,7 +41655,7 @@ assemblyRouter.get("/", async (req, res) => {
   try {
     const pipeline = redis2.pipeline();
     for (const id of allIds) {
-      pipeline.get(`${REDIS_PREFIX10}${id}`);
+      pipeline.get(`${REDIS_PREFIX11}${id}`);
     }
     const results = await pipeline.exec();
     if (results) {
@@ -41118,7 +41709,7 @@ assemblyRouter.put("/:id", async (req, res) => {
         query: "MATCH (a:Assembly {id: $id}) SET a.status = $status, a.updated_at = datetime()",
         params: { id: assembly.$id, status: assembly.status }
       },
-      callId: uuid30(),
+      callId: uuid31(),
       timeoutMs: 5e3
     });
   } catch {
@@ -41126,326 +41717,9 @@ assemblyRouter.put("/:id", async (req, res) => {
   res.json({ success: true, data: assembly });
 });
 
-// src/routes/decisions.ts
-init_redis();
-init_logger();
-init_mcp_caller();
-init_cognitive_proxy();
-init_sse();
-import { Router as Router21 } from "express";
-import { v4 as uuid31 } from "uuid";
-var decisionsRouter = Router21();
-var REDIS_PREFIX11 = "orchestrator:decision:";
-var REDIS_INDEX5 = "orchestrator:decisions:index";
-var TTL_SECONDS9 = 7776e3;
-async function storeDecision(decision) {
-  const redis2 = getRedis();
-  if (!redis2) return false;
-  try {
-    await redis2.set(`${REDIS_PREFIX11}${decision.$id}`, JSON.stringify(decision), "EX", TTL_SECONDS9);
-    await redis2.sadd(REDIS_INDEX5, decision.$id);
-    return true;
-  } catch (err) {
-    logger.warn({ err: String(err) }, "Redis store failed for decision");
-    return false;
-  }
-}
-async function loadDecision(id) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
-  try {
-    const raw = await redis2.get(`${REDIS_PREFIX11}${id}`);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-async function listAllDecisionIds() {
-  const redis2 = getRedis();
-  if (!redis2) return [];
-  try {
-    return await redis2.smembers(REDIS_INDEX5);
-  } catch {
-    return [];
-  }
-}
-async function buildLineageChain(assemblyId) {
-  const lineage = [];
-  try {
-    const result = await callMcpTool({
-      toolName: "graph.read_cypher",
-      args: {
-        query: `MATCH (a:Assembly {id: $assemblyId})
-OPTIONAL MATCH (a)-[:COMPOSED_OF]->(b)
-WHERE b:Block OR b:ArchitectureBlock OR b:LegoBlock
-OPTIONAL MATCH (b)-[:DERIVED_FROM|EXTRACTED_FROM]->(p)
-WHERE p:Pattern OR p:Signal OR p:StrategicInsight
-RETURN a.id AS asm_id, a.name AS asm_name, a.created_at AS asm_ts,
-       b.id AS block_id, b.name AS block_name, labels(b)[0] AS block_type, b.created_at AS block_ts,
-       p.id AS source_id, p.name AS source_name, labels(p)[0] AS source_type, p.createdAt AS source_ts
-ORDER BY b.name`,
-        params: { assemblyId }
-      },
-      callId: uuid31(),
-      timeoutMs: 15e3
-    });
-    if (result.status === "success") {
-      const records = Array.isArray(result.result) ? result.result : Array.isArray(result.result?.records) ? result.result.records : [];
-      if (records.length > 0) {
-        const r = records[0];
-        lineage.push({
-          stage: "assembly",
-          node_id: String(r.asm_id ?? assemblyId),
-          node_type: "Assembly",
-          name: String(r.asm_name ?? assemblyId),
-          timestamp: r.asm_ts ? String(r.asm_ts) : void 0
-        });
-      }
-      const seenBlocks = /* @__PURE__ */ new Set();
-      const seenSources = /* @__PURE__ */ new Set();
-      for (const r of records) {
-        if (r.block_id && !seenBlocks.has(String(r.block_id))) {
-          seenBlocks.add(String(r.block_id));
-          lineage.push({
-            stage: "block",
-            node_id: String(r.block_id),
-            node_type: String(r.block_type ?? "Block"),
-            name: String(r.block_name ?? r.block_id),
-            timestamp: r.block_ts ? String(r.block_ts) : void 0
-          });
-        }
-        if (r.source_id && !seenSources.has(String(r.source_id))) {
-          seenSources.add(String(r.source_id));
-          const sourceType = String(r.source_type ?? "Unknown");
-          const stage = sourceType.includes("Signal") ? "signal" : sourceType.includes("Pattern") ? "pattern" : "signal";
-          lineage.push({
-            stage,
-            node_id: String(r.source_id),
-            node_type: sourceType,
-            name: String(r.source_name ?? r.source_id),
-            timestamp: r.source_ts ? String(r.source_ts) : void 0
-          });
-        }
-      }
-    }
-  } catch (err) {
-    logger.warn({ err: String(err), assemblyId }, "Failed to build lineage chain");
-  }
-  return lineage;
-}
-decisionsRouter.post("/certify", async (req, res) => {
-  const body = req.body;
-  if (!body.assembly_id || !body.title) {
-    res.status(400).json({
-      success: false,
-      error: { code: "VALIDATION_ERROR", message: "Required: assembly_id, title", status_code: 400 }
-    });
-    return;
-  }
-  const assemblyId = String(body.assembly_id);
-  const title = String(body.title);
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  const decisionId = `widgetdc:decision:${uuid31()}`;
-  const lineageChain = await buildLineageChain(assemblyId);
-  let rationale = String(body.rationale ?? "");
-  let summary = String(body.summary ?? "");
-  if (!rationale || !summary) {
-    try {
-      const result = await callCognitive("analyze", {
-        prompt: `You are a decision certifier for an architecture synthesis platform.
-
-Decision: "${title}"
-Assembly: ${assemblyId}
-Lineage: ${lineageChain.length} nodes traced (${lineageChain.map((l) => `${l.stage}:${l.name}`).join(" \u2192 ")})
-${body.context ? `Context: ${JSON.stringify(body.context)}` : ""}
-
-Generate:
-1. A concise summary (1-2 sentences)
-2. A rationale explaining why this decision was made based on the evidence chain
-
-Reply as JSON: {"summary": "...", "rationale": "..."}`,
-        context: { assembly_id: assemblyId, lineage: lineageChain },
-        agent_id: "orchestrator"
-      }, 2e4);
-      const text = String(result ?? "");
-      const match = text.match(/\{[\s\S]*\}/);
-      if (match) {
-        const parsed = JSON.parse(match[0]);
-        if (!summary) summary = parsed.summary ?? title;
-        if (!rationale) rationale = parsed.rationale ?? "Auto-certified based on assembly lineage";
-      }
-    } catch {
-      if (!summary) summary = title;
-      if (!rationale) rationale = "Certified from accepted assembly with verified lineage";
-    }
-  }
-  const proof = {
-    verified_at: now,
-    verified_by: String(body.certifier ?? "orchestrator:decision-engine")
-  };
-  try {
-    const [healthResult] = await Promise.allSettled([
-      fetch("https://orchestrator-production-c27e.up.railway.app/health", { signal: AbortSignal.timeout(5e3) }).then((r) => r.json())
-    ]);
-    if (healthResult.status === "fulfilled") {
-      const h = healthResult.value;
-      proof.service_health = {
-        orchestrator: String(h.status ?? "unknown"),
-        redis: h.redis_enabled ? "connected" : "disconnected",
-        rlm: h.rlm_available ? "available" : "unavailable"
-      };
-    }
-  } catch {
-  }
-  if (body.test_results && typeof body.test_results === "object") {
-    proof.test_results = body.test_results;
-  }
-  if (body.deploy_sha) proof.deploy_sha = String(body.deploy_sha);
-  const certificate = {
-    $id: decisionId,
-    $schema: "widgetdc:decision:v1",
-    title,
-    summary,
-    rationale,
-    assembly_id: assemblyId,
-    lineage_chain: lineageChain,
-    evidence_refs: Array.isArray(body.evidence_refs) ? body.evidence_refs : lineageChain.map((l) => l.node_id),
-    arbitration_outcome: String(body.arbitration_outcome ?? "accepted"),
-    production_proof: proof,
-    certified_at: now,
-    certifier_agent: String(body.certifier ?? "orchestrator:decision-engine"),
-    status: "certified",
-    tags: Array.isArray(body.tags) ? body.tags : []
-  };
-  await storeDecision(certificate);
-  try {
-    await callMcpTool({
-      toolName: "graph.write_cypher",
-      args: {
-        query: `CREATE (d:Decision {
-  id: $id, title: $title, summary: $summary, rationale: $rationale,
-  assembly_id: $assemblyId, status: 'certified',
-  certified_at: datetime(), certifier_agent: $certifier,
-  lineage_depth: $lineageDepth, evidence_count: $evidenceCount
-})
-WITH d
-MATCH (a:Assembly {id: $assemblyId})
-CREATE (d)-[:BASED_ON]->(a)
-WITH d
-UNWIND $evidenceIds AS eid
-MATCH (e) WHERE e.id = eid
-CREATE (d)-[:CERTIFIED_BY_EVIDENCE]->(e)`,
-        params: {
-          id: decisionId,
-          title,
-          summary,
-          rationale,
-          assemblyId,
-          certifier: certificate.certifier_agent,
-          lineageDepth: lineageChain.length,
-          evidenceCount: certificate.evidence_refs.length,
-          evidenceIds: certificate.evidence_refs.slice(0, 20)
-          // Cap for query size
-        }
-      },
-      callId: uuid31(),
-      timeoutMs: 15e3
-    });
-  } catch (err) {
-    logger.warn({ err: String(err), decision_id: decisionId }, "Failed to write decision to Neo4j");
-  }
-  broadcastSSE("decision-certified", {
-    decision_id: decisionId,
-    title,
-    assembly_id: assemblyId,
-    lineage_depth: lineageChain.length
-  });
-  logger.info({
-    decision_id: decisionId,
-    title,
-    assembly_id: assemblyId,
-    lineage_depth: lineageChain.length
-  }, "Decision certified");
-  res.status(201).json({ success: true, data: certificate });
-});
-decisionsRouter.get("/", async (req, res) => {
-  const statusFilter = req.query.status;
-  const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "50")), 1), 200);
-  const offset = Math.max(parseInt(String(req.query.offset ?? "0")), 0);
-  const allIds = await listAllDecisionIds();
-  const redis2 = getRedis();
-  if (!redis2 || allIds.length === 0) {
-    res.json({ decisions: [], total: 0, limit, offset });
-    return;
-  }
-  const decisions = [];
-  try {
-    const pipeline = redis2.pipeline();
-    for (const id of allIds) {
-      pipeline.get(`${REDIS_PREFIX11}${id}`);
-    }
-    const results = await pipeline.exec();
-    if (results) {
-      for (const [err, raw] of results) {
-        if (!err && typeof raw === "string") {
-          try {
-            decisions.push(JSON.parse(raw));
-          } catch {
-          }
-        }
-      }
-    }
-  } catch (err) {
-    logger.warn({ err: String(err) }, "Redis pipeline failed for decisions list");
-  }
-  let filtered = decisions;
-  if (statusFilter) {
-    filtered = filtered.filter((d) => d.status === statusFilter);
-  }
-  filtered.sort((a, b) => b.certified_at.localeCompare(a.certified_at));
-  const total = filtered.length;
-  const page = filtered.slice(offset, offset + limit);
-  res.json({ decisions: page, total, limit, offset });
-});
-decisionsRouter.get("/:id", async (req, res) => {
-  const id = req.params.id;
-  if (id === "lineage") {
-    res.status(400).json({ success: false, error: "Provide a decision ID" });
-    return;
-  }
-  const decision = await loadDecision(id);
-  if (!decision) {
-    res.status(404).json({ success: false, error: "Decision not found" });
-    return;
-  }
-  res.json({ success: true, data: decision });
-});
-decisionsRouter.get("/:id/lineage", async (req, res) => {
-  const decision = await loadDecision(req.params.id);
-  if (!decision) {
-    res.status(404).json({ success: false, error: "Decision not found" });
-    return;
-  }
-  const stages = {};
-  for (const entry of decision.lineage_chain) {
-    if (!stages[entry.stage]) stages[entry.stage] = [];
-    stages[entry.stage].push(entry);
-  }
-  res.json({
-    success: true,
-    data: {
-      decision_id: decision.$id,
-      title: decision.title,
-      certified_at: decision.certified_at,
-      assembly_id: decision.assembly_id,
-      lineage_chain: decision.lineage_chain,
-      lineage_by_stage: stages,
-      depth: decision.lineage_chain.length,
-      stages_covered: Object.keys(stages),
-      production_proof: decision.production_proof
-    }
-  });
-});
+// src/index.ts
+init_loose_ends();
+init_decisions();
 
 // src/routes/s1-s4.ts
 init_chain_engine();
