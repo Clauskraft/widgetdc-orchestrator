@@ -115,6 +115,7 @@ function DeliverableDraftPage() {
   const jobs = useJobStore((state) => state.jobs)
   const activeJob = useMemo(() => jobs.find((job) => job.id === 'deliverable-draft'), [jobs])
   const setActiveClient = useSessionStore((state) => state.setActiveClient)
+  const engagementId = useSessionStore((state) => state.engagementId)
 
   const parsed = response?.parsed as DeliverableDraftParsed | undefined
   const citationTitles = useMemo(() => {
@@ -222,6 +223,7 @@ function DeliverableDraftPage() {
             format: 'markdown',
             max_sections: 6,
             include_citations: true,
+            engagement_id: engagementId ?? undefined,
           },
         },
         priority: 'high',
@@ -418,13 +420,26 @@ function DeliverableDraftPage() {
                     folder="WidgeTDC/Deliverables"
                     contentMarkdown={markdown}
                     properties={buildVisualizationProperties({ kind: 'deliverable_draft', deliverableType: type }, {
+                      engagement_id: engagementId ?? null,
                       client: clientName || 'Unknown',
                       source_tool: 'deliverable_draft',
+                      source_deliverable_id: deliverable?.$id ?? parsed?.id ?? null,
                       status: deliverable?.status ?? response?.status ?? 'unknown',
                       citations_count: deliverable?.metadata.total_citations ?? parsed?.total_citations ?? 0,
                     })}
                   />
-                  {canvasPayload && <SendCanvasToObsidianButton payload={canvasPayload} />}
+                  {canvasPayload && (
+                    <SendCanvasToObsidianButton
+                      payload={{
+                        ...canvasPayload,
+                        properties: {
+                          ...canvasPayload.properties,
+                          engagement_id: engagementId ?? '',
+                          source_deliverable_id: deliverable?.$id ?? parsed?.id ?? '',
+                        },
+                      }}
+                    />
+                  )}
                 </div>
               </CardContent>
             </Card>

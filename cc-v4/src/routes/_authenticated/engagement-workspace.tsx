@@ -68,6 +68,33 @@ type EngagementPlan = {
   total_citations: number
 }
 
+type EngagementContext = {
+  engagement: Engagement
+  plan: EngagementPlan | null
+  outcome: {
+    grade: string
+    completed_at: string
+  } | null
+  deliverables: Array<{
+    id: string
+    title: string
+    type: string
+    status: string
+    created_at?: string
+    completed_at?: string
+    source_tool?: string
+  }>
+  artifacts: Array<{
+    path: string
+    title: string
+    kind: string
+    generated_at?: string
+    source_tool?: string
+    refined_from?: string
+    source_deliverable_id?: string
+  }>
+}
+
 type KnowledgeFeed = {
   generated_at: string
   graph_pulse?: { total_nodes?: number } | null
@@ -192,6 +219,19 @@ function EngagementWorkspacePage() {
     if (storedPlanQuery.data) setGeneratedPlan(storedPlanQuery.data)
   }, [storedPlanQuery.data])
 
+  const engagementContextQuery = useQuery<EngagementContext | null>({
+    queryKey: ['engagement-context', selectedEngagement?.$id],
+    enabled: !!selectedEngagement?.$id,
+    queryFn: async () => {
+      const response = await apiGet<ApiEnvelope<EngagementContext>>(`/api/engagements/${selectedEngagement?.$id}/context`)
+      return response.data
+    },
+  })
+
+  useEffect(() => {
+    if (engagementContextQuery.data?.plan) setGeneratedPlan(engagementContextQuery.data.plan)
+  }, [engagementContextQuery.data?.plan])
+
   const createEngagementMutation = useMutation({
     mutationFn: async () => apiPost<ApiEnvelope<Engagement>>('/api/engagements', {
       client: draftClient.trim(),
@@ -252,6 +292,8 @@ function EngagementWorkspacePage() {
 
   const insights = knowledgeFeedQuery.data?.top_insights ?? []
   const gapAlerts = knowledgeFeedQuery.data?.gap_alerts ?? []
+  const linkedDeliverables = engagementContextQuery.data?.deliverables ?? []
+  const linkedArtifacts = engagementContextQuery.data?.artifacts ?? []
 
   return (
     <div className="flex flex-col gap-6 p-8">
@@ -610,6 +652,81 @@ function EngagementWorkspacePage() {
                   ))}
                 </div>
               </>
+            )}
+          </CardContent>
+        </Card>
+      </section>
+
+      <section className="grid gap-6 xl:grid-cols-[1fr_1fr]">
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <FileStack className="h-4 w-4" />
+              Engagement deliverables
+            </CardTitle>
+            <CardDescription>Client-facing outputs already linked to this engagement through graph lineage.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {engagementContextQuery.isLoading ? (
+              Array.from({ length: 3 }).map((_, index) => <Skeleton key={index} className="h-20 w-full" />)
+            ) : linkedDeliverables.length === 0 ? (
+              <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
+                No engagement-linked deliverables yet. Generate one from Deliverable Studio to seed lineage.
+              </div>
+            ) : (
+              linkedDeliverables.map((deliverable) => (
+                <div key={deliverable.id} className="rounded-lg border p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-semibold">{deliverable.title}</div>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        {deliverable.type} · {deliverable.source_tool ?? 'deliverable_draft'}
+                      </div>
+                    </div>
+                    <Badge variant={deliverable.status === 'completed' ? 'default' : 'outline'}>{deliverable.status}</Badge>
+                  </div>
+                  <div className="mt-3 text-xs text-muted-foreground">
+                    Created {formatDate(deliverable.created_at)}{deliverable.completed_at ? ` · completed ${formatDate(deliverable.completed_at)}` : ''}
+                  </div>
+                </div>
+              ))
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <NotebookPen className="h-4 w-4" />
+              Deep-work artifacts
+            </CardTitle>
+            <CardDescription>Notes and canvases materialized into Obsidian for this engagement.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {engagementContextQuery.isLoading ? (
+              Array.from({ length: 3 }).map((_, index) => <Skeleton key={index} className="h-20 w-full" />)
+            ) : linkedArtifacts.length === 0 ? (
+              <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
+                No engagement-linked artifacts yet. Send an audit or deliverable to Obsidian to establish provenance.
+              </div>
+            ) : (
+              linkedArtifacts.map((artifact) => (
+                <div key={artifact.path} className="rounded-lg border p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-semibold">{artifact.title}</div>
+                      <div className="mt-1 text-xs text-muted-foreground">{artifact.kind} · {artifact.source_tool ?? 'obsidian'}</div>
+                    </div>
+                    <Badge variant="outline">{artifact.path.endsWith('.canvas') ? 'canvas' : 'note'}</Badge>
+                  </div>
+                  <div className="mt-3 space-y-1 text-xs text-muted-foreground">
+                    <div className="truncate">{artifact.path}</div>
+                    {artifact.refined_from && <div className="truncate">Derived from {artifact.refined_from}</div>}
+                    {artifact.source_deliverable_id && <div>Linked deliverable {artifact.source_deliverable_id}</div>}
+                    <div>Generated {formatDate(artifact.generated_at)}</div>
+                  </div>
+                </div>
+              ))
             )}
           </CardContent>
         </Card>

@@ -1770,13 +1770,15 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
         const format = typeof args.format === 'string' ? args.format as 'pdf' | 'markdown' : 'markdown'
         if (!prompt || prompt.length < 10) return 'Error: prompt required (min 10 chars)'
 
-        const result = await generateDeliverable({
-          prompt,
-          type,
-          format,
-          max_sections: typeof args.max_sections === 'number' ? args.max_sections : undefined,
-          include_citations: typeof args.include_citations === 'boolean' ? args.include_citations : true,
-        })
+          const result = await generateDeliverable({
+            prompt,
+            type,
+            format,
+            max_sections: typeof args.max_sections === 'number' ? args.max_sections : undefined,
+            include_citations: typeof args.include_citations === 'boolean' ? args.include_citations : true,
+            engagement_id: typeof args.engagement_id === 'string' ? args.engagement_id : undefined,
+            derived_from_path: typeof args.derived_from_path === 'string' ? args.derived_from_path : undefined,
+          })
 
         if (result.status === 'failed') {
           return `Deliverable generation failed: ${result.error}`
@@ -1790,9 +1792,10 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
           format: result.format,
           status: result.status,
           sections_count: result.sections.length,
-          total_citations: result.metadata.total_citations,
-          generation_ms: result.metadata.generation_ms,
-          preview,
+            total_citations: result.metadata.total_citations,
+            generation_ms: result.metadata.generation_ms,
+            engagement_id: result.engagement_id,
+            preview,
           url: `/api/deliverables/${encodeURIComponent(result.$id)}`,
           markdown_url: `/api/deliverables/${encodeURIComponent(result.$id)}/markdown`,
         }, null, 2)

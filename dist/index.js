@@ -3645,7 +3645,9 @@ var init_tool_registry = __esm({
           type: z.enum(["analysis", "roadmap", "assessment"]).describe("Deliverable type"),
           format: z.enum(["pdf", "markdown"]).optional().describe("Output format (default: markdown)"),
           max_sections: z.number().optional().describe("Max sections (default: 8)"),
-          include_citations: z.boolean().optional().describe("Include knowledge graph citations (default: true)")
+          include_citations: z.boolean().optional().describe("Include knowledge graph citations (default: true)"),
+          engagement_id: z.string().optional().describe("Attach deliverable to an existing engagement"),
+          derived_from_path: z.string().optional().describe("Optional upstream Obsidian artifact path for provenance")
         }),
         timeoutMs: 18e4,
         outputDescription: "Deliverable with title, sections, citations, markdown content, confidence scores"
@@ -8539,6 +8541,167 @@ var init_similarity_engine = __esm({
   }
 });
 
+// src/engagement/engagement-lineage.ts
+import { v4 as uuid12 } from "uuid";
+async function readRows(query, params) {
+  const result = await callMcpTool({
+    toolName: "graph.read_cypher",
+    args: { query, params },
+    callId: uuid12(),
+    timeoutMs: 15e3
+  });
+  if (result.status !== "success") return [];
+  const payload = result.result;
+  if (!payload || payload.success === false) return [];
+  return Array.isArray(payload.results) ? payload.results : [];
+}
+async function recordDeliverableLineage(input) {
+  if (!input.engagementId) return;
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (eng:Engagement {id: $engagementId})
+MERGE (d:Deliverable {id: $deliverableId})
+SET d.title = $title,
+    d.type = $type,
+    d.status = $status,
+    d.sourceTool = $sourceTool,
+    d.updatedAt = datetime(),
+    d.createdAt = coalesce(d.createdAt, datetime($createdAt))
+FOREACH (_ IN CASE WHEN $completedAt IS NULL OR $completedAt = '' THEN [] ELSE [1] END |
+  SET d.completedAt = datetime($completedAt)
+)
+MERGE (d)-[:FOR_ENGAGEMENT]->(eng)
+MERGE (src:WorkspaceSource {id: $sourceTool})
+SET src.kind = 'tool', src.updatedAt = datetime()
+MERGE (d)-[:WAS_GENERATED_BY]->(src)
+FOREACH (_ IN CASE WHEN $derivedFromPath IS NULL OR $derivedFromPath = '' THEN [] ELSE [1] END |
+  MERGE (a:ObsidianArtifact {path: $derivedFromPath})
+  MERGE (d)-[:WAS_DERIVED_FROM]->(a)
+)`,
+        params: {
+          engagementId: input.engagementId,
+          deliverableId: input.deliverableId,
+          title: input.title,
+          type: input.type,
+          status: input.status,
+          createdAt: input.createdAt ?? (/* @__PURE__ */ new Date()).toISOString(),
+          completedAt: input.completedAt ?? null,
+          sourceTool: input.sourceTool ?? "deliverable_draft",
+          derivedFromPath: input.derivedFromPath ?? null
+        },
+        _force: true
+      },
+      callId: uuid12(),
+      timeoutMs: 15e3
+    });
+  } catch (err) {
+    logger.warn({ error: String(err), deliverableId: input.deliverableId, engagementId: input.engagementId }, "Deliverable lineage write failed");
+  }
+}
+async function recordObsidianArtifactLineage(input) {
+  if (!input.engagementId) return;
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (eng:Engagement {id: $engagementId})
+MERGE (a:ObsidianArtifact {path: $path})
+SET a.title = $title,
+    a.kind = $kind,
+    a.sourceTool = $sourceTool,
+    a.generatedAt = datetime($generatedAt),
+    a.refinedFrom = $refinedFrom,
+    a.sourceDeliverableId = $sourceDeliverableId,
+    a.updatedAt = datetime()
+MERGE (a)-[:FOR_ENGAGEMENT]->(eng)
+MERGE (src:WorkspaceSource {id: $sourceTool})
+SET src.kind = 'surface', src.updatedAt = datetime()
+MERGE (a)-[:WAS_GENERATED_BY]->(src)
+FOREACH (_ IN CASE WHEN $refinedFrom IS NULL OR $refinedFrom = '' THEN [] ELSE [1] END |
+  MERGE (parent:ObsidianArtifact {path: $refinedFrom})
+  MERGE (a)-[:WAS_DERIVED_FROM]->(parent)
+)
+FOREACH (_ IN CASE WHEN $sourceDeliverableId IS NULL OR $sourceDeliverableId = '' THEN [] ELSE [1] END |
+  MERGE (d:Deliverable {id: $sourceDeliverableId})
+  MERGE (a)-[:WAS_DERIVED_FROM]->(d)
+)`,
+        params: {
+          engagementId: input.engagementId,
+          path: input.path,
+          title: input.title,
+          kind: input.kind,
+          generatedAt: input.generatedAt ?? (/* @__PURE__ */ new Date()).toISOString(),
+          sourceTool: input.sourceTool ?? "obsidian",
+          refinedFrom: input.refinedFrom ?? null,
+          sourceDeliverableId: input.sourceDeliverableId ?? null
+        },
+        _force: true
+      },
+      callId: uuid12(),
+      timeoutMs: 15e3
+    });
+  } catch (err) {
+    logger.warn({ error: String(err), path: input.path, engagementId: input.engagementId }, "Obsidian artifact lineage write failed");
+  }
+}
+async function listDeliverablesForEngagement(engagementId, limit = 10) {
+  const rows = await readRows(
+    `MATCH (:Engagement {id: $engagementId})<-[:FOR_ENGAGEMENT]-(d:Deliverable)
+RETURN d.id AS id,
+       d.title AS title,
+       d.type AS type,
+       d.status AS status,
+       toString(d.createdAt) AS created_at,
+       toString(d.completedAt) AS completed_at,
+       d.sourceTool AS source_tool
+ORDER BY d.createdAt DESC
+LIMIT $limit`,
+    { engagementId, limit }
+  );
+  return rows.map((row) => ({
+    id: String(row.id ?? ""),
+    title: String(row.title ?? "Untitled deliverable"),
+    type: String(row.type ?? "unknown"),
+    status: String(row.status ?? "unknown"),
+    created_at: typeof row.created_at === "string" ? row.created_at : void 0,
+    completed_at: typeof row.completed_at === "string" ? row.completed_at : void 0,
+    source_tool: typeof row.source_tool === "string" ? row.source_tool : void 0
+  })).filter((row) => row.id);
+}
+async function listArtifactsForEngagement(engagementId, limit = 10) {
+  const rows = await readRows(
+    `MATCH (:Engagement {id: $engagementId})<-[:FOR_ENGAGEMENT]-(a:ObsidianArtifact)
+RETURN a.path AS path,
+       a.title AS title,
+       a.kind AS kind,
+       toString(a.generatedAt) AS generated_at,
+       a.sourceTool AS source_tool,
+       a.refinedFrom AS refined_from,
+       a.sourceDeliverableId AS source_deliverable_id
+ORDER BY a.generatedAt DESC
+LIMIT $limit`,
+    { engagementId, limit }
+  );
+  return rows.map((row) => ({
+    path: String(row.path ?? ""),
+    title: String(row.title ?? "Untitled artifact"),
+    kind: String(row.kind ?? "unknown"),
+    generated_at: typeof row.generated_at === "string" ? row.generated_at : void 0,
+    source_tool: typeof row.source_tool === "string" ? row.source_tool : void 0,
+    refined_from: typeof row.refined_from === "string" ? row.refined_from : void 0,
+    source_deliverable_id: typeof row.source_deliverable_id === "string" ? row.source_deliverable_id : void 0
+  })).filter((row) => row.path);
+}
+var init_engagement_lineage = __esm({
+  "src/engagement/engagement-lineage.ts"() {
+    "use strict";
+    init_mcp_caller();
+    init_logger();
+  }
+});
+
 // src/engagement/deliverable-engine.ts
 var deliverable_engine_exports = {};
 __export(deliverable_engine_exports, {
@@ -8546,7 +8709,7 @@ __export(deliverable_engine_exports, {
   getDeliverable: () => getDeliverable,
   listDeliverables: () => listDeliverables
 });
-import { v4 as uuid12 } from "uuid";
+import { v4 as uuid13 } from "uuid";
 async function persist(d) {
   deliverableCache.set(d.$id, d);
   if (deliverableCache.size > CACHE_MAX_SIZE) {
@@ -8598,7 +8761,7 @@ async function generateDeliverable(req) {
   }
   activeGenerations++;
   const t0 = Date.now();
-  const deliverableId = `widgetdc:deliverable:${uuid12()}`;
+  const deliverableId = `widgetdc:deliverable:${uuid13()}`;
   const format = req.format ?? "markdown";
   const maxSections = Math.min(Math.max(req.max_sections ?? 5, 2), 8);
   const deliverable = {
@@ -8606,6 +8769,8 @@ async function generateDeliverable(req) {
     $schema: "widgetdc:deliverable:v1",
     prompt: req.prompt,
     type: req.type,
+    engagement_id: req.engagement_id,
+    derived_from_path: req.derived_from_path,
     format,
     title: "",
     sections: [],
@@ -8666,6 +8831,19 @@ async function generateDeliverable(req) {
     };
     deliverable.status = "completed";
     deliverable.completed_at = (/* @__PURE__ */ new Date()).toISOString();
+    if (deliverable.engagement_id) {
+      await recordDeliverableLineage({
+        engagementId: deliverable.engagement_id,
+        deliverableId,
+        title: deliverable.title,
+        type: deliverable.type,
+        status: deliverable.status,
+        createdAt: deliverable.created_at,
+        completedAt: deliverable.completed_at,
+        sourceTool: "deliverable_draft",
+        derivedFromPath: deliverable.derived_from_path
+      });
+    }
     try {
       const { hookDeliverableToKnowledge: hookDeliverableToKnowledge2 } = await Promise.resolve().then(() => (init_compound_hooks(), compound_hooks_exports));
       const allCits = sections.flatMap((s) => s.citations);
@@ -8684,6 +8862,19 @@ async function generateDeliverable(req) {
     deliverable.error = err instanceof Error ? err.message : String(err);
     deliverable.completed_at = (/* @__PURE__ */ new Date()).toISOString();
     deliverable.metadata.generation_ms = Date.now() - t0;
+    if (deliverable.engagement_id) {
+      await recordDeliverableLineage({
+        engagementId: deliverable.engagement_id,
+        deliverableId,
+        title: deliverable.title || `${deliverable.type} deliverable`,
+        type: deliverable.type,
+        status: deliverable.status,
+        createdAt: deliverable.created_at,
+        completedAt: deliverable.completed_at,
+        sourceTool: "deliverable_draft",
+        derivedFromPath: deliverable.derived_from_path
+      });
+    }
     logger.error({ id: deliverableId, error: deliverable.error }, "Deliverable: Failed");
   } finally {
     activeGenerations--;
@@ -8883,7 +9074,7 @@ async function renderPDF(deliverable) {
         content: deliverable.markdown,
         template: deliverable.type
       },
-      callId: uuid12(),
+      callId: uuid13(),
       timeoutMs: 45e3
     });
     if (result.status === "success" && result.result) {
@@ -8904,6 +9095,7 @@ var init_deliverable_engine = __esm({
     init_dual_rag();
     init_redis();
     init_logger();
+    init_engagement_lineage();
     REDIS_PREFIX3 = "orchestrator:deliverable:";
     REDIS_INDEX2 = "orchestrator:deliverables:index";
     TTL_SECONDS2 = 604800;
@@ -9086,7 +9278,7 @@ __export(osint_scanner_exports, {
   getOsintStatus: () => getOsintStatus,
   runOsintScan: () => runOsintScan
 });
-import { v4 as uuid13 } from "uuid";
+import { v4 as uuid14 } from "uuid";
 async function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -9111,7 +9303,7 @@ async function checkToolAvailability() {
     const result = await callMcpTool({
       toolName: "the_snout.domain_intel",
       args: { domain: "borger.dk", type: "basic" },
-      callId: uuid13(),
+      callId: uuid14(),
       timeoutMs: 1e4
     });
     return result.status === "success";
@@ -9128,7 +9320,7 @@ async function scanCTForDomain(domain, toolsAvailable) {
       const result = await callMcpTool({
         toolName: "the_snout.ct_transparency",
         args: { domain },
-        callId: uuid13(),
+        callId: uuid14(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (result.status === "success" && result.result) {
@@ -9143,7 +9335,7 @@ async function scanCTForDomain(domain, toolsAvailable) {
       const fallbackResult = await callMcpTool({
         toolName: "the_snout.domain_intel",
         args: { domain, type: "ct" },
-        callId: uuid13(),
+        callId: uuid14(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (fallbackResult.status === "success" && fallbackResult.result) {
@@ -9188,7 +9380,7 @@ async function scanDMARCForDomain(domain, toolsAvailable) {
       const result = await callMcpTool({
         toolName: "the_snout.domain_intel",
         args: { domain, type: "dmarc" },
-        callId: uuid13(),
+        callId: uuid14(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (result.status === "success" && result.result) {
@@ -9271,7 +9463,7 @@ async function ingestCTResults(ctResults) {
             },
             _force: true
           },
-          callId: uuid13(),
+          callId: uuid14(),
           timeoutMs: 15e3
         });
         if (result.status === "success") {
@@ -9334,7 +9526,7 @@ async function ingestDMARCResults(dmarcResults) {
             },
             _force: true
           },
-          callId: uuid13(),
+          callId: uuid14(),
           timeoutMs: 15e3
         });
         if (result.status === "success") {
@@ -9369,7 +9561,7 @@ async function persistScanResult(result) {
   }
 }
 async function runOsintScan(options) {
-  const scanId = uuid13();
+  const scanId = uuid14();
   const startedAt2 = (/* @__PURE__ */ new Date()).toISOString();
   const t0 = Date.now();
   const domains = options?.domains ?? [...DK_PUBLIC_DOMAINS];
@@ -9514,7 +9706,7 @@ __export(evolution_loop_exports, {
   getEvolutionStatus: () => getEvolutionStatus,
   runEvolutionLoop: () => runEvolutionLoop
 });
-import { v4 as uuid14 } from "uuid";
+import { v4 as uuid15 } from "uuid";
 async function persistCycle(cycle) {
   const redis2 = getRedis();
   if (!redis2) return;
@@ -9563,7 +9755,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (n) RETURN labels(n)[0] AS label, count(*) AS count ORDER BY count DESC LIMIT 15"
       },
-      callId: uuid14(),
+      callId: uuid15(),
       timeoutMs: 1e4
     }),
     callMcpTool({
@@ -9571,7 +9763,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (f:FailureMemory) WHERE f.last_seen > datetime() - duration('P7D') RETURN f.category AS category, f.pattern AS pattern, f.hit_count AS hits ORDER BY f.hit_count DESC LIMIT 10"
       },
-      callId: uuid14(),
+      callId: uuid15(),
       timeoutMs: 1e4
     }),
     callMcpTool({
@@ -9579,7 +9771,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (l:Lesson) WHERE l.created_at > datetime() - duration('P7D') RETURN l.agent_id AS agent, l.lesson AS lesson, l.context AS context ORDER BY l.created_at DESC LIMIT 10"
       },
-      callId: uuid14(),
+      callId: uuid15(),
       timeoutMs: 1e4
     })
   ]);
@@ -9635,7 +9827,7 @@ async function stageOrient(observeResult, focusArea) {
         RETURN labels(b)[0] AS label, coalesce(b.name, b.title, b.id) AS name, b.status AS status, b.quality_score AS quality
         ORDER BY coalesce(b.quality_score, 0) ASC LIMIT 10`
     },
-    callId: uuid14(),
+    callId: uuid15(),
     timeoutMs: 1e4
   });
   const blocks = blocksResult.status === "success" ? Array.isArray(blocksResult.result) ? blocksResult.result : blocksResult.result?.results ?? [] : [];
@@ -9757,7 +9949,7 @@ async function stageLearn(cycleId, observeResult, orientResult, actResult) {
           estimated_impact: orientResult.estimated_impact
         }
       },
-      callId: uuid14(),
+      callId: uuid15(),
       timeoutMs: 15e3
     });
     if (writeResult.status === "success") {
@@ -9787,7 +9979,7 @@ async function stageLearn(cycleId, observeResult, orientResult, actResult) {
             cycle_id: cycleId
           }
         },
-        callId: uuid14(),
+        callId: uuid15(),
         timeoutMs: 1e4
       });
       if (lessonResult.status === "success") {
@@ -9804,7 +9996,7 @@ async function runEvolutionLoop(opts) {
     throw new Error("Evolution loop already running. Only 1 concurrent cycle allowed.");
   }
   isRunning = true;
-  const cycleId = uuid14();
+  const cycleId = uuid15();
   const startedAt2 = (/* @__PURE__ */ new Date()).toISOString();
   const t0 = Date.now();
   const focusArea = opts?.focus_area?.slice(0, 200);
@@ -18274,7 +18466,7 @@ var moa_router_exports = {};
 __export(moa_router_exports, {
   routeMoA: () => routeMoA
 });
-import { v4 as uuid15 } from "uuid";
+import { v4 as uuid16 } from "uuid";
 async function classifyQuery2(query, provider) {
   try {
     const result = await chatLLM({
@@ -18321,7 +18513,7 @@ function selectAgents(domains, maxAgents) {
 }
 async function dispatchAgents(query, agents) {
   const chainDef = {
-    name: `moa-${uuid15().slice(0, 8)}`,
+    name: `moa-${uuid16().slice(0, 8)}`,
     mode: "parallel",
     steps: agents.map((a) => ({
       agent_id: a.agent_id,
@@ -18376,7 +18568,7 @@ async function routeMoA(request) {
   const t0 = Date.now();
   const provider = request.provider ?? "deepseek";
   const maxAgents = request.max_agents ?? 3;
-  const taskId = `moa-${uuid15()}`;
+  const taskId = `moa-${uuid16()}`;
   const board = createBlackboard(taskId);
   const classification = await classifyQuery2(request.query, provider);
   await board.write("observations", {
@@ -18634,7 +18826,7 @@ __export(skill_forge_exports, {
   loadForgedTools: () => loadForgedTools,
   verifyForgedTool: () => verifyForgedTool
 });
-import { v4 as uuid16 } from "uuid";
+import { v4 as uuid17 } from "uuid";
 function getForgedTools() {
   return [...FORGED_TOOLS.values()];
 }
@@ -18721,7 +18913,7 @@ Handler type: ${handlerType}` }
   }
   const namespace = name.split("_")[0] || "custom";
   const spec2 = {
-    id: uuid16(),
+    id: uuid17(),
     name,
     namespace,
     description,
@@ -18757,7 +18949,7 @@ async function verifyForgedTool(name) {
       const result = await callMcpTool({
         toolName: spec2.handler_config.backend_tool,
         args: {},
-        callId: uuid16(),
+        callId: uuid17(),
         timeoutMs: 1e4
       });
       testResult = result.status === "success" ? "Backend tool reachable" : `Backend error: ${result.error_message}`;
@@ -18766,7 +18958,7 @@ async function verifyForgedTool(name) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: "RETURN 1 AS test" },
-        callId: uuid16(),
+        callId: uuid17(),
         timeoutMs: 5e3
       });
       testResult = result.status === "success" ? "Cypher engine reachable" : `Cypher error: ${result.error_message}`;
@@ -18798,7 +18990,7 @@ async function executeForgedTool(name, args) {
         const result = await callMcpTool({
           toolName: spec2.handler_config.backend_tool,
           args,
-          callId: uuid16(),
+          callId: uuid17(),
           timeoutMs: 3e4
         });
         return result.status === "success" ? JSON.stringify(result.result, null, 2).slice(0, 1e3) : `Error: ${result.error_message}`;
@@ -18808,7 +19000,7 @@ async function executeForgedTool(name, args) {
         const result = await callMcpTool({
           toolName: "graph.read_cypher",
           args: { query: spec2.handler_config.cypher_template, params: args },
-          callId: uuid16(),
+          callId: uuid17(),
           timeoutMs: 15e3
         });
         return result.status === "success" ? JSON.stringify(result.result, null, 2).slice(0, 1e3) : `Error: ${result.error_message}`;
@@ -18879,7 +19071,7 @@ __export(engagement_engine_exports, {
   matchPrecedents: () => matchPrecedents,
   recordOutcome: () => recordOutcome
 });
-import { v4 as uuid17 } from "uuid";
+import { v4 as uuid18 } from "uuid";
 async function saveEngagement(e) {
   engagementCache.set(e.$id, e);
   const redis2 = getRedis();
@@ -18956,7 +19148,7 @@ MERGE (eng)-[:USES_METHODOLOGY]->(m)`,
         },
         _force: true
       },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -18992,7 +19184,7 @@ SET eng.status = 'completed'`,
         },
         _force: true
       },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -19015,7 +19207,7 @@ async function indexEngagementForPrecedent(e) {
         orgId: "default",
         _force: true
       },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 15e3
     });
   } catch (err) {
@@ -19025,7 +19217,7 @@ async function indexEngagementForPrecedent(e) {
 async function createEngagement(req) {
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const e = {
-    $id: `eng-${uuid17()}`,
+    $id: `eng-${uuid18()}`,
     $schema: "https://widgetdc.io/schemas/engagement/v1",
     client: req.client.slice(0, 120),
     domain: req.domain.slice(0, 60),
@@ -19105,7 +19297,7 @@ ORDER BY
 LIMIT ${Math.floor(limit)}`,
         params: { domain: req.domain }
       },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return [];
@@ -19154,7 +19346,7 @@ async function queryKgRag(query, maxEvidence = 10) {
     const result = await callMcpTool({
       toolName: "kg_rag.query",
       args: { question: query, max_evidence: maxEvidence },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 45e3
     });
     if (result.status !== "success") return { answer: "", sources: [] };
@@ -19183,7 +19375,7 @@ async function foldContext(text, query, maxTokens = 1500) {
         max_tokens: maxTokens,
         domain: "consulting"
       },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 2e4
     });
     if (result.status !== "success") return null;
@@ -19218,7 +19410,7 @@ async function proposeViaConsensus(engagementId, req, planSummary) {
           budget_dkk: req.budget_dkk ?? 0
         }
       },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return { proposalId: null, quorum: 0 };
@@ -19244,7 +19436,7 @@ async function voteOnConsensus(proposalId, decision, confidence, reasoning) {
         confidence: Math.min(1, Math.max(0, confidence)),
         reasoning: reasoning.slice(0, 500)
       },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 1e4
     });
     if (result.status !== "success") return false;
@@ -19265,7 +19457,7 @@ async function planViaRlmMission(engagementId, req, maxSteps = 3) {
         maxSteps,
         maxDepth: 2
       },
-      callId: uuid17(),
+      callId: uuid18(),
       timeoutMs: 2e4
     });
     if (startResult.status !== "success") return { missionId: null, insights: [], stepsExecuted: 0 };
@@ -19279,7 +19471,7 @@ async function planViaRlmMission(engagementId, req, maxSteps = 3) {
       const stepResult = await callMcpTool({
         toolName: "rlm.execute_step",
         args: { missionId },
-        callId: uuid17(),
+        callId: uuid18(),
         timeoutMs: 6e4
       });
       if (stepResult.status !== "success") break;
@@ -19357,7 +19549,7 @@ async function enforceConsensusGate(engagementId, req) {
 }
 async function generatePlan(req) {
   const t0 = Date.now();
-  const engagementId = req.engagement_id ?? `eng-${uuid17()}`;
+  const engagementId = req.engagement_id ?? `eng-${uuid18()}`;
   enforceInputSanityGate(req);
   const highStakes = isHighStakesPlan(req);
   const complex = req.duration_weeks > GATE_DURATION_WEEKS;
@@ -19539,7 +19731,7 @@ Return ONLY JSON matching the schema, no prose.`;
       const r = await callMcpTool({
         toolName: "llm.generate",
         args: { prompt: mercuryPrompt },
-        callId: uuid17(),
+        callId: uuid18(),
         timeoutMs: 3e4
       });
       if (r.status === "success") {
@@ -22280,10 +22472,10 @@ __export(pheromone_layer_exports, {
   runPheromoneCron: () => runPheromoneCron,
   sense: () => sense
 });
-import { v4 as uuid18 } from "uuid";
+import { v4 as uuid19 } from "uuid";
 async function deposit(agentId, type, domain, strength, label, metrics2 = {}, tags = [], ttlSeconds = DEFAULT_TTL2) {
   const pheromone = {
-    id: `ph-${uuid18().slice(0, 12)}`,
+    id: `ph-${uuid19().slice(0, 12)}`,
     type,
     agentId,
     domain,
@@ -24075,7 +24267,7 @@ __export(competitive_crawler_exports, {
   COMPETITOR_TARGETS: () => COMPETITOR_TARGETS,
   runCompetitiveCrawl: () => runCompetitiveCrawl
 });
-import { v4 as uuid19 } from "uuid";
+import { v4 as uuid20 } from "uuid";
 async function fetchPageText(url) {
   const res = await fetch(url, {
     headers: {
@@ -24120,7 +24312,7 @@ async function extractCapabilities(target) {
         const cap = line.replace(/^[\s\-\*]+/, "").trim();
         if (cap.length > 10 && cap.length < 200) {
           capabilities.push({
-            $id: `capability:${target.slug}:${uuid19().slice(0, 8)}`,
+            $id: `capability:${target.slug}:${uuid20().slice(0, 8)}`,
             competitor: target.name,
             capability: cap,
             category: categorizeCapability(cap),
@@ -24170,7 +24362,7 @@ async function persistCapabilities(capabilities) {
             extracted_at: cap.extracted_at
           }
         },
-        callId: uuid19(),
+        callId: uuid20(),
         timeoutMs: 1e4
       });
       persisted++;
@@ -24194,7 +24386,7 @@ async function analyzeGaps(capabilities) {
     const result = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: "MATCH (t:Tool) RETURN t.name AS name LIMIT 200" },
-      callId: uuid19(),
+      callId: uuid20(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -24331,9 +24523,9 @@ __export(loose_ends_exports, {
   runLooseEndScan: () => runLooseEndScan
 });
 import { Router } from "express";
-import { v4 as uuid20 } from "uuid";
+import { v4 as uuid21 } from "uuid";
 async function runLooseEndScan() {
-  const scanId = uuid20();
+  const scanId = uuid21();
   const t0 = Date.now();
   const findings = [];
   logger.info({ scan_id: scanId }, "Loose-end scan started");
@@ -24343,7 +24535,7 @@ async function runLooseEndScan() {
         const result = await callMcpTool({
           toolName: "graph.read_cypher",
           args: { query: dq.cypher },
-          callId: uuid20(),
+          callId: uuid21(),
           timeoutMs: 15e3
         });
         if (result.status !== "success") return [];
@@ -24404,7 +24596,7 @@ SET s.scanned_at = datetime(), s.duration_ms = $duration,
           total: summary.total
         }
       },
-      callId: uuid20(),
+      callId: uuid21(),
       timeoutMs: 1e4
     });
   } catch {
@@ -24442,7 +24634,7 @@ AND NOT (b)<-[:COMPOSED_OF]-(:Assembly)
 RETURN b.id AS id, b.name AS name, b.domain AS domain, labels(b)[0] AS type
 LIMIT 25`,
         buildFinding: (records) => records.map((r) => ({
-          id: `orphan-${r.id ?? uuid20().slice(0, 8)}`,
+          id: `orphan-${r.id ?? uuid21().slice(0, 8)}`,
           severity: "warning",
           category: "orphan_block",
           title: `Orphan block: ${r.name ?? r.id}`,
@@ -24460,7 +24652,7 @@ AND NOT (a)<-[:BASED_ON]-(:Decision)
 RETURN a.id AS id, a.name AS name, a.composite AS score
 LIMIT 15`,
         buildFinding: (records) => records.map((r) => ({
-          id: `dangling-asm-${r.id ?? uuid20().slice(0, 8)}`,
+          id: `dangling-asm-${r.id ?? uuid21().slice(0, 8)}`,
           severity: "warning",
           category: "dangling_assembly",
           title: `Accepted assembly without decision: ${r.name ?? r.id}`,
@@ -24478,7 +24670,7 @@ AND NOT (d)-[:DERIVES_FROM]->()
 RETURN d.id AS id, d.title AS title, d.certified_at AS certified_at
 LIMIT 10`,
         buildFinding: (records) => records.map((r) => ({
-          id: `no-lineage-${r.id ?? uuid20().slice(0, 8)}`,
+          id: `no-lineage-${r.id ?? uuid21().slice(0, 8)}`,
           severity: "critical",
           category: "missing_lineage",
           title: `Decision without lineage: ${r.title ?? r.id}`,
@@ -24496,7 +24688,7 @@ AND NOT (n)-[]-()
 RETURN n.id AS id, labels(n)[0] AS type, n.domain AS domain, n.insight AS title
 LIMIT 20`,
         buildFinding: (records) => records.map((r) => ({
-          id: `disconnected-${r.id ?? uuid20().slice(0, 8)}`,
+          id: `disconnected-${r.id ?? uuid21().slice(0, 8)}`,
           severity: "info",
           category: "disconnected_node",
           title: `Disconnected ${r.type}: ${(r.title ?? r.id ?? "").toString().slice(0, 60)}`,
@@ -24514,7 +24706,7 @@ AND d.created_at < datetime() - duration('P7D')
 RETURN d.id AS id, d.title AS title, d.created_at AS created_at
 LIMIT 10`,
         buildFinding: (records) => records.map((r) => ({
-          id: `stale-decision-${r.id ?? uuid20().slice(0, 8)}`,
+          id: `stale-decision-${r.id ?? uuid21().slice(0, 8)}`,
           severity: "warning",
           category: "unresolved_decision",
           title: `Stale draft decision: ${r.title ?? r.id}`,
@@ -24590,7 +24782,7 @@ __export(decisions_exports, {
   storeDecision: () => storeDecision
 });
 import { Router as Router2 } from "express";
-import { v4 as uuid21 } from "uuid";
+import { v4 as uuid22 } from "uuid";
 async function storeDecision(decision) {
   const redis2 = getRedis();
   if (!redis2) return false;
@@ -24639,7 +24831,7 @@ RETURN a.id AS asm_id, a.name AS asm_name, a.created_at AS asm_ts,
 ORDER BY b.name`,
         params: { assemblyId }
       },
-      callId: uuid21(),
+      callId: uuid22(),
       timeoutMs: 15e3
     });
     if (result.status === "success") {
@@ -24711,7 +24903,7 @@ var init_decisions = __esm({
       const assemblyId = String(body.assembly_id);
       const title = String(body.title);
       const now = (/* @__PURE__ */ new Date()).toISOString();
-      const decisionId = `widgetdc:decision:${uuid21()}`;
+      const decisionId = `widgetdc:decision:${uuid22()}`;
       const lineageChain = await buildLineageChain(assemblyId);
       let rationale = String(body.rationale ?? "");
       let summary = String(body.summary ?? "");
@@ -24814,7 +25006,7 @@ CREATE (d)-[:CERTIFIED_BY_EVIDENCE]->(e)`,
               // Cap for query size
             }
           },
-          callId: uuid21(),
+          callId: uuid22(),
           timeoutMs: 15e3
         });
       } catch (err) {
@@ -25623,7 +25815,7 @@ __export(hyperagent_autonomous_exports, {
   runAutonomousCycle: () => runAutonomousCycle,
   setPhase: () => setPhase
 });
-import { v4 as uuid22 } from "uuid";
+import { v4 as uuid23 } from "uuid";
 function stream(event, data) {
   const payload = {
     ...data,
@@ -26023,7 +26215,7 @@ async function runAutonomousCycle(phase, maxTargets) {
       }
     }
   }
-  const cycleId = `auto-${uuid22().slice(0, 8)}`;
+  const cycleId = `auto-${uuid23().slice(0, 8)}`;
   const effectivePhase = phase ?? currentPhase;
   const batchSize = maxTargets ?? CYCLE_BATCH_SIZE[effectivePhase];
   const profileId = PHASE_POLICY[effectivePhase];
@@ -26831,7 +27023,7 @@ __export(inventor_loop_exports, {
   runInventor: () => runInventor,
   stopInventor: () => stopInventor
 });
-import { v4 as uuid23 } from "uuid";
+import { v4 as uuid24 } from "uuid";
 function stream2(event, data) {
   broadcastSSE("inventor", { event, ...data, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
 }
@@ -27243,7 +27435,7 @@ async function runStep(config2) {
     cognitionItems,
     config2
   );
-  const nodeId = `inv-${uuid23().slice(0, 8)}`;
+  const nodeId = `inv-${uuid24().slice(0, 8)}`;
   const parentId = parentNodes.length > 0 ? parentNodes[0].id : null;
   const node = {
     id: nodeId,
@@ -27504,7 +27696,7 @@ async function runInventor(config2, resume = false) {
   });
   if (config2.initialArtifact && nodes.size === 0) {
     const seedNode = {
-      id: `inv-seed-${uuid23().slice(0, 8)}`,
+      id: `inv-seed-${uuid24().slice(0, 8)}`,
       parentId: null,
       artifact: config2.initialArtifact,
       taskDescription: config2.taskDescription,
@@ -28835,7 +29027,7 @@ __export(tool_executor_exports, {
   executeToolUnified: () => executeToolUnified,
   getTokenSavings: () => getTokenSavings
 });
-import { v4 as uuid24 } from "uuid";
+import { v4 as uuid25 } from "uuid";
 async function enforceHyperAgentGate(toolName2, opts) {
   const toolDef = getTool(toolName2);
   if (!toolDef) return null;
@@ -28861,7 +29053,7 @@ function getTokenSavings() {
 async function saveFullToolOutput(content, toolName2) {
   const redis2 = getRedis();
   if (!redis2) return null;
-  const id = uuid24();
+  const id = uuid25();
   try {
     const payload = JSON.stringify({
       $id: `tool-output-${id}`,
@@ -28979,7 +29171,7 @@ function buildToolFallback(toolName2, error) {
   }
 }
 async function executeToolUnified(toolName2, args, opts) {
-  const callId = opts?.call_id ?? uuid24();
+  const callId = opts?.call_id ?? uuid25();
   const t0 = Date.now();
   let deprecation_notice;
   const toolDef = getTool(toolName2);
@@ -29089,7 +29281,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher, params: args.params ?? {} },
-        callId: uuid24(),
+        callId: uuid25(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
@@ -29110,7 +29302,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher },
-        callId: uuid24(),
+        callId: uuid25(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Task query failed: ${result.error_message}`;
@@ -29128,7 +29320,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: toolName2,
         args: mcpArgs ?? {},
-        callId: uuid24(),
+        callId: uuid25(),
         timeoutMs: 3e4
       });
       if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
@@ -29136,8 +29328,8 @@ ${result.merged_context}`;
     }
     case "get_platform_health": {
       const [backendHealth, graphHealth] = await Promise.allSettled([
-        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid24(), timeoutMs: 1e4 }),
-        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid24(), timeoutMs: 1e4 })
+        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid25(), timeoutMs: 1e4 }),
+        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid25(), timeoutMs: 1e4 })
       ]);
       const parts = [];
       if (backendHealth.status === "fulfilled" && backendHealth.value.status === "success") {
@@ -29153,7 +29345,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: args.query },
-        callId: uuid24(),
+        callId: uuid25(),
         timeoutMs: 2e4
       });
       if (result.status !== "success") return `Document search failed: ${result.error_message}`;
@@ -29171,7 +29363,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issues",
         args: payload,
-        callId: uuid24(),
+        callId: uuid25(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
@@ -29187,7 +29379,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issue_get",
         args: { identifier },
-        callId: uuid24(),
+        callId: uuid25(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
@@ -29198,7 +29390,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.labels",
         args: { limit },
-        callId: uuid24(),
+        callId: uuid25(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Linear labels fetch failed: ${result.error_message}`;
@@ -29212,7 +29404,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.save_issue",
         args: body,
-        callId: uuid24(),
+        callId: uuid25(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear save issue failed: ${result.error_message}`;
@@ -29224,7 +29416,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.get_issue",
         args: { id },
-        callId: uuid24(),
+        callId: uuid25(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Linear get issue failed: ${result.error_message}`;
@@ -30155,7 +30347,9 @@ ${formatted}`;
           type,
           format,
           max_sections: typeof args.max_sections === "number" ? args.max_sections : void 0,
-          include_citations: typeof args.include_citations === "boolean" ? args.include_citations : true
+          include_citations: typeof args.include_citations === "boolean" ? args.include_citations : true,
+          engagement_id: typeof args.engagement_id === "string" ? args.engagement_id : void 0,
+          derived_from_path: typeof args.derived_from_path === "string" ? args.derived_from_path : void 0
         });
         if (result.status === "failed") {
           return `Deliverable generation failed: ${result.error}`;
@@ -30170,6 +30364,7 @@ ${formatted}`;
           sections_count: result.sections.length,
           total_citations: result.metadata.total_citations,
           generation_ms: result.metadata.generation_ms,
+          engagement_id: result.engagement_id,
           preview,
           url: `/api/deliverables/${encodeURIComponent(result.$id)}`,
           markdown_url: `/api/deliverables/${encodeURIComponent(result.$id)}/markdown`
@@ -30449,7 +30644,7 @@ ${formatted}`;
             max_tokens: budget,
             domain
           },
-          callId: uuid24(),
+          callId: uuid25(),
           timeoutMs: 25e3
         });
         if (result.status !== "success") return `Folding failed: ${result.error_message}`;
@@ -30531,7 +30726,7 @@ ${summary}`;
         const lineage = await buildLineageChain2(assemblyId);
         const now = (/* @__PURE__ */ new Date()).toISOString();
         const decision = {
-          $id: `widgetdc:decision:${uuid24()}`,
+          $id: `widgetdc:decision:${uuid25()}`,
           $schema: "https://widgetdc.io/schemas/decision/v1",
           title,
           description: typeof args.description === "string" ? args.description : "",
@@ -30614,7 +30809,7 @@ ${lines.join("\n")}`;
         const { saveDrillContext: saveDrillContext2, fetchDrillChildren: fetchDrillChildren2 } = await Promise.resolve().then(() => (init_drill(), drill_exports));
         const domain = String(args.domain ?? "");
         if (!domain) return "Error: domain required";
-        const sessionId = uuid24();
+        const sessionId = uuid25();
         const ctx = {
           stack: [],
           current_level: "domain",
@@ -30850,7 +31045,7 @@ ${lines.join("\n")}`;
     case "peer_eval_evaluate": {
       const { hookIntoExecution: hookIntoExecution2 } = await Promise.resolve().then(() => (init_peer_eval(), peer_eval_exports));
       const agentId = args.agent_id;
-      const taskId = args.task_id ?? uuid24();
+      const taskId = args.task_id ?? uuid25();
       const taskType = args.task_type ?? "manual-eval";
       const success = args.success ?? true;
       const latencyMs = typeof args.latency_ms === "number" ? args.latency_ms : 1e3;
@@ -31396,7 +31591,7 @@ ${lines.join("\n")}`;
       if (!["read_only", "staged_write", "production_write"].includes(scope)) {
         throw new Error("scope must be read_only, staged_write, or production_write");
       }
-      const sessionId = `gov-${uuid24().slice(0, 8)}`;
+      const sessionId = `gov-${uuid25().slice(0, 8)}`;
       const plan = await createPlan2(description, sessionId, scope, {
         targetServices: targetService ? [targetService] : [],
         successMetrics: `Plan approved and executed under ${scope} profile`,
@@ -31459,7 +31654,7 @@ ${lines.join("\n")}`;
       const scoreMap = { success: 90, partial: 60, failed: 20 };
       const score = scoreMap[outcome] ?? 50;
       const plan = getPlan3(planId);
-      const kpi = await evaluatePlan2(`eval-${uuid24().slice(0, 8)}`, planId, score, "governance");
+      const kpi = await evaluatePlan2(`eval-${uuid25().slice(0, 8)}`, planId, score, "governance");
       return JSON.stringify({
         plan_id: planId,
         outcome,
@@ -32239,7 +32434,7 @@ __export(peer_eval_exports, {
   isFleetReliable: () => isFleetReliable,
   runFleetAnalysis: () => runFleetAnalysis
 });
-import { v4 as uuid25 } from "uuid";
+import { v4 as uuid26 } from "uuid";
 async function hookIntoExecution(agentId, taskId, context) {
   const t0 = Date.now();
   const qualityScore = context.metrics?.quality_score ?? (context.success ? 0.7 : 0.2);
@@ -32258,7 +32453,7 @@ async function hookIntoExecution(agentId, taskId, context) {
   } catch {
   }
   const evalReport = {
-    id: `eval-${uuid25().slice(0, 12)}`,
+    id: `eval-${uuid26().slice(0, 12)}`,
     agentId,
     taskId,
     taskType: context.taskType,
@@ -32388,7 +32583,7 @@ function updateFleetLearning(eval_) {
 async function broadcastBestPractice(eval_) {
   const insightText = eval_.insights.length > 0 ? eval_.insights.join("; ") : `Agent ${eval_.agentId} scored ${(eval_.selfScore * 100).toFixed(1)}% on ${eval_.taskType} (novelty: ${(eval_.novelty * 100).toFixed(0)}%)`;
   const bp = {
-    id: `bp-${uuid25().slice(0, 8)}`,
+    id: `bp-${uuid26().slice(0, 8)}`,
     agentId: eval_.agentId,
     taskType: eval_.taskType,
     score: eval_.selfScore,
@@ -38866,12 +39061,12 @@ import cron from "node-cron";
 // src/graph/graph-self-correct.ts
 init_mcp_caller();
 init_logger();
-import { v4 as uuid26 } from "uuid";
+import { v4 as uuid27 } from "uuid";
 async function graphRead(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid26(),
+    callId: uuid27(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -38882,7 +39077,7 @@ async function graphWrite(cypher, params, force = true) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {}, _force: force },
-    callId: uuid26(),
+    callId: uuid27(),
     timeoutMs: 15e3
   });
   return result.status === "success";
@@ -39344,7 +39539,7 @@ init_mcp_caller();
 init_adoption_telemetry();
 init_phantom_loop_selector();
 import { Router as Router10 } from "express";
-import { v4 as uuid27 } from "uuid";
+import { v4 as uuid28 } from "uuid";
 var adoptionRouter = Router10();
 var REDIS_KEY5 = "orchestrator:adoption-metrics";
 var REDIS_TRENDS_KEY = "orchestrator:adoption-trends";
@@ -39470,7 +39665,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (c:Conversation) WHERE c.createdAt > datetime() - duration('P1D') RETURN count(c) AS count"
       },
-      callId: uuid27(),
+      callId: uuid28(),
       timeoutMs: 1e4
     }),
     // Count artifacts from last 24h
@@ -39479,7 +39674,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (a:AnalysisArtifact) WHERE a.createdAt > datetime() - duration('P1D') RETURN count(a) AS count"
       },
-      callId: uuid27(),
+      callId: uuid28(),
       timeoutMs: 1e4
     }),
     // Count tool calls from audit trail
@@ -39488,7 +39683,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (e:AuditEvent) WHERE e.timestamp > datetime() - duration('P1D') AND e.action = 'tool_call' RETURN count(e) AS count"
       },
-      callId: uuid27(),
+      callId: uuid28(),
       timeoutMs: 1e4
     })
   ]);
@@ -39593,7 +39788,7 @@ SET m.conversations_24h = $conversations,
           featuresPct: snapshot.features_pct
         }
       },
-      callId: uuid27(),
+      callId: uuid28(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -41898,7 +42093,7 @@ knowledgeRouter.get("/briefing", async (_req, res) => {
 init_logger();
 init_redis();
 import { Router as Router18 } from "express";
-import { v4 as uuid28 } from "uuid";
+import { v4 as uuid29 } from "uuid";
 var neuralBusRouter = Router18();
 var BUS_MESSAGES_KEY = "neural-bus:messages";
 var BUS_AGENTS_KEY = "neural-bus:agents";
@@ -41914,7 +42109,7 @@ neuralBusRouter.post("/broadcast", async (req, res) => {
     const redis2 = await getRedisClient();
     const msg = {
       ...req.body,
-      id: uuid28(),
+      id: uuid29(),
       acknowledgedBy: []
     };
     await redis2.hset(BUS_MESSAGES_KEY, msg.id, JSON.stringify(msg));
@@ -41936,7 +42131,7 @@ neuralBusRouter.post("/send", async (req, res) => {
     const redis2 = await getRedisClient();
     const msg = {
       ...req.body,
-      id: uuid28(),
+      id: uuid29(),
       acknowledgedBy: []
     };
     if (!msg.to) {
@@ -41958,7 +42153,7 @@ neuralBusRouter.post("/publish", async (req, res) => {
     const redis2 = await getRedisClient();
     const msg = {
       ...req.body,
-      id: uuid28(),
+      id: uuid29(),
       acknowledgedBy: []
     };
     await redis2.hset(BUS_MESSAGES_KEY, msg.id, JSON.stringify(msg));
@@ -42100,7 +42295,7 @@ init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router19 } from "express";
 import { randomUUID as randomUUID3 } from "crypto";
-import { v4 as uuid29 } from "uuid";
+import { v4 as uuid30 } from "uuid";
 var notebookRouter = Router19();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
@@ -42140,7 +42335,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query, params: {} },
-        callId: uuid29(),
+        callId: uuid30(),
         timeoutMs: 15e3
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -42148,7 +42343,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "kg_rag.query",
         args: { question: query, max_evidence: 10 },
-        callId: uuid29(),
+        callId: uuid30(),
         timeoutMs: 2e4
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -42483,13 +42678,13 @@ ${compressed}`,
 init_chain_engine();
 init_cognitive_proxy();
 init_logger();
-import { v4 as uuid30 } from "uuid";
+import { v4 as uuid31 } from "uuid";
 var monitorRouter = Router20();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid30(),
+    callId: uuid31(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];
@@ -42768,7 +42963,7 @@ init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router21 } from "express";
-import { v4 as uuid31 } from "uuid";
+import { v4 as uuid32 } from "uuid";
 var assemblyRouter = Router21();
 var REDIS_PREFIX11 = "orchestrator:assembly:";
 var REDIS_INDEX5 = "orchestrator:assemblies:index";
@@ -42832,7 +43027,7 @@ ORDER BY b.domain, b.name LIMIT 50`;
     const graphResult = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params },
-      callId: uuid31(),
+      callId: uuid32(),
       timeoutMs: 15e3
     });
     if (graphResult.status === "success" && graphResult.result) {
@@ -42898,7 +43093,7 @@ Reply as JSON:
   const assemblies = [];
   const now = (/* @__PURE__ */ new Date()).toISOString();
   for (const candidate of analysis.candidates.slice(0, maxCandidates)) {
-    const assemblyId = `widgetdc:assembly:${uuid31()}`;
+    const assemblyId = `widgetdc:assembly:${uuid32()}`;
     const selectedBlocks = blocks.filter((b) => candidate.block_ids.includes(b.block_id));
     const conflictCount = candidate.conflicts?.length ?? 0;
     const coherence = Math.max(0, Math.min(1, candidate.coherence ?? 0.5));
@@ -42957,7 +43152,7 @@ MERGE (a)-[:COMPOSED_OF]->(b)`,
             blockIds: selectedBlocks.map((b) => b.block_id)
           }
         },
-        callId: uuid31(),
+        callId: uuid32(),
         timeoutMs: 1e4
       });
     } catch (err) {
@@ -43047,7 +43242,7 @@ assemblyRouter.put("/:id", async (req, res) => {
         query: "MATCH (a:Assembly {id: $id}) SET a.status = $status, a.updated_at = datetime()",
         params: { id: assembly.$id, status: assembly.status }
       },
-      callId: uuid31(),
+      callId: uuid32(),
       timeoutMs: 5e3
     });
   } catch {
@@ -43184,9 +43379,9 @@ async function listPlans() {
 // src/flywheel/harvest-pipeline.ts
 init_logger();
 init_mcp_caller();
-import { v4 as uuid32 } from "uuid";
+import { v4 as uuid33 } from "uuid";
 async function extract(domain) {
-  const callId = `harvest-extract-${uuid32().substring(0, 8)}`;
+  const callId = `harvest-extract-${uuid33().substring(0, 8)}`;
   try {
     const result = await callMcpTool({
       toolName: "srag.query",
@@ -43212,7 +43407,7 @@ function generalize(items, domain) {
     if (content.length > 2e3 || name.toLowerCase().includes("framework")) tier = "framework";
     else if (content.length > 500 || name.toLowerCase().includes("template")) tier = "template";
     return {
-      id: `harvest-${uuid32().substring(0, 12)}`,
+      id: `harvest-${uuid33().substring(0, 12)}`,
       name,
       tier,
       description: content.substring(0, 300),
@@ -43229,7 +43424,7 @@ function generalize(items, domain) {
 }
 async function store(components) {
   if (components.length === 0) return 0;
-  const callId = `harvest-store-${uuid32().substring(0, 8)}`;
+  const callId = `harvest-store-${uuid33().substring(0, 8)}`;
   const labelMap = {
     framework: "Framework",
     template: "Template",
@@ -43281,7 +43476,7 @@ async function verify(components) {
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: `${comp.tier} for ${comp.industries[0]}: ${comp.name}` },
-        callId: `harvest-verify-${uuid32().substring(0, 8)}`,
+        callId: `harvest-verify-${uuid33().substring(0, 8)}`,
         timeoutMs: 15e3
       });
       const resultStr = JSON.stringify(result).toLowerCase();
@@ -43337,7 +43532,7 @@ init_tool_executor();
 init_logger();
 init_config();
 import { Router as Router23 } from "express";
-import { v4 as uuid33 } from "uuid";
+import { v4 as uuid34 } from "uuid";
 var MATRIX_ALIAS_TARGETS = {
   "claude-sonnet": "claude-sonnet-4-20250514",
   "claude-opus": "claude-sonnet-4-20250514",
@@ -43568,7 +43763,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     return;
   }
   const { model, messages, stream: stream3, temperature, max_tokens } = req.body;
-  const requestId = `chatcmpl-${uuid33().substring(0, 12)}`;
+  const requestId = `chatcmpl-${uuid34().substring(0, 12)}`;
   const assistant = ASSISTANT_MAP.get(model);
   const resolvedModel = assistant ? assistant.baseModel : model;
   const mapping = resolveModelToProvider(resolvedModel) ?? resolveModelToProvider("gemini-flash");
@@ -44806,7 +45001,7 @@ init_mcp_caller();
 init_config();
 init_logger();
 import { Router as Router26 } from "express";
-import { v4 as uuid34 } from "uuid";
+import { v4 as uuid35 } from "uuid";
 var mcpGatewayRouter = Router26();
 var backendToolsCache = [];
 var backendToolsCacheTime = 0;
@@ -44892,7 +45087,7 @@ async function handleToolsCall(id, params) {
   if (isOrchestratorTool) {
     try {
       const results = await executeToolCalls([{
-        id: uuid34(),
+        id: uuid35(),
         function: { name: toolName2, arguments: JSON.stringify(args) }
       }]);
       const result = results[0];
@@ -44920,7 +45115,7 @@ async function handleToolsCall(id, params) {
     const mcpResult = await callMcpTool({
       toolName: backendName,
       args,
-      callId: uuid34(),
+      callId: uuid35(),
       timeoutMs: 3e4
     });
     if (mcpResult.status !== "success") {
@@ -45039,7 +45234,7 @@ init_tool_registry();
 init_logger();
 init_adoption_telemetry();
 import { Router as Router27 } from "express";
-import { v4 as uuid35 } from "uuid";
+import { v4 as uuid36 } from "uuid";
 var toolGatewayRouter = Router27();
 function respondLegacyToolResult(res, result) {
   const httpStatus = result.status === "success" ? 200 : result.status === "timeout" ? 504 : 500;
@@ -45054,7 +45249,7 @@ function respondLegacyToolResult(res, result) {
 }
 toolGatewayRouter.post("/call", async (req, res) => {
   const toolName2 = typeof req.body?.tool_name === "string" ? req.body.tool_name : null;
-  const callId = typeof req.body?.call_id === "string" ? req.body.call_id : uuid35();
+  const callId = typeof req.body?.call_id === "string" ? req.body.call_id : uuid36();
   const args = req.body?.arguments && typeof req.body.arguments === "object" ? req.body.arguments : {};
   if (!toolName2) {
     res.status(400).json({
@@ -45093,7 +45288,7 @@ toolGatewayRouter.post("/:name", async (req, res) => {
     });
     return;
   }
-  const callId = req.body?.call_id ?? uuid35();
+  const callId = req.body?.call_id ?? uuid36();
   const args = req.body ?? {};
   logger.info({ tool: name, call_id: callId }, "REST tool gateway call");
   const result = await executeToolUnified(name, args, {
@@ -45732,12 +45927,12 @@ import { Router as Router31 } from "express";
 init_mcp_caller();
 init_logger();
 init_sse();
-import { v4 as uuid36 } from "uuid";
+import { v4 as uuid37 } from "uuid";
 async function graphRead3(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid36(),
+    callId: uuid37(),
     timeoutMs: 3e4
   });
   if (result.status !== "success") return [];
@@ -45748,7 +45943,7 @@ async function graphWrite2(cypher, params) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {} },
-    callId: uuid36(),
+    callId: uuid37(),
     timeoutMs: 6e4
   });
   return result.status === "success";
@@ -46043,6 +46238,8 @@ deliverablesRouter.post("/generate", async (req, res) => {
   const format = body.format ?? "markdown";
   const rawMaxSections = body.max_sections;
   const maxSections = typeof rawMaxSections === "number" && Number.isInteger(rawMaxSections) ? rawMaxSections : void 0;
+  const engagementId = typeof body.engagement_id === "string" ? body.engagement_id : void 0;
+  const derivedFromPath = typeof body.derived_from_path === "string" ? body.derived_from_path : void 0;
   if (!prompt || typeof prompt !== "string" || prompt.length < 10) {
     res.status(400).json({
       success: false,
@@ -46068,7 +46265,9 @@ deliverablesRouter.post("/generate", async (req, res) => {
     prompt: prompt.slice(0, 2e3),
     type,
     format,
-    max_sections: maxSections
+    max_sections: maxSections,
+    engagement_id: engagementId,
+    derived_from_path: derivedFromPath
   };
   logger.info({ prompt: prompt.slice(0, 80), type, format }, "Deliverable generation requested");
   try {
@@ -46084,6 +46283,7 @@ deliverablesRouter.post("/generate", async (req, res) => {
         total_citations: deliverable.metadata.total_citations,
         avg_confidence: deliverable.metadata.avg_confidence,
         generation_ms: deliverable.metadata.generation_ms,
+        engagement_id: deliverable.engagement_id,
         url: `/api/deliverables/${encodeURIComponent(deliverable.$id)}`,
         markdown_url: `/api/deliverables/${encodeURIComponent(deliverable.$id)}/markdown`
       }
@@ -46268,6 +46468,7 @@ similarityRouter.get("/client/:id", async (req, res) => {
 
 // src/routes/engagements.ts
 init_engagement_engine();
+init_engagement_lineage();
 init_logger();
 import { Router as Router34 } from "express";
 var engagementsRouter = Router34();
@@ -46444,6 +46645,40 @@ engagementsRouter.get("/:id", async (req, res) => {
   }
   res.json({ success: true, data: engagement });
 });
+engagementsRouter.get("/:id/context", async (req, res) => {
+  const id = decodeURIComponent(req.params.id);
+  const engagement = await getEngagement(id);
+  if (!engagement) {
+    res.status(404).json({
+      success: false,
+      error: { code: "NOT_FOUND", message: "Engagement not found", status_code: 404 }
+    });
+    return;
+  }
+  try {
+    const [plan, outcome, deliverables, artifacts] = await Promise.all([
+      getPlan2(id),
+      getOutcome(id),
+      listDeliverablesForEngagement(id, 8),
+      listArtifactsForEngagement(id, 8)
+    ]);
+    res.json({
+      success: true,
+      data: {
+        engagement,
+        plan,
+        outcome,
+        deliverables,
+        artifacts
+      }
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: { code: "CONTEXT_FAILED", message: err instanceof Error ? err.message : String(err), status_code: 500 }
+    });
+  }
+});
 engagementsRouter.get("/:id/plan", async (req, res) => {
   const id = decodeURIComponent(req.params.id);
   const plan = await getPlan2(id);
@@ -46595,7 +46830,7 @@ intelligenceRouter.post("/adaptive-rag/retrain", async (_req, res) => {
 });
 intelligenceRouter.post("/extract-test", async (req, res) => {
   const { callMcpTool: callMcpTool2 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
-  const { v4: uuid38 } = await import("uuid");
+  const { v4: uuid39 } = await import("uuid");
   const content = req.body?.content ?? "CSRD regulation, ATP pension fund, GRI framework";
   try {
     const llmResult = await callMcpTool2({
@@ -46605,7 +46840,7 @@ intelligenceRouter.post("/extract-test", async (req, res) => {
 
 Content: ${content.slice(0, 2e3)}`
       },
-      callId: uuid38(),
+      callId: uuid39(),
       timeoutMs: 3e4
     });
     const raw = llmResult.result;
@@ -46695,7 +46930,7 @@ init_manifesto_governance();
 init_mcp_caller();
 init_logger();
 import { Router as Router36 } from "express";
-import { v4 as uuid37 } from "uuid";
+import { v4 as uuid38 } from "uuid";
 var governanceRouter = Router36();
 governanceRouter.get("/matrix", (_req, res) => {
   res.json({
@@ -46753,7 +46988,7 @@ RETURN p.name as name, p.status as status`,
               gap_remediation: p.gap_remediation ?? ""
             }
           },
-          callId: uuid37(),
+          callId: uuid38(),
           timeoutMs: 15e3
         });
         results.push({
@@ -48860,6 +49095,7 @@ benchmarkRouter.get("/ablation/:taskId/report", (req, res) => {
 // src/routes/obsidian.ts
 init_config();
 init_logger();
+init_engagement_lineage();
 import { Router as Router51 } from "express";
 var obsidianRouter = Router51();
 var TIMEOUT_MS = 8e3;
@@ -49325,6 +49561,19 @@ obsidianRouter.post("/materialize", async (req, res) => {
   const content = `${buildFrontmatter(properties)}${body.content_markdown}`;
   try {
     const result = await writeNote(path4, content, "replace");
+    const engagementId = typeof properties.engagement_id === "string" ? properties.engagement_id : null;
+    if (engagementId) {
+      await recordObsidianArtifactLineage({
+        engagementId,
+        path: path4,
+        title: body.title,
+        kind: body.kind,
+        generatedAt: String(properties.generated_at),
+        sourceTool: typeof properties.source_tool === "string" ? properties.source_tool : "obsidian.materialize",
+        refinedFrom: typeof properties.refined_from === "string" ? properties.refined_from : void 0,
+        sourceDeliverableId: typeof properties.source_deliverable_id === "string" ? properties.source_deliverable_id : void 0
+      });
+    }
     res.json({
       success: true,
       kind: body.kind,
@@ -49359,6 +49608,19 @@ obsidianRouter.post("/canvas", async (req, res) => {
   }, null, 2);
   try {
     const result = await writeNote(path4, content, "replace");
+    const engagementId = typeof properties.engagement_id === "string" ? properties.engagement_id : null;
+    if (engagementId) {
+      await recordObsidianArtifactLineage({
+        engagementId,
+        path: path4,
+        title: body.title,
+        kind: body.kind,
+        generatedAt: String(properties.generated_at),
+        sourceTool: typeof properties.source_tool === "string" ? properties.source_tool : "obsidian.canvas",
+        refinedFrom: typeof properties.refined_from === "string" ? properties.refined_from : void 0,
+        sourceDeliverableId: typeof properties.source_deliverable_id === "string" ? properties.source_deliverable_id : void 0
+      });
+    }
     res.json({
       success: true,
       kind: body.kind,

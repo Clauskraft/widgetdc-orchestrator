@@ -15,6 +15,7 @@ import { callCognitive } from '../cognitive-proxy.js'
 import { dualChannelRAG } from '../memory/dual-rag.js'
 import { getRedis } from '../redis.js'
 import { logger } from '../logger.js'
+import { recordDeliverableLineage } from './engagement-lineage.js'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -27,6 +28,8 @@ export interface DeliverableRequest {
   format?: DeliverableFormat
   max_sections?: number
   include_citations?: boolean
+  engagement_id?: string
+  derived_from_path?: string
 }
 
 interface SectionPlan {
@@ -53,6 +56,8 @@ export interface Deliverable {
   $schema: string
   prompt: string
   type: DeliverableType
+  engagement_id?: string
+  derived_from_path?: string
   format: DeliverableFormat
   title: string
   sections: SectionContent[]
@@ -155,6 +160,8 @@ export async function generateDeliverable(req: DeliverableRequest): Promise<Deli
     $schema: 'widgetdc:deliverable:v1',
     prompt: req.prompt,
     type: req.type,
+    engagement_id: req.engagement_id,
+    derived_from_path: req.derived_from_path,
     format,
     title: '',
     sections: [],
@@ -235,6 +242,20 @@ export async function generateDeliverable(req: DeliverableRequest): Promise<Deli
     deliverable.status = 'completed'
     deliverable.completed_at = new Date().toISOString()
 
+    if (deliverable.engagement_id) {
+      await recordDeliverableLineage({
+        engagementId: deliverable.engagement_id,
+        deliverableId,
+        title: deliverable.title,
+        type: deliverable.type,
+        status: deliverable.status,
+        createdAt: deliverable.created_at,
+        completedAt: deliverable.completed_at,
+        sourceTool: 'deliverable_draft',
+        derivedFromPath: deliverable.derived_from_path,
+      })
+    }
+
     // F4: Compound hook — write citations back to graph (flywheel)
     try {
       const { hookDeliverableToKnowledge } = await import('../swarm/compound-hooks.js')
@@ -254,6 +275,19 @@ export async function generateDeliverable(req: DeliverableRequest): Promise<Deli
     deliverable.error = err instanceof Error ? err.message : String(err)
     deliverable.completed_at = new Date().toISOString()
     deliverable.metadata.generation_ms = Date.now() - t0
+    if (deliverable.engagement_id) {
+      await recordDeliverableLineage({
+        engagementId: deliverable.engagement_id,
+        deliverableId,
+        title: deliverable.title || `${deliverable.type} deliverable`,
+        type: deliverable.type,
+        status: deliverable.status,
+        createdAt: deliverable.created_at,
+        completedAt: deliverable.completed_at,
+        sourceTool: 'deliverable_draft',
+        derivedFromPath: deliverable.derived_from_path,
+      })
+    }
     logger.error({ id: deliverableId, error: deliverable.error }, 'Deliverable: Failed')
   } finally {
     activeGenerations--
