@@ -30,7 +30,9 @@ import {
   type RecordOutcomeRequest,
   type OutcomeGrade,
 } from '../engagement/engagement-engine.js'
+import { getDeliverable } from '../engagement/deliverable-engine.js'
 import { listArtifactsForEngagement, listDeliverablesForEngagement } from '../engagement/engagement-lineage.js'
+import { getEngagementCostReport } from '../analytics/engagement-cost-tracker.js'
 import { recommendPhantomSkillLoop } from '../services/phantom-loop-selector.js'
 import { logger } from '../logger.js'
 
@@ -364,6 +366,69 @@ engagementsRouter.get('/:id/intelligence', async (req: Request, res: Response) =
     res.status(500).json({
       success: false,
       error: { code: 'INTELLIGENCE_FAILED', message: err instanceof Error ? err.message : String(err), status_code: 500 },
+    })
+  }
+})
+
+engagementsRouter.get('/:id/economics', async (req: Request, res: Response) => {
+  const id = decodeURIComponent(req.params.id)
+  const engagement = await getEngagement(id)
+  if (!engagement) {
+    res.status(404).json({
+      success: false,
+      error: { code: 'NOT_FOUND', message: 'Engagement not found', status_code: 404 },
+    })
+    return
+  }
+
+  try {
+    const [costReport, deliverableLinks, artifacts] = await Promise.all([
+      getEngagementCostReport(id),
+      listDeliverablesForEngagement(id, 12),
+      listArtifactsForEngagement(id, 20),
+    ])
+
+    const deliverables = (await Promise.all(
+      deliverableLinks.map(async (item) => getDeliverable(item.id))
+    )).filter(Boolean)
+
+    const totalCitations = deliverables.reduce((sum, deliverable) => sum + (deliverable?.metadata.total_citations ?? 0), 0)
+    const avgConfidence = deliverables.length > 0
+      ? deliverables.reduce((sum, deliverable) => sum + (deliverable?.metadata.avg_confidence ?? 0), 0) / deliverables.length
+      : 0
+    const provenanceCompleteCount = deliverables.filter((deliverable) => !!deliverable?.engagement_id).length + artifacts.length
+    const provenanceTotal = deliverables.length + artifacts.length
+
+    res.json({
+      success: true,
+      data: {
+        engagement_id: id,
+        commercial: {
+          total_cost_dkk: costReport?.total_cost_dkk ?? 0,
+          total_requests: costReport?.total_requests ?? 0,
+          total_tokens: costReport?.total_tokens ?? 0,
+          avg_success_rate: costReport?.avg_success_rate ?? 0,
+          by_agent: costReport?.by_agent ?? [],
+          by_tool: costReport?.by_tool ?? {},
+        },
+        quality: {
+          deliverables_count: deliverables.length,
+          artifacts_count: artifacts.length,
+          total_citations: totalCitations,
+          avg_confidence: Number(avgConfidence.toFixed(3)),
+          provenance_completeness_percent: provenanceTotal > 0
+            ? Math.round((provenanceCompleteCount / provenanceTotal) * 1000) / 10
+            : 0,
+          evidence_coverage_per_deliverable: deliverables.length > 0
+            ? Math.round((totalCitations / deliverables.length) * 10) / 10
+            : 0,
+        },
+      },
+    })
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: { code: 'ECONOMICS_FAILED', message: err instanceof Error ? err.message : String(err), status_code: 500 },
     })
   }
 })
