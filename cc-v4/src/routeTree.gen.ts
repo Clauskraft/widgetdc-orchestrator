@@ -23,6 +23,7 @@ import { Route as AuthenticatedKnowledgeRouteImport } from './routes/_authentica
 import { Route as AuthenticatedInventorRouteImport } from './routes/_authenticated/inventor'
 import { Route as AuthenticatedFlywheelRouteImport } from './routes/_authenticated/flywheel'
 import { Route as AuthenticatedFleetLearningRouteImport } from './routes/_authenticated/fleet-learning'
+import { Route as AuthenticatedEngagementWorkspaceRouteImport } from './routes/_authenticated/engagement-workspace'
 import { Route as AuthenticatedCronRouteImport } from './routes/_authenticated/cron'
 import { Route as AuthenticatedCostRouteImport } from './routes/_authenticated/cost'
 import { Route as AuthenticatedCognitiveRouteImport } from './routes/_authenticated/cognitive'
@@ -113,6 +114,12 @@ const AuthenticatedFleetLearningRoute =
   AuthenticatedFleetLearningRouteImport.update({
     id: '/fleet-learning',
     path: '/fleet-learning',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedEngagementWorkspaceRoute =
+  AuthenticatedEngagementWorkspaceRouteImport.update({
+    id: '/engagement-workspace',
+    path: '/engagement-workspace',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
 const AuthenticatedCronRoute = AuthenticatedCronRouteImport.update({
@@ -226,6 +233,7 @@ export interface FileRoutesByFullPath {
   '/cognitive': typeof AuthenticatedCognitiveRoute
   '/cost': typeof AuthenticatedCostRoute
   '/cron': typeof AuthenticatedCronRoute
+  '/engagement-workspace': typeof AuthenticatedEngagementWorkspaceRoute
   '/fleet-learning': typeof AuthenticatedFleetLearningRoute
   '/flywheel': typeof AuthenticatedFlywheelRoute
   '/inventor': typeof AuthenticatedInventorRoute
@@ -258,6 +266,7 @@ export interface FileRoutesByTo {
   '/cognitive': typeof AuthenticatedCognitiveRoute
   '/cost': typeof AuthenticatedCostRoute
   '/cron': typeof AuthenticatedCronRoute
+  '/engagement-workspace': typeof AuthenticatedEngagementWorkspaceRoute
   '/fleet-learning': typeof AuthenticatedFleetLearningRoute
   '/flywheel': typeof AuthenticatedFlywheelRoute
   '/inventor': typeof AuthenticatedInventorRoute
@@ -293,6 +302,7 @@ export interface FileRoutesById {
   '/_authenticated/cognitive': typeof AuthenticatedCognitiveRoute
   '/_authenticated/cost': typeof AuthenticatedCostRoute
   '/_authenticated/cron': typeof AuthenticatedCronRoute
+  '/_authenticated/engagement-workspace': typeof AuthenticatedEngagementWorkspaceRoute
   '/_authenticated/fleet-learning': typeof AuthenticatedFleetLearningRoute
   '/_authenticated/flywheel': typeof AuthenticatedFlywheelRoute
   '/_authenticated/inventor': typeof AuthenticatedInventorRoute
@@ -329,6 +339,7 @@ export interface FileRouteTypes {
     | '/cognitive'
     | '/cost'
     | '/cron'
+    | '/engagement-workspace'
     | '/fleet-learning'
     | '/flywheel'
     | '/inventor'
@@ -361,6 +372,7 @@ export interface FileRouteTypes {
     | '/cognitive'
     | '/cost'
     | '/cron'
+    | '/engagement-workspace'
     | '/fleet-learning'
     | '/flywheel'
     | '/inventor'
@@ -395,6 +407,7 @@ export interface FileRouteTypes {
     | '/_authenticated/cognitive'
     | '/_authenticated/cost'
     | '/_authenticated/cron'
+    | '/_authenticated/engagement-workspace'
     | '/_authenticated/fleet-learning'
     | '/_authenticated/flywheel'
     | '/_authenticated/inventor'
@@ -520,6 +533,13 @@ declare module '@tanstack/react-router' {
       path: '/fleet-learning'
       fullPath: '/fleet-learning'
       preLoaderRoute: typeof AuthenticatedFleetLearningRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/engagement-workspace': {
+      id: '/_authenticated/engagement-workspace'
+      path: '/engagement-workspace'
+      fullPath: '/engagement-workspace'
+      preLoaderRoute: typeof AuthenticatedEngagementWorkspaceRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/cron': {
@@ -684,6 +704,7 @@ interface AuthenticatedRouteChildren {
   AuthenticatedCognitiveRoute: typeof AuthenticatedCognitiveRoute
   AuthenticatedCostRoute: typeof AuthenticatedCostRoute
   AuthenticatedCronRoute: typeof AuthenticatedCronRoute
+  AuthenticatedEngagementWorkspaceRoute: typeof AuthenticatedEngagementWorkspaceRoute
   AuthenticatedFleetLearningRoute: typeof AuthenticatedFleetLearningRoute
   AuthenticatedFlywheelRoute: typeof AuthenticatedFlywheelRoute
   AuthenticatedInventorRoute: typeof AuthenticatedInventorRoute
@@ -712,6 +733,7 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedCognitiveRoute: AuthenticatedCognitiveRoute,
   AuthenticatedCostRoute: AuthenticatedCostRoute,
   AuthenticatedCronRoute: AuthenticatedCronRoute,
+  AuthenticatedEngagementWorkspaceRoute: AuthenticatedEngagementWorkspaceRoute,
   AuthenticatedFleetLearningRoute: AuthenticatedFleetLearningRoute,
   AuthenticatedFlywheelRoute: AuthenticatedFlywheelRoute,
   AuthenticatedInventorRoute: AuthenticatedInventorRoute,
