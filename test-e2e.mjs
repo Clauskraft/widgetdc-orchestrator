@@ -1276,6 +1276,12 @@ await test('118v. POST /api/tools/fact_query responds', async () => {
   assert(r.status !== 404, `fact_query not deployed (404)`)
 })
 
+// ── 118x. capability_match — LIN-774 ──
+await test('118x. POST /api/tools/capability_match responds', async () => {
+  const r = await api('/api/tools/capability_match', { method: 'POST', body: JSON.stringify({ required_capabilities: ['optimization', 'graph'] }) })
+  assert(r.status !== 404, `capability_match not deployed (404)`)
+})
+
 // ── 118w. memory_search with tier filter — CoALA W8.5 ──
 await test('118w. POST /api/tools/memory_search with tier responds', async () => {
   const r = await api('/api/tools/memory_search', { method: 'POST', body: JSON.stringify({ tier: 'episodic', limit: 3 }) })

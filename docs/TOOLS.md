@@ -114,6 +114,7 @@ Every tool declares governance metadata per the Neural Bridge v2 specification:
 | 70 | `prompt_ab_test` | value-props | 10s | MIPROv2-lite prompt A/B testing with auto-champion selection |
 | 71 | `fact_assert` | value-props | 15s | Assert bi-temporal fact with valid_from/valid_to + supersession chain |
 | 72 | `fact_query` | value-props | 10s | Query bi-temporal facts with temporal filters (as_of) |
+| 73 | `capability_match` | agents | 10s | LIN-774: Match capabilities across tools, agents, patterns, services |
 | 53 | `llm_chat` | llm | 60s | Direct LLM chat proxy supporting 6 providers |
 | 54 | `llm_providers` | llm | 5s | List available LLM providers with default models |
 | 55 | `decision_certify` | decisions | 30s | Certify an assembly as an architecture decision |

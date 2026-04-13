@@ -1164,6 +1164,21 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     outputDescription: 'Array of bi-temporal facts matching filters',
   }),
 
+  // ─── LIN-774: Internal Capability Matching ──────────────────────────
+
+  defineTool({
+    name: 'capability_match',
+    namespace: 'agents',
+    description: 'LIN-774: Match task requirements against available capabilities from MCP tools, agents, patterns, and services. Returns ranked matches with confidence scores. Use to find the right tool/agent/pattern/service for a task.',
+    input: z.object({
+      required_capabilities: z.array(z.string()).describe('List of required capabilities (e.g., ["optimization", "graph", "compliance"])'),
+      min_confidence: z.number().optional().describe('Minimum confidence threshold 0-1 (default: 0.3)'),
+      max_results: z.number().optional().describe('Max results to return (default: 20)'),
+    }),
+    timeoutMs: 10000,
+    outputDescription: 'Ranked list of CapabilityMatch objects from all sources (mcp_tool, agent, pattern, service)',
+  }),
+
   defineTool({
     name: 'failure_harvest',
     namespace: 'intelligence',

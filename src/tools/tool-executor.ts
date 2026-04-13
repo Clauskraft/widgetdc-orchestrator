@@ -1817,6 +1817,43 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     // ─── value-props.* — OSINT DD + DSPy + Bi-temporal (Week 9, V8-V10) ──
 
+    case 'capability_match': {
+      try {
+        const { queryCapabilities } = await import('../agents/capability-matcher.js')
+        const requiredCapabilities = Array.isArray(args.required_capabilities) ? args.required_capabilities as string[] : []
+        if (requiredCapabilities.length === 0) return 'Error: required_capabilities array is required'
+        const matches = await queryCapabilities({
+          required_capabilities: requiredCapabilities,
+          min_confidence: typeof args.min_confidence === 'number' ? args.min_confidence : 0.3,
+          max_results: typeof args.max_results === 'number' ? args.max_results : 20,
+        })
+        if (matches.length === 0) return `No matches found for capabilities: ${requiredCapabilities.join(', ')}`
+
+        const bySource = matches.reduce((acc, m) => {
+          if (!acc[m.source]) acc[m.source] = []
+          acc[m.source].push(m)
+          return acc
+        }, {} as Record<string, typeof matches>)
+
+        const lines = [`# Capability Match Results`]
+        lines.push(`\n**Required:** ${requiredCapabilities.join(', ')}`)
+        lines.push(`**Found:** ${matches.length} matches across ${Object.keys(bySource).length} sources\n`)
+
+        for (const [source, sourceMatches] of Object.entries(bySource)) {
+          lines.push(`\n## ${source} (${sourceMatches.length})`)
+          for (const m of sourceMatches) {
+            lines.push(`\n### ${m.name} (confidence: ${(m.confidence * 100).toFixed(0)}%)`)
+            lines.push(`- Matched: ${m.matched_capabilities.join(', ')}`)
+            lines.push(`- All capabilities: ${m.capabilities.slice(0, 10).join(', ')}`)
+          }
+        }
+
+        return lines.join('\n')
+      } catch (err) {
+        return `Capability match failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
     case 'due_diligence': {
       try {
         const { handleDueDiligence } = await import('../value-props/v8-v10-value-props.js')
