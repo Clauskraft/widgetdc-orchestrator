@@ -30,13 +30,13 @@ interface FleetEntry {
 function FleetLearningPage() {
   const { data: status, isLoading: statusLoading, error: statusError } = useQuery<PeerEvalStatus>({
     queryKey: ['peer-eval-status'],
-    queryFn: () => apiGet('/api/peer-eval/status'),
+    queryFn: () => apiGet('/api/peer-eval/status').then(r => r.data),
     refetchInterval: 15000,
   })
 
   const { data: fleet, isLoading: fleetLoading } = useQuery<FleetEntry[]>({
     queryKey: ['peer-eval-fleet'],
-    queryFn: () => apiGet('/api/peer-eval/fleet'),
+    queryFn: () => apiGet('/api/peer-eval/fleet').then(r => r.data ?? []),
     refetchInterval: 15000,
   })
 
