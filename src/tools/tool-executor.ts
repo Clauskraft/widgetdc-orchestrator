@@ -1859,37 +1859,69 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     case 'fleet_pheromone_backfill': {
       try {
         const { processFleetBatchForPheromones } = await import('../swarm/fleet-pheromone-bridge.js')
-        const { getAllFleetLearnings } = await import('../swarm/peer-eval.js')
+        const { getRecentEvals } = await import('../swarm/peer-eval.js')
 
-        // Use fleet-aggregate (one signal per task type), not raw evals.
-        // FleetLearning lives in-memory + Redis-hydrated; this is the canonical
-        // source the dashboard queries via /api/peer-eval/fleet.
-        const learnings = getAllFleetLearnings()
+        // Walk raw evals (peer-eval:recent, last 200) and group by (agentId, taskType)
+        // so each agent gets per-domain pheromone trails. Enables Uber-style routing:
+        // pheromone_sense({domain}) returns ranked agent candidates with reputation per
+        // task type — not a single "best agent" collapse.
+        const sampleSize = typeof args.max_evals === 'number' ? args.max_evals : 200
+        const raw = await getRecentEvals(sampleSize)
+        if (raw.length === 0) {
+          return JSON.stringify({
+            total_evals_available: 0,
+            pheromones_deposited: 0,
+            note: 'No raw evals in peer-eval:recent. Bridge will populate going forward via live hook.',
+          }, null, 2)
+        }
+
+        // Group by (agentId, taskType) → compute avg score, latency, cost per pair
+        type Bucket = { agentId: string; taskType: string; scores: number[]; lat: number[]; cost: number[]; lastTs: string }
+        const buckets = new Map<string, Bucket>()
+        for (const e of raw) {
+          const key = `${e.agentId}::${e.taskType}`
+          let b = buckets.get(key)
+          if (!b) {
+            b = { agentId: e.agentId, taskType: e.taskType, scores: [], lat: [], cost: [], lastTs: e.createdAt }
+            buckets.set(key, b)
+          }
+          b.scores.push(e.metrics.quality_score ?? e.selfScore ?? 0.5)
+          b.lat.push(e.metrics.latency_ms ?? 0)
+          b.cost.push(e.metrics.cost_usd ?? 0)
+          if (e.createdAt > b.lastTs) b.lastTs = e.createdAt
+        }
+
         const minScore = typeof args.min_score === 'number' ? args.min_score : 0
         const minEvals = typeof args.min_evals === 'number' ? args.min_evals : 1
 
-        const evals = learnings
-          .filter(l => l.totalEvals >= minEvals && l.avgScore >= minScore)
-          .map(l => ({
-            taskType: l.taskType,
-            agentId: l.bestAgent ?? 'fleet-aggregate',
-            score: l.avgScore,
-            latency_ms: Math.round(l.avgLatency ?? 0),
-            cost: l.avgCost ?? 0,
-            success: l.avgScore >= 0.5,
-            timestamp: l.lastUpdated ?? new Date().toISOString(),
-          }))
+        // One pheromone per (agent, taskType) — preserves trust per-pair
+        const evals = [...buckets.values()]
+          .map(b => {
+            const avg = b.scores.reduce((s, x) => s + x, 0) / b.scores.length
+            return {
+              taskType: b.taskType,
+              agentId: b.agentId,
+              score: avg,
+              latency_ms: Math.round(b.lat.reduce((s, x) => s + x, 0) / b.lat.length),
+              cost: b.cost.reduce((s, x) => s + x, 0) / b.cost.length,
+              success: avg >= 0.5,
+              timestamp: b.lastTs,
+              evalCount: b.scores.length,
+            }
+          })
+          .filter(e => e.score >= minScore && e.evalCount >= minEvals)
 
-        const limited = typeof args.max_evals === 'number' ? evals.slice(0, args.max_evals) : evals
-        const result = await processFleetBatchForPheromones(limited)
+        const result = await processFleetBatchForPheromones(evals)
 
         return JSON.stringify({
-          total_task_types_available: learnings.length,
-          total_task_types_processed: result.total,
+          total_raw_evals: raw.length,
+          unique_agent_task_pairs: buckets.size,
+          pairs_after_filter: evals.length,
           pheromones_deposited: result.deposited,
           errors: result.errors,
           filter: { min_score: minScore, min_evals: minEvals },
-          source: 'fleet-aggregate (getAllFleetLearnings)',
+          source: 'getRecentEvals → group by (agentId, taskType)',
+          uber_principle: 'one pheromone per (agent, taskType) — sense returns ranked candidates by trust per domain',
         }, null, 2)
       } catch (err) {
         return `Fleet pheromone backfill failed: ${err instanceof Error ? err.message : String(err)}`

@@ -20,6 +20,8 @@ export interface FleetEvalResult {
   cost: number
   success: boolean
   timestamp: string
+  /** Sample size for trust weighting (Uber principle: 50 evals at 0.85 > 1 eval at 0.85) */
+  evalCount?: number
 }
 
 export interface PheromoneDeposit {
@@ -217,8 +219,9 @@ export async function processFleetEvalForPheromones(
             score: evalResult.score,
             latency_ms: evalResult.latency_ms,
             cost_usd: evalResult.cost,
+            eval_count: evalResult.evalCount ?? 1,  // Uber trust weight
           },
-          tags: ['fleet-pheromone-bridge', evalResult.taskType, deposit.type.toLowerCase()],
+          tags: ['fleet-pheromone-bridge', evalResult.taskType, deposit.type.toLowerCase(), `agent:${evalResult.agentId}`],
         },
         callId: `fleet-pheromone-${evalResult.taskType}-${Date.now()}`,
       })
