@@ -50,7 +50,7 @@ export interface ChainStep {
   arguments?: Record<string, unknown>
   prompt?: string
   timeout_ms?: number
-  /** Override: bypass RLM routing, use orchestrator llm-proxy directly */
+  /** Deprecated: rejected on cognitive/RLM paths to preserve canonical routing. */
   llm_provider?: string
   llm_model?: string
 }
@@ -162,14 +162,12 @@ async function executeStep(step: ChainStep, previousOutput: unknown): Promise<St
     let output: unknown
 
     if (step.cognitive_action) {
-      // Delegate to RLM Engine (or LLM-direct if llm_provider set)
+      // Cognitive flows are canonicalized through the RLM Engine.
       const prompt = step.prompt?.replace(/\{\{prev\}\}/g, prevStr) ?? prevStr
       output = await callCognitive(step.cognitive_action, {
         prompt,
         context: step.arguments,
         agent_id: step.agent_id,
-        llm_provider: step.llm_provider,
-        llm_model: step.llm_model,
       }, step.timeout_ms)
     } else if (step.tool_name) {
       // Call MCP tool via backend — resolve tool name from registry first
@@ -194,8 +192,6 @@ async function executeStep(step: ChainStep, previousOutput: unknown): Promise<St
           prompt,
           context: args,
           agent_id: step.agent_id,
-          llm_provider: step.llm_provider,
-          llm_model: step.llm_model,
         }, step.timeout_ms ?? toolDef?.timeoutMs ?? 30000)
         output = result
       } else if (backendToolName === step.tool_name) {

@@ -304,12 +304,28 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     namespace: 'cognitive',
     description: 'Send a complex question to the RLM reasoning engine for deep multi-step analysis. Use for strategy questions, architecture analysis, comparisons, evaluations, and planning.',
     input: z.object({
-      question: z.string().describe('The complex question to reason about'),
+      question: z.string().optional().describe('Legacy alias: the complex question to reason about'),
+      task: z.string().optional().describe('Canonical RLM task string'),
+      query: z.string().optional().describe('Compatibility alias used by some orchestrator callers'),
       mode: z.enum(['reason', 'analyze', 'plan']).optional().describe('Reasoning mode (default: reason)'),
+    }).refine(v => typeof v.task === 'string' || typeof v.question === 'string' || typeof v.query === 'string', {
+      message: 'One of task, question, or query is required',
     }),
     backendTool: 'rlm.reason',
     timeoutMs: 45000,
     costTier: 'standard',
+  }),
+
+  defineTool({
+    name: 'recommend_skill_loop',
+    namespace: 'adoption',
+    description: 'Recommend the best Phantom BOM autonomous loop for an intent and repo or domain, including confidence, reuse suggestions, and warnings.',
+    input: z.object({
+      intent: z.string().describe('The task or outcome the agent is trying to achieve'),
+      repo_or_domain: z.string().describe('Repository name, repo URL fragment, or domain to route against Phantom evidence'),
+    }),
+    timeoutMs: 15000,
+    costTier: 'micro',
   }),
 
   defineTool({

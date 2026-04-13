@@ -638,9 +638,12 @@ function buildChatGPTSpec(): object {
           description: 'Send a complex question to the RLM reasoning engine. Use for strategy questions, architecture analysis, comparisons, evaluations, and planning.',
 
           requestBody: { required: true, content: { 'application/json': { schema: {
-            type: 'object', required: ['question'],
+            type: 'object',
+            anyOf: [{ required: ['task'] }, { required: ['question'] }, { required: ['query'] }],
             properties: {
-              question: { type: 'string', description: 'The complex question to reason about' },
+              task: { type: 'string', description: 'Canonical RLM task string' },
+              question: { type: 'string', description: 'Legacy alias for the reasoning task' },
+              query: { type: 'string', description: 'Compatibility alias used by some orchestrator callers' },
               mode: { type: 'string', enum: ['reason', 'analyze', 'plan'], default: 'reason', description: 'Reasoning mode' },
             },
           } } } },

@@ -7,9 +7,11 @@ import { Search } from 'lucide-react'
 import { apiPost } from '@/lib/api-client'
 import { Skeleton } from '@/components/ui/skeleton'
 
+type KnowledgeResult = Record<string, unknown>
+
 function KnowledgePage() {
   const [query, setQuery] = useState('')
-  const [results, setResults] = useState<any[]>([])
+  const [results, setResults] = useState<KnowledgeResult[]>([])
   const [isLoading, setIsLoading] = useState(false)
 
   const handleSearch = async (e: React.FormEvent) => {
@@ -18,7 +20,7 @@ function KnowledgePage() {
 
     setIsLoading(true)
     try {
-      const data = await apiPost('/api/knowledge/search', { query })
+      const data = await apiPost<KnowledgeResult[]>('/api/knowledge/search', { query })
       setResults(data)
     } catch (err) {
       console.error('Search failed:', err)

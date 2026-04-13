@@ -14,12 +14,41 @@ import { Router, Request, Response } from 'express'
 import { extractPhantomBOM, getRunState, listRuns, extractProvider, generatePhantomClusters, getProviderRegistry } from '../phantom-bom.js'
 import { logger } from '../logger.js'
 import { config } from '../config.js'
+import { recommendPhantomSkillLoop } from '../services/phantom-loop-selector.js'
 
 export const phantomBomRouter = Router()
 
 /** Mutex: max 3 concurrent extractions */
 let activeExtractions = 0
 const MAX_CONCURRENT = 3
+
+/**
+ * POST /api/phantom-bom/skills/route
+ * Body: { intent: string, repo_or_domain: string }
+ * Returns the recommended autonomous loop based on Phantom evidence.
+ */
+phantomBomRouter.post('/skills/route', async (req: Request, res: Response) => {
+  const { intent, repo_or_domain } = req.body as { intent?: string; repo_or_domain?: string }
+
+  if (!intent || typeof intent !== 'string' || intent.trim().length < 4) {
+    res.status(400).json({ success: false, error: { code: 'MISSING_INTENT', message: 'intent is required (min 4 chars)', status_code: 400 } })
+    return
+  }
+
+  if (!repo_or_domain || typeof repo_or_domain !== 'string' || repo_or_domain.trim().length < 2) {
+    res.status(400).json({ success: false, error: { code: 'MISSING_REPO_OR_DOMAIN', message: 'repo_or_domain is required (min 2 chars)', status_code: 400 } })
+    return
+  }
+
+  try {
+    const recommendation = await recommendPhantomSkillLoop(intent.trim(), repo_or_domain.trim())
+    res.json({ success: true, recommendation })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    logger.error({ intent, repo_or_domain, err: msg }, 'Phantom skill routing failed')
+    res.status(500).json({ success: false, error: { code: 'PHANTOM_SKILL_ROUTING_FAILED', message: msg, status_code: 500 } })
+  }
+})
 
 /**
  * POST /api/phantom-bom/extract

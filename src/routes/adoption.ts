@@ -11,6 +11,7 @@ import { logger } from '../logger.js'
 import { callMcpTool } from '../mcp-caller.js'
 import { v4 as uuid } from 'uuid'
 import { computeTelemetry } from '../flywheel/adoption-telemetry.js'
+import { recommendPhantomSkillLoop } from '../services/phantom-loop-selector.js'
 
 export const adoptionRouter = Router()
 
@@ -67,6 +68,41 @@ adoptionRouter.get('/telemetry', async (_req: Request, res: Response) => {
   } catch (err) {
     logger.error({ err: String(err) }, 'adoption telemetry compute failed')
     res.status(500).json({ success: false, error: { code: 'TELEMETRY_ERROR', message: String(err) } })
+  }
+})
+
+/* ─── POST /skills/recommend — Phantom loop recommendation ───────────────── */
+
+adoptionRouter.post('/skills/recommend', async (req: Request, res: Response) => {
+  const body = req.body as Record<string, unknown>
+  const intent = typeof body.intent === 'string' ? body.intent.trim() : ''
+  const repoOrDomain = typeof body.repo_or_domain === 'string' ? body.repo_or_domain.trim() : ''
+
+  if (intent.length < 4) {
+    res.status(400).json({
+      success: false,
+      error: { code: 'VALIDATION_ERROR', message: 'intent is required (min 4 chars)', status_code: 400 },
+    })
+    return
+  }
+
+  if (repoOrDomain.length < 2) {
+    res.status(400).json({
+      success: false,
+      error: { code: 'VALIDATION_ERROR', message: 'repo_or_domain is required (min 2 chars)', status_code: 400 },
+    })
+    return
+  }
+
+  try {
+    const recommendation = await recommendPhantomSkillLoop(intent, repoOrDomain)
+    res.json({ success: true, data: recommendation })
+  } catch (err) {
+    logger.error({ err: String(err), intent, repoOrDomain }, 'adoption skill recommendation failed')
+    res.status(500).json({
+      success: false,
+      error: { code: 'RECOMMENDATION_ERROR', message: String(err), status_code: 500 },
+    })
   }
 })
 

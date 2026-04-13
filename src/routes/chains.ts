@@ -70,6 +70,17 @@ chainsRouter.post('/execute', async (req: Request, res: Response) => {
       })
       return
     }
+    if ((step.llm_provider || step.llm_model) && (step.cognitive_action || step.tool_name?.startsWith('rlm.'))) {
+      res.status(400).json({
+        success: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'llm_provider/llm_model are not allowed on cognitive or rlm.* chain steps. Use explicit LLM routes for direct model selection.',
+          status_code: 400,
+        },
+      })
+      return
+    }
     if (step.agent_id === 'auto' && !step.capability) {
       res.status(400).json({
         success: false,

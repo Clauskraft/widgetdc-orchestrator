@@ -15,7 +15,7 @@ interface CognitiveRequest {
   agent_id?: string
   depth?: number
   mode?: string
-  /** Override: bypass RLM and use orchestrator llm-proxy directly */
+  /** Deprecated: retained only so callers receive a controlled validation error. */
   llm_provider?: string
   llm_model?: string
 }
@@ -62,25 +62,8 @@ export async function callCognitive(
   params: CognitiveRequest,
   timeoutMs?: number,
 ): Promise<unknown> {
-  // ── LLM Direct Bypass: skip RLM routing, use orchestrator llm-proxy ──
-  // When llm_provider is set, bypass RLM entirely and call the LLM directly.
-  // This avoids RLM's internal routing which may select suboptimal models
-  // (e.g. gemini-flash-lite instead of gemini-2.0-flash for complex tasks).
-  if (params.llm_provider) {
-    const { chatLLM } = await import('./llm/llm-proxy.js')
-    const systemPrompt = `You are a WidgeTDC platform agent (${params.agent_id ?? 'unknown'}). Action: ${action}. Produce concrete, actionable output.`
-    const result = await chatLLM({
-      provider: params.llm_provider,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: params.prompt },
-      ],
-      model: params.llm_model,
-      max_tokens: 4000,
-      temperature: 0.3,
-    })
-    logger.info({ action, provider: params.llm_provider, model: result.model, agent: params.agent_id }, 'Cognitive LLM-direct bypass')
-    return result.content
+  if (params.llm_provider || params.llm_model) {
+    throw new Error('Direct LLM override is not allowed on cognitive routes. Use the explicit /api/llm or /v1/chat/completions surfaces for direct model selection.')
   }
 
   if (!config.rlmUrl) {
@@ -162,7 +145,7 @@ export async function callCognitive(
       throw new Error(`RLM ${action} failed: ${errText}`)
     }
 
-    const data: CognitiveResponse = await res.json()
+    const data = await res.json() as CognitiveResponse
     return data.result ?? data.answer ?? data.reasoning ?? data.plan ?? data
   } catch (err) {
     clearTimeout(timer)
@@ -189,27 +172,8 @@ export async function callCognitiveRaw(
   params: CognitiveRequest,
   timeoutMs?: number,
 ): Promise<CognitiveRawResponse | null> {
-  // ── LLM Direct Bypass (same as callCognitive) ──
-  if (params.llm_provider) {
-    const { chatLLM } = await import('./llm/llm-proxy.js')
-    const systemPrompt = `You are a WidgeTDC platform agent (${params.agent_id ?? 'unknown'}). Action: ${action}. Produce concrete, actionable output.`
-    const result = await chatLLM({
-      provider: params.llm_provider,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: params.prompt },
-      ],
-      model: params.llm_model,
-      max_tokens: 4000,
-      temperature: 0.3,
-    })
-    logger.info({ action, provider: params.llm_provider, model: result.model, agent: params.agent_id }, 'CognitiveRaw LLM-direct bypass')
-    return {
-      result: result.content,
-      answer: result.content,
-      routing: { provider: result.provider, model: result.model, domain: action, latency_ms: result.duration_ms, cost: 0 },
-      quality: { overall_score: 0.7 },
-    } as CognitiveRawResponse
+  if (params.llm_provider || params.llm_model) {
+    throw new Error('Direct LLM override is not allowed on cognitive routes. Use the explicit /api/llm or /v1/chat/completions surfaces for direct model selection.')
   }
 
   if (!config.rlmUrl) return null
@@ -224,7 +188,7 @@ export async function callCognitiveRaw(
   const timer = setTimeout(() => controller.abort(), timeoutMs ?? 120000)
 
   try {
-    const p = params as Record<string, unknown>
+    const p = params as unknown as Record<string, unknown>
     let body: Record<string, unknown>
 
     if (action === 'analyze') {
@@ -305,7 +269,7 @@ export async function getRlmHealth(): Promise<Record<string, unknown> | null> {
   try {
     const res = await fetch(`${config.rlmUrl}/health`, { signal: AbortSignal.timeout(5000) })
     if (!res.ok) return { status: 'unhealthy', http_status: res.status }
-    return await res.json()
+    return await res.json() as Record<string, unknown>
   } catch {
     return { status: 'unreachable' }
   }

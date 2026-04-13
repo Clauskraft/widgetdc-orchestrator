@@ -23,6 +23,9 @@ import {
   FlaskConical,
   LayoutDashboard,
   Kanban,
+  ShieldCheck,
+  FileSearch,
+  Presentation,
 } from 'lucide-react'
 
 export interface NavItem {
@@ -39,6 +42,35 @@ export interface NavGroup {
 
 export const sidebarData: NavGroup[] = [
   {
+    label: 'Proof Flows',
+    items: [
+      {
+        title: 'Compliance Audit',
+        path: '/compliance/audit',
+        icon: ShieldCheck,
+        description: 'V1 AI Act gap audit for client stacks',
+      },
+      {
+        title: 'Project Overview',
+        path: '/project-overview',
+        icon: LayoutDashboard,
+        description: 'Executive summary for active client work',
+      },
+      {
+        title: 'Deliverable Draft',
+        path: '/deliverable/draft',
+        icon: Presentation,
+        description: 'V4 consulting deliverable factory',
+      },
+      {
+        title: 'Knowledge Search',
+        path: '/knowledge',
+        icon: FileSearch,
+        description: 'Search graph-backed context and evidence',
+      },
+    ],
+  },
+  {
     label: 'Operations',
     items: [
       {
@@ -46,12 +78,6 @@ export const sidebarData: NavGroup[] = [
         path: '/',
         icon: Home,
         description: 'Platform overview and KPIs',
-      },
-      {
-        title: 'Project Overview',
-        path: '/project-overview',
-        icon: LayoutDashboard,
-        description: 'Engagements, decisions, architecture, drill-down',
       },
       {
         title: 'Project Board',

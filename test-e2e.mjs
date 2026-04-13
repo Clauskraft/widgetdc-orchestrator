@@ -1294,6 +1294,18 @@ await test('118z. POST /api/tools/intent_detect responds', async () => {
   assert(r.status !== 404, `intent_detect not deployed (404)`)
 })
 
+// ── 118za. recommend_skill_loop — Phantom loop routing ──
+await test('118za. POST /api/tools/recommend_skill_loop responds', async () => {
+  const r = await api('/api/tools/recommend_skill_loop', {
+    method: 'POST',
+    body: JSON.stringify({
+      intent: 'Improve tool adoption and discovery quality for Mission Control',
+      repo_or_domain: 'widgetdc-orchestrator',
+    }),
+  })
+  assert(r.status !== 404, `recommend_skill_loop not deployed (404)`)
+})
+
 // ── 118w. memory_search with tier filter — CoALA W8.5 ──
 await test('118w. POST /api/tools/memory_search with tier responds', async () => {
   const r = await api('/api/tools/memory_search', { method: 'POST', body: JSON.stringify({ tier: 'episodic', limit: 3 }) })

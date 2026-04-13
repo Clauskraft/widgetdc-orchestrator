@@ -4,11 +4,20 @@ import { sidebarData } from './sidebar-data'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { Menu, X } from 'lucide-react'
+import { useAuthStore } from '@/stores/auth-store'
+import { useSessionStore } from '@/stores/session'
+import { useTelemetryStore } from '@/stores/telemetry'
+import { useJobStore } from '@/stores/jobs'
 
 export function Sidebar() {
   const location = useLocation()
   const navigate = useNavigate()
   const [isOpen, setIsOpen] = useState(false)
+  const reset = useAuthStore((state) => state.reset)
+  const resetSession = useSessionStore((state) => state.reset)
+  const resetTelemetry = useTelemetryStore((state) => state.reset)
+  const resetJobs = useJobStore((state) => state.reset)
+  const activeClient = useSessionStore((state) => state.activeClient)
 
   const isActive = (path: string) => location.pathname === path
 
@@ -34,7 +43,15 @@ export function Sidebar() {
         )}
       >
         <div className="p-6 border-b">
-          <h1 className="font-bold text-lg hidden md:block">WidgeTDC</h1>
+          <div className="hidden md:block space-y-2">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-muted-foreground">WidgeTDC</p>
+            <div>
+              <h1 className="text-lg font-semibold">Client Delivery Cockpit</h1>
+              <p className="text-sm text-muted-foreground">
+                {activeClient ? `Active client: ${activeClient}` : 'Proof-facing operator shell'}
+              </p>
+            </div>
+          </div>
         </div>
 
         <nav className="flex-1 overflow-auto p-4 space-y-6">
@@ -78,7 +95,18 @@ export function Sidebar() {
         </nav>
 
         <div className="p-4 border-t">
-          <Button variant="outline" className="w-full" size="sm">
+          <Button
+            variant="outline"
+            className="w-full"
+            size="sm"
+            onClick={() => {
+              reset()
+              resetSession()
+              resetTelemetry()
+              resetJobs()
+              navigate({ to: '/sign-in' })
+            }}
+          >
             Sign Out
           </Button>
         </div>

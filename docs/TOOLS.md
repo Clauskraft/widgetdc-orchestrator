@@ -47,9 +47,10 @@ Every tool declares governance metadata per the Neural Bridge v2 specification:
 | 6 | `adaptive_rag_query` | knowledge | 30s | Query using adaptive RAG routing (canonical RAG endpoint) |
 | 7 | `run_osint_scan` | knowledge | 600s | Run OSINT scanning pipeline on Danish public sector domains |
 | 8 | `reason_deeply` | cognitive | 45s | Deep multi-step analysis via RLM reasoning engine |
-| 9 | `investigate` | cognitive | 120s | Multi-agent deep investigation on a topic |
-| 10 | `context_fold` | cognitive | 30s | Compress large context via RLM /cognitive/fold |
-| 11 | `query_graph` | graph | 15s | Execute a Cypher query against the Neo4j knowledge graph |
+| 9 | `recommend_skill_loop` | adoption | 15s | Recommend the best Phantom BOM loop, skill stack, and reuse path |
+| 10 | `investigate` | cognitive | 120s | Multi-agent deep investigation on a topic |
+| 11 | `context_fold` | cognitive | 30s | Compress large context via RLM /cognitive/fold |
+| 12 | `query_graph` | graph | 15s | Execute a Cypher query against the Neo4j knowledge graph |
 | 12 | `build_communities` | graph | 120s | Build hierarchical community summaries via Leiden detection |
 | 13 | `drill_start` | graph | 15s | Start hierarchical drill-down session (G4.15) |
 | 14 | `drill_down` | graph | 15s | Drill into child level in active session (G4.16) |
@@ -402,6 +403,30 @@ curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/reaso
   -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"question": "Should we migrate our SRAG pipeline from OpenAI to local embeddings?", "mode": "analyze"}'
+```
+
+---
+
+#### `recommend_skill_loop`
+
+**Description:** Recommend the best Phantom BOM autonomous loop for an intent and repo or domain, including confidence, reuse suggestions, and warnings.
+
+**Timeout:** 15,000 ms  
+**Handler:** orchestrator
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `intent` | string | yes | The task or outcome the agent is trying to achieve |
+| `repo_or_domain` | string | yes | Repository name, repo URL fragment, or domain to route against Phantom evidence |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/recommend_skill_loop \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"intent": "Improve tool adoption and discovery quality for Mission Control", "repo_or_domain": "widgetdc-orchestrator"}'
 ```
 
 ---

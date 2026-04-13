@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { useState, useMemo } from 'react'
+import { useState, useMemo, type ChangeEvent } from 'react'
 import { apiGet } from '@/lib/api-client'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -32,11 +32,15 @@ function SortIcon({ col, sort }: { col: SortKey; sort: { key: SortKey; dir: Sort
 }
 
 function AuditPage() {
-  const { data: raw = [], isLoading, error } = useQuery({
+  const { data: raw = [], isLoading, error } = useQuery<
+    AuditEntry[] | { entries?: AuditEntry[]; data?: AuditEntry[] },
+    Error,
+    AuditEntry[]
+  >({
     queryKey: ['audit-log'],
     queryFn: () => apiGet<AuditEntry[] | { entries?: AuditEntry[]; data?: AuditEntry[] }>('/api/audit/log?limit=200'),
     refetchInterval: 15000,
-    select: (d: any) => {
+    select: (d) => {
       if (Array.isArray(d)) return d
       return d?.entries ?? d?.data ?? []
     },
@@ -48,7 +52,7 @@ function AuditPage() {
 
   const statuses = useMemo(() => {
     const s = new Set<string>(['all'])
-    raw.forEach(e => s.add(e.status))
+    raw.forEach((e) => s.add(e.status))
     return [...s]
   }, [raw])
 
@@ -56,7 +60,7 @@ function AuditPage() {
     let rows = [...raw]
     if (search) {
       const q = search.toLowerCase()
-      rows = rows.filter(e =>
+      rows = rows.filter((e) =>
         e.action?.toLowerCase().includes(q) ||
         e.user?.toLowerCase().includes(q) ||
         e.agent?.toLowerCase().includes(q) ||
@@ -65,7 +69,7 @@ function AuditPage() {
       )
     }
     if (statusFilter !== 'all') {
-      rows = rows.filter(e => e.status === statusFilter)
+      rows = rows.filter((e) => e.status === statusFilter)
     }
     rows.sort((a, b) => {
       let av = a[sort.key] ?? ''
@@ -137,7 +141,7 @@ function AuditPage() {
           <Input
             placeholder="Search action, user, path…"
             value={search}
-            onChange={e => setSearch(e.target.value)}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setSearch(e.target.value)}
             className="pl-9"
           />
         </div>

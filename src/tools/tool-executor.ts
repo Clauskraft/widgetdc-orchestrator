@@ -621,13 +621,39 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     case 'reason_deeply': {
       if (!isRlmAvailable()) return 'RLM Engine is not available.'
       const mode = (args.mode as string) ?? 'reason'
+      const reasoningTask =
+        typeof args.task === 'string' ? args.task
+        : typeof args.question === 'string' ? args.question
+        : typeof args.query === 'string' ? args.query
+        : ''
+      if (!reasoningTask) return 'Error: one of task, question, or query is required'
       const result = await callCognitive(mode, {
-        prompt: args.question as string,
-        context: { source: 'chat-tool-call' },
+        prompt: reasoningTask,
+        context: {
+          source: 'chat-tool-call',
+          input_alias:
+            typeof args.task === 'string' ? 'task'
+            : typeof args.question === 'string' ? 'question'
+            : 'query',
+        },
         agent_id: 'chat-orchestrator',
         depth: 1,
       }, 45000)
       return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+    }
+
+    case 'recommend_skill_loop': {
+      try {
+        const intent = String(args.intent ?? '').trim()
+        const repoOrDomain = String(args.repo_or_domain ?? '').trim()
+        if (intent.length < 4) return 'Error: intent is required (min 4 chars)'
+        if (repoOrDomain.length < 2) return 'Error: repo_or_domain is required (min 2 chars)'
+        const { recommendPhantomSkillLoop } = await import('../services/phantom-loop-selector.js')
+        const recommendation = await recommendPhantomSkillLoop(intent, repoOrDomain)
+        return JSON.stringify(recommendation, null, 2)
+      } catch (err) {
+        return `Phantom skill loop recommendation failed: ${err instanceof Error ? err.message : String(err)}`
+      }
     }
 
     case 'query_graph': {

@@ -14,7 +14,6 @@ import { config } from '../config.js'
 import { callCognitive, isRlmAvailable } from '../cognitive-proxy.js'
 import { executeChain } from '../chain/chain-engine.js'
 import { listExecutions } from '../chain/chain-engine.js'
-import { chatLLM } from '../llm/llm-proxy.js'
 import { dualChannelRAG } from '../memory/dual-rag.js'
 import { AgentRegistry } from '../agents/agent-registry.js'
 import { resolveRoutingDecision } from '../agents/routing-engine.js'
@@ -162,12 +161,18 @@ async function agentAutoReply(agentId: string, userMessage: string, from: string
       { role: 'user' as const, content: `${from} siger: ${userMessage}` },
     ]
 
-    const result = await chatLLM({
-      provider: provider || 'deepseek',
-      messages,
-      max_tokens: 800,
-      temperature: 0.7,
-    })
+    const result = await callCognitive('reason', {
+      prompt: `${messages[0].content}\n\n${messages[1].content}`,
+      context: {
+        persona,
+        capabilities,
+        conversation_context: context,
+        requested_provider: provider,
+      },
+      agent_id: agentId,
+      depth: 1,
+    }, 30000)
+    const reply = typeof result === 'string' ? result : JSON.stringify(result)
 
     // Broadcast agent's reply
     broadcastMessage({
@@ -175,13 +180,13 @@ async function agentAutoReply(agentId: string, userMessage: string, from: string
       to: from,
       source: 'agent',
       type: 'Message',
-      message: result.content,
+      message: reply,
       timestamp: new Date().toISOString(),
       ...(threadId ? { thread_id: threadId } : {}),
-      metadata: { provider: result.provider, model: result.model, duration_ms: result.duration_ms },
+      metadata: { surface: 'rlm.cognitive.reason' },
     })
 
-    logger.info({ agent: agentId, from, model: result.model, ms: result.duration_ms }, 'Agent auto-reply sent')
+    logger.info({ agent: agentId, from }, 'Agent auto-reply sent via RLM')
   } catch (err) {
     logger.error({ err: String(err), agent: agentId }, 'Agent auto-reply failed')
     broadcastMessage({
@@ -493,15 +498,15 @@ chatRouter.post('/summarize', async (req: Request, res: Response) => {
       .slice(0, 8000) // limit context size
 
     // Use LLM to summarize
-    const llmResult = await chatLLM({
-      provider: 'deepseek',
-      messages: [{
-        role: 'user',
-        content: `Summarize this conversation concisely. Include key decisions, action items, and outcomes. Reply in the same language as the conversation.\n\n${transcript}`,
-      }],
-      max_tokens: 500,
-    })
-    const summary = llmResult.content || 'Summary generation failed'
+    const llmResult = await callCognitive('fold', {
+      prompt: `Summarize this conversation concisely. Include key decisions, action items, and outcomes. Reply in the same language as the conversation.\n\n${transcript}`,
+      context: {
+        transcript,
+        objective: 'conversation_summary',
+      },
+      agent_id: 'command-center',
+    }, 30000)
+    const summary = typeof llmResult === 'string' ? llmResult : JSON.stringify(llmResult)
 
     // Broadcast summary
     broadcastMessage({
@@ -584,12 +589,18 @@ async function runDebate(debateId: string, agents: string[], topic: string, roun
         : `You are agent "${agent}" in round ${round} of a debate on "${topic}". Review the previous arguments and provide your rebuttal or refined position (max 200 words).${prevContext}`
 
       try {
-        const llmResult = await chatLLM({
-          provider: 'deepseek',
-          messages: [{ role: 'user', content: prompt }],
-          max_tokens: 300,
-        })
-        const responseStr = llmResult.content || '(no response)'
+        const llmResult = await callCognitive('reason', {
+          prompt,
+          context: {
+            topic,
+            round,
+            debate_id: debateId,
+            previous_arguments: responses,
+          },
+          agent_id: agent,
+          depth: 1,
+        }, 30000)
+        const responseStr = typeof llmResult === 'string' ? llmResult : JSON.stringify(llmResult)
         responses.push({ agent, round, response: responseStr })
 
         broadcastMessage({
@@ -610,12 +621,16 @@ async function runDebate(debateId: string, agents: string[], topic: string, roun
   // Final synthesis
   const allArgs = responses.map(r => `[${r.agent} R${r.round}]: ${r.response}`).join('\n')
   try {
-    const synthResult = await chatLLM({
-      provider: 'deepseek',
-      messages: [{ role: 'user', content: `Synthesize the following debate on "${topic}" into a final summary. Identify areas of agreement, disagreement, and recommended action. Be concise (max 300 words).\n\n${allArgs}` }],
-      max_tokens: 400,
-    })
-    const synthStr = synthResult.content || '(synthesis failed)'
+    const synthResult = await callCognitive('analyze', {
+      prompt: `Synthesize the following debate on "${topic}" into a final summary. Identify areas of agreement, disagreement, and recommended action. Be concise (max 300 words).\n\n${allArgs}`,
+      context: {
+        topic,
+        debate_id: debateId,
+        arguments: responses,
+      },
+      agent_id: 'rlm',
+    }, 30000)
+    const synthStr = typeof synthResult === 'string' ? synthResult : JSON.stringify(synthResult)
 
     broadcastMessage({
       from: 'System',

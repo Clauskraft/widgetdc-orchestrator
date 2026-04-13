@@ -23,7 +23,7 @@ function SignInPage() {
 
     try {
       // Validate API key by calling health endpoint
-      const result = await apiGet('/health', {
+      const result = await apiGet<{ status?: string }>('/health', {
         headers: {
           Authorization: `Bearer ${apiKey}`,
         },

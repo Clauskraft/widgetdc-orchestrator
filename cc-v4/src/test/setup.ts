@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
-import { afterEach } from 'vitest'
+import { afterEach, vi } from 'vitest'
 
 // Auto-cleanup after each test
 afterEach(() => {
@@ -23,26 +23,31 @@ Object.defineProperty(window, 'matchMedia', {
 })
 
 // Mock IntersectionObserver
-global.IntersectionObserver = class IntersectionObserver {
+global.IntersectionObserver = class IntersectionObserver implements IntersectionObserver {
+  readonly root = null
+  readonly rootMargin = '0px'
+  readonly thresholds = []
+
   observe = () => {}
   unobserve = () => {}
   disconnect = () => {}
+  takeRecords = () => []
 }
 
 // Mock ResizeObserver
-global.ResizeObserver = class ResizeObserver {
+global.ResizeObserver = class ResizeObserver implements ResizeObserver {
   observe = () => {}
   unobserve = () => {}
   disconnect = () => {}
 }
 
 // Mock TanStack Router — must use createElement for JSX
-vi.mock('@tanstack/react-router', async (importOriginal) => {
+vi.mock('@tanstack/react-router', async (importOriginal: () => Promise<typeof import('@tanstack/react-router')>) => {
   const React = await import('react')
-  const actual = await importOriginal<typeof import('@tanstack/react-router')>()
+  const actual = await importOriginal()
   return {
     ...actual,
-    Link: (props: any) => React.createElement('a', { href: props.to }, props.children),
+    Link: (props: { to?: string; children?: React.ReactNode }) => React.createElement('a', { href: props.to }, props.children),
     useRouter: () => ({
       navigate: () => {},
       history: { push: () => {} },
@@ -60,7 +65,8 @@ vi.mock('@/stores/auth-store', () => {
     accessToken: 'test-token',
     reset: () => {},
   }
-  const store = vi.fn(() => mockState)
-  store.getState = () => mockState
+  const store = Object.assign(vi.fn(() => mockState), {
+    getState: () => mockState,
+  })
   return { useAuthStore: store }
 })

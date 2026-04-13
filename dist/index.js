@@ -537,6 +537,463 @@ var init_write_gate = __esm({
   }
 });
 
+// src/cognitive-proxy.ts
+function isRlmAvailable() {
+  return config.rlmUrl.length > 0;
+}
+async function callCognitive(action, params, timeoutMs) {
+  if (params.llm_provider || params.llm_model) {
+    throw new Error("Direct LLM override is not allowed on cognitive routes. Use the explicit /api/llm or /v1/chat/completions surfaces for direct model selection.");
+  }
+  if (!config.rlmUrl) {
+    throw new Error("RLM Engine not configured (set RLM_URL)");
+  }
+  const path4 = COGNITIVE_ROUTES[action];
+  if (!path4) {
+    throw new Error(`Unknown cognitive action: ${action}. Valid: ${Object.keys(COGNITIVE_ROUTES).join(", ")}`);
+  }
+  const url = `${config.rlmUrl}${path4}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs ?? 12e4);
+  try {
+    logger.debug({ action, url, agent: params.agent_id }, "Cognitive proxy call");
+    const p = params;
+    let body;
+    if (action === "analyze") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "string" ? p.context : p.context || params.prompt,
+        analysis_dimensions: p.analysis_dimensions || ["general"],
+        agent_id: params.agent_id
+      };
+    } else if (action === "reason") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
+        agent_id: params.agent_id,
+        depth: params.depth ?? 0
+      };
+    } else if (action === "plan") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
+        constraints: p.constraints || [],
+        agent_id: params.agent_id
+      };
+    } else if (action === "fold") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
+        agent_id: params.agent_id
+      };
+    } else {
+      body = {
+        prompt: params.prompt,
+        task: p.task || params.prompt,
+        context: p.context || params.prompt,
+        agent_id: params.agent_id,
+        depth: params.depth ?? 0,
+        mode: params.mode ?? "standard"
+      };
+    }
+    body.$id = "CognitiveRequest";
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    clearTimeout(timer);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => `HTTP ${res.status}`);
+      throw new Error(`RLM ${action} failed: ${errText}`);
+    }
+    const data = await res.json();
+    return data.result ?? data.answer ?? data.reasoning ?? data.plan ?? data;
+  } catch (err) {
+    clearTimeout(timer);
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`RLM ${action} timed out after ${timeoutMs ?? 12e4}ms`);
+    }
+    throw err;
+  }
+}
+async function callCognitiveRaw(action, params, timeoutMs) {
+  if (params.llm_provider || params.llm_model) {
+    throw new Error("Direct LLM override is not allowed on cognitive routes. Use the explicit /api/llm or /v1/chat/completions surfaces for direct model selection.");
+  }
+  if (!config.rlmUrl) return null;
+  const path4 = COGNITIVE_ROUTES[action];
+  if (!path4) {
+    throw new Error(`Unknown cognitive action: ${action}. Valid: ${Object.keys(COGNITIVE_ROUTES).join(", ")}`);
+  }
+  const url = `${config.rlmUrl}${path4}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs ?? 12e4);
+  try {
+    const p = params;
+    let body;
+    if (action === "analyze") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "string" ? p.context : p.context || params.prompt,
+        analysis_dimensions: p.analysis_dimensions || ["general"],
+        constraints: p.constraints || [],
+        agent_id: params.agent_id
+      };
+    } else if (action === "reason") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
+        agent_id: params.agent_id,
+        depth: params.depth ?? 0
+      };
+    } else if (action === "plan") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
+        constraints: p.constraints || [],
+        agent_id: params.agent_id
+      };
+    } else if (action === "fold") {
+      body = {
+        task: p.task || params.prompt,
+        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
+        agent_id: params.agent_id
+      };
+    } else {
+      body = {
+        prompt: params.prompt,
+        task: p.task || params.prompt,
+        context: p.context || params.prompt,
+        agent_id: params.agent_id,
+        depth: params.depth ?? 0,
+        mode: params.mode ?? "standard"
+      };
+    }
+    body.$id = "CognitiveRequest";
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    clearTimeout(timer);
+    if (!res.ok) {
+      logger.warn({ action, status: res.status }, "callCognitiveRaw: non-OK");
+      return null;
+    }
+    return await res.json();
+  } catch (err) {
+    clearTimeout(timer);
+    if (err instanceof Error && err.name === "AbortError") {
+      logger.warn({ action, timeoutMs }, "callCognitiveRaw: timeout");
+      return null;
+    }
+    logger.debug({ action, error: String(err) }, "callCognitiveRaw: failed");
+    return null;
+  }
+}
+async function getRlmHealth() {
+  if (!config.rlmUrl) return null;
+  try {
+    const res = await fetch(`${config.rlmUrl}/health`, { signal: AbortSignal.timeout(5e3) });
+    if (!res.ok) return { status: "unhealthy", http_status: res.status };
+    return await res.json();
+  } catch {
+    return { status: "unreachable" };
+  }
+}
+var COGNITIVE_ROUTES;
+var init_cognitive_proxy = __esm({
+  "src/cognitive-proxy.ts"() {
+    "use strict";
+    init_config();
+    init_logger();
+    COGNITIVE_ROUTES = {
+      reason: "/reason",
+      analyze: "/cognitive/analyze",
+      plan: "/cognitive/plan",
+      learn: "/cognitive/learn",
+      fold: "/cognitive/fold",
+      enrich: "/cognitive/enrich"
+    };
+  }
+});
+
+// src/graph/hierarchical-intelligence.ts
+var hierarchical_intelligence_exports = {};
+__export(hierarchical_intelligence_exports, {
+  buildCommunitySummaries: () => buildCommunitySummaries,
+  searchCommunitySummaries: () => searchCommunitySummaries
+});
+import { v4 as uuid } from "uuid";
+async function buildCommunitySummaries() {
+  const t0 = Date.now();
+  logger.info("Hierarchical intelligence: building community summaries");
+  let communities;
+  let method;
+  try {
+    communities = await runLeidenCommunities();
+    method = "gds-leiden";
+  } catch (err) {
+    logger.warn({ error: String(err) }, "GDS Leiden failed \u2014 using Cypher fallback");
+    communities = await runCypherClustering();
+    method = "cypher-fallback";
+  }
+  if (communities.length === 0) {
+    logger.info("No communities found \u2014 graph may be too sparse");
+    return { communities_created: 0, summaries_generated: 0, relationships_created: 0, levels: 0, duration_ms: Date.now() - t0, method };
+  }
+  let summariesGenerated = 0;
+  let relsCreated = 0;
+  const BATCH = 5;
+  for (let i = 0; i < communities.length; i += BATCH) {
+    const batch = communities.slice(i, i + BATCH);
+    const results = await Promise.allSettled(
+      batch.map((c) => createCommunitySummary(c))
+    );
+    for (const r of results) {
+      if (r.status === "fulfilled") {
+        summariesGenerated += r.value.summary ? 1 : 0;
+        relsCreated += r.value.rels_created;
+      }
+    }
+  }
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MATCH (s:CommunitySummary) WHERE s.updatedAt < datetime() - duration('P30D') DETACH DELETE s`,
+        _force: true
+      },
+      callId: uuid(),
+      timeoutMs: 1e4
+    });
+  } catch {
+  }
+  const result = {
+    communities_created: communities.length,
+    summaries_generated: summariesGenerated,
+    relationships_created: relsCreated,
+    levels: 1,
+    // Single level for MVP; multi-level in future
+    duration_ms: Date.now() - t0,
+    method
+  };
+  logger.info(result, "Hierarchical intelligence: complete");
+  return result;
+}
+async function runLeidenCommunities() {
+  await callMcpTool({
+    toolName: "graph.write_cypher",
+    args: {
+      query: `CALL gds.graph.project('community-detect', '*', '*') YIELD graphName RETURN graphName`,
+      _force: true
+    },
+    callId: uuid(),
+    timeoutMs: 3e4
+  });
+  const leidenResult = await callMcpTool({
+    toolName: "graph.write_cypher",
+    args: {
+      query: `CALL gds.leiden.write('community-detect', { writeProperty: 'communityId' })
+YIELD communityCount, modularity
+RETURN communityCount, modularity`,
+      _force: true
+    },
+    callId: uuid(),
+    timeoutMs: 6e4
+  });
+  await callMcpTool({
+    toolName: "graph.write_cypher",
+    args: {
+      query: `CALL gds.graph.drop('community-detect') YIELD graphName RETURN graphName`,
+      _force: true
+    },
+    callId: uuid(),
+    timeoutMs: 1e4
+  }).catch(() => {
+  });
+  return await collectCommunityMembers("communityId");
+}
+async function runCypherClustering() {
+  const result = await callMcpTool({
+    toolName: "graph.read_cypher",
+    args: {
+      query: `MATCH (n) WHERE n.domain IS NOT NULL
+WITH n.domain AS domain, collect({name: coalesce(n.title, n.name, n.filename, ''), description: substring(coalesce(n.description, n.content, ''), 0, 200), type: labels(n)[0]}) AS members, count(*) AS cnt
+WHERE cnt >= 5
+RETURN domain, members[..20] AS members, cnt
+ORDER BY cnt DESC LIMIT 30`
+    },
+    callId: uuid(),
+    timeoutMs: 15e3
+  });
+  if (result.status !== "success") return [];
+  const rows = result.result?.results ?? result.result;
+  if (!Array.isArray(rows)) return [];
+  return rows.map((r, i) => ({
+    community_id: i,
+    member_count: typeof r.cnt === "object" ? r.cnt.low : Number(r.cnt) || 0,
+    members: Array.isArray(r.members) ? r.members : [],
+    domain: String(r.domain ?? "general")
+  }));
+}
+async function collectCommunityMembers(propertyName) {
+  if (!SAFE_COMMUNITY_PROPS.has(propertyName)) {
+    logger.warn({ propertyName }, "Rejected unsafe community property name");
+    return [];
+  }
+  const result = await callMcpTool({
+    toolName: "graph.read_cypher",
+    args: {
+      query: `MATCH (n) WHERE n.${propertyName} IS NOT NULL
+WITH n.${propertyName} AS cid, collect({name: coalesce(n.title, n.name, n.filename, ''), description: substring(coalesce(n.description, n.content, ''), 0, 200), type: labels(n)[0]}) AS members, count(*) AS cnt
+WHERE cnt >= 5
+RETURN cid, members[..20] AS members, cnt, head(members).domain AS domain
+ORDER BY cnt DESC LIMIT 50`
+    },
+    callId: uuid(),
+    timeoutMs: 15e3
+  });
+  if (result.status !== "success") return [];
+  const rows = result.result?.results ?? result.result;
+  if (!Array.isArray(rows)) return [];
+  return rows.map((r) => ({
+    community_id: typeof r.cid === "object" ? r.cid.low : Number(r.cid) || 0,
+    member_count: typeof r.cnt === "object" ? r.cnt.low : Number(r.cnt) || 0,
+    members: Array.isArray(r.members) ? r.members : [],
+    domain: String(r.domain ?? "general")
+  }));
+}
+async function createCommunitySummary(community) {
+  const memberList = community.members.filter((m) => m.name).map((m) => `- ${m.name} (${m.type}): ${m.description || "no description"}`).join("\n");
+  if (!memberList) return { summary: null, rels_created: 0 };
+  let summary = null;
+  try {
+    const result = await callCognitive("analyze", {
+      prompt: `Summarize this knowledge graph community in 2-3 sentences. Describe: what theme connects these entities, what they collectively represent, and their significance for consulting.
+
+COMMUNITY (${community.member_count} members, domain: ${community.domain}):
+${memberList}
+
+Write a concise executive summary (max 100 words).`,
+      context: { community_id: community.community_id, domain: community.domain },
+      agent_id: "hierarchical-intelligence"
+    }, 2e4);
+    summary = String(result ?? "").trim();
+    if (summary.length < 10) summary = null;
+  } catch {
+    logger.debug({ community_id: community.community_id }, "Community summary generation failed");
+    return { summary: null, rels_created: 0 };
+  }
+  if (!summary) return { summary: null, rels_created: 0 };
+  const communityNodeId = `community-${community.community_id}-${community.domain}`;
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (c:CommunitySummary {id: $id})
+SET c.name = $name, c.summary = $summary, c.domain = $domain,
+    c.member_count = $memberCount, c.level = 1, c.updatedAt = datetime()`,
+        params: {
+          id: communityNodeId,
+          name: `${community.domain} Community (${community.member_count} members)`,
+          summary,
+          domain: community.domain,
+          memberCount: community.member_count
+        },
+        _force: true
+        // Infrastructure write
+      },
+      callId: uuid(),
+      timeoutMs: 1e4
+    });
+  } catch (err) {
+    logger.debug({ error: String(err) }, "CommunitySummary MERGE failed");
+    return { summary, rels_created: 0 };
+  }
+  let relsCreated = 0;
+  const memberNames = community.members.filter((m) => m.name).map((m) => m.name).slice(0, 20);
+  if (memberNames.length > 0) {
+    try {
+      const result = await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `MATCH (c:CommunitySummary {id: $communityId})
+UNWIND $names AS memberName
+MATCH (m) WHERE coalesce(m.title, m.name) = memberName
+MERGE (m)-[:MEMBER_OF]->(c)
+RETURN count(*) AS rels`,
+          params: { communityId: communityNodeId, names: memberNames },
+          _force: true
+        },
+        callId: uuid(),
+        timeoutMs: 1e4
+      });
+      if (result.status === "success") {
+        const rows = result.result?.results ?? result.result;
+        if (Array.isArray(rows) && rows[0]) {
+          relsCreated = typeof rows[0].rels === "object" ? rows[0].rels.low : Number(rows[0].rels) || 0;
+        }
+      }
+    } catch {
+    }
+  }
+  return { summary, rels_created: relsCreated };
+}
+async function searchCommunitySummaries(query, maxResults = 5) {
+  try {
+    const result = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: `MATCH (c:CommunitySummary)
+WHERE toLower(c.summary) CONTAINS toLower($keyword)
+   OR toLower(c.domain) CONTAINS toLower($keyword)
+   OR toLower(c.name) CONTAINS toLower($keyword)
+RETURN c.id AS id, c.name AS name, c.summary AS summary, c.domain AS domain, c.member_count AS members
+ORDER BY c.member_count DESC
+LIMIT $limit`,
+        params: {
+          keyword: query.split(/\s+/).filter((w) => w.length >= 3).slice(0, 3).join(" ").slice(0, 80),
+          limit: maxResults
+        }
+      },
+      callId: uuid(),
+      timeoutMs: 1e4
+    });
+    if (result.status !== "success") return [];
+    const rows = result.result?.results ?? result.result;
+    if (!Array.isArray(rows)) return [];
+    return rows.map((r) => ({
+      source: "community",
+      content: `[Community: ${r.name}] ${r.summary}`,
+      score: 0.75,
+      // Community summaries are structurally relevant
+      metadata: { id: r.id, domain: r.domain, members: r.members }
+    }));
+  } catch {
+    return [];
+  }
+}
+var SAFE_COMMUNITY_PROPS;
+var init_hierarchical_intelligence = __esm({
+  "src/graph/hierarchical-intelligence.ts"() {
+    "use strict";
+    init_mcp_caller();
+    init_cognitive_proxy();
+    init_logger();
+    SAFE_COMMUNITY_PROPS = /* @__PURE__ */ new Set(["communityId", "communityId2", "leiden_community", "louvain_community"]);
+  }
+});
+
 // ../widgetdc-contracts/dist/llm/LlmMatrix.js
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -1077,494 +1534,6 @@ var init_llm_proxy = __esm({
       inception: "Mercury",
       local: "Local"
     };
-  }
-});
-
-// src/cognitive-proxy.ts
-function isRlmAvailable() {
-  return config.rlmUrl.length > 0;
-}
-async function callCognitive(action, params, timeoutMs) {
-  if (params.llm_provider) {
-    const { chatLLM: chatLLM2 } = await Promise.resolve().then(() => (init_llm_proxy(), llm_proxy_exports));
-    const systemPrompt = `You are a WidgeTDC platform agent (${params.agent_id ?? "unknown"}). Action: ${action}. Produce concrete, actionable output.`;
-    const result = await chatLLM2({
-      provider: params.llm_provider,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: params.prompt }
-      ],
-      model: params.llm_model,
-      max_tokens: 4e3,
-      temperature: 0.3
-    });
-    logger.info({ action, provider: params.llm_provider, model: result.model, agent: params.agent_id }, "Cognitive LLM-direct bypass");
-    return result.content;
-  }
-  if (!config.rlmUrl) {
-    throw new Error("RLM Engine not configured (set RLM_URL)");
-  }
-  const path4 = COGNITIVE_ROUTES[action];
-  if (!path4) {
-    throw new Error(`Unknown cognitive action: ${action}. Valid: ${Object.keys(COGNITIVE_ROUTES).join(", ")}`);
-  }
-  const url = `${config.rlmUrl}${path4}`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs ?? 12e4);
-  try {
-    logger.debug({ action, url, agent: params.agent_id }, "Cognitive proxy call");
-    const p = params;
-    let body;
-    if (action === "analyze") {
-      body = {
-        task: p.task || params.prompt,
-        context: typeof p.context === "string" ? p.context : p.context || params.prompt,
-        analysis_dimensions: p.analysis_dimensions || ["general"],
-        agent_id: params.agent_id
-      };
-    } else if (action === "reason") {
-      body = {
-        task: p.task || params.prompt,
-        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
-        agent_id: params.agent_id,
-        depth: params.depth ?? 0
-      };
-    } else if (action === "plan") {
-      body = {
-        task: p.task || params.prompt,
-        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
-        constraints: p.constraints || [],
-        agent_id: params.agent_id
-      };
-    } else if (action === "fold") {
-      body = {
-        task: p.task || params.prompt,
-        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
-        agent_id: params.agent_id
-      };
-    } else {
-      body = {
-        prompt: params.prompt,
-        task: p.task || params.prompt,
-        context: p.context || params.prompt,
-        agent_id: params.agent_id,
-        depth: params.depth ?? 0,
-        mode: params.mode ?? "standard"
-      };
-    }
-    body.$id = "CognitiveRequest";
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal
-    });
-    clearTimeout(timer);
-    if (!res.ok) {
-      const errText = await res.text().catch(() => `HTTP ${res.status}`);
-      throw new Error(`RLM ${action} failed: ${errText}`);
-    }
-    const data = await res.json();
-    return data.result ?? data.answer ?? data.reasoning ?? data.plan ?? data;
-  } catch (err) {
-    clearTimeout(timer);
-    if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(`RLM ${action} timed out after ${timeoutMs ?? 12e4}ms`);
-    }
-    throw err;
-  }
-}
-async function callCognitiveRaw(action, params, timeoutMs) {
-  if (params.llm_provider) {
-    const { chatLLM: chatLLM2 } = await Promise.resolve().then(() => (init_llm_proxy(), llm_proxy_exports));
-    const systemPrompt = `You are a WidgeTDC platform agent (${params.agent_id ?? "unknown"}). Action: ${action}. Produce concrete, actionable output.`;
-    const result = await chatLLM2({
-      provider: params.llm_provider,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: params.prompt }
-      ],
-      model: params.llm_model,
-      max_tokens: 4e3,
-      temperature: 0.3
-    });
-    logger.info({ action, provider: params.llm_provider, model: result.model, agent: params.agent_id }, "CognitiveRaw LLM-direct bypass");
-    return {
-      result: result.content,
-      answer: result.content,
-      routing: { provider: result.provider, model: result.model, domain: action, latency_ms: result.duration_ms, cost: 0 },
-      quality: { overall_score: 0.7 }
-    };
-  }
-  if (!config.rlmUrl) return null;
-  const path4 = COGNITIVE_ROUTES[action];
-  if (!path4) {
-    throw new Error(`Unknown cognitive action: ${action}. Valid: ${Object.keys(COGNITIVE_ROUTES).join(", ")}`);
-  }
-  const url = `${config.rlmUrl}${path4}`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs ?? 12e4);
-  try {
-    const p = params;
-    let body;
-    if (action === "analyze") {
-      body = {
-        task: p.task || params.prompt,
-        context: typeof p.context === "string" ? p.context : p.context || params.prompt,
-        analysis_dimensions: p.analysis_dimensions || ["general"],
-        constraints: p.constraints || [],
-        agent_id: params.agent_id
-      };
-    } else if (action === "reason") {
-      body = {
-        task: p.task || params.prompt,
-        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
-        agent_id: params.agent_id,
-        depth: params.depth ?? 0
-      };
-    } else if (action === "plan") {
-      body = {
-        task: p.task || params.prompt,
-        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
-        constraints: p.constraints || [],
-        agent_id: params.agent_id
-      };
-    } else if (action === "fold") {
-      body = {
-        task: p.task || params.prompt,
-        context: typeof p.context === "object" ? p.context : { prompt: params.prompt },
-        agent_id: params.agent_id
-      };
-    } else {
-      body = {
-        prompt: params.prompt,
-        task: p.task || params.prompt,
-        context: p.context || params.prompt,
-        agent_id: params.agent_id,
-        depth: params.depth ?? 0,
-        mode: params.mode ?? "standard"
-      };
-    }
-    body.$id = "CognitiveRequest";
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...config.backendApiKey ? { "Authorization": `Bearer ${config.backendApiKey}` } : {}
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal
-    });
-    clearTimeout(timer);
-    if (!res.ok) {
-      logger.warn({ action, status: res.status }, "callCognitiveRaw: non-OK");
-      return null;
-    }
-    return await res.json();
-  } catch (err) {
-    clearTimeout(timer);
-    if (err instanceof Error && err.name === "AbortError") {
-      logger.warn({ action, timeoutMs }, "callCognitiveRaw: timeout");
-      return null;
-    }
-    logger.debug({ action, error: String(err) }, "callCognitiveRaw: failed");
-    return null;
-  }
-}
-async function getRlmHealth() {
-  if (!config.rlmUrl) return null;
-  try {
-    const res = await fetch(`${config.rlmUrl}/health`, { signal: AbortSignal.timeout(5e3) });
-    if (!res.ok) return { status: "unhealthy", http_status: res.status };
-    return await res.json();
-  } catch {
-    return { status: "unreachable" };
-  }
-}
-var COGNITIVE_ROUTES;
-var init_cognitive_proxy = __esm({
-  "src/cognitive-proxy.ts"() {
-    "use strict";
-    init_config();
-    init_logger();
-    COGNITIVE_ROUTES = {
-      reason: "/reason",
-      analyze: "/cognitive/analyze",
-      plan: "/cognitive/plan",
-      learn: "/cognitive/learn",
-      fold: "/cognitive/fold",
-      enrich: "/cognitive/enrich"
-    };
-  }
-});
-
-// src/graph/hierarchical-intelligence.ts
-var hierarchical_intelligence_exports = {};
-__export(hierarchical_intelligence_exports, {
-  buildCommunitySummaries: () => buildCommunitySummaries,
-  searchCommunitySummaries: () => searchCommunitySummaries
-});
-import { v4 as uuid } from "uuid";
-async function buildCommunitySummaries() {
-  const t0 = Date.now();
-  logger.info("Hierarchical intelligence: building community summaries");
-  let communities;
-  let method;
-  try {
-    communities = await runLeidenCommunities();
-    method = "gds-leiden";
-  } catch (err) {
-    logger.warn({ error: String(err) }, "GDS Leiden failed \u2014 using Cypher fallback");
-    communities = await runCypherClustering();
-    method = "cypher-fallback";
-  }
-  if (communities.length === 0) {
-    logger.info("No communities found \u2014 graph may be too sparse");
-    return { communities_created: 0, summaries_generated: 0, relationships_created: 0, levels: 0, duration_ms: Date.now() - t0, method };
-  }
-  let summariesGenerated = 0;
-  let relsCreated = 0;
-  const BATCH = 5;
-  for (let i = 0; i < communities.length; i += BATCH) {
-    const batch = communities.slice(i, i + BATCH);
-    const results = await Promise.allSettled(
-      batch.map((c) => createCommunitySummary(c))
-    );
-    for (const r of results) {
-      if (r.status === "fulfilled") {
-        summariesGenerated += r.value.summary ? 1 : 0;
-        relsCreated += r.value.rels_created;
-      }
-    }
-  }
-  try {
-    await callMcpTool({
-      toolName: "graph.write_cypher",
-      args: {
-        query: `MATCH (s:CommunitySummary) WHERE s.updatedAt < datetime() - duration('P30D') DETACH DELETE s`,
-        _force: true
-      },
-      callId: uuid(),
-      timeoutMs: 1e4
-    });
-  } catch {
-  }
-  const result = {
-    communities_created: communities.length,
-    summaries_generated: summariesGenerated,
-    relationships_created: relsCreated,
-    levels: 1,
-    // Single level for MVP; multi-level in future
-    duration_ms: Date.now() - t0,
-    method
-  };
-  logger.info(result, "Hierarchical intelligence: complete");
-  return result;
-}
-async function runLeidenCommunities() {
-  await callMcpTool({
-    toolName: "graph.write_cypher",
-    args: {
-      query: `CALL gds.graph.project('community-detect', '*', '*') YIELD graphName RETURN graphName`,
-      _force: true
-    },
-    callId: uuid(),
-    timeoutMs: 3e4
-  });
-  const leidenResult = await callMcpTool({
-    toolName: "graph.write_cypher",
-    args: {
-      query: `CALL gds.leiden.write('community-detect', { writeProperty: 'communityId' })
-YIELD communityCount, modularity
-RETURN communityCount, modularity`,
-      _force: true
-    },
-    callId: uuid(),
-    timeoutMs: 6e4
-  });
-  await callMcpTool({
-    toolName: "graph.write_cypher",
-    args: {
-      query: `CALL gds.graph.drop('community-detect') YIELD graphName RETURN graphName`,
-      _force: true
-    },
-    callId: uuid(),
-    timeoutMs: 1e4
-  }).catch(() => {
-  });
-  return await collectCommunityMembers("communityId");
-}
-async function runCypherClustering() {
-  const result = await callMcpTool({
-    toolName: "graph.read_cypher",
-    args: {
-      query: `MATCH (n) WHERE n.domain IS NOT NULL
-WITH n.domain AS domain, collect({name: coalesce(n.title, n.name, n.filename, ''), description: substring(coalesce(n.description, n.content, ''), 0, 200), type: labels(n)[0]}) AS members, count(*) AS cnt
-WHERE cnt >= 5
-RETURN domain, members[..20] AS members, cnt
-ORDER BY cnt DESC LIMIT 30`
-    },
-    callId: uuid(),
-    timeoutMs: 15e3
-  });
-  if (result.status !== "success") return [];
-  const rows = result.result?.results ?? result.result;
-  if (!Array.isArray(rows)) return [];
-  return rows.map((r, i) => ({
-    community_id: i,
-    member_count: typeof r.cnt === "object" ? r.cnt.low : Number(r.cnt) || 0,
-    members: Array.isArray(r.members) ? r.members : [],
-    domain: String(r.domain ?? "general")
-  }));
-}
-async function collectCommunityMembers(propertyName) {
-  if (!SAFE_COMMUNITY_PROPS.has(propertyName)) {
-    logger.warn({ propertyName }, "Rejected unsafe community property name");
-    return [];
-  }
-  const result = await callMcpTool({
-    toolName: "graph.read_cypher",
-    args: {
-      query: `MATCH (n) WHERE n.${propertyName} IS NOT NULL
-WITH n.${propertyName} AS cid, collect({name: coalesce(n.title, n.name, n.filename, ''), description: substring(coalesce(n.description, n.content, ''), 0, 200), type: labels(n)[0]}) AS members, count(*) AS cnt
-WHERE cnt >= 5
-RETURN cid, members[..20] AS members, cnt, head(members).domain AS domain
-ORDER BY cnt DESC LIMIT 50`
-    },
-    callId: uuid(),
-    timeoutMs: 15e3
-  });
-  if (result.status !== "success") return [];
-  const rows = result.result?.results ?? result.result;
-  if (!Array.isArray(rows)) return [];
-  return rows.map((r) => ({
-    community_id: typeof r.cid === "object" ? r.cid.low : Number(r.cid) || 0,
-    member_count: typeof r.cnt === "object" ? r.cnt.low : Number(r.cnt) || 0,
-    members: Array.isArray(r.members) ? r.members : [],
-    domain: String(r.domain ?? "general")
-  }));
-}
-async function createCommunitySummary(community) {
-  const memberList = community.members.filter((m) => m.name).map((m) => `- ${m.name} (${m.type}): ${m.description || "no description"}`).join("\n");
-  if (!memberList) return { summary: null, rels_created: 0 };
-  let summary = null;
-  try {
-    const result = await callCognitive("analyze", {
-      prompt: `Summarize this knowledge graph community in 2-3 sentences. Describe: what theme connects these entities, what they collectively represent, and their significance for consulting.
-
-COMMUNITY (${community.member_count} members, domain: ${community.domain}):
-${memberList}
-
-Write a concise executive summary (max 100 words).`,
-      context: { community_id: community.community_id, domain: community.domain },
-      agent_id: "hierarchical-intelligence"
-    }, 2e4);
-    summary = String(result ?? "").trim();
-    if (summary.length < 10) summary = null;
-  } catch {
-    logger.debug({ community_id: community.community_id }, "Community summary generation failed");
-    return { summary: null, rels_created: 0 };
-  }
-  if (!summary) return { summary: null, rels_created: 0 };
-  const communityNodeId = `community-${community.community_id}-${community.domain}`;
-  try {
-    await callMcpTool({
-      toolName: "graph.write_cypher",
-      args: {
-        query: `MERGE (c:CommunitySummary {id: $id})
-SET c.name = $name, c.summary = $summary, c.domain = $domain,
-    c.member_count = $memberCount, c.level = 1, c.updatedAt = datetime()`,
-        params: {
-          id: communityNodeId,
-          name: `${community.domain} Community (${community.member_count} members)`,
-          summary,
-          domain: community.domain,
-          memberCount: community.member_count
-        },
-        _force: true
-        // Infrastructure write
-      },
-      callId: uuid(),
-      timeoutMs: 1e4
-    });
-  } catch (err) {
-    logger.debug({ error: String(err) }, "CommunitySummary MERGE failed");
-    return { summary, rels_created: 0 };
-  }
-  let relsCreated = 0;
-  const memberNames = community.members.filter((m) => m.name).map((m) => m.name).slice(0, 20);
-  if (memberNames.length > 0) {
-    try {
-      const result = await callMcpTool({
-        toolName: "graph.write_cypher",
-        args: {
-          query: `MATCH (c:CommunitySummary {id: $communityId})
-UNWIND $names AS memberName
-MATCH (m) WHERE coalesce(m.title, m.name) = memberName
-MERGE (m)-[:MEMBER_OF]->(c)
-RETURN count(*) AS rels`,
-          params: { communityId: communityNodeId, names: memberNames },
-          _force: true
-        },
-        callId: uuid(),
-        timeoutMs: 1e4
-      });
-      if (result.status === "success") {
-        const rows = result.result?.results ?? result.result;
-        if (Array.isArray(rows) && rows[0]) {
-          relsCreated = typeof rows[0].rels === "object" ? rows[0].rels.low : Number(rows[0].rels) || 0;
-        }
-      }
-    } catch {
-    }
-  }
-  return { summary, rels_created: relsCreated };
-}
-async function searchCommunitySummaries(query, maxResults = 5) {
-  try {
-    const result = await callMcpTool({
-      toolName: "graph.read_cypher",
-      args: {
-        query: `MATCH (c:CommunitySummary)
-WHERE toLower(c.summary) CONTAINS toLower($keyword)
-   OR toLower(c.domain) CONTAINS toLower($keyword)
-   OR toLower(c.name) CONTAINS toLower($keyword)
-RETURN c.id AS id, c.name AS name, c.summary AS summary, c.domain AS domain, c.member_count AS members
-ORDER BY c.member_count DESC
-LIMIT $limit`,
-        params: {
-          keyword: query.split(/\s+/).filter((w) => w.length >= 3).slice(0, 3).join(" ").slice(0, 80),
-          limit: maxResults
-        }
-      },
-      callId: uuid(),
-      timeoutMs: 1e4
-    });
-    if (result.status !== "success") return [];
-    const rows = result.result?.results ?? result.result;
-    if (!Array.isArray(rows)) return [];
-    return rows.map((r) => ({
-      source: "community",
-      content: `[Community: ${r.name}] ${r.summary}`,
-      score: 0.75,
-      // Community summaries are structurally relevant
-      metadata: { id: r.id, domain: r.domain, members: r.members }
-    }));
-  } catch {
-    return [];
-  }
-}
-var SAFE_COMMUNITY_PROPS;
-var init_hierarchical_intelligence = __esm({
-  "src/graph/hierarchical-intelligence.ts"() {
-    "use strict";
-    init_mcp_caller();
-    init_cognitive_proxy();
-    init_logger();
-    SAFE_COMMUNITY_PROPS = /* @__PURE__ */ new Set(["communityId", "communityId2", "leiden_community", "louvain_community"]);
   }
 });
 
@@ -2949,12 +2918,27 @@ var init_tool_registry = __esm({
         namespace: "cognitive",
         description: "Send a complex question to the RLM reasoning engine for deep multi-step analysis. Use for strategy questions, architecture analysis, comparisons, evaluations, and planning.",
         input: z.object({
-          question: z.string().describe("The complex question to reason about"),
+          question: z.string().optional().describe("Legacy alias: the complex question to reason about"),
+          task: z.string().optional().describe("Canonical RLM task string"),
+          query: z.string().optional().describe("Compatibility alias used by some orchestrator callers"),
           mode: z.enum(["reason", "analyze", "plan"]).optional().describe("Reasoning mode (default: reason)")
+        }).refine((v) => typeof v.task === "string" || typeof v.question === "string" || typeof v.query === "string", {
+          message: "One of task, question, or query is required"
         }),
         backendTool: "rlm.reason",
         timeoutMs: 45e3,
         costTier: "standard"
+      }),
+      defineTool({
+        name: "recommend_skill_loop",
+        namespace: "adoption",
+        description: "Recommend the best Phantom BOM autonomous loop for an intent and repo or domain, including confidence, reuse suggestions, and warnings.",
+        input: z.object({
+          intent: z.string().describe("The task or outcome the agent is trying to achieve"),
+          repo_or_domain: z.string().describe("Repository name, repo URL fragment, or domain to route against Phantom evidence")
+        }),
+        timeoutMs: 15e3,
+        costTier: "micro"
       }),
       defineTool({
         name: "query_graph",
@@ -6046,9 +6030,7 @@ async function executeStep(step, previousOutput) {
       output = await callCognitive(step.cognitive_action, {
         prompt,
         context: step.arguments,
-        agent_id: step.agent_id,
-        llm_provider: step.llm_provider,
-        llm_model: step.llm_model
+        agent_id: step.agent_id
       }, step.timeout_ms);
     } else if (step.tool_name) {
       const toolDef = getTool(step.tool_name);
@@ -6068,9 +6050,7 @@ async function executeStep(step, previousOutput) {
         const result = await callCognitive(action, {
           prompt,
           context: args,
-          agent_id: step.agent_id,
-          llm_provider: step.llm_provider,
-          llm_model: step.llm_model
+          agent_id: step.agent_id
         }, step.timeout_ms ?? toolDef?.timeoutMs ?? 3e4);
         output = result;
       } else if (backendToolName === step.tool_name) {
@@ -7412,6 +7392,360 @@ var init_hyperagent = __esm({
     sessionCircuits = /* @__PURE__ */ new Map();
     plans = /* @__PURE__ */ new Map();
     APPROVAL_PREFIX = "orchestrator:approval:";
+  }
+});
+
+// src/services/phantom-skill-router.ts
+async function extractPhantomEvidence(repoOrDomain) {
+  try {
+    const componentResult = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: `
+          MATCH (c:PhantomComponent)
+          WHERE c.source_repo CONTAINS $repo OR c.domain CONTAINS $repo
+          RETURN
+            count(c) AS componentCount,
+            count(CASE WHEN c.source_type = 'external' THEN 1 END) AS externalSourceCount,
+            count(CASE WHEN c.is_canonical = true THEN 1 END) AS canonicalNodeCount,
+            avg(coalesce(c.confidence, 0)) AS avgConfidence
+        `,
+        params: { repo: repoOrDomain }
+      },
+      callId: `phantom-evidence-components-${Date.now()}`
+    });
+    const matchResult = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: `
+          MATCH (c:PhantomComponent)-[:MAPS_TO]->(target)
+          WHERE c.source_repo CONTAINS $repo OR c.domain CONTAINS $repo
+          RETURN count(DISTINCT target) AS knownCapabilityMatches
+        `,
+        params: { repo: repoOrDomain }
+      },
+      callId: `phantom-evidence-matches-${Date.now()}`
+    });
+    const unknownResult = await callMcpTool({
+      toolName: "graph.read_cypher",
+      args: {
+        query: `
+          MATCH (c:PhantomComponent)
+          WHERE c.source_repo CONTAINS $repo OR c.domain CONTAINS $repo
+          OPTIONAL MATCH (c)-[r]->()
+          WITH c, count(r) AS relCount
+          RETURN
+            count(CASE WHEN relCount = 0 THEN 1 END) AS unknownRelationCount,
+            avg(coalesce(c.confidence, 0)) AS avgConfidence
+        `,
+        params: { repo: repoOrDomain }
+      },
+      callId: `phantom-evidence-unknown-${Date.now()}`
+    });
+    const parseCount = (result, key) => {
+      const r = result;
+      const results = r?.results ?? [];
+      if (results.length === 0) return 0;
+      const val = results[0]?.[key];
+      if (typeof val === "object" && val !== null && "low" in val) {
+        return val.low;
+      }
+      return Number(val) || 0;
+    };
+    const componentCount = parseCount(componentResult, "componentCount");
+    const externalSourceCount = parseCount(componentResult, "externalSourceCount");
+    const canonicalNodeCount = parseCount(componentResult, "canonicalNodeCount");
+    const knownCapabilityMatches = parseCount(matchResult, "knownCapabilityMatches");
+    const unknownRelationCount = parseCount(unknownResult, "unknownRelationCount");
+    const avgConfidence = parseCount(unknownResult, "avgConfidence") / 100;
+    const totalRelations = knownCapabilityMatches + unknownRelationCount;
+    const coverageScore = totalRelations > 0 ? knownCapabilityMatches / totalRelations : 0;
+    return {
+      componentCount,
+      externalSourceCount,
+      canonicalNodeCount,
+      knownCapabilityMatches,
+      unknownRelationCount,
+      avgConfidence,
+      hasRuntimeSurface: canonicalNodeCount > 0,
+      coverageScore
+    };
+  } catch (err) {
+    logger.warn({ err: String(err), repo: repoOrDomain }, "Failed to extract Phantom evidence");
+    return {
+      componentCount: 0,
+      externalSourceCount: 0,
+      canonicalNodeCount: 0,
+      knownCapabilityMatches: 0,
+      unknownRelationCount: 0,
+      avgConfidence: 0.5,
+      hasRuntimeSurface: false,
+      coverageScore: 0.5
+    };
+  }
+}
+function computeEvidenceBasedRouting(intent, evidence) {
+  const patterns = SKILL_COMPOSITION_PATTERNS.map((p) => ({
+    pattern: p.id,
+    weight: p.baseWeight,
+    baseWeight: p.baseWeight,
+    evidenceFactors: []
+  }));
+  const reuseSuggestions = [];
+  const warnings = [];
+  if (evidence.externalSourceCount > 3) {
+    const p = patterns.find((p2) => p2.pattern === "harvest-to-pattern-library");
+    if (p) {
+      p.weight = Math.min(1, p.weight + 0.3);
+      p.evidenceFactors.push(`${evidence.externalSourceCount} external sources detected`);
+    }
+  }
+  if (evidence.canonicalNodeCount > 0) {
+    const p = patterns.find((p2) => p2.pattern === "research-to-standard");
+    if (p) {
+      p.weight = Math.min(1, p.weight + 0.25);
+      p.evidenceFactors.push(`${evidence.canonicalNodeCount} canonical nodes exist`);
+    }
+    reuseSuggestions.push(`Review ${evidence.canonicalNodeCount} existing canonical nodes before creating new standards`);
+  }
+  if (evidence.knownCapabilityMatches > 0) {
+    const p = patterns.find((p2) => p2.pattern === "reuse-before-design");
+    if (p) {
+      p.weight = Math.min(1, p.weight + 0.3);
+      p.evidenceFactors.push(`${evidence.knownCapabilityMatches} capability matches found`);
+    }
+    reuseSuggestions.push(`${evidence.knownCapabilityMatches} existing capabilities match \u2014 consider reuse before new design`);
+  }
+  if (evidence.coverageScore < 0.3) {
+    const p = patterns.find((p2) => p2.pattern === "harvest-to-pattern-library");
+    if (p) {
+      p.weight = Math.min(1, p.weight + 0.4);
+      p.evidenceFactors.push(`Low coverage (${(evidence.coverageScore * 100).toFixed(0)}%) \u2014 harvest + discovery required`);
+    }
+    if (evidence.canonicalNodeCount > 0) {
+      const cP = patterns.find((p2) => p2.pattern === "research-to-standard");
+      if (cP) {
+        cP.weight = Math.min(1, cP.weight + 0.15);
+        cP.evidenceFactors.push("Low coverage but canonical nodes exist \u2014 research to standard");
+      }
+    }
+    warnings.push(`Low Phantom BOM coverage (${(evidence.coverageScore * 100).toFixed(0)}%) \u2014 start with Loop A or C before implementation`);
+  }
+  if (evidence.avgConfidence > 0.8 && evidence.hasRuntimeSurface) {
+    const p = patterns.find((p2) => p2.pattern === "standard-to-implementation");
+    if (p) {
+      p.weight = Math.min(1, p.weight + 0.35);
+      p.evidenceFactors.push(`High confidence (${(evidence.avgConfidence * 100).toFixed(0)}%) + runtime surface known \u2014 direct to Loop D`);
+    }
+    const harvestP = patterns.find((p2) => p2.pattern === "harvest-to-pattern-library");
+    if (harvestP) {
+      harvestP.weight = Math.max(0.05, harvestP.weight - 0.15);
+      harvestP.evidenceFactors.push("Domain well-understood \u2014 minimal harvesting needed");
+    }
+  }
+  if (evidence.unknownRelationCount > 5) {
+    const p = patterns.find((p2) => p2.pattern === "harvest-to-pattern-library");
+    if (p) {
+      p.weight = Math.min(1, p.weight + 0.2);
+      p.evidenceFactors.push(`${evidence.unknownRelationCount} unknown relations need mapping`);
+    }
+    warnings.push(`${evidence.unknownRelationCount} components have no known relations \u2014 map dependencies before implementation`);
+  }
+  if (evidence.hasRuntimeSurface && evidence.knownCapabilityMatches > 0) {
+    const p = patterns.find((p2) => p2.pattern === "adoption-flywheel");
+    if (p) {
+      p.weight = Math.min(1, p.weight + 0.15);
+      p.evidenceFactors.push("Runtime surface + known capabilities \u2014 feed adoption telemetry");
+    }
+  }
+  const totalWeight = patterns.reduce((sum, p) => sum + p.weight, 0);
+  if (totalWeight > 0) {
+    for (const p of patterns) {
+      p.weight = p.weight / totalWeight;
+    }
+  }
+  patterns.sort((a, b) => b.weight - a.weight);
+  const confidence = evidence.avgConfidence * 0.4 + evidence.coverageScore * 0.3 + (evidence.knownCapabilityMatches > 0 ? 0.3 : 0);
+  return {
+    intent,
+    phantomEvidence: evidence,
+    recommendedPatterns: patterns,
+    reuseSuggestions,
+    warnings,
+    confidence: Math.min(1, Math.max(0, confidence))
+  };
+}
+async function routeWithPhantomEvidence(intent, repoOrDomain) {
+  const evidence = await extractPhantomEvidence(repoOrDomain);
+  return computeEvidenceBasedRouting(intent, evidence);
+}
+var SKILL_COMPOSITION_PATTERNS;
+var init_phantom_skill_router = __esm({
+  "src/services/phantom-skill-router.ts"() {
+    "use strict";
+    init_mcp_caller();
+    init_logger();
+    SKILL_COMPOSITION_PATTERNS = [
+      {
+        // Loop A — PHANTOM_SKILL_LOOPS spec §4
+        id: "harvest-to-pattern-library",
+        name: "Loop A \u2014 Harvest To Pattern Library",
+        description: "Convert external components into reusable internal capability patterns.",
+        skills: ["flow-discover", "skill-intent-contract", "omega-sentinel", "skill-verify"],
+        triggers: ["external", "new-repo", "unknown-components", "many-sources", "low-coverage"],
+        baseWeight: 0.2
+      },
+      {
+        // Loop B — PHANTOM_SKILL_LOOPS spec §4
+        id: "reuse-before-design",
+        name: "Loop B \u2014 Reuse Before Design",
+        description: "Prevent unnecessary rebuilds \u2014 rank reuse candidates before any new design.",
+        skills: ["flow-discover", "skill-decision-support", "skill-verify", "omega-sentinel"],
+        triggers: ["capability-match", "existing-tool", "existing-pattern", "known-capability"],
+        baseWeight: 0.25
+      },
+      {
+        // Loop C — PHANTOM_SKILL_LOOPS spec §4
+        id: "research-to-standard",
+        name: "Loop C \u2014 Research To Standard",
+        description: "Convert scattered evidence into canonical standards, templates, and contracts.",
+        skills: ["flow-discover", "flow-spec", "omega-sentinel", "skill-verify"],
+        triggers: ["canonical", "existing-nodes", "templates", "policies", "fragmented-patterns"],
+        baseWeight: 0.2
+      },
+      {
+        // Loop D — PHANTOM_SKILL_LOOPS spec §4
+        id: "standard-to-implementation",
+        name: "Loop D \u2014 Standard To Implementation",
+        description: "Ship against known standards with minimal exploratory overhead.",
+        skills: ["flow-develop", "skill-tdd", "omega-sentinel", "skill-verify"],
+        triggers: ["implementation", "known-standard", "runtime-surface", "high-confidence"],
+        baseWeight: 0.2
+      },
+      {
+        // Loop E — PHANTOM_SKILL_LOOPS spec §4
+        id: "adoption-flywheel",
+        name: "Loop E \u2014 Adoption Flywheel",
+        description: "Turn execution results into ranked adoption signals \u2014 route better next time.",
+        skills: ["skill-iterative-loop", "skill-status", "flow-deliver", "skill-verify"],
+        triggers: ["post-delivery", "adoption", "ranking", "telemetry", "quality-signal"],
+        baseWeight: 0.15
+      }
+    ];
+  }
+});
+
+// src/services/phantom-loop-selector.ts
+var phantom_loop_selector_exports = {};
+__export(phantom_loop_selector_exports, {
+  recommendPhantomSkillLoop: () => recommendPhantomSkillLoop
+});
+function isStandardsIntent(intent) {
+  return /\b(standard|contract|schema|template|policy|spec|governance|canonical)\b/i.test(intent);
+}
+function isAdoptionIntent(intent) {
+  return /\b(adoption|telemetry|ranking|rank|discoverability|usage|kpi|quality score|error rate|flywheel)\b/i.test(intent);
+}
+function isImplementationIntent(intent) {
+  return /\b(implement|build|ship|fix|extend|integrate|frontend|backend|route|api|ui|hardening|deploy)\b/i.test(intent);
+}
+function mapPatternToLoop(pattern) {
+  switch (pattern) {
+    case "harvest-to-pattern-library":
+      return "harvest_to_pattern_library";
+    case "reuse-before-design":
+      return "reuse_before_design";
+    case "research-to-standard":
+      return "research_to_standard";
+    case "standard-to-implementation":
+      return "standard_to_implementation";
+    case "adoption-flywheel":
+      return "adoption_flywheel";
+    default:
+      return "harvest_to_pattern_library";
+  }
+}
+async function recommendPhantomSkillLoop(intent, repoOrDomain) {
+  const routing = await routeWithPhantomEvidence(intent, repoOrDomain);
+  const evidence = routing.phantomEvidence;
+  const topPattern = routing.recommendedPatterns[0]?.pattern ?? "harvest-to-pattern-library";
+  const reasons = [];
+  let loopId;
+  if (isAdoptionIntent(intent)) {
+    loopId = "adoption_flywheel";
+    reasons.push("Intent is adoption or telemetry shaped, so ranking and loop optimization should come first.");
+  } else if (evidence.knownCapabilityMatches > 0) {
+    loopId = "reuse_before_design";
+    reasons.push(`${evidence.knownCapabilityMatches} known capability matches suggest reuse before creating new surfaces.`);
+  } else if ((evidence.coverageScore < 0.4 || evidence.unknownRelationCount > 5) && evidence.externalSourceCount > 3) {
+    loopId = "harvest_to_pattern_library";
+    reasons.push(`Coverage is low (${(evidence.coverageScore * 100).toFixed(0)}%) and external sources are high, so harvesting should precede implementation.`);
+  } else if ((evidence.coverageScore < 0.4 || evidence.unknownRelationCount > 5) && evidence.canonicalNodeCount > 0) {
+    loopId = "research_to_standard";
+    reasons.push("Canonical nodes exist but coverage is still weak, so the next step should be standardization rather than direct build.");
+  } else if (isStandardsIntent(intent) && evidence.canonicalNodeCount > 0) {
+    loopId = "research_to_standard";
+    reasons.push("Intent is standards or contracts shaped and canonical surfaces already exist.");
+  } else if (evidence.avgConfidence >= 0.75 && evidence.coverageScore >= 0.6 && evidence.hasRuntimeSurface && isImplementationIntent(intent)) {
+    loopId = "standard_to_implementation";
+    reasons.push("Confidence, coverage, and runtime surface are strong enough to compress directly to implementation.");
+  } else {
+    loopId = mapPatternToLoop(topPattern);
+    reasons.push(`Falling back to top Phantom routing pattern: ${topPattern}.`);
+  }
+  if (routing.warnings.length > 0) {
+    reasons.push(...routing.warnings);
+  }
+  return {
+    intent,
+    repo_or_domain: repoOrDomain,
+    confidence: routing.confidence,
+    recommended_loop: LOOP_DEFINITIONS[loopId],
+    recommended_pattern: topPattern,
+    recommended_patterns: routing.recommendedPatterns,
+    phantom_evidence: routing.phantomEvidence,
+    reuse_suggestions: routing.reuseSuggestions,
+    warnings: routing.warnings,
+    selection_reasons: reasons
+  };
+}
+var LOOP_DEFINITIONS;
+var init_phantom_loop_selector = __esm({
+  "src/services/phantom-loop-selector.ts"() {
+    "use strict";
+    init_phantom_skill_router();
+    LOOP_DEFINITIONS = {
+      harvest_to_pattern_library: {
+        id: "harvest_to_pattern_library",
+        name: "Harvest To Pattern Library",
+        description: "Harvest external components, classify them, and map them to internal capability patterns.",
+        skills: ["flow-discover", "skill-intent-contract", "omega-sentinel", "skill-verify"]
+      },
+      reuse_before_design: {
+        id: "reuse_before_design",
+        name: "Reuse Before Design",
+        description: "Search for reusable tools, patterns, and runtime surfaces before designing something new.",
+        skills: ["flow-discover", "skill-decision-support", "omega-sentinel", "skill-verify"]
+      },
+      research_to_standard: {
+        id: "research_to_standard",
+        name: "Research To Standard",
+        description: "Turn existing evidence and canonical nodes into a standard, contract, or template.",
+        skills: ["flow-discover", "flow-spec", "omega-sentinel", "skill-verify"]
+      },
+      standard_to_implementation: {
+        id: "standard_to_implementation",
+        name: "Standard To Implementation",
+        description: "Implement or extend against a known standard and runtime surface with verification.",
+        skills: ["flow-develop", "skill-tdd", "omega-sentinel", "skill-verify"]
+      },
+      adoption_flywheel: {
+        id: "adoption_flywheel",
+        name: "Adoption Flywheel",
+        description: "Capture execution outcomes, rerank tool choices, and improve adoption over time.",
+        skills: ["skill-iterative-loop", "skill-status", "flow-deliver", "skill-verify"]
+      }
+    };
   }
 });
 
@@ -28719,13 +29053,31 @@ ${result.merged_context}`;
     case "reason_deeply": {
       if (!isRlmAvailable()) return "RLM Engine is not available.";
       const mode = args.mode ?? "reason";
+      const reasoningTask = typeof args.task === "string" ? args.task : typeof args.question === "string" ? args.question : typeof args.query === "string" ? args.query : "";
+      if (!reasoningTask) return "Error: one of task, question, or query is required";
       const result = await callCognitive(mode, {
-        prompt: args.question,
-        context: { source: "chat-tool-call" },
+        prompt: reasoningTask,
+        context: {
+          source: "chat-tool-call",
+          input_alias: typeof args.task === "string" ? "task" : typeof args.question === "string" ? "question" : "query"
+        },
         agent_id: "chat-orchestrator",
         depth: 1
       }, 45e3);
       return typeof result === "string" ? result : JSON.stringify(result, null, 2);
+    }
+    case "recommend_skill_loop": {
+      try {
+        const intent = String(args.intent ?? "").trim();
+        const repoOrDomain = String(args.repo_or_domain ?? "").trim();
+        if (intent.length < 4) return "Error: intent is required (min 4 chars)";
+        if (repoOrDomain.length < 2) return "Error: repo_or_domain is required (min 2 chars)";
+        const { recommendPhantomSkillLoop: recommendPhantomSkillLoop2 } = await Promise.resolve().then(() => (init_phantom_loop_selector(), phantom_loop_selector_exports));
+        const recommendation = await recommendPhantomSkillLoop2(intent, repoOrDomain);
+        return JSON.stringify(recommendation, null, 2);
+      } catch (err) {
+        return `Phantom skill loop recommendation failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
     }
     case "query_graph": {
       const cypher = args.cypher;
@@ -37535,9 +37887,9 @@ init_slack();
 import { Router as Router7 } from "express";
 init_chat_store();
 init_config();
+init_cognitive_proxy();
 init_chain_engine();
 init_chain_engine();
-init_llm_proxy();
 init_dual_rag();
 init_agent_registry();
 init_routing_engine();
@@ -37653,23 +38005,31 @@ Seneste samtale-kontekst:
 ${context}` },
       { role: "user", content: `${from} siger: ${userMessage}` }
     ];
-    const result = await chatLLM({
-      provider: provider || "deepseek",
-      messages,
-      max_tokens: 800,
-      temperature: 0.7
-    });
+    const result = await callCognitive("reason", {
+      prompt: `${messages[0].content}
+
+${messages[1].content}`,
+      context: {
+        persona,
+        capabilities,
+        conversation_context: context,
+        requested_provider: provider
+      },
+      agent_id: agentId,
+      depth: 1
+    }, 3e4);
+    const reply = typeof result === "string" ? result : JSON.stringify(result);
     broadcastMessage({
       from: agentId,
       to: from,
       source: "agent",
       type: "Message",
-      message: result.content,
+      message: reply,
       timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       ...threadId ? { thread_id: threadId } : {},
-      metadata: { provider: result.provider, model: result.model, duration_ms: result.duration_ms }
+      metadata: { surface: "rlm.cognitive.reason" }
     });
-    logger.info({ agent: agentId, from, model: result.model, ms: result.duration_ms }, "Agent auto-reply sent");
+    logger.info({ agent: agentId, from }, "Agent auto-reply sent via RLM");
   } catch (err) {
     logger.error({ err: String(err), agent: agentId }, "Agent auto-reply failed");
     broadcastMessage({
@@ -37922,17 +38282,17 @@ chatRouter.post("/summarize", async (req, res) => {
       return;
     }
     const transcript = messages.sort((a, b) => (a.timestamp || "").localeCompare(b.timestamp || "")).map((m) => `[${(m.timestamp || "").slice(11, 19)}] ${m.from}: ${m.message}`).join("\n").slice(0, 8e3);
-    const llmResult = await chatLLM({
-      provider: "deepseek",
-      messages: [{
-        role: "user",
-        content: `Summarize this conversation concisely. Include key decisions, action items, and outcomes. Reply in the same language as the conversation.
+    const llmResult = await callCognitive("fold", {
+      prompt: `Summarize this conversation concisely. Include key decisions, action items, and outcomes. Reply in the same language as the conversation.
 
-${transcript}`
-      }],
-      max_tokens: 500
-    });
-    const summary = llmResult.content || "Summary generation failed";
+${transcript}`,
+      context: {
+        transcript,
+        objective: "conversation_summary"
+      },
+      agent_id: "command-center"
+    }, 3e4);
+    const summary = typeof llmResult === "string" ? llmResult : JSON.stringify(llmResult);
     broadcastMessage({
       from: "System",
       to: "All",
@@ -37995,12 +38355,18 @@ async function runDebate(debateId, agents, topic, rounds) {
       const prevContext = responses.length > 0 ? "\n\nPrevious arguments:\n" + responses.map((r) => `[${r.agent} R${r.round}]: ${r.response}`).join("\n") : "";
       const prompt = round === 1 ? `You are agent "${agent}" in a structured debate. Topic: "${topic}". Present your argument concisely (max 200 words).` : `You are agent "${agent}" in round ${round} of a debate on "${topic}". Review the previous arguments and provide your rebuttal or refined position (max 200 words).${prevContext}`;
       try {
-        const llmResult = await chatLLM({
-          provider: "deepseek",
-          messages: [{ role: "user", content: prompt }],
-          max_tokens: 300
-        });
-        const responseStr = llmResult.content || "(no response)";
+        const llmResult = await callCognitive("reason", {
+          prompt,
+          context: {
+            topic,
+            round,
+            debate_id: debateId,
+            previous_arguments: responses
+          },
+          agent_id: agent,
+          depth: 1
+        }, 3e4);
+        const responseStr = typeof llmResult === "string" ? llmResult : JSON.stringify(llmResult);
         responses.push({ agent, round, response: responseStr });
         broadcastMessage({
           from: agent,
@@ -38018,14 +38384,18 @@ async function runDebate(debateId, agents, topic, rounds) {
   }
   const allArgs = responses.map((r) => `[${r.agent} R${r.round}]: ${r.response}`).join("\n");
   try {
-    const synthResult = await chatLLM({
-      provider: "deepseek",
-      messages: [{ role: "user", content: `Synthesize the following debate on "${topic}" into a final summary. Identify areas of agreement, disagreement, and recommended action. Be concise (max 300 words).
+    const synthResult = await callCognitive("analyze", {
+      prompt: `Synthesize the following debate on "${topic}" into a final summary. Identify areas of agreement, disagreement, and recommended action. Be concise (max 300 words).
 
-${allArgs}` }],
-      max_tokens: 400
-    });
-    const synthStr = synthResult.content || "(synthesis failed)";
+${allArgs}`,
+      context: {
+        topic,
+        debate_id: debateId,
+        arguments: responses
+      },
+      agent_id: "rlm"
+    }, 3e4);
+    const synthStr = typeof synthResult === "string" ? synthResult : JSON.stringify(synthResult);
     broadcastMessage({
       from: "System",
       to: "All",
@@ -38356,6 +38726,17 @@ chainsRouter.post("/execute", async (req, res) => {
       });
       return;
     }
+    if ((step.llm_provider || step.llm_model) && (step.cognitive_action || step.tool_name?.startsWith("rlm."))) {
+      res.status(400).json({
+        success: false,
+        error: {
+          code: "VALIDATION_ERROR",
+          message: "llm_provider/llm_model are not allowed on cognitive or rlm.* chain steps. Use explicit LLM routes for direct model selection.",
+          status_code: 400
+        }
+      });
+      return;
+    }
     if (step.agent_id === "auto" && !step.capability) {
       res.status(400).json({
         success: false,
@@ -38430,6 +38811,17 @@ cognitiveRouter.post("/:action", async (req, res) => {
     res.status(400).json({
       success: false,
       error: { code: "VALIDATION_ERROR", message: "Required: prompt, message, task, or instruction", status_code: 400 }
+    });
+    return;
+  }
+  if (body.llm_provider || body.llm_model) {
+    res.status(400).json({
+      success: false,
+      error: {
+        code: "VALIDATION_ERROR",
+        message: "llm_provider/llm_model are not allowed on cognitive routes. Use /api/llm or /v1/chat/completions for direct model selection.",
+        status_code: 400
+      }
     });
     return;
   }
@@ -38950,6 +39342,7 @@ init_redis();
 init_logger();
 init_mcp_caller();
 init_adoption_telemetry();
+init_phantom_loop_selector();
 import { Router as Router10 } from "express";
 import { v4 as uuid27 } from "uuid";
 var adoptionRouter = Router10();
@@ -38977,6 +39370,35 @@ adoptionRouter.get("/telemetry", async (_req, res) => {
   } catch (err) {
     logger.error({ err: String(err) }, "adoption telemetry compute failed");
     res.status(500).json({ success: false, error: { code: "TELEMETRY_ERROR", message: String(err) } });
+  }
+});
+adoptionRouter.post("/skills/recommend", async (req, res) => {
+  const body = req.body;
+  const intent = typeof body.intent === "string" ? body.intent.trim() : "";
+  const repoOrDomain = typeof body.repo_or_domain === "string" ? body.repo_or_domain.trim() : "";
+  if (intent.length < 4) {
+    res.status(400).json({
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: "intent is required (min 4 chars)", status_code: 400 }
+    });
+    return;
+  }
+  if (repoOrDomain.length < 2) {
+    res.status(400).json({
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: "repo_or_domain is required (min 2 chars)", status_code: 400 }
+    });
+    return;
+  }
+  try {
+    const recommendation = await recommendPhantomSkillLoop(intent, repoOrDomain);
+    res.json({ success: true, data: recommendation });
+  } catch (err) {
+    logger.error({ err: String(err), intent, repoOrDomain }, "adoption skill recommendation failed");
+    res.status(500).json({
+      success: false,
+      error: { code: "RECOMMENDATION_ERROR", message: String(err), status_code: 500 }
+    });
   }
 });
 adoptionRouter.get("/metrics", async (_req, res) => {
@@ -44177,9 +44599,11 @@ function buildChatGPTSpec() {
           description: "Send a complex question to the RLM reasoning engine. Use for strategy questions, architecture analysis, comparisons, evaluations, and planning.",
           requestBody: { required: true, content: { "application/json": { schema: {
             type: "object",
-            required: ["question"],
+            anyOf: [{ required: ["task"] }, { required: ["question"] }, { required: ["query"] }],
             properties: {
-              question: { type: "string", description: "The complex question to reason about" },
+              task: { type: "string", description: "Canonical RLM task string" },
+              question: { type: "string", description: "Legacy alias for the reasoning task" },
+              query: { type: "string", description: "Compatibility alias used by some orchestrator callers" },
               mode: { type: "string", enum: ["reason", "analyze", "plan"], default: "reason", description: "Reasoning mode" }
             }
           } } } },
@@ -48442,6 +48866,33 @@ async function ghFetch(path4) {
     clearTimeout(timer);
   }
 }
+function extractMetadataFromNoteContent(content) {
+  if (content.startsWith("---\n")) {
+    const end = content.indexOf("\n---\n", 4);
+    if (end !== -1) {
+      const raw = content.slice(4, end);
+      const properties = {};
+      for (const line of raw.split("\n")) {
+        const separator = line.indexOf(":");
+        if (separator === -1) continue;
+        const key = line.slice(0, separator).trim();
+        const value = line.slice(separator + 1).trim().replace(/^"(.*)"$/, "$1");
+        if (key) properties[key] = value;
+      }
+      return properties;
+    }
+  }
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed.widgetdc && typeof parsed.widgetdc === "object") {
+      return Object.fromEntries(
+        Object.entries(parsed.widgetdc).map(([key, value]) => [key, String(value)])
+      );
+    }
+  } catch {
+  }
+  return {};
+}
 async function ghListDir(path4) {
   const encodedPath = path4 ? `/contents/${path4}` : "/contents";
   const r = await ghFetch(encodedPath);
@@ -48456,6 +48907,35 @@ async function ghGetFile(path4) {
     return Buffer.from(data.content.replace(/\n/g, ""), "base64").toString("utf-8");
   }
   throw new Error("Unexpected encoding from GitHub API");
+}
+async function ghGetFileSha(path4) {
+  const r = await ghFetch(`/contents/${encodeURIComponent(path4)}`);
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`GitHub API ${r.status}: ${r.statusText}`);
+  const data = await r.json();
+  return data.sha;
+}
+async function ghWriteFile(path4, content, message) {
+  const [owner, repo] = config.obsidianGithubRepo.split("/");
+  const base = `https://api.github.com/repos/${owner}/${repo}`;
+  const sha = await ghGetFileSha(path4);
+  const r = await fetch(`${base}/contents/${encodeURIComponent(path4)}`, {
+    method: "PUT",
+    headers: {
+      "Accept": "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Authorization": `Bearer ${config.githubToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      message,
+      content: Buffer.from(content, "utf-8").toString("base64"),
+      ...sha ? { sha } : {}
+    })
+  });
+  if (!r.ok) throw new Error(`GitHub write ${r.status}: ${r.statusText}`);
+  const data = await r.json();
+  return { sha: data.content?.sha ?? sha ?? "" };
 }
 async function ghSearchCode(query) {
   const [owner, repo] = config.obsidianGithubRepo.split("/");
@@ -48492,6 +48972,83 @@ async function ghGetTreeStats() {
   const files = treeData.tree.filter((n) => n.type === "blob");
   const dirs = treeData.tree.filter((n) => n.type === "tree");
   return { file_count: files.length, dir_count: dirs.length, sha: treeSha };
+}
+function normalizeVaultPath(path4) {
+  return path4.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+/g, "/");
+}
+function slugify(input) {
+  return input.toLowerCase().trim().replace(/[^a-z0-9 _-]/g, "").replace(/\s+/g, "-").replace(/-+/g, "-");
+}
+function formatFrontmatterValue(value) {
+  if (value === null) return "null";
+  if (typeof value === "boolean" || typeof value === "number") return String(value);
+  if (/^[a-zA-Z0-9._:/ -]+$/.test(value)) return `"${value.replace(/"/g, '\\"')}"`;
+  return `"${value.replace(/"/g, '\\"')}"`;
+}
+function buildFrontmatter(properties = {}) {
+  const entries = Object.entries(properties).filter(([, value]) => value !== void 0);
+  if (entries.length === 0) return "";
+  const lines = entries.map(([key, value]) => `${key}: ${formatFrontmatterValue(value)}`);
+  return `---
+${lines.join("\n")}
+---
+
+`;
+}
+function buildVaultName() {
+  return config.obsidianGithubRepo.split("/")[1] || "Obsidian";
+}
+function buildObsidianUri(path4, action = "open") {
+  const vault = encodeURIComponent(buildVaultName());
+  const file = encodeURIComponent(path4.replace(/\.(md|canvas)$/i, ""));
+  return `obsidian://${action}?vault=${vault}&file=${file}`;
+}
+function applyNoteOperation(existing, incoming, operation) {
+  if (operation === "append") return `${existing}${existing.endsWith("\n") ? "" : "\n"}${incoming}`;
+  if (operation === "prepend") return `${incoming}${incoming.endsWith("\n") ? "" : "\n"}${existing}`;
+  return incoming;
+}
+async function writeLiveNote(path4, content, operation) {
+  const normalizedPath = normalizeVaultPath(path4);
+  if (operation === "replace") {
+    const r = await obsidianFetch(`/vault/${encodeURIComponent(normalizedPath)}`, {
+      method: "PUT",
+      body: content,
+      headers: { "Content-Type": "text/markdown; charset=utf-8" }
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return;
+  }
+  const existingR = await obsidianFetch(`/vault/${encodeURIComponent(normalizedPath)}`);
+  const existing = existingR.ok ? await existingR.text() : "";
+  const next = applyNoteOperation(existing, content, operation);
+  const writeR = await obsidianFetch(`/vault/${encodeURIComponent(normalizedPath)}`, {
+    method: "PUT",
+    body: next,
+    headers: { "Content-Type": "text/markdown; charset=utf-8" }
+  });
+  if (!writeR.ok) throw new Error(`HTTP ${writeR.status}`);
+}
+async function writeGithubNote(path4, content, operation) {
+  const normalizedPath = normalizeVaultPath(path4);
+  let nextContent = content;
+  if (operation !== "replace") {
+    const existing = await ghGetFile(normalizedPath).catch(() => "");
+    nextContent = applyNoteOperation(existing, content, operation);
+  }
+  return ghWriteFile(normalizedPath, nextContent, `obsidian-sync: ${normalizedPath}`);
+}
+async function writeNote(path4, content, operation) {
+  const normalizedPath = normalizeVaultPath(path4);
+  if (isLiveMode()) {
+    await writeLiveNote(normalizedPath, content, operation);
+    return { path: normalizedPath, uri: buildObsidianUri(normalizedPath), mode: "live" };
+  }
+  if (isGithubMode()) {
+    const result = await writeGithubNote(normalizedPath, content, operation);
+    return { path: normalizedPath, uri: buildObsidianUri(normalizedPath), mode: "github", sha: result.sha };
+  }
+  throw new Error("Not configured");
 }
 obsidianRouter.get("/status", async (_req, res) => {
   if (isLiveMode()) {
@@ -48635,6 +49192,24 @@ obsidianRouter.get("/note", async (req, res) => {
   }
   res.status(503).json({ error: "Not configured" });
 });
+obsidianRouter.get("/metadata", async (req, res) => {
+  const path4 = req.query.path;
+  if (!path4) return res.status(400).json({ error: "path parameter required" });
+  try {
+    const content = isLiveMode() ? await (async () => {
+      const r = await obsidianFetch(`/vault/${encodeURIComponent(path4)}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.text();
+    })() : isGithubMode() ? await ghGetFile(path4) : Promise.reject(new Error("Not configured"));
+    const resolvedContent = await content;
+    res.json({
+      path: path4,
+      properties: extractMetadataFromNoteContent(resolvedContent)
+    });
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
 obsidianRouter.get("/tags", async (_req, res) => {
   if (isLiveMode()) {
     try {
@@ -48651,6 +49226,115 @@ obsidianRouter.get("/tags", async (_req, res) => {
     return;
   }
   res.status(503).json({ error: "Not configured" });
+});
+obsidianRouter.post("/note", async (req, res) => {
+  const body = req.body;
+  if (!body?.path || typeof body.path !== "string") return res.status(400).json({ error: "path is required" });
+  if (typeof body.content !== "string") return res.status(400).json({ error: "content is required" });
+  try {
+    const result = await writeNote(body.path, body.content, body.operation ?? "replace");
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+obsidianRouter.patch("/note", async (req, res) => {
+  const body = req.body;
+  if (!body?.path || typeof body.path !== "string") return res.status(400).json({ error: "path is required" });
+  if (typeof body.content !== "string") return res.status(400).json({ error: "content is required" });
+  try {
+    const result = await writeNote(body.path, body.content, body.operation ?? "append");
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+obsidianRouter.post("/daily", async (req, res) => {
+  const body = req.body ?? {};
+  const date = body.date ?? (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  const title = body.title?.trim() || date;
+  const folder = normalizeVaultPath(body.folder ?? "Daily");
+  const path4 = `${folder}/${slugify(title) || date}.md`;
+  try {
+    const result = await writeNote(path4, body.content ?? "", "append");
+    res.json({ success: true, date, ...result });
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+obsidianRouter.post("/open", async (req, res) => {
+  const body = req.body ?? {};
+  if (!body.path || typeof body.path !== "string") return res.status(400).json({ error: "path is required" });
+  const normalizedPath = normalizeVaultPath(body.path);
+  res.json({
+    success: true,
+    path: normalizedPath,
+    uri: buildObsidianUri(normalizedPath)
+  });
+});
+obsidianRouter.post("/materialize", async (req, res) => {
+  const body = req.body;
+  if (!body?.kind || typeof body.kind !== "string") return res.status(400).json({ error: "kind is required" });
+  if (!body?.title || typeof body.title !== "string") return res.status(400).json({ error: "title is required" });
+  if (typeof body.content_markdown !== "string") return res.status(400).json({ error: "content_markdown is required" });
+  const folder = normalizeVaultPath(body.folder ?? `WidgeTDC/${body.kind}`);
+  const fileName = `${slugify(body.title) || "artifact"}.md`;
+  const path4 = `${folder}/${fileName}`;
+  const properties = {
+    widgetdc_kind: body.kind,
+    generated_at: (/* @__PURE__ */ new Date()).toISOString(),
+    ...body.properties
+  };
+  const content = `${buildFrontmatter(properties)}${body.content_markdown}`;
+  try {
+    const result = await writeNote(path4, content, "replace");
+    res.json({
+      success: true,
+      kind: body.kind,
+      title: body.title,
+      path: path4,
+      uri: body.open_after_write ? buildObsidianUri(path4) : result.uri,
+      mode: result.mode,
+      sha: result.sha,
+      properties
+    });
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
+});
+obsidianRouter.post("/canvas", async (req, res) => {
+  const body = req.body;
+  if (!body?.kind || typeof body.kind !== "string") return res.status(400).json({ error: "kind is required" });
+  if (!body?.title || typeof body.title !== "string") return res.status(400).json({ error: "title is required" });
+  if (!Array.isArray(body.nodes) || body.nodes.length === 0) return res.status(400).json({ error: "nodes are required" });
+  const folder = normalizeVaultPath(body.folder ?? `WidgeTDC/${body.kind}`);
+  const fileName = `${slugify(body.title) || "artifact"}.canvas`;
+  const path4 = `${folder}/${fileName}`;
+  const properties = {
+    widgetdc_kind: body.kind,
+    generated_at: (/* @__PURE__ */ new Date()).toISOString(),
+    ...body.properties
+  };
+  const content = JSON.stringify({
+    widgetdc: properties,
+    nodes: body.nodes,
+    edges: body.edges ?? []
+  }, null, 2);
+  try {
+    const result = await writeNote(path4, content, "replace");
+    res.json({
+      success: true,
+      kind: body.kind,
+      title: body.title,
+      path: path4,
+      uri: body.open_after_write ? buildObsidianUri(path4) : result.uri,
+      mode: result.mode,
+      sha: result.sha,
+      properties
+    });
+  } catch (err) {
+    res.status(503).json({ error: err.message });
+  }
 });
 
 // src/routes/grafana-proxy.ts
@@ -49866,9 +50550,29 @@ async function getProviderRegistry() {
 // src/routes/phantom-bom.ts
 init_logger();
 init_config();
+init_phantom_loop_selector();
 var phantomBomRouter = Router53();
 var activeExtractions = 0;
 var MAX_CONCURRENT3 = 3;
+phantomBomRouter.post("/skills/route", async (req, res) => {
+  const { intent, repo_or_domain } = req.body;
+  if (!intent || typeof intent !== "string" || intent.trim().length < 4) {
+    res.status(400).json({ success: false, error: { code: "MISSING_INTENT", message: "intent is required (min 4 chars)", status_code: 400 } });
+    return;
+  }
+  if (!repo_or_domain || typeof repo_or_domain !== "string" || repo_or_domain.trim().length < 2) {
+    res.status(400).json({ success: false, error: { code: "MISSING_REPO_OR_DOMAIN", message: "repo_or_domain is required (min 2 chars)", status_code: 400 } });
+    return;
+  }
+  try {
+    const recommendation = await recommendPhantomSkillLoop(intent.trim(), repo_or_domain.trim());
+    res.json({ success: true, recommendation });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ intent, repo_or_domain, err: msg }, "Phantom skill routing failed");
+    res.status(500).json({ success: false, error: { code: "PHANTOM_SKILL_ROUTING_FAILED", message: msg, status_code: 500 } });
+  }
+});
 phantomBomRouter.post("/extract", async (req, res) => {
   const { repo_url, source_type = "git" } = req.body;
   if (!repo_url || typeof repo_url !== "string") {

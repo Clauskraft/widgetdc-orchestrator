@@ -36,6 +36,18 @@ cognitiveRouter.post('/:action', async (req: Request, res: Response) => {
     return
   }
 
+  if (body.llm_provider || body.llm_model) {
+    res.status(400).json({
+      success: false,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'llm_provider/llm_model are not allowed on cognitive routes. Use /api/llm or /v1/chat/completions for direct model selection.',
+        status_code: 400,
+      },
+    })
+    return
+  }
+
   try {
     const result = await callCognitive(action, {
       prompt: promptText,

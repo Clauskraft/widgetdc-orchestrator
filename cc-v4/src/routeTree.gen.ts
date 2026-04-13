@@ -39,6 +39,8 @@ import { Route as AuthenticatedSettingsAppearanceRouteImport } from './routes/_a
 import { Route as AuthenticatedSettingsApiKeysRouteImport } from './routes/_authenticated/settings/api-keys'
 import { Route as AuthenticatedSettingsActivityRouteImport } from './routes/_authenticated/settings/activity'
 import { Route as AuthenticatedSettingsAccountRouteImport } from './routes/_authenticated/settings/account'
+import { Route as AuthenticatedDeliverableDraftRouteImport } from './routes/_authenticated/deliverable/draft'
+import { Route as AuthenticatedComplianceAuditRouteImport } from './routes/_authenticated/compliance/audit'
 
 const AuthenticatedRoute = AuthenticatedRouteImport.update({
   id: '/_authenticated',
@@ -198,6 +200,18 @@ const AuthenticatedSettingsAccountRoute =
     path: '/account',
     getParentRoute: () => AuthenticatedSettingsRoute,
   } as any)
+const AuthenticatedDeliverableDraftRoute =
+  AuthenticatedDeliverableDraftRouteImport.update({
+    id: '/deliverable/draft',
+    path: '/deliverable/draft',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedComplianceAuditRoute =
+  AuthenticatedComplianceAuditRouteImport.update({
+    id: '/compliance/audit',
+    path: '/compliance/audit',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AuthenticatedIndexRoute
@@ -224,6 +238,8 @@ export interface FileRoutesByFullPath {
   '/project-board': typeof AuthenticatedProjectBoardRoute
   '/project-overview': typeof AuthenticatedProjectOverviewRoute
   '/settings': typeof AuthenticatedSettingsRouteWithChildren
+  '/compliance/audit': typeof AuthenticatedComplianceAuditRoute
+  '/deliverable/draft': typeof AuthenticatedDeliverableDraftRoute
   '/settings/account': typeof AuthenticatedSettingsAccountRoute
   '/settings/activity': typeof AuthenticatedSettingsActivityRoute
   '/settings/api-keys': typeof AuthenticatedSettingsApiKeysRoute
@@ -255,6 +271,8 @@ export interface FileRoutesByTo {
   '/project-overview': typeof AuthenticatedProjectOverviewRoute
   '/settings': typeof AuthenticatedSettingsRouteWithChildren
   '/': typeof AuthenticatedIndexRoute
+  '/compliance/audit': typeof AuthenticatedComplianceAuditRoute
+  '/deliverable/draft': typeof AuthenticatedDeliverableDraftRoute
   '/settings/account': typeof AuthenticatedSettingsAccountRoute
   '/settings/activity': typeof AuthenticatedSettingsActivityRoute
   '/settings/api-keys': typeof AuthenticatedSettingsApiKeysRoute
@@ -288,6 +306,8 @@ export interface FileRoutesById {
   '/_authenticated/project-overview': typeof AuthenticatedProjectOverviewRoute
   '/_authenticated/settings': typeof AuthenticatedSettingsRouteWithChildren
   '/_authenticated/': typeof AuthenticatedIndexRoute
+  '/_authenticated/compliance/audit': typeof AuthenticatedComplianceAuditRoute
+  '/_authenticated/deliverable/draft': typeof AuthenticatedDeliverableDraftRoute
   '/_authenticated/settings/account': typeof AuthenticatedSettingsAccountRoute
   '/_authenticated/settings/activity': typeof AuthenticatedSettingsActivityRoute
   '/_authenticated/settings/api-keys': typeof AuthenticatedSettingsApiKeysRoute
@@ -321,6 +341,8 @@ export interface FileRouteTypes {
     | '/project-board'
     | '/project-overview'
     | '/settings'
+    | '/compliance/audit'
+    | '/deliverable/draft'
     | '/settings/account'
     | '/settings/activity'
     | '/settings/api-keys'
@@ -352,6 +374,8 @@ export interface FileRouteTypes {
     | '/project-overview'
     | '/settings'
     | '/'
+    | '/compliance/audit'
+    | '/deliverable/draft'
     | '/settings/account'
     | '/settings/activity'
     | '/settings/api-keys'
@@ -384,6 +408,8 @@ export interface FileRouteTypes {
     | '/_authenticated/project-overview'
     | '/_authenticated/settings'
     | '/_authenticated/'
+    | '/_authenticated/compliance/audit'
+    | '/_authenticated/deliverable/draft'
     | '/_authenticated/settings/account'
     | '/_authenticated/settings/activity'
     | '/_authenticated/settings/api-keys'
@@ -608,6 +634,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedSettingsAccountRouteImport
       parentRoute: typeof AuthenticatedSettingsRoute
     }
+    '/_authenticated/deliverable/draft': {
+      id: '/_authenticated/deliverable/draft'
+      path: '/deliverable/draft'
+      fullPath: '/deliverable/draft'
+      preLoaderRoute: typeof AuthenticatedDeliverableDraftRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/compliance/audit': {
+      id: '/_authenticated/compliance/audit'
+      path: '/compliance/audit'
+      fullPath: '/compliance/audit'
+      preLoaderRoute: typeof AuthenticatedComplianceAuditRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
   }
 }
 
@@ -657,6 +697,8 @@ interface AuthenticatedRouteChildren {
   AuthenticatedProjectOverviewRoute: typeof AuthenticatedProjectOverviewRoute
   AuthenticatedSettingsRoute: typeof AuthenticatedSettingsRouteWithChildren
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
+  AuthenticatedComplianceAuditRoute: typeof AuthenticatedComplianceAuditRoute
+  AuthenticatedDeliverableDraftRoute: typeof AuthenticatedDeliverableDraftRoute
 }
 
 const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
@@ -683,6 +725,8 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedProjectOverviewRoute: AuthenticatedProjectOverviewRoute,
   AuthenticatedSettingsRoute: AuthenticatedSettingsRouteWithChildren,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
+  AuthenticatedComplianceAuditRoute: AuthenticatedComplianceAuditRoute,
+  AuthenticatedDeliverableDraftRoute: AuthenticatedDeliverableDraftRoute,
 }
 
 const AuthenticatedRouteWithChildren = AuthenticatedRoute._addFileChildren(
