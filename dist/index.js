@@ -13095,6 +13095,17 @@ var init_tool_registry = __esm({
         timeoutMs: 12e4,
         outputDescription: "Backfill results: total evals processed, pheromones deposited, errors"
       }),
+      // ─── Intent Detection + Skill Composition (LIN-774, @widgetdc/intent) ──
+      defineTool({
+        name: "intent_detect",
+        namespace: "intent",
+        description: "LIN-774: Detect task intent and generate canonical skill composition plan. Uses shared @widgetdc/intent patterns: research-to-standard, harvest-to-pattern-library, standard-to-implementation, ci-triage, review-resolution, self-healing-recovery, visualization-system-loop. Returns: outputType, confidence, suggested skills, full composition plan with steps.",
+        input: z.object({
+          input: z.string().describe("Natural language task description")
+        }),
+        timeoutMs: 5e3,
+        outputDescription: "IntentResult with matched intent, confidence, suggested skills, and SkillCompositionPlan with steps"
+      }),
       defineTool({
         name: "failure_harvest",
         namespace: "intelligence",
@@ -23675,15 +23686,21 @@ async function processFleetEvalForPheromones(evalResult) {
     }
   }
   for (const deposit3 of deposits) {
+    const wireType = deposit3.type === "ALERT" ? "repellent" : deposit3.type === "ATTRACTION" ? "attraction" : deposit3.type === "TRAIL" ? "trail" : "external";
     try {
       await callMcpTool({
         toolName: "pheromone_deposit",
         args: {
-          type: deposit3.type,
+          type: wireType,
           domain: deposit3.domain,
-          intensity: deposit3.intensity,
-          agent_id: deposit3.agentId,
-          metadata: deposit3.metadata
+          strength: deposit3.intensity,
+          source: deposit3.agentId,
+          metadata: {
+            score: evalResult.score,
+            latency_ms: evalResult.latency_ms,
+            cost_usd: evalResult.cost
+          },
+          tags: ["fleet-pheromone-bridge", evalResult.taskType, deposit3.type.toLowerCase()]
         },
         callId: `fleet-pheromone-${evalResult.taskType}-${Date.now()}`
       });
@@ -23738,6 +23755,190 @@ var init_fleet_pheromone_bridge = __esm({
     IMPROVEMENT_DELTA = 0.1;
     recentScores = /* @__PURE__ */ new Map();
     MAX_CACHE_SIZE = 200;
+  }
+});
+
+// src/intent/intent-router.ts
+var intent_router_exports = {};
+__export(intent_router_exports, {
+  buildSkillCompositionPlan: () => buildSkillCompositionPlan,
+  detectIntent: () => detectIntent,
+  getSkillCompositionPatterns: () => getSkillCompositionPatterns
+});
+function detectIntent(input) {
+  const normalised = input.toLowerCase().trim();
+  for (const mapping of INTENT_MAPPINGS) {
+    const matched = mapping.keywords.filter((kw) => normalised.includes(kw.toLowerCase()));
+    if (matched.length > 0) {
+      return {
+        matched: true,
+        outputType: mapping.outputType,
+        confidence: Math.min(1, matched.length * 0.4),
+        matchedKeywords: matched,
+        suggestedSkills: mapping.skills,
+        composition: buildSkillCompositionPlan(input, mapping.skills)
+      };
+    }
+  }
+  return {
+    matched: false,
+    outputType: "conversation",
+    confidence: 0,
+    matchedKeywords: [],
+    suggestedSkills: [],
+    composition: buildSkillCompositionPlan(input, [])
+  };
+}
+function buildSkillCompositionPlan(input, fallbackSkills = []) {
+  const normalised = input.toLowerCase().trim();
+  const scoredPatterns = COMPOSITION_PATTERNS.map((pattern) => ({
+    pattern,
+    score: pattern.triggers.reduce((sum, trigger) => sum + (normalised.includes(trigger) ? 1 : 0), 0)
+  }));
+  const best = scoredPatterns.sort((a, b) => b.score - a.score)[0]?.pattern ?? COMPOSITION_PATTERNS[0];
+  const skills = best.defaultSkills.length > 0 ? best.defaultSkills : fallbackSkills;
+  const triggered = best.triggers.filter((t) => normalised.includes(t));
+  const rationale = triggered.length > 0 ? `Selected pattern "${best.name}" because the task signals: ${triggered.join(", ")}.` : `Selected pattern "${best.name}" as default canonical workflow.`;
+  return {
+    patternId: best.id,
+    patternName: best.name,
+    taskClass: best.taskClass,
+    rationale,
+    skills,
+    steps: best.steps
+  };
+}
+function getSkillCompositionPatterns() {
+  return [...COMPOSITION_PATTERNS];
+}
+var COMPOSITION_PATTERNS, INTENT_MAPPINGS;
+var init_intent_router = __esm({
+  "src/intent/intent-router.ts"() {
+    "use strict";
+    COMPOSITION_PATTERNS = [
+      {
+        id: "research-to-standard",
+        name: "Research To Standard",
+        taskClass: "standardize",
+        description: "Default method for tasks that define standards, taxonomies, policies, or canonical methods.",
+        triggers: ["standard", "standardize", "taxonomy", "canonical", "policy", "governance", "framework", "visualization"],
+        defaultSkills: ["skill-intent-contract", "flow-discover", "flow-define", "octopus-architecture", "flow-spec", "flow-deliver", "skill-verify"],
+        steps: [
+          { skill: "skill-intent-contract", phase: "define", purpose: "Lock the intent, success criteria, and boundaries.", required: true },
+          { skill: "flow-discover", phase: "discover", purpose: "Harvest sources and gather reference patterns.", required: true },
+          { skill: "flow-define", phase: "define", purpose: "Define the canonical method, taxonomy, and constraints.", required: true },
+          { skill: "octopus-architecture", phase: "design", purpose: "Design the architecture and operating model.", required: true },
+          { skill: "flow-spec", phase: "define", purpose: "Convert the standard into a buildable specification.", required: true },
+          { skill: "flow-deliver", phase: "deliver", purpose: "Run structured validation and review.", required: true },
+          { skill: "skill-verify", phase: "verify", purpose: "Verify evidence and completion.", required: true }
+        ]
+      },
+      {
+        id: "harvest-to-pattern-library",
+        name: "Harvest To Pattern Library",
+        taskClass: "harvest",
+        description: "Default method for premium-source or corpus harvesting into reusable patterns.",
+        triggers: ["harvest", "source pack", "pattern library", "corpus", "extract", "scribd", "babok", "benchmark"],
+        defaultSkills: ["skill-intent-contract", "flow-discover", "skill-content-pipeline", "flow-define", "flow-deliver", "skill-verify"],
+        steps: [
+          { skill: "skill-intent-contract", phase: "define", purpose: "Set extraction targets and limits.", required: true },
+          { skill: "flow-discover", phase: "discover", purpose: "Locate and qualify source material.", required: true },
+          { skill: "skill-content-pipeline", phase: "discover", purpose: "Normalize source content into structured pattern candidates.", required: true },
+          { skill: "flow-define", phase: "define", purpose: "Map harvested units to canonical families.", required: true },
+          { skill: "flow-deliver", phase: "deliver", purpose: "Validate quality and completeness.", required: true },
+          { skill: "skill-verify", phase: "verify", purpose: "Verify provenance and harvested outputs.", required: true }
+        ]
+      },
+      {
+        id: "standard-to-implementation",
+        name: "Standard To Implementation",
+        taskClass: "implement",
+        description: "Default method for implementing an already-defined standard into runtime behavior.",
+        triggers: ["implement", "build", "wire", "integrate", "default method", "all agents", "runtime"],
+        defaultSkills: ["skill-intent-contract", "flow-define", "octopus-architecture", "flow-develop", "flow-deliver", "skill-verify"],
+        steps: [
+          { skill: "skill-intent-contract", phase: "define", purpose: "Confirm what must be implemented and protected.", required: true },
+          { skill: "flow-define", phase: "define", purpose: "Lock requirements and interfaces.", required: true },
+          { skill: "octopus-architecture", phase: "design", purpose: "Design the integration and composition model.", required: true },
+          { skill: "flow-develop", phase: "develop", purpose: "Implement the default method.", required: true },
+          { skill: "flow-deliver", phase: "deliver", purpose: "Validate implementation quality.", required: true },
+          { skill: "skill-verify", phase: "verify", purpose: "Verify the runtime effect.", required: true }
+        ]
+      },
+      {
+        id: "ci-triage",
+        name: "CI Triage",
+        taskClass: "validate",
+        description: "Default method for CI failures, broken checks, and failing contracts.",
+        triggers: ["ci", "check", "test fail", "build fail", "contract", "pipeline", "broken pr"],
+        defaultSkills: ["skill-intent-contract", "skill-debug", "flow-develop", "flow-deliver", "skill-verify"],
+        steps: [
+          { skill: "skill-intent-contract", phase: "define", purpose: "Lock the failing gate, expected behavior, and acceptance check.", required: true },
+          { skill: "skill-debug", phase: "discover", purpose: "Diagnose the failure from logs, checks, and changed files.", required: true },
+          { skill: "flow-develop", phase: "develop", purpose: "Implement the concrete fix instead of restarting discovery.", required: true },
+          { skill: "flow-deliver", phase: "deliver", purpose: "Re-run the failing quality gates and validate the outcome.", required: true },
+          { skill: "skill-verify", phase: "verify", purpose: "Verify the failing CI path is genuinely cleared.", required: true }
+        ]
+      },
+      {
+        id: "review-resolution",
+        name: "Review Resolution",
+        taskClass: "validate",
+        description: "Default method for unresolved review threads, bot findings, drift comments.",
+        triggers: ["review", "copilot", "bugbot", "thread", "blocked pr", "merge blocked", "comment drift"],
+        defaultSkills: ["skill-intent-contract", "skill-code-review", "flow-develop", "flow-deliver", "skill-verify"],
+        steps: [
+          { skill: "skill-intent-contract", phase: "define", purpose: "Clarify which review findings are real blockers versus stale noise.", required: true },
+          { skill: "skill-code-review", phase: "discover", purpose: "Read review findings, changed files, and affected contracts.", required: true },
+          { skill: "flow-develop", phase: "develop", purpose: "Resolve the real findings with minimal, targeted changes.", required: true },
+          { skill: "flow-deliver", phase: "deliver", purpose: "Validate that review blockers are cleared.", required: true },
+          { skill: "skill-verify", phase: "verify", purpose: "Verify merge readiness against the original blockers.", required: true }
+        ]
+      },
+      {
+        id: "self-healing-recovery",
+        name: "Self-Healing Recovery",
+        taskClass: "validate",
+        description: "Default method for deploy mismatches, runtime regressions, and incidents.",
+        triggers: ["deploy", "runtime", "incident", "health", "self-heal", "mismatch", "production"],
+        defaultSkills: ["skill-intent-contract", "omega-sentinel", "skill-debug", "flow-develop", "flow-deliver", "skill-verify"],
+        steps: [
+          { skill: "skill-intent-contract", phase: "define", purpose: "Lock the broken runtime path, environment, and expected steady state.", required: true },
+          { skill: "omega-sentinel", phase: "discover", purpose: "Read production/runtime evidence, contracts, and deployment drift signals.", required: true },
+          { skill: "skill-debug", phase: "discover", purpose: "Diagnose the concrete failure without rediscovering the entire system.", required: true },
+          { skill: "flow-develop", phase: "develop", purpose: "Implement the narrow recovery or hardening fix.", required: true },
+          { skill: "flow-deliver", phase: "deliver", purpose: "Validate runtime recovery end-to-end.", required: true },
+          { skill: "skill-verify", phase: "verify", purpose: "Verify production no longer exhibits the mismatch or regression.", required: true }
+        ]
+      },
+      {
+        id: "visualization-system-loop",
+        name: "Visualization System Loop",
+        taskClass: "visualize",
+        description: "Default method for canonical visualization work.",
+        triggers: ["visualization", "diagram", "template", "pattern", "renderer", "visual standard", "benchmark", "bindings"],
+        defaultSkills: ["skill-intent-contract", "flow-discover", "flow-define", "octopus-architecture", "flow-develop", "flow-deliver", "skill-verify"],
+        steps: [
+          { skill: "skill-intent-contract", phase: "define", purpose: "Lock audience, explanation goal, and canonical visualization constraints.", required: true },
+          { skill: "flow-discover", phase: "discover", purpose: "Harvest visualization references, patterns, and existing graph evidence.", required: true },
+          { skill: "flow-define", phase: "define", purpose: "Define the canonical visualization family, template, and trigger rules.", required: true },
+          { skill: "octopus-architecture", phase: "design", purpose: "Design graph bindings, routing inputs, and improvement loops.", required: true },
+          { skill: "flow-develop", phase: "develop", purpose: "Implement catalog, routing, bindings, and benchmark gates.", required: true },
+          { skill: "flow-deliver", phase: "deliver", purpose: "Validate benchmark stability and harvest quality.", required: true },
+          { skill: "skill-verify", phase: "verify", purpose: "Verify the visualization system improved or stayed neutral.", required: true }
+        ]
+      }
+    ];
+    INTENT_MAPPINGS = [
+      { outputType: "report", keywords: ["rapport", "report", "analyse", "analysis", "research", "unders\xF8gelse"], skills: ["skill-knowledge-work"] },
+      { outputType: "deck", keywords: ["deck", "slides", "pr\xE6sentation", "presentation", "pitch"], skills: ["skill-deck"] },
+      { outputType: "spreadsheet", keywords: ["budget", "spreadsheet", "regneark", "roi", "npv", "cash flow", "finans", "\xF8konomi"], skills: ["skill-cost-projections"] },
+      { outputType: "diagram", keywords: ["diagram", "arkitektur", "architecture", "flow", "flowchart", "mermaid"], skills: ["octopus-architecture"] },
+      { outputType: "process", keywords: ["process", "workflow", "pipeline", "devops", "ci/cd"], skills: ["flow-develop"] },
+      { outputType: "dev-spec", keywords: ["spec", "prd", "requirements", "krav", "user story", "epic"], skills: ["skill-prd"] },
+      { outputType: "security-scan", keywords: ["security", "sikkerhed", "pentest", "vulnerability", "cve", "s\xE5rbarhed"], skills: ["skill-security-framing", "skill-audit"] },
+      { outputType: "audit", keywords: ["audit", "compliance", "governance", "risk", "risiko"], skills: ["skill-audit"] }
+    ];
   }
 });
 
@@ -30314,6 +30515,29 @@ ${formatted}`;
         return `Fleet pheromone backfill failed: ${err instanceof Error ? err.message : String(err)}`;
       }
     }
+    // ─── Intent Detection + Skill Composition (LIN-774) ─────────────
+    case "intent_detect": {
+      try {
+        const { detectIntent: detectIntent2, getSkillCompositionPatterns: getSkillCompositionPatterns2 } = await Promise.resolve().then(() => (init_intent_router(), intent_router_exports));
+        const inputText = typeof args.input === "string" ? args.input : "";
+        if (!inputText) return "Error: input string is required";
+        const result = detectIntent2(inputText);
+        const patterns = getSkillCompositionPatterns2();
+        return JSON.stringify({
+          intent: {
+            matched: result.matched,
+            outputType: result.outputType,
+            confidence: result.confidence,
+            matchedKeywords: result.matchedKeywords,
+            suggestedSkills: result.suggestedSkills
+          },
+          composition: result.composition,
+          availablePatterns: patterns.map((p) => ({ id: p.id, name: p.name, taskClass: p.taskClass }))
+        }, null, 2);
+      } catch (err) {
+        return `Intent detection failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
     case "due_diligence": {
       try {
         const { handleDueDiligence: handleDueDiligence2 } = await Promise.resolve().then(() => (init_v8_v10_value_props(), v8_v10_value_props_exports));
@@ -32140,6 +32364,8 @@ var init_mcp_caller = __esm({
       "capability_match",
       // Fleet Learning D1
       "fleet_pheromone_backfill",
+      // Intent Detection + Skill Composition (LIN-774)
+      "intent_detect",
       // Model routing
       "model_providers",
       "model_route",

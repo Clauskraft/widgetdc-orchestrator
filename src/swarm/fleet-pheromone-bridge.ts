@@ -197,16 +197,28 @@ export async function processFleetEvalForPheromones(
   }
 
   // Deposit pheromones via MCP
+  // Contract per src/tools/tool-registry.ts: type ∈ attraction|repellent|trail|external (lowercase),
+  // strength (not intensity), source (not agent_id), metadata is Record<string, number>.
+  // Bridge's internal 'ALERT' type maps to 'repellent' on the wire.
   for (const deposit of deposits) {
+    const wireType =
+      deposit.type === 'ALERT' ? 'repellent' :
+      deposit.type === 'ATTRACTION' ? 'attraction' :
+      deposit.type === 'TRAIL' ? 'trail' : 'external'
     try {
       await callMcpTool({
         toolName: 'pheromone_deposit',
         args: {
-          type: deposit.type,
+          type: wireType,
           domain: deposit.domain,
-          intensity: deposit.intensity,
-          agent_id: deposit.agentId,
-          metadata: deposit.metadata,
+          strength: deposit.intensity,
+          source: deposit.agentId,
+          metadata: {
+            score: evalResult.score,
+            latency_ms: evalResult.latency_ms,
+            cost_usd: evalResult.cost,
+          },
+          tags: ['fleet-pheromone-bridge', evalResult.taskType, deposit.type.toLowerCase()],
         },
         callId: `fleet-pheromone-${evalResult.taskType}-${Date.now()}`,
       })
