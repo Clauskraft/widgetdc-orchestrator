@@ -1,1 +1,1 @@
-Deploy timestamp:  13. apr 2026 11:45:00 — Fleet Learning fix
+Deploy timestamp:  13. apr 2026 12:32:00 — intent_detect + skill composition
