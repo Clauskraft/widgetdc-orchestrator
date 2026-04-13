@@ -1282,6 +1282,12 @@ await test('118x. POST /api/tools/capability_match responds', async () => {
   assert(r.status !== 404, `capability_match not deployed (404)`)
 })
 
+// ── 118y. fleet_pheromone_backfill — D1 Fleet-Pheromone Bridge ──
+await test('118y. POST /api/tools/fleet_pheromone_backfill responds', async () => {
+  const r = await api('/api/tools/fleet_pheromone_backfill', { method: 'POST', body: JSON.stringify({ max_evals: 10 }) })
+  assert(r.status !== 404, `fleet_pheromone_backfill not deployed (404)`)
+})
+
 // ── 118w. memory_search with tier filter — CoALA W8.5 ──
 await test('118w. POST /api/tools/memory_search with tier responds', async () => {
   const r = await api('/api/tools/memory_search', { method: 'POST', body: JSON.stringify({ tier: 'episodic', limit: 3 }) })

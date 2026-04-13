@@ -1179,6 +1179,20 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     outputDescription: 'Ranked list of CapabilityMatch objects from all sources (mcp_tool, agent, pattern, service)',
   }),
 
+  // ─── Fleet Learning D1: Fleet-Pheromone Bridge ─────────────────────
+
+  defineTool({
+    name: 'fleet_pheromone_backfill',
+    namespace: 'fleet-learning',
+    description: 'D1: Backfill historical fleet evaluation data into pheromone deposits. Converts past 2,705+ evals into ATTRACTION/ALERT/TRAIL pheromones. Use once to seed the pheromone system with fleet intelligence.',
+    input: z.object({
+      max_evals: z.number().optional().describe('Max evals to process (default: 500)'),
+      min_score: z.number().optional().describe('Only process evals with score >= this (default: 0)'),
+    }),
+    timeoutMs: 120000,
+    outputDescription: 'Backfill results: total evals processed, pheromones deposited, errors',
+  }),
+
   defineTool({
     name: 'failure_harvest',
     namespace: 'intelligence',

@@ -203,6 +203,8 @@ const LOCAL_TOOLS = new Set([
   'due_diligence', 'prompt_ab_test', 'fact_assert', 'fact_query',
   // LIN-774: Capability Matching
   'capability_match',
+  // Fleet Learning D1
+  'fleet_pheromone_backfill',
   // Model routing
   'model_providers', 'model_route', 'model_cost_estimate', 'model_budget_status', 'model_policy_check',
   // Workflow

@@ -1854,6 +1854,50 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    // ─── Fleet Learning D1: Fleet-Pheromone Bridge ──────────────────
+
+    case 'fleet_pheromone_backfill': {
+      try {
+        const { processFleetBatchForPheromones } = await import('../swarm/fleet-pheromone-bridge.js')
+        // Fetch recent evals from Redis
+        const redis = getRedis()
+        if (!redis) return 'Error: Redis required for fleet pheromone backfill'
+
+        // Get all fleet evals from the peer-eval list
+        const raw = await redis.lrange('peer-eval:all', 0, (args.max_evals as number) ?? 499)
+        const evals = raw.map(r => {
+          try {
+            const parsed = JSON.parse(r)
+            return {
+              taskType: parsed.taskType ?? 'unknown',
+              agentId: parsed.agentId ?? 'unknown',
+              score: parsed.metrics?.quality_score ?? 0.5,
+              latency_ms: parsed.metrics?.latency_ms ?? 0,
+              cost: parsed.metrics?.cost_usd ?? 0,
+              success: parsed.success ?? true,
+              timestamp: parsed.timestamp ?? new Date().toISOString(),
+            }
+          } catch {
+            return null
+          }
+        }).filter(Boolean) as Array<{ taskType: string; agentId: string; score: number; latency_ms: number; cost: number; success: boolean; timestamp: string }>
+
+        const minScore = typeof args.min_score === 'number' ? args.min_score : 0
+        const filtered = evals.filter(e => e.score >= minScore)
+        const result = await processFleetBatchForPheromones(filtered)
+
+        return JSON.stringify({
+          total_evals_available: evals.length,
+          total_evals_processed: result.total,
+          pheromones_deposited: result.deposited,
+          errors: result.errors,
+          filter: { min_score: minScore },
+        }, null, 2)
+      } catch (err) {
+        return `Fleet pheromone backfill failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
     case 'due_diligence': {
       try {
         const { handleDueDiligence } = await import('../value-props/v8-v10-value-props.js')
@@ -2417,6 +2461,15 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
         },
         insights,
       })
+
+      // D1: Fleet-Pheromone Bridge — automatically deposit pheromones after evaluation
+      if (qualityScore !== undefined) {
+        try {
+          const { fleetPheromoneHook } = await import('../swarm/fleet-pheromone-bridge.js')
+          fleetPheromoneHook(taskType, agentId, qualityScore, latencyMs, costUsd ?? 0)
+        } catch { /* non-critical */ }
+      }
+
       return JSON.stringify(report)
     }
 
