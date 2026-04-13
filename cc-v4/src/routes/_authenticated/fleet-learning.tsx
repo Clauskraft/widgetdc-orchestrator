@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { apiGet } from '@/lib/api-client'
+import { apiGet, apiPost } from '@/lib/api-client'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -22,6 +22,7 @@ interface FleetEntry {
   avgLatency: number
   bestAgent?: string
   bestScore: number
+  bestPractices?: string[]
   bestPracticeCount?: number
   lastUpdated: string
   reliable?: boolean
@@ -30,18 +31,26 @@ interface FleetEntry {
 function FleetLearningPage() {
   const { data: status, isLoading: statusLoading, error: statusError } = useQuery<PeerEvalStatus>({
     queryKey: ['peer-eval-status'],
-    queryFn: () => apiGet('/api/peer-eval/status').then(r => r.data),
+    queryFn: () =>
+      apiPost('/api/tools/peer_eval_status', {}).then(
+        (r: any) => {
+          const d = r?.data?.result
+          return typeof d === 'string' ? JSON.parse(d) : d
+        }
+      ),
     refetchInterval: 15000,
   })
 
   const { data: fleet, isLoading: fleetLoading, error: fleetError } = useQuery<FleetEntry[]>({
     queryKey: ['peer-eval-fleet'],
-    queryFn: () => {
-      const r = apiGet('/api/peer-eval/fleet')
-      // API returns {success, data: [], count} — unwrap safely
-      const arr = r?.data
-      return Array.isArray(arr) ? arr : []
-    },
+    queryFn: () =>
+      apiPost('/api/tools/peer_eval_fleet', {}).then(
+        (r: any) => {
+          const d = r?.data?.result
+          const arr = typeof d === 'string' ? JSON.parse(d) : d
+          return Array.isArray(arr) ? arr : []
+        }
+      ),
     refetchInterval: 15000,
   })
 
@@ -50,14 +59,13 @@ function FleetLearningPage() {
       <div className="p-8">
         <Alert variant="destructive">
           <AlertDescription>
-            Failed to load fleet learning data. {statusError?.message || fleetError?.message}
+            Failed to load fleet learning data.
           </AlertDescription>
         </Alert>
       </div>
     )
   }
 
-  // Guard: always arrays
   const fleetData: FleetEntry[] = Array.isArray(fleet) ? fleet : []
   const uniqueAgents = [...new Set(fleetData.map(f => f.bestAgent).filter(Boolean))]
   const avgScoreOverall = fleetData.length > 0
