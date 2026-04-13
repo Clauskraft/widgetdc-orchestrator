@@ -401,8591 +401,6 @@ var init_chat_store = __esm({
   }
 });
 
-// src/chat-broadcaster.ts
-import { WebSocketServer, WebSocket } from "ws";
-function initWebSocket(server2) {
-  wss = new WebSocketServer({ server: server2, path: "/ws" });
-  wss.on("connection", (ws, req) => {
-    const url = new URL(req.url ?? "/", `http://localhost`);
-    const agentId = url.searchParams.get("agent_id") ?? "unknown";
-    if (config.orchestratorApiKey) {
-      const token = url.searchParams.get("api_key") ?? (req.headers["authorization"]?.startsWith("Bearer ") ? req.headers["authorization"].slice(7) : "") ?? "";
-      if (token !== config.orchestratorApiKey) {
-        logger.warn({ agent_id: agentId }, "WebSocket auth rejected");
-        ws.close(4401, "Unauthorized");
-        return;
-      }
-    }
-    const conn = { ws, agentId, connectedAt: /* @__PURE__ */ new Date(), lastPingAt: /* @__PURE__ */ new Date() };
-    connections.set(agentId, conn);
-    logger.info({ agent_id: agentId, total_connections: connections.size }, "WebSocket connected");
-    broadcastMessage({
-      from: "System",
-      to: "All",
-      source: "system",
-      type: "Message",
-      message: `\u{1F7E2} ${agentId} connected to Orchestrator`,
-      timestamp: (/* @__PURE__ */ new Date()).toISOString()
-    });
-    ws.on("message", (data) => {
-      try {
-        const msg = JSON.parse(data.toString());
-        handleIncomingMessage(agentId, msg);
-      } catch (err) {
-        logger.warn({ agent_id: agentId, err: String(err) }, "Invalid WS message");
-      }
-    });
-    ws.on("close", () => {
-      connections.delete(agentId);
-      logger.info({ agent_id: agentId, total_connections: connections.size }, "WebSocket disconnected");
-      broadcastMessage({
-        from: "System",
-        to: "All",
-        source: "system",
-        type: "Message",
-        message: `\u{1F534} ${agentId} disconnected from Orchestrator`,
-        timestamp: (/* @__PURE__ */ new Date()).toISOString()
-      });
-    });
-    ws.on("error", (err) => {
-      logger.error({ agent_id: agentId, err: err.message }, "WebSocket error");
-    });
-  });
-  setInterval(() => {
-    const now = Date.now();
-    for (const [agentId, conn] of connections.entries()) {
-      if (conn.ws.readyState === WebSocket.OPEN) {
-        conn.ws.ping();
-        conn.lastPingAt = /* @__PURE__ */ new Date();
-      } else if (now - conn.lastPingAt.getTime() > config.wsHeartbeatMs * 3) {
-        logger.warn({ agent_id: agentId }, "Stale WS connection removed");
-        connections.delete(agentId);
-      }
-    }
-  }, config.wsHeartbeatMs);
-  logger.info({ path: "/ws" }, "WebSocket server ready");
-}
-function handleIncomingMessage(fromAgentId, msg) {
-  logger.debug({ from: msg.from, to: msg.to, type: msg.type }, "WS message received");
-  if (msg.to === "All") {
-    broadcastMessage(msg);
-  } else {
-    const target = connections.get(msg.to);
-    const storedMsg = {
-      id: msg.id || msgId(),
-      from: msg.from,
-      to: msg.to,
-      source: msg.source,
-      type: msg.type,
-      message: msg.message,
-      timestamp: msg.timestamp || (/* @__PURE__ */ new Date()).toISOString(),
-      thread_id: msg.thread_id,
-      parent_id: msg.parent_id,
-      metadata: msg.metadata
-    };
-    const payload = JSON.stringify({ type: "message", data: storedMsg });
-    if (target?.ws.readyState === WebSocket.OPEN) {
-      target.ws.send(payload);
-      const sender = connections.get(fromAgentId);
-      if (sender?.ws.readyState === WebSocket.OPEN && fromAgentId !== msg.to) {
-        sender.ws.send(payload);
-      }
-      storeMessage(storedMsg).catch(() => {
-      });
-      broadcastSSE("message", storedMsg);
-    } else {
-      storeMessage(storedMsg).catch(() => {
-      });
-      const sender = connections.get(fromAgentId);
-      if (sender?.ws.readyState === WebSocket.OPEN) {
-        sender.ws.send(payload);
-        sender.ws.send(JSON.stringify({
-          type: "message",
-          data: {
-            id: msgId(),
-            from: "System",
-            to: fromAgentId,
-            source: "system",
-            type: "Alert",
-            message: `${msg.to} is offline. Message saved.`,
-            timestamp: (/* @__PURE__ */ new Date()).toISOString()
-          }
-        }));
-      }
-      logger.info({ from: msg.from, to: msg.to }, "DM stored for offline agent (not broadcast)");
-    }
-  }
-}
-function broadcastMessage(msg) {
-  const storedMsg = {
-    id: msg.id || msgId(),
-    from: msg.from,
-    to: msg.to,
-    source: msg.source,
-    type: msg.type,
-    message: msg.message,
-    timestamp: msg.timestamp || (/* @__PURE__ */ new Date()).toISOString(),
-    thread_id: msg.thread_id,
-    parent_id: msg.parent_id,
-    files: msg.files,
-    metadata: msg.metadata
-  };
-  storeMessage(storedMsg).catch(() => {
-  });
-  broadcastSSE("message", { ...msg, id: storedMsg.id });
-  const payload = JSON.stringify({ type: "message", data: { ...msg, id: storedMsg.id } });
-  let sent = 0;
-  for (const [, conn] of connections.entries()) {
-    if (conn.ws.readyState === WebSocket.OPEN) {
-      conn.ws.send(payload);
-      sent++;
-    }
-  }
-  logger.debug({ to: msg.to, type: msg.type, recipients: sent }, "Message broadcast");
-}
-function broadcastToolResult(callId, result, agentId) {
-  broadcastMessage({
-    from: "Orchestrator",
-    to: agentId,
-    source: "orchestrator",
-    type: "ToolResult",
-    message: `Tool call ${callId} completed`,
-    call_id: callId,
-    timestamp: (/* @__PURE__ */ new Date()).toISOString()
-  });
-}
-function getConnectionStats() {
-  return {
-    total: connections.size,
-    agents: Array.from(connections.entries()).map(([id, c]) => ({
-      agent_id: id,
-      connected_at: c.connectedAt.toISOString(),
-      last_ping: c.lastPingAt.toISOString(),
-      state: c.ws.readyState === WebSocket.OPEN ? "open" : "closing"
-    }))
-  };
-}
-var connections, wss;
-var init_chat_broadcaster = __esm({
-  "src/chat-broadcaster.ts"() {
-    "use strict";
-    init_logger();
-    init_config();
-    init_sse();
-    init_chat_store();
-    connections = /* @__PURE__ */ new Map();
-    wss = null;
-  }
-});
-
-// src/agents/agent-registry.ts
-function persistToRedis(agentId, entry) {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  const serialised = JSON.stringify({
-    handshake: entry.handshake,
-    registeredAt: entry.registeredAt.toISOString(),
-    lastSeenAt: entry.lastSeenAt.toISOString()
-  });
-  redis2.hset(REDIS_KEY2, agentId, serialised).catch((err) => {
-    logger.warn({ err: String(err), agent_id: agentId }, "Redis persist failed");
-  });
-}
-function removeFromRedis(agentId) {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  redis2.hdel(REDIS_KEY2, agentId).catch(() => {
-  });
-}
-var REDIS_KEY2, registry, AgentRegistry;
-var init_agent_registry = __esm({
-  "src/agents/agent-registry.ts"() {
-    "use strict";
-    init_logger();
-    init_redis();
-    REDIS_KEY2 = "orchestrator:agents";
-    registry = /* @__PURE__ */ new Map();
-    AgentRegistry = {
-      /** Hydrate registry from Redis on startup */
-      async hydrate() {
-        const redis2 = getRedis();
-        if (!redis2) return;
-        try {
-          const all = await redis2.hgetall(REDIS_KEY2);
-          let count = 0;
-          for (const [agentId, json] of Object.entries(all)) {
-            try {
-              const data = JSON.parse(json);
-              registry.set(agentId, {
-                handshake: data.handshake,
-                registeredAt: new Date(data.registeredAt),
-                lastSeenAt: new Date(data.lastSeenAt),
-                activeCalls: 0
-                // reset on restart
-              });
-              count++;
-            } catch {
-              logger.warn({ agent_id: agentId }, "Skipped corrupt Redis entry");
-            }
-          }
-          if (count > 0) {
-            logger.info({ count }, "Hydrated agent registry from Redis");
-          }
-        } catch (err) {
-          logger.warn({ err: String(err) }, "Redis hydration failed \u2014 starting with empty registry");
-        }
-      },
-      register(handshake) {
-        const existing = registry.get(handshake.agent_id);
-        const entry = {
-          handshake,
-          registeredAt: existing?.registeredAt ?? /* @__PURE__ */ new Date(),
-          lastSeenAt: /* @__PURE__ */ new Date(),
-          activeCalls: existing?.activeCalls ?? 0
-        };
-        registry.set(handshake.agent_id, entry);
-        persistToRedis(handshake.agent_id, entry);
-        logger.info({ agent_id: handshake.agent_id, status: handshake.status }, "Agent registered");
-      },
-      heartbeat(agentId) {
-        const entry = registry.get(agentId);
-        if (entry) {
-          entry.lastSeenAt = /* @__PURE__ */ new Date();
-          persistToRedis(agentId, entry);
-        }
-      },
-      get(agentId) {
-        return registry.get(agentId);
-      },
-      all() {
-        return Array.from(registry.values());
-      },
-      canCallTool(agentId, toolName2) {
-        let entry = registry.get(agentId);
-        if (!entry) {
-          const autoHandshake = {
-            agent_id: agentId,
-            display_name: agentId,
-            source: "auto-discovered",
-            status: "online",
-            capabilities: ["mcp_tools"],
-            allowed_tool_namespaces: ["*"],
-            registered_at: (/* @__PURE__ */ new Date()).toISOString(),
-            last_seen_at: (/* @__PURE__ */ new Date()).toISOString()
-          };
-          const autoEntry = {
-            handshake: autoHandshake,
-            registeredAt: /* @__PURE__ */ new Date(),
-            lastSeenAt: /* @__PURE__ */ new Date(),
-            activeCalls: 0
-          };
-          registry.set(agentId, autoEntry);
-          persistToRedis(agentId, autoEntry);
-          logger.info({ agent_id: agentId }, "Auto-discovered and registered new agent");
-          entry = autoEntry;
-        }
-        if (entry.handshake.status === "offline") return { allowed: false, reason: `Agent '${agentId}' is offline.` };
-        const namespaces = entry.handshake.allowed_tool_namespaces;
-        if (namespaces.includes("*")) return { allowed: true };
-        const namespace = toolName2.split(".")[0];
-        if (!namespace) return { allowed: false, reason: `Invalid tool name '${toolName2}'. Expected 'namespace.method'.` };
-        if (namespaces.includes(namespace)) return { allowed: true };
-        return { allowed: false, reason: `Agent '${agentId}' not authorized for '${namespace}'. Allowed: [${namespaces.join(", ")}]` };
-      },
-      remove(agentId) {
-        const existed = registry.delete(agentId);
-        if (existed) removeFromRedis(agentId);
-        return existed;
-      },
-      update(agentId, fields) {
-        const entry = registry.get(agentId);
-        if (!entry) return false;
-        Object.assign(entry.handshake, fields);
-        entry.lastSeenAt = /* @__PURE__ */ new Date();
-        persistToRedis(agentId, entry);
-        return true;
-      },
-      /** Remove all agents from registry and Redis */
-      async purgeAll() {
-        const count = registry.size;
-        registry.clear();
-        const redis2 = getRedis();
-        if (redis2) await redis2.del(REDIS_KEY2).catch(() => {
-        });
-        return count;
-      },
-      incrementActive(agentId) {
-        const e = registry.get(agentId);
-        if (e) e.activeCalls++;
-      },
-      decrementActive(agentId) {
-        const e = registry.get(agentId);
-        if (e) e.activeCalls = Math.max(0, e.activeCalls - 1);
-      },
-      getActiveCalls(agentId) {
-        return registry.get(agentId)?.activeCalls ?? 0;
-      }
-    };
-  }
-});
-
-// src/slack.ts
-function isSlackEnabled() {
-  return Boolean(config.backendUrl) && Boolean(config.backendApiKey);
-}
-async function postToSlack(payload) {
-  if (!isSlackEnabled() || !_slackToolAvailable) return;
-  try {
-    const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${config.backendApiKey}`
-      },
-      body: JSON.stringify({
-        tool: "slack.channel.post",
-        payload
-      })
-    });
-    if (!res.ok) {
-      if (res.status === 404) {
-        _slackToolAvailable = false;
-        logger.warn("slack.channel.post not found on backend \u2014 Slack notifications disabled until restart. Register slack as a deferred namespace on the backend to fix.");
-      } else {
-        logger.warn({ status: res.status }, "Slack MCP post failed");
-      }
-    }
-  } catch (err) {
-    logger.warn({ err: String(err) }, "Slack MCP post error");
-  }
-}
-function notifyAgentRegistered(agentId, displayName, namespaces) {
-  postToSlack({
-    text: `Agent *${displayName}* (\`${agentId}\`) registered
-Namespaces: ${namespaces.join(", ")}`,
-    level: "info",
-    title: `Agent Registered: ${displayName}`,
-    source: "orchestrator",
-    channel: "#ops-alerts"
-  });
-}
-function notifyToolCall(agentId, toolName2, status, durationMs, errorMessage) {
-  const emoji = status === "success" ? ":white_check_mark:" : ":x:";
-  const level = status === "success" ? "info" : "error";
-  const errorLine = errorMessage ? `
-Error: \`${errorMessage.slice(0, 200)}\`` : "";
-  postToSlack({
-    text: `${emoji} \`${agentId}\` called \`${toolName2}\` \u2192 *${status}* (${durationMs}ms)${errorLine}
-Orchestrator: \`${config.orchestratorId}\``,
-    level,
-    title: `Tool Call: ${toolName2} \u2192 ${status}`,
-    source: "orchestrator",
-    channel: "#ops-alerts"
-  });
-}
-function notifyChatMessage(from, to, message) {
-  postToSlack({
-    text: `*${from}* \u2192 *${to}*
-${message.slice(0, 500)}`,
-    level: "info",
-    title: `Chat: ${from} \u2192 ${to}`,
-    source: "orchestrator",
-    channel: "#ops-alerts"
-  });
-}
-function notifyAdoptionDigest(digest) {
-  const trendEmoji2 = digest.trend === "up" ? ":chart_with_upwards_trend:" : digest.trend === "down" ? ":chart_with_downwards_trend:" : ":bar_chart:";
-  postToSlack({
-    text: [
-      `${trendEmoji2} *Weekly Adoption Report* (${digest.period})`,
-      "",
-      `*Conversations:* ${digest.conversations} | *Pipelines:* ${digest.pipelines} | *Artifacts:* ${digest.artifacts}`,
-      `*Active Agents:* ${digest.agents} | *Tool Calls:* ${digest.toolCalls} | *Chains:* ${digest.chains}`,
-      `*Feature Adoption:* ${digest.featuresPct}%`,
-      "",
-      `Trend: ${digest.trend === "up" ? "Growing" : digest.trend === "down" ? "Declining" : "Stable"}`
-    ].join("\n"),
-    level: "info",
-    title: `Weekly Adoption Digest \u2014 ${digest.period}`,
-    source: "orchestrator",
-    channel: "#ops-status"
-  });
-}
-var _slackToolAvailable;
-var init_slack = __esm({
-  "src/slack.ts"() {
-    "use strict";
-    init_config();
-    init_logger();
-    _slackToolAvailable = true;
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/guard/guard.mjs
-function IsAsyncIterator(value) {
-  return IsObject(value) && globalThis.Symbol.asyncIterator in value;
-}
-function IsIterator(value) {
-  return IsObject(value) && globalThis.Symbol.iterator in value;
-}
-function IsStandardObject(value) {
-  return IsObject(value) && (globalThis.Object.getPrototypeOf(value) === Object.prototype || globalThis.Object.getPrototypeOf(value) === null);
-}
-function IsPromise(value) {
-  return value instanceof globalThis.Promise;
-}
-function IsDate(value) {
-  return value instanceof Date && globalThis.Number.isFinite(value.getTime());
-}
-function IsMap(value) {
-  return value instanceof globalThis.Map;
-}
-function IsSet(value) {
-  return value instanceof globalThis.Set;
-}
-function IsTypedArray(value) {
-  return globalThis.ArrayBuffer.isView(value);
-}
-function IsUint8Array(value) {
-  return value instanceof globalThis.Uint8Array;
-}
-function HasPropertyKey(value, key) {
-  return key in value;
-}
-function IsObject(value) {
-  return value !== null && typeof value === "object";
-}
-function IsArray(value) {
-  return globalThis.Array.isArray(value) && !globalThis.ArrayBuffer.isView(value);
-}
-function IsUndefined(value) {
-  return value === void 0;
-}
-function IsNull(value) {
-  return value === null;
-}
-function IsBoolean(value) {
-  return typeof value === "boolean";
-}
-function IsNumber(value) {
-  return typeof value === "number";
-}
-function IsInteger(value) {
-  return globalThis.Number.isInteger(value);
-}
-function IsBigInt(value) {
-  return typeof value === "bigint";
-}
-function IsString(value) {
-  return typeof value === "string";
-}
-function IsFunction(value) {
-  return typeof value === "function";
-}
-function IsSymbol(value) {
-  return typeof value === "symbol";
-}
-function IsValueType(value) {
-  return IsBigInt(value) || IsBoolean(value) || IsNull(value) || IsNumber(value) || IsString(value) || IsSymbol(value) || IsUndefined(value);
-}
-var init_guard = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/guard/guard.mjs"() {
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/guard/index.mjs
-var init_guard2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/guard/index.mjs"() {
-    init_guard();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/system/policy.mjs
-var TypeSystemPolicy;
-var init_policy = __esm({
-  "node_modules/@sinclair/typebox/build/esm/system/policy.mjs"() {
-    init_guard2();
-    (function(TypeSystemPolicy3) {
-      TypeSystemPolicy3.InstanceMode = "default";
-      TypeSystemPolicy3.ExactOptionalPropertyTypes = false;
-      TypeSystemPolicy3.AllowArrayObject = false;
-      TypeSystemPolicy3.AllowNaN = false;
-      TypeSystemPolicy3.AllowNullVoid = false;
-      function IsExactOptionalProperty(value, key) {
-        return TypeSystemPolicy3.ExactOptionalPropertyTypes ? key in value : value[key] !== void 0;
-      }
-      TypeSystemPolicy3.IsExactOptionalProperty = IsExactOptionalProperty;
-      function IsObjectLike(value) {
-        const isObject = IsObject(value);
-        return TypeSystemPolicy3.AllowArrayObject ? isObject : isObject && !IsArray(value);
-      }
-      TypeSystemPolicy3.IsObjectLike = IsObjectLike;
-      function IsRecordLike(value) {
-        return IsObjectLike(value) && !(value instanceof Date) && !(value instanceof Uint8Array);
-      }
-      TypeSystemPolicy3.IsRecordLike = IsRecordLike;
-      function IsNumberLike(value) {
-        return TypeSystemPolicy3.AllowNaN ? IsNumber(value) : Number.isFinite(value);
-      }
-      TypeSystemPolicy3.IsNumberLike = IsNumberLike;
-      function IsVoidLike(value) {
-        const isUndefined = IsUndefined(value);
-        return TypeSystemPolicy3.AllowNullVoid ? isUndefined || value === null : isUndefined;
-      }
-      TypeSystemPolicy3.IsVoidLike = IsVoidLike;
-    })(TypeSystemPolicy || (TypeSystemPolicy = {}));
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/registry/format.mjs
-var format_exports = {};
-__export(format_exports, {
-  Clear: () => Clear,
-  Delete: () => Delete,
-  Entries: () => Entries,
-  Get: () => Get,
-  Has: () => Has,
-  Set: () => Set2
-});
-function Entries() {
-  return new Map(map);
-}
-function Clear() {
-  return map.clear();
-}
-function Delete(format) {
-  return map.delete(format);
-}
-function Has(format) {
-  return map.has(format);
-}
-function Set2(format, func) {
-  map.set(format, func);
-}
-function Get(format) {
-  return map.get(format);
-}
-var map;
-var init_format = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/registry/format.mjs"() {
-    map = /* @__PURE__ */ new Map();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/registry/type.mjs
-var type_exports = {};
-__export(type_exports, {
-  Clear: () => Clear2,
-  Delete: () => Delete2,
-  Entries: () => Entries2,
-  Get: () => Get2,
-  Has: () => Has2,
-  Set: () => Set3
-});
-function Entries2() {
-  return new Map(map2);
-}
-function Clear2() {
-  return map2.clear();
-}
-function Delete2(kind) {
-  return map2.delete(kind);
-}
-function Has2(kind) {
-  return map2.has(kind);
-}
-function Set3(kind, func) {
-  map2.set(kind, func);
-}
-function Get2(kind) {
-  return map2.get(kind);
-}
-var map2;
-var init_type = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/registry/type.mjs"() {
-    map2 = /* @__PURE__ */ new Map();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/registry/index.mjs
-var init_registry = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/registry/index.mjs"() {
-    init_format();
-    init_type();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/guard/value.mjs
-var value_exports = {};
-__export(value_exports, {
-  HasPropertyKey: () => HasPropertyKey2,
-  IsArray: () => IsArray2,
-  IsAsyncIterator: () => IsAsyncIterator2,
-  IsBigInt: () => IsBigInt2,
-  IsBoolean: () => IsBoolean2,
-  IsDate: () => IsDate2,
-  IsFunction: () => IsFunction2,
-  IsIterator: () => IsIterator2,
-  IsNull: () => IsNull2,
-  IsNumber: () => IsNumber2,
-  IsObject: () => IsObject2,
-  IsRegExp: () => IsRegExp,
-  IsString: () => IsString2,
-  IsSymbol: () => IsSymbol2,
-  IsUint8Array: () => IsUint8Array2,
-  IsUndefined: () => IsUndefined2
-});
-function HasPropertyKey2(value, key) {
-  return key in value;
-}
-function IsAsyncIterator2(value) {
-  return IsObject2(value) && !IsArray2(value) && !IsUint8Array2(value) && Symbol.asyncIterator in value;
-}
-function IsArray2(value) {
-  return Array.isArray(value);
-}
-function IsBigInt2(value) {
-  return typeof value === "bigint";
-}
-function IsBoolean2(value) {
-  return typeof value === "boolean";
-}
-function IsDate2(value) {
-  return value instanceof globalThis.Date;
-}
-function IsFunction2(value) {
-  return typeof value === "function";
-}
-function IsIterator2(value) {
-  return IsObject2(value) && !IsArray2(value) && !IsUint8Array2(value) && Symbol.iterator in value;
-}
-function IsNull2(value) {
-  return value === null;
-}
-function IsNumber2(value) {
-  return typeof value === "number";
-}
-function IsObject2(value) {
-  return typeof value === "object" && value !== null;
-}
-function IsRegExp(value) {
-  return value instanceof globalThis.RegExp;
-}
-function IsString2(value) {
-  return typeof value === "string";
-}
-function IsSymbol2(value) {
-  return typeof value === "symbol";
-}
-function IsUint8Array2(value) {
-  return value instanceof globalThis.Uint8Array;
-}
-function IsUndefined2(value) {
-  return value === void 0;
-}
-var init_value = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/guard/value.mjs"() {
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/create/immutable.mjs
-function ImmutableArray(value) {
-  return globalThis.Object.freeze(value).map((value2) => Immutable(value2));
-}
-function ImmutableDate(value) {
-  return value;
-}
-function ImmutableUint8Array(value) {
-  return value;
-}
-function ImmutableRegExp(value) {
-  return value;
-}
-function ImmutableObject(value) {
-  const result = {};
-  for (const key of Object.getOwnPropertyNames(value)) {
-    result[key] = Immutable(value[key]);
-  }
-  for (const key of Object.getOwnPropertySymbols(value)) {
-    result[key] = Immutable(value[key]);
-  }
-  return globalThis.Object.freeze(result);
-}
-function Immutable(value) {
-  return IsArray2(value) ? ImmutableArray(value) : IsDate2(value) ? ImmutableDate(value) : IsUint8Array2(value) ? ImmutableUint8Array(value) : IsRegExp(value) ? ImmutableRegExp(value) : IsObject2(value) ? ImmutableObject(value) : value;
-}
-var init_immutable = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/create/immutable.mjs"() {
-    init_value();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/clone/value.mjs
-function ArrayType(value) {
-  return value.map((value2) => Visit(value2));
-}
-function DateType(value) {
-  return new Date(value.getTime());
-}
-function Uint8ArrayType(value) {
-  return new Uint8Array(value);
-}
-function RegExpType(value) {
-  return new RegExp(value.source, value.flags);
-}
-function ObjectType(value) {
-  const result = {};
-  for (const key of Object.getOwnPropertyNames(value)) {
-    result[key] = Visit(value[key]);
-  }
-  for (const key of Object.getOwnPropertySymbols(value)) {
-    result[key] = Visit(value[key]);
-  }
-  return result;
-}
-function Visit(value) {
-  return IsArray2(value) ? ArrayType(value) : IsDate2(value) ? DateType(value) : IsUint8Array2(value) ? Uint8ArrayType(value) : IsRegExp(value) ? RegExpType(value) : IsObject2(value) ? ObjectType(value) : value;
-}
-function Clone(value) {
-  return Visit(value);
-}
-var init_value2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/clone/value.mjs"() {
-    init_value();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/create/type.mjs
-function CreateType(schema, options) {
-  const result = options !== void 0 ? { ...options, ...schema } : schema;
-  switch (TypeSystemPolicy.InstanceMode) {
-    case "freeze":
-      return Immutable(result);
-    case "clone":
-      return Clone(result);
-    default:
-      return result;
-  }
-}
-var init_type2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/create/type.mjs"() {
-    init_policy();
-    init_immutable();
-    init_value2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/symbols/symbols.mjs
-var TransformKind, ReadonlyKind, OptionalKind, Hint, Kind;
-var init_symbols = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/symbols/symbols.mjs"() {
-    TransformKind = /* @__PURE__ */ Symbol.for("TypeBox.Transform");
-    ReadonlyKind = /* @__PURE__ */ Symbol.for("TypeBox.Readonly");
-    OptionalKind = /* @__PURE__ */ Symbol.for("TypeBox.Optional");
-    Hint = /* @__PURE__ */ Symbol.for("TypeBox.Hint");
-    Kind = /* @__PURE__ */ Symbol.for("TypeBox.Kind");
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/symbols/index.mjs
-var init_symbols2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/symbols/index.mjs"() {
-    init_symbols();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/unsafe/unsafe.mjs
-function Unsafe(options = {}) {
-  return CreateType({ [Kind]: options[Kind] ?? "Unsafe" }, options);
-}
-var init_unsafe = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/unsafe/unsafe.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/unsafe/index.mjs
-var init_unsafe2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/unsafe/index.mjs"() {
-    init_unsafe();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/error/error.mjs
-var TypeBoxError;
-var init_error = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/error/error.mjs"() {
-    TypeBoxError = class extends Error {
-      constructor(message) {
-        super(message);
-      }
-    };
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/error/index.mjs
-var init_error2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/error/index.mjs"() {
-    init_error();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/system/system.mjs
-var TypeSystemDuplicateTypeKind, TypeSystemDuplicateFormat, TypeSystem;
-var init_system = __esm({
-  "node_modules/@sinclair/typebox/build/esm/system/system.mjs"() {
-    init_registry();
-    init_unsafe2();
-    init_symbols2();
-    init_error2();
-    TypeSystemDuplicateTypeKind = class extends TypeBoxError {
-      constructor(kind) {
-        super(`Duplicate type kind '${kind}' detected`);
-      }
-    };
-    TypeSystemDuplicateFormat = class extends TypeBoxError {
-      constructor(kind) {
-        super(`Duplicate string format '${kind}' detected`);
-      }
-    };
-    (function(TypeSystem2) {
-      function Type3(kind, check) {
-        if (type_exports.Has(kind))
-          throw new TypeSystemDuplicateTypeKind(kind);
-        type_exports.Set(kind, check);
-        return (options = {}) => Unsafe({ ...options, [Kind]: kind });
-      }
-      TypeSystem2.Type = Type3;
-      function Format2(format, check) {
-        if (format_exports.Has(format))
-          throw new TypeSystemDuplicateFormat(format);
-        format_exports.Set(format, check);
-        return format;
-      }
-      TypeSystem2.Format = Format2;
-    })(TypeSystem || (TypeSystem = {}));
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/system/index.mjs
-var init_system2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/system/index.mjs"() {
-    init_policy();
-    init_system();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-key.mjs
-var init_mapped_key = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-key.mjs"() {
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-result.mjs
-function MappedResult(properties) {
-  return CreateType({
-    [Kind]: "MappedResult",
-    properties
-  });
-}
-var init_mapped_result = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-result.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/discard/discard.mjs
-function DiscardKey(value, key) {
-  const { [key]: _, ...rest } = value;
-  return rest;
-}
-function Discard(value, keys) {
-  return keys.reduce((acc, key) => DiscardKey(acc, key), value);
-}
-var init_discard = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/discard/discard.mjs"() {
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/discard/index.mjs
-var init_discard2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/discard/index.mjs"() {
-    init_discard();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/array/array.mjs
-function Array2(items, options) {
-  return CreateType({ [Kind]: "Array", type: "array", items }, options);
-}
-var init_array = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/array/array.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/array/index.mjs
-var init_array2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/array/index.mjs"() {
-    init_array();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/async-iterator/async-iterator.mjs
-function AsyncIterator(items, options) {
-  return CreateType({ [Kind]: "AsyncIterator", type: "AsyncIterator", items }, options);
-}
-var init_async_iterator = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/async-iterator/async-iterator.mjs"() {
-    init_symbols2();
-    init_type2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/async-iterator/index.mjs
-var init_async_iterator2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/async-iterator/index.mjs"() {
-    init_async_iterator();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/constructor/constructor.mjs
-function Constructor(parameters, returns, options) {
-  return CreateType({ [Kind]: "Constructor", type: "Constructor", parameters, returns }, options);
-}
-var init_constructor = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/constructor/constructor.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/constructor/index.mjs
-var init_constructor2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/constructor/index.mjs"() {
-    init_constructor();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/function/function.mjs
-function Function(parameters, returns, options) {
-  return CreateType({ [Kind]: "Function", type: "Function", parameters, returns }, options);
-}
-var init_function = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/function/function.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/function/index.mjs
-var init_function2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/function/index.mjs"() {
-    init_function();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/create/index.mjs
-var init_create = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/create/index.mjs"() {
-    init_type2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/computed/computed.mjs
-function Computed(target, parameters, options) {
-  return CreateType({ [Kind]: "Computed", target, parameters }, options);
-}
-var init_computed = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/computed/computed.mjs"() {
-    init_create();
-    init_symbols();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/computed/index.mjs
-var init_computed2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/computed/index.mjs"() {
-    init_computed();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/never/never.mjs
-function Never(options) {
-  return CreateType({ [Kind]: "Never", not: {} }, options);
-}
-var init_never = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/never/never.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/never/index.mjs
-var init_never2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/never/index.mjs"() {
-    init_never();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/guard/kind.mjs
-function IsReadonly(value) {
-  return IsObject2(value) && value[ReadonlyKind] === "Readonly";
-}
-function IsOptional(value) {
-  return IsObject2(value) && value[OptionalKind] === "Optional";
-}
-function IsAny(value) {
-  return IsKindOf(value, "Any");
-}
-function IsArgument(value) {
-  return IsKindOf(value, "Argument");
-}
-function IsArray3(value) {
-  return IsKindOf(value, "Array");
-}
-function IsAsyncIterator3(value) {
-  return IsKindOf(value, "AsyncIterator");
-}
-function IsBigInt3(value) {
-  return IsKindOf(value, "BigInt");
-}
-function IsBoolean3(value) {
-  return IsKindOf(value, "Boolean");
-}
-function IsComputed(value) {
-  return IsKindOf(value, "Computed");
-}
-function IsConstructor(value) {
-  return IsKindOf(value, "Constructor");
-}
-function IsDate3(value) {
-  return IsKindOf(value, "Date");
-}
-function IsFunction3(value) {
-  return IsKindOf(value, "Function");
-}
-function IsInteger2(value) {
-  return IsKindOf(value, "Integer");
-}
-function IsIntersect(value) {
-  return IsKindOf(value, "Intersect");
-}
-function IsIterator3(value) {
-  return IsKindOf(value, "Iterator");
-}
-function IsKindOf(value, kind) {
-  return IsObject2(value) && Kind in value && value[Kind] === kind;
-}
-function IsLiteralValue(value) {
-  return IsBoolean2(value) || IsNumber2(value) || IsString2(value);
-}
-function IsLiteral(value) {
-  return IsKindOf(value, "Literal");
-}
-function IsMappedKey(value) {
-  return IsKindOf(value, "MappedKey");
-}
-function IsMappedResult(value) {
-  return IsKindOf(value, "MappedResult");
-}
-function IsNever(value) {
-  return IsKindOf(value, "Never");
-}
-function IsNot(value) {
-  return IsKindOf(value, "Not");
-}
-function IsNull3(value) {
-  return IsKindOf(value, "Null");
-}
-function IsNumber3(value) {
-  return IsKindOf(value, "Number");
-}
-function IsObject3(value) {
-  return IsKindOf(value, "Object");
-}
-function IsPromise2(value) {
-  return IsKindOf(value, "Promise");
-}
-function IsRecord(value) {
-  return IsKindOf(value, "Record");
-}
-function IsRef(value) {
-  return IsKindOf(value, "Ref");
-}
-function IsRegExp2(value) {
-  return IsKindOf(value, "RegExp");
-}
-function IsString3(value) {
-  return IsKindOf(value, "String");
-}
-function IsSymbol3(value) {
-  return IsKindOf(value, "Symbol");
-}
-function IsTemplateLiteral(value) {
-  return IsKindOf(value, "TemplateLiteral");
-}
-function IsThis(value) {
-  return IsKindOf(value, "This");
-}
-function IsTransform(value) {
-  return IsObject2(value) && TransformKind in value;
-}
-function IsTuple(value) {
-  return IsKindOf(value, "Tuple");
-}
-function IsUndefined3(value) {
-  return IsKindOf(value, "Undefined");
-}
-function IsUnion(value) {
-  return IsKindOf(value, "Union");
-}
-function IsUint8Array3(value) {
-  return IsKindOf(value, "Uint8Array");
-}
-function IsUnknown(value) {
-  return IsKindOf(value, "Unknown");
-}
-function IsUnsafe(value) {
-  return IsKindOf(value, "Unsafe");
-}
-function IsVoid(value) {
-  return IsKindOf(value, "Void");
-}
-function IsKind(value) {
-  return IsObject2(value) && Kind in value && IsString2(value[Kind]);
-}
-function IsSchema(value) {
-  return IsAny(value) || IsArgument(value) || IsArray3(value) || IsBoolean3(value) || IsBigInt3(value) || IsAsyncIterator3(value) || IsComputed(value) || IsConstructor(value) || IsDate3(value) || IsFunction3(value) || IsInteger2(value) || IsIntersect(value) || IsIterator3(value) || IsLiteral(value) || IsMappedKey(value) || IsMappedResult(value) || IsNever(value) || IsNot(value) || IsNull3(value) || IsNumber3(value) || IsObject3(value) || IsPromise2(value) || IsRecord(value) || IsRef(value) || IsRegExp2(value) || IsString3(value) || IsSymbol3(value) || IsTemplateLiteral(value) || IsThis(value) || IsTuple(value) || IsUndefined3(value) || IsUnion(value) || IsUint8Array3(value) || IsUnknown(value) || IsUnsafe(value) || IsVoid(value) || IsKind(value);
-}
-var init_kind = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/guard/kind.mjs"() {
-    init_value();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/optional/optional.mjs
-function RemoveOptional(schema) {
-  return CreateType(Discard(schema, [OptionalKind]));
-}
-function AddOptional(schema) {
-  return CreateType({ ...schema, [OptionalKind]: "Optional" });
-}
-function OptionalWithFlag(schema, F) {
-  return F === false ? RemoveOptional(schema) : AddOptional(schema);
-}
-function Optional(schema, enable) {
-  const F = enable ?? true;
-  return IsMappedResult(schema) ? OptionalFromMappedResult(schema, F) : OptionalWithFlag(schema, F);
-}
-var init_optional = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/optional/optional.mjs"() {
-    init_type2();
-    init_symbols2();
-    init_discard2();
-    init_optional_from_mapped_result();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/optional/optional-from-mapped-result.mjs
-function FromProperties(P, F) {
-  const Acc = {};
-  for (const K2 of globalThis.Object.getOwnPropertyNames(P))
-    Acc[K2] = Optional(P[K2], F);
-  return Acc;
-}
-function FromMappedResult(R, F) {
-  return FromProperties(R.properties, F);
-}
-function OptionalFromMappedResult(R, F) {
-  const P = FromMappedResult(R, F);
-  return MappedResult(P);
-}
-var init_optional_from_mapped_result = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/optional/optional-from-mapped-result.mjs"() {
-    init_mapped2();
-    init_optional();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/optional/index.mjs
-var init_optional2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/optional/index.mjs"() {
-    init_optional_from_mapped_result();
-    init_optional();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-create.mjs
-function IntersectCreate(T, options = {}) {
-  const allObjects = T.every((schema) => IsObject3(schema));
-  const clonedUnevaluatedProperties = IsSchema(options.unevaluatedProperties) ? { unevaluatedProperties: options.unevaluatedProperties } : {};
-  return CreateType(options.unevaluatedProperties === false || IsSchema(options.unevaluatedProperties) || allObjects ? { ...clonedUnevaluatedProperties, [Kind]: "Intersect", type: "object", allOf: T } : { ...clonedUnevaluatedProperties, [Kind]: "Intersect", allOf: T }, options);
-}
-var init_intersect_create = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-create.mjs"() {
-    init_type2();
-    init_symbols2();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-evaluated.mjs
-function IsIntersectOptional(types) {
-  return types.every((left) => IsOptional(left));
-}
-function RemoveOptionalFromType(type) {
-  return Discard(type, [OptionalKind]);
-}
-function RemoveOptionalFromRest(types) {
-  return types.map((left) => IsOptional(left) ? RemoveOptionalFromType(left) : left);
-}
-function ResolveIntersect(types, options) {
-  return IsIntersectOptional(types) ? Optional(IntersectCreate(RemoveOptionalFromRest(types), options)) : IntersectCreate(RemoveOptionalFromRest(types), options);
-}
-function IntersectEvaluated(types, options = {}) {
-  if (types.length === 1)
-    return CreateType(types[0], options);
-  if (types.length === 0)
-    return Never(options);
-  if (types.some((schema) => IsTransform(schema)))
-    throw new Error("Cannot intersect transform types");
-  return ResolveIntersect(types, options);
-}
-var init_intersect_evaluated = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-evaluated.mjs"() {
-    init_symbols2();
-    init_type2();
-    init_discard2();
-    init_never2();
-    init_optional2();
-    init_intersect_create();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-type.mjs
-var init_intersect_type = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-type.mjs"() {
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/intersect/intersect.mjs
-function Intersect(types, options) {
-  if (types.length === 1)
-    return CreateType(types[0], options);
-  if (types.length === 0)
-    return Never(options);
-  if (types.some((schema) => IsTransform(schema)))
-    throw new Error("Cannot intersect transform types");
-  return IntersectCreate(types, options);
-}
-var init_intersect = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/intersect/intersect.mjs"() {
-    init_type2();
-    init_never2();
-    init_intersect_create();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/intersect/index.mjs
-var init_intersect2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/intersect/index.mjs"() {
-    init_intersect_evaluated();
-    init_intersect_type();
-    init_intersect();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/union/union-create.mjs
-function UnionCreate(T, options) {
-  return CreateType({ [Kind]: "Union", anyOf: T }, options);
-}
-var init_union_create = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/union/union-create.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/union/union-evaluated.mjs
-function IsUnionOptional(types) {
-  return types.some((type) => IsOptional(type));
-}
-function RemoveOptionalFromRest2(types) {
-  return types.map((left) => IsOptional(left) ? RemoveOptionalFromType2(left) : left);
-}
-function RemoveOptionalFromType2(T) {
-  return Discard(T, [OptionalKind]);
-}
-function ResolveUnion(types, options) {
-  const isOptional = IsUnionOptional(types);
-  return isOptional ? Optional(UnionCreate(RemoveOptionalFromRest2(types), options)) : UnionCreate(RemoveOptionalFromRest2(types), options);
-}
-function UnionEvaluated(T, options) {
-  return T.length === 1 ? CreateType(T[0], options) : T.length === 0 ? Never(options) : ResolveUnion(T, options);
-}
-var init_union_evaluated = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/union/union-evaluated.mjs"() {
-    init_type2();
-    init_symbols2();
-    init_discard2();
-    init_never2();
-    init_optional2();
-    init_union_create();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/union/union-type.mjs
-var init_union_type = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/union/union-type.mjs"() {
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/union/union.mjs
-function Union(types, options) {
-  return types.length === 0 ? Never(options) : types.length === 1 ? CreateType(types[0], options) : UnionCreate(types, options);
-}
-var init_union = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/union/union.mjs"() {
-    init_never2();
-    init_type2();
-    init_union_create();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/union/index.mjs
-var init_union2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/union/index.mjs"() {
-    init_union_evaluated();
-    init_union_type();
-    init_union();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/template-literal/parse.mjs
-function Unescape(pattern) {
-  return pattern.replace(/\\\$/g, "$").replace(/\\\*/g, "*").replace(/\\\^/g, "^").replace(/\\\|/g, "|").replace(/\\\(/g, "(").replace(/\\\)/g, ")");
-}
-function IsNonEscaped(pattern, index, char) {
-  return pattern[index] === char && pattern.charCodeAt(index - 1) !== 92;
-}
-function IsOpenParen(pattern, index) {
-  return IsNonEscaped(pattern, index, "(");
-}
-function IsCloseParen(pattern, index) {
-  return IsNonEscaped(pattern, index, ")");
-}
-function IsSeparator(pattern, index) {
-  return IsNonEscaped(pattern, index, "|");
-}
-function IsGroup(pattern) {
-  if (!(IsOpenParen(pattern, 0) && IsCloseParen(pattern, pattern.length - 1)))
-    return false;
-  let count = 0;
-  for (let index = 0; index < pattern.length; index++) {
-    if (IsOpenParen(pattern, index))
-      count += 1;
-    if (IsCloseParen(pattern, index))
-      count -= 1;
-    if (count === 0 && index !== pattern.length - 1)
-      return false;
-  }
-  return true;
-}
-function InGroup(pattern) {
-  return pattern.slice(1, pattern.length - 1);
-}
-function IsPrecedenceOr(pattern) {
-  let count = 0;
-  for (let index = 0; index < pattern.length; index++) {
-    if (IsOpenParen(pattern, index))
-      count += 1;
-    if (IsCloseParen(pattern, index))
-      count -= 1;
-    if (IsSeparator(pattern, index) && count === 0)
-      return true;
-  }
-  return false;
-}
-function IsPrecedenceAnd(pattern) {
-  for (let index = 0; index < pattern.length; index++) {
-    if (IsOpenParen(pattern, index))
-      return true;
-  }
-  return false;
-}
-function Or(pattern) {
-  let [count, start] = [0, 0];
-  const expressions = [];
-  for (let index = 0; index < pattern.length; index++) {
-    if (IsOpenParen(pattern, index))
-      count += 1;
-    if (IsCloseParen(pattern, index))
-      count -= 1;
-    if (IsSeparator(pattern, index) && count === 0) {
-      const range2 = pattern.slice(start, index);
-      if (range2.length > 0)
-        expressions.push(TemplateLiteralParse(range2));
-      start = index + 1;
-    }
-  }
-  const range = pattern.slice(start);
-  if (range.length > 0)
-    expressions.push(TemplateLiteralParse(range));
-  if (expressions.length === 0)
-    return { type: "const", const: "" };
-  if (expressions.length === 1)
-    return expressions[0];
-  return { type: "or", expr: expressions };
-}
-function And(pattern) {
-  function Group(value, index) {
-    if (!IsOpenParen(value, index))
-      throw new TemplateLiteralParserError(`TemplateLiteralParser: Index must point to open parens`);
-    let count = 0;
-    for (let scan = index; scan < value.length; scan++) {
-      if (IsOpenParen(value, scan))
-        count += 1;
-      if (IsCloseParen(value, scan))
-        count -= 1;
-      if (count === 0)
-        return [index, scan];
-    }
-    throw new TemplateLiteralParserError(`TemplateLiteralParser: Unclosed group parens in expression`);
-  }
-  function Range(pattern2, index) {
-    for (let scan = index; scan < pattern2.length; scan++) {
-      if (IsOpenParen(pattern2, scan))
-        return [index, scan];
-    }
-    return [index, pattern2.length];
-  }
-  const expressions = [];
-  for (let index = 0; index < pattern.length; index++) {
-    if (IsOpenParen(pattern, index)) {
-      const [start, end] = Group(pattern, index);
-      const range = pattern.slice(start, end + 1);
-      expressions.push(TemplateLiteralParse(range));
-      index = end;
-    } else {
-      const [start, end] = Range(pattern, index);
-      const range = pattern.slice(start, end);
-      if (range.length > 0)
-        expressions.push(TemplateLiteralParse(range));
-      index = end - 1;
-    }
-  }
-  return expressions.length === 0 ? { type: "const", const: "" } : expressions.length === 1 ? expressions[0] : { type: "and", expr: expressions };
-}
-function TemplateLiteralParse(pattern) {
-  return IsGroup(pattern) ? TemplateLiteralParse(InGroup(pattern)) : IsPrecedenceOr(pattern) ? Or(pattern) : IsPrecedenceAnd(pattern) ? And(pattern) : { type: "const", const: Unescape(pattern) };
-}
-function TemplateLiteralParseExact(pattern) {
-  return TemplateLiteralParse(pattern.slice(1, pattern.length - 1));
-}
-var TemplateLiteralParserError;
-var init_parse = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/template-literal/parse.mjs"() {
-    init_error2();
-    TemplateLiteralParserError = class extends TypeBoxError {
-    };
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/template-literal/finite.mjs
-function IsNumberExpression(expression) {
-  return expression.type === "or" && expression.expr.length === 2 && expression.expr[0].type === "const" && expression.expr[0].const === "0" && expression.expr[1].type === "const" && expression.expr[1].const === "[1-9][0-9]*";
-}
-function IsBooleanExpression(expression) {
-  return expression.type === "or" && expression.expr.length === 2 && expression.expr[0].type === "const" && expression.expr[0].const === "true" && expression.expr[1].type === "const" && expression.expr[1].const === "false";
-}
-function IsStringExpression(expression) {
-  return expression.type === "const" && expression.const === ".*";
-}
-function IsTemplateLiteralExpressionFinite(expression) {
-  return IsNumberExpression(expression) || IsStringExpression(expression) ? false : IsBooleanExpression(expression) ? true : expression.type === "and" ? expression.expr.every((expr) => IsTemplateLiteralExpressionFinite(expr)) : expression.type === "or" ? expression.expr.every((expr) => IsTemplateLiteralExpressionFinite(expr)) : expression.type === "const" ? true : (() => {
-    throw new TemplateLiteralFiniteError(`Unknown expression type`);
-  })();
-}
-function IsTemplateLiteralFinite(schema) {
-  const expression = TemplateLiteralParseExact(schema.pattern);
-  return IsTemplateLiteralExpressionFinite(expression);
-}
-var TemplateLiteralFiniteError;
-var init_finite = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/template-literal/finite.mjs"() {
-    init_parse();
-    init_error2();
-    TemplateLiteralFiniteError = class extends TypeBoxError {
-    };
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/template-literal/generate.mjs
-function* GenerateReduce(buffer) {
-  if (buffer.length === 1)
-    return yield* buffer[0];
-  for (const left of buffer[0]) {
-    for (const right of GenerateReduce(buffer.slice(1))) {
-      yield `${left}${right}`;
-    }
-  }
-}
-function* GenerateAnd(expression) {
-  return yield* GenerateReduce(expression.expr.map((expr) => [...TemplateLiteralExpressionGenerate(expr)]));
-}
-function* GenerateOr(expression) {
-  for (const expr of expression.expr)
-    yield* TemplateLiteralExpressionGenerate(expr);
-}
-function* GenerateConst(expression) {
-  return yield expression.const;
-}
-function* TemplateLiteralExpressionGenerate(expression) {
-  return expression.type === "and" ? yield* GenerateAnd(expression) : expression.type === "or" ? yield* GenerateOr(expression) : expression.type === "const" ? yield* GenerateConst(expression) : (() => {
-    throw new TemplateLiteralGenerateError("Unknown expression");
-  })();
-}
-function TemplateLiteralGenerate(schema) {
-  const expression = TemplateLiteralParseExact(schema.pattern);
-  return IsTemplateLiteralExpressionFinite(expression) ? [...TemplateLiteralExpressionGenerate(expression)] : [];
-}
-var TemplateLiteralGenerateError;
-var init_generate = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/template-literal/generate.mjs"() {
-    init_finite();
-    init_parse();
-    init_error2();
-    TemplateLiteralGenerateError = class extends TypeBoxError {
-    };
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/literal/literal.mjs
-function Literal(value, options) {
-  return CreateType({
-    [Kind]: "Literal",
-    const: value,
-    type: typeof value
-  }, options);
-}
-var init_literal = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/literal/literal.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/literal/index.mjs
-var init_literal2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/literal/index.mjs"() {
-    init_literal();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/boolean/boolean.mjs
-function Boolean2(options) {
-  return CreateType({ [Kind]: "Boolean", type: "boolean" }, options);
-}
-var init_boolean = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/boolean/boolean.mjs"() {
-    init_symbols2();
-    init_create();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/boolean/index.mjs
-var init_boolean2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/boolean/index.mjs"() {
-    init_boolean();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/bigint/bigint.mjs
-function BigInt2(options) {
-  return CreateType({ [Kind]: "BigInt", type: "bigint" }, options);
-}
-var init_bigint = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/bigint/bigint.mjs"() {
-    init_symbols2();
-    init_create();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/bigint/index.mjs
-var init_bigint2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/bigint/index.mjs"() {
-    init_bigint();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/number/number.mjs
-function Number2(options) {
-  return CreateType({ [Kind]: "Number", type: "number" }, options);
-}
-var init_number = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/number/number.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/number/index.mjs
-var init_number2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/number/index.mjs"() {
-    init_number();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/string/string.mjs
-function String2(options) {
-  return CreateType({ [Kind]: "String", type: "string" }, options);
-}
-var init_string = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/string/string.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/string/index.mjs
-var init_string2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/string/index.mjs"() {
-    init_string();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/template-literal/syntax.mjs
-function* FromUnion(syntax) {
-  const trim = syntax.trim().replace(/"|'/g, "");
-  return trim === "boolean" ? yield Boolean2() : trim === "number" ? yield Number2() : trim === "bigint" ? yield BigInt2() : trim === "string" ? yield String2() : yield (() => {
-    const literals = trim.split("|").map((literal) => Literal(literal.trim()));
-    return literals.length === 0 ? Never() : literals.length === 1 ? literals[0] : UnionEvaluated(literals);
-  })();
-}
-function* FromTerminal(syntax) {
-  if (syntax[1] !== "{") {
-    const L = Literal("$");
-    const R = FromSyntax(syntax.slice(1));
-    return yield* [L, ...R];
-  }
-  for (let i = 2; i < syntax.length; i++) {
-    if (syntax[i] === "}") {
-      const L = FromUnion(syntax.slice(2, i));
-      const R = FromSyntax(syntax.slice(i + 1));
-      return yield* [...L, ...R];
-    }
-  }
-  yield Literal(syntax);
-}
-function* FromSyntax(syntax) {
-  for (let i = 0; i < syntax.length; i++) {
-    if (syntax[i] === "$") {
-      const L = Literal(syntax.slice(0, i));
-      const R = FromTerminal(syntax.slice(i));
-      return yield* [L, ...R];
-    }
-  }
-  yield Literal(syntax);
-}
-function TemplateLiteralSyntax(syntax) {
-  return [...FromSyntax(syntax)];
-}
-var init_syntax = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/template-literal/syntax.mjs"() {
-    init_literal2();
-    init_boolean2();
-    init_bigint2();
-    init_number2();
-    init_string2();
-    init_union2();
-    init_never2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/patterns/patterns.mjs
-var PatternBoolean, PatternNumber, PatternString, PatternNever, PatternBooleanExact, PatternNumberExact, PatternStringExact, PatternNeverExact;
-var init_patterns = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/patterns/patterns.mjs"() {
-    PatternBoolean = "(true|false)";
-    PatternNumber = "(0|[1-9][0-9]*)";
-    PatternString = "(.*)";
-    PatternNever = "(?!.*)";
-    PatternBooleanExact = `^${PatternBoolean}$`;
-    PatternNumberExact = `^${PatternNumber}$`;
-    PatternStringExact = `^${PatternString}$`;
-    PatternNeverExact = `^${PatternNever}$`;
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/patterns/index.mjs
-var init_patterns2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/patterns/index.mjs"() {
-    init_patterns();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/template-literal/pattern.mjs
-function Escape(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-function Visit2(schema, acc) {
-  return IsTemplateLiteral(schema) ? schema.pattern.slice(1, schema.pattern.length - 1) : IsUnion(schema) ? `(${schema.anyOf.map((schema2) => Visit2(schema2, acc)).join("|")})` : IsNumber3(schema) ? `${acc}${PatternNumber}` : IsInteger2(schema) ? `${acc}${PatternNumber}` : IsBigInt3(schema) ? `${acc}${PatternNumber}` : IsString3(schema) ? `${acc}${PatternString}` : IsLiteral(schema) ? `${acc}${Escape(schema.const.toString())}` : IsBoolean3(schema) ? `${acc}${PatternBoolean}` : (() => {
-    throw new TemplateLiteralPatternError(`Unexpected Kind '${schema[Kind]}'`);
-  })();
-}
-function TemplateLiteralPattern(kinds) {
-  return `^${kinds.map((schema) => Visit2(schema, "")).join("")}$`;
-}
-var TemplateLiteralPatternError;
-var init_pattern = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/template-literal/pattern.mjs"() {
-    init_patterns2();
-    init_symbols2();
-    init_error2();
-    init_kind();
-    TemplateLiteralPatternError = class extends TypeBoxError {
-    };
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/template-literal/union.mjs
-function TemplateLiteralToUnion(schema) {
-  const R = TemplateLiteralGenerate(schema);
-  const L = R.map((S) => Literal(S));
-  return UnionEvaluated(L);
-}
-var init_union3 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/template-literal/union.mjs"() {
-    init_union2();
-    init_literal2();
-    init_generate();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/template-literal/template-literal.mjs
-function TemplateLiteral(unresolved, options) {
-  const pattern = IsString2(unresolved) ? TemplateLiteralPattern(TemplateLiteralSyntax(unresolved)) : TemplateLiteralPattern(unresolved);
-  return CreateType({ [Kind]: "TemplateLiteral", type: "string", pattern }, options);
-}
-var init_template_literal = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/template-literal/template-literal.mjs"() {
-    init_type2();
-    init_syntax();
-    init_pattern();
-    init_value();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/template-literal/index.mjs
-var init_template_literal2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/template-literal/index.mjs"() {
-    init_finite();
-    init_generate();
-    init_syntax();
-    init_parse();
-    init_pattern();
-    init_union3();
-    init_template_literal();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-property-keys.mjs
-function FromTemplateLiteral(templateLiteral) {
-  const keys = TemplateLiteralGenerate(templateLiteral);
-  return keys.map((key) => key.toString());
-}
-function FromUnion2(types) {
-  const result = [];
-  for (const type of types)
-    result.push(...IndexPropertyKeys(type));
-  return result;
-}
-function FromLiteral(literalValue) {
-  return [literalValue.toString()];
-}
-function IndexPropertyKeys(type) {
-  return [...new Set(IsTemplateLiteral(type) ? FromTemplateLiteral(type) : IsUnion(type) ? FromUnion2(type.anyOf) : IsLiteral(type) ? FromLiteral(type.const) : IsNumber3(type) ? ["[number]"] : IsInteger2(type) ? ["[number]"] : [])];
-}
-var init_indexed_property_keys = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-property-keys.mjs"() {
-    init_template_literal2();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-result.mjs
-function FromProperties2(type, properties, options) {
-  const result = {};
-  for (const K2 of Object.getOwnPropertyNames(properties)) {
-    result[K2] = Index(type, IndexPropertyKeys(properties[K2]), options);
-  }
-  return result;
-}
-function FromMappedResult2(type, mappedResult, options) {
-  return FromProperties2(type, mappedResult.properties, options);
-}
-function IndexFromMappedResult(type, mappedResult, options) {
-  const properties = FromMappedResult2(type, mappedResult, options);
-  return MappedResult(properties);
-}
-var init_indexed_from_mapped_result = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-result.mjs"() {
-    init_mapped2();
-    init_indexed_property_keys();
-    init_indexed2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/indexed/indexed.mjs
-function FromRest(types, key) {
-  return types.map((type) => IndexFromPropertyKey(type, key));
-}
-function FromIntersectRest(types) {
-  return types.filter((type) => !IsNever(type));
-}
-function FromIntersect(types, key) {
-  return IntersectEvaluated(FromIntersectRest(FromRest(types, key)));
-}
-function FromUnionRest(types) {
-  return types.some((L) => IsNever(L)) ? [] : types;
-}
-function FromUnion3(types, key) {
-  return UnionEvaluated(FromUnionRest(FromRest(types, key)));
-}
-function FromTuple(types, key) {
-  return key in types ? types[key] : key === "[number]" ? UnionEvaluated(types) : Never();
-}
-function FromArray(type, key) {
-  return key === "[number]" ? type : Never();
-}
-function FromProperty(properties, propertyKey) {
-  return propertyKey in properties ? properties[propertyKey] : Never();
-}
-function IndexFromPropertyKey(type, propertyKey) {
-  return IsIntersect(type) ? FromIntersect(type.allOf, propertyKey) : IsUnion(type) ? FromUnion3(type.anyOf, propertyKey) : IsTuple(type) ? FromTuple(type.items ?? [], propertyKey) : IsArray3(type) ? FromArray(type.items, propertyKey) : IsObject3(type) ? FromProperty(type.properties, propertyKey) : Never();
-}
-function IndexFromPropertyKeys(type, propertyKeys) {
-  return propertyKeys.map((propertyKey) => IndexFromPropertyKey(type, propertyKey));
-}
-function FromSchema(type, propertyKeys) {
-  return UnionEvaluated(IndexFromPropertyKeys(type, propertyKeys));
-}
-function Index(type, key, options) {
-  if (IsRef(type) || IsRef(key)) {
-    const error = `Index types using Ref parameters require both Type and Key to be of TSchema`;
-    if (!IsSchema(type) || !IsSchema(key))
-      throw new TypeBoxError(error);
-    return Computed("Index", [type, key]);
-  }
-  if (IsMappedResult(key))
-    return IndexFromMappedResult(type, key, options);
-  if (IsMappedKey(key))
-    return IndexFromMappedKey(type, key, options);
-  return CreateType(IsSchema(key) ? FromSchema(type, IndexPropertyKeys(key)) : FromSchema(type, key), options);
-}
-var init_indexed = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/indexed/indexed.mjs"() {
-    init_type2();
-    init_error2();
-    init_computed2();
-    init_never2();
-    init_intersect2();
-    init_union2();
-    init_indexed_property_keys();
-    init_indexed_from_mapped_key();
-    init_indexed_from_mapped_result();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-key.mjs
-function MappedIndexPropertyKey(type, key, options) {
-  return { [key]: Index(type, [key], Clone(options)) };
-}
-function MappedIndexPropertyKeys(type, propertyKeys, options) {
-  return propertyKeys.reduce((result, left) => {
-    return { ...result, ...MappedIndexPropertyKey(type, left, options) };
-  }, {});
-}
-function MappedIndexProperties(type, mappedKey, options) {
-  return MappedIndexPropertyKeys(type, mappedKey.keys, options);
-}
-function IndexFromMappedKey(type, mappedKey, options) {
-  const properties = MappedIndexProperties(type, mappedKey, options);
-  return MappedResult(properties);
-}
-var init_indexed_from_mapped_key = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-key.mjs"() {
-    init_indexed();
-    init_mapped2();
-    init_value2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/indexed/index.mjs
-var init_indexed2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/indexed/index.mjs"() {
-    init_indexed_from_mapped_key();
-    init_indexed_from_mapped_result();
-    init_indexed_property_keys();
-    init_indexed();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/iterator/iterator.mjs
-function Iterator(items, options) {
-  return CreateType({ [Kind]: "Iterator", type: "Iterator", items }, options);
-}
-var init_iterator = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/iterator/iterator.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/iterator/index.mjs
-var init_iterator2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/iterator/index.mjs"() {
-    init_iterator();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/object/object.mjs
-function RequiredArray(properties) {
-  return globalThis.Object.keys(properties).filter((key) => !IsOptional(properties[key]));
-}
-function _Object(properties, options) {
-  const required2 = RequiredArray(properties);
-  const schema = required2.length > 0 ? { [Kind]: "Object", type: "object", required: required2, properties } : { [Kind]: "Object", type: "object", properties };
-  return CreateType(schema, options);
-}
-var Object2;
-var init_object = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/object/object.mjs"() {
-    init_type2();
-    init_symbols2();
-    init_kind();
-    Object2 = _Object;
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/object/index.mjs
-var init_object2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/object/index.mjs"() {
-    init_object();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/promise/promise.mjs
-function Promise2(item, options) {
-  return CreateType({ [Kind]: "Promise", type: "Promise", item }, options);
-}
-var init_promise = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/promise/promise.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/promise/index.mjs
-var init_promise2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/promise/index.mjs"() {
-    init_promise();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/readonly/readonly.mjs
-function RemoveReadonly(schema) {
-  return CreateType(Discard(schema, [ReadonlyKind]));
-}
-function AddReadonly(schema) {
-  return CreateType({ ...schema, [ReadonlyKind]: "Readonly" });
-}
-function ReadonlyWithFlag(schema, F) {
-  return F === false ? RemoveReadonly(schema) : AddReadonly(schema);
-}
-function Readonly(schema, enable) {
-  const F = enable ?? true;
-  return IsMappedResult(schema) ? ReadonlyFromMappedResult(schema, F) : ReadonlyWithFlag(schema, F);
-}
-var init_readonly = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/readonly/readonly.mjs"() {
-    init_type2();
-    init_symbols2();
-    init_discard2();
-    init_readonly_from_mapped_result();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/readonly/readonly-from-mapped-result.mjs
-function FromProperties3(K, F) {
-  const Acc = {};
-  for (const K2 of globalThis.Object.getOwnPropertyNames(K))
-    Acc[K2] = Readonly(K[K2], F);
-  return Acc;
-}
-function FromMappedResult3(R, F) {
-  return FromProperties3(R.properties, F);
-}
-function ReadonlyFromMappedResult(R, F) {
-  const P = FromMappedResult3(R, F);
-  return MappedResult(P);
-}
-var init_readonly_from_mapped_result = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/readonly/readonly-from-mapped-result.mjs"() {
-    init_mapped2();
-    init_readonly();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/readonly/index.mjs
-var init_readonly2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/readonly/index.mjs"() {
-    init_readonly_from_mapped_result();
-    init_readonly();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/tuple/tuple.mjs
-function Tuple(types, options) {
-  return CreateType(types.length > 0 ? { [Kind]: "Tuple", type: "array", items: types, additionalItems: false, minItems: types.length, maxItems: types.length } : { [Kind]: "Tuple", type: "array", minItems: types.length, maxItems: types.length }, options);
-}
-var init_tuple = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/tuple/tuple.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/tuple/index.mjs
-var init_tuple2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/tuple/index.mjs"() {
-    init_tuple();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/sets/set.mjs
-function SetIncludes(T, S) {
-  return T.includes(S);
-}
-function SetDistinct(T) {
-  return [...new Set(T)];
-}
-function SetIntersect(T, S) {
-  return T.filter((L) => S.includes(L));
-}
-function SetIntersectManyResolve(T, Init) {
-  return T.reduce((Acc, L) => {
-    return SetIntersect(Acc, L);
-  }, Init);
-}
-function SetIntersectMany(T) {
-  return T.length === 1 ? T[0] : T.length > 1 ? SetIntersectManyResolve(T.slice(1), T[0]) : [];
-}
-function SetUnionMany(T) {
-  const Acc = [];
-  for (const L of T)
-    Acc.push(...L);
-  return Acc;
-}
-var init_set = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/sets/set.mjs"() {
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/sets/index.mjs
-var init_sets = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/sets/index.mjs"() {
-    init_set();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/mapped/mapped.mjs
-function FromMappedResult4(K, P) {
-  return K in P ? FromSchemaType(K, P[K]) : MappedResult(P);
-}
-function MappedKeyToKnownMappedResultProperties(K) {
-  return { [K]: Literal(K) };
-}
-function MappedKeyToUnknownMappedResultProperties(P) {
-  const Acc = {};
-  for (const L of P)
-    Acc[L] = Literal(L);
-  return Acc;
-}
-function MappedKeyToMappedResultProperties(K, P) {
-  return SetIncludes(P, K) ? MappedKeyToKnownMappedResultProperties(K) : MappedKeyToUnknownMappedResultProperties(P);
-}
-function FromMappedKey(K, P) {
-  const R = MappedKeyToMappedResultProperties(K, P);
-  return FromMappedResult4(K, R);
-}
-function FromRest2(K, T) {
-  return T.map((L) => FromSchemaType(K, L));
-}
-function FromProperties4(K, T) {
-  const Acc = {};
-  for (const K2 of globalThis.Object.getOwnPropertyNames(T))
-    Acc[K2] = FromSchemaType(K, T[K2]);
-  return Acc;
-}
-function FromSchemaType(K, T) {
-  const options = { ...T };
-  return (
-    // unevaluated modifier types
-    IsOptional(T) ? Optional(FromSchemaType(K, Discard(T, [OptionalKind]))) : IsReadonly(T) ? Readonly(FromSchemaType(K, Discard(T, [ReadonlyKind]))) : (
-      // unevaluated mapped types
-      IsMappedResult(T) ? FromMappedResult4(K, T.properties) : IsMappedKey(T) ? FromMappedKey(K, T.keys) : (
-        // unevaluated types
-        IsConstructor(T) ? Constructor(FromRest2(K, T.parameters), FromSchemaType(K, T.returns), options) : IsFunction3(T) ? Function(FromRest2(K, T.parameters), FromSchemaType(K, T.returns), options) : IsAsyncIterator3(T) ? AsyncIterator(FromSchemaType(K, T.items), options) : IsIterator3(T) ? Iterator(FromSchemaType(K, T.items), options) : IsIntersect(T) ? Intersect(FromRest2(K, T.allOf), options) : IsUnion(T) ? Union(FromRest2(K, T.anyOf), options) : IsTuple(T) ? Tuple(FromRest2(K, T.items ?? []), options) : IsObject3(T) ? Object2(FromProperties4(K, T.properties), options) : IsArray3(T) ? Array2(FromSchemaType(K, T.items), options) : IsPromise2(T) ? Promise2(FromSchemaType(K, T.item), options) : T
-      )
-    )
-  );
-}
-function MappedFunctionReturnType(K, T) {
-  const Acc = {};
-  for (const L of K)
-    Acc[L] = FromSchemaType(L, T);
-  return Acc;
-}
-function Mapped(key, map3, options) {
-  const K = IsSchema(key) ? IndexPropertyKeys(key) : key;
-  const RT = map3({ [Kind]: "MappedKey", keys: K });
-  const R = MappedFunctionReturnType(K, RT);
-  return Object2(R, options);
-}
-var init_mapped = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/mapped/mapped.mjs"() {
-    init_symbols2();
-    init_discard2();
-    init_array2();
-    init_async_iterator2();
-    init_constructor2();
-    init_function2();
-    init_indexed2();
-    init_intersect2();
-    init_iterator2();
-    init_literal2();
-    init_object2();
-    init_optional2();
-    init_promise2();
-    init_readonly2();
-    init_tuple2();
-    init_union2();
-    init_sets();
-    init_mapped_result();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/mapped/index.mjs
-var init_mapped2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/mapped/index.mjs"() {
-    init_mapped_key();
-    init_mapped_result();
-    init_mapped();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/ref/ref.mjs
-function Ref(...args) {
-  const [$ref, options] = typeof args[0] === "string" ? [args[0], args[1]] : [args[0].$id, args[1]];
-  if (typeof $ref !== "string")
-    throw new TypeBoxError("Ref: $ref must be a string");
-  return CreateType({ [Kind]: "Ref", $ref }, options);
-}
-var init_ref = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/ref/ref.mjs"() {
-    init_error2();
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/ref/index.mjs
-var init_ref2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/ref/index.mjs"() {
-    init_ref();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-keys.mjs
-function FromRest3(types) {
-  const result = [];
-  for (const L of types)
-    result.push(KeyOfPropertyKeys(L));
-  return result;
-}
-function FromIntersect2(types) {
-  const propertyKeysArray = FromRest3(types);
-  const propertyKeys = SetUnionMany(propertyKeysArray);
-  return propertyKeys;
-}
-function FromUnion4(types) {
-  const propertyKeysArray = FromRest3(types);
-  const propertyKeys = SetIntersectMany(propertyKeysArray);
-  return propertyKeys;
-}
-function FromTuple2(types) {
-  return types.map((_, indexer) => indexer.toString());
-}
-function FromArray2(_) {
-  return ["[number]"];
-}
-function FromProperties5(T) {
-  return globalThis.Object.getOwnPropertyNames(T);
-}
-function FromPatternProperties(patternProperties) {
-  if (!includePatternProperties)
-    return [];
-  const patternPropertyKeys = globalThis.Object.getOwnPropertyNames(patternProperties);
-  return patternPropertyKeys.map((key) => {
-    return key[0] === "^" && key[key.length - 1] === "$" ? key.slice(1, key.length - 1) : key;
-  });
-}
-function KeyOfPropertyKeys(type) {
-  return IsIntersect(type) ? FromIntersect2(type.allOf) : IsUnion(type) ? FromUnion4(type.anyOf) : IsTuple(type) ? FromTuple2(type.items ?? []) : IsArray3(type) ? FromArray2(type.items) : IsObject3(type) ? FromProperties5(type.properties) : IsRecord(type) ? FromPatternProperties(type.patternProperties) : [];
-}
-function KeyOfPattern(schema) {
-  includePatternProperties = true;
-  const keys = KeyOfPropertyKeys(schema);
-  includePatternProperties = false;
-  const pattern = keys.map((key) => `(${key})`);
-  return `^(${pattern.join("|")})$`;
-}
-var includePatternProperties;
-var init_keyof_property_keys = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-keys.mjs"() {
-    init_sets();
-    init_kind();
-    includePatternProperties = false;
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/keyof/keyof.mjs
-function FromComputed(target, parameters) {
-  return Computed("KeyOf", [Computed(target, parameters)]);
-}
-function FromRef($ref) {
-  return Computed("KeyOf", [Ref($ref)]);
-}
-function KeyOfFromType(type, options) {
-  const propertyKeys = KeyOfPropertyKeys(type);
-  const propertyKeyTypes = KeyOfPropertyKeysToRest(propertyKeys);
-  const result = UnionEvaluated(propertyKeyTypes);
-  return CreateType(result, options);
-}
-function KeyOfPropertyKeysToRest(propertyKeys) {
-  return propertyKeys.map((L) => L === "[number]" ? Number2() : Literal(L));
-}
-function KeyOf(type, options) {
-  return IsComputed(type) ? FromComputed(type.target, type.parameters) : IsRef(type) ? FromRef(type.$ref) : IsMappedResult(type) ? KeyOfFromMappedResult(type, options) : KeyOfFromType(type, options);
-}
-var init_keyof = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/keyof/keyof.mjs"() {
-    init_type2();
-    init_literal2();
-    init_number2();
-    init_computed2();
-    init_ref2();
-    init_keyof_property_keys();
-    init_union2();
-    init_keyof_from_mapped_result();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-from-mapped-result.mjs
-function FromProperties6(properties, options) {
-  const result = {};
-  for (const K2 of globalThis.Object.getOwnPropertyNames(properties))
-    result[K2] = KeyOf(properties[K2], Clone(options));
-  return result;
-}
-function FromMappedResult5(mappedResult, options) {
-  return FromProperties6(mappedResult.properties, options);
-}
-function KeyOfFromMappedResult(mappedResult, options) {
-  const properties = FromMappedResult5(mappedResult, options);
-  return MappedResult(properties);
-}
-var init_keyof_from_mapped_result = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-from-mapped-result.mjs"() {
-    init_mapped2();
-    init_keyof();
-    init_value2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-entries.mjs
-function KeyOfPropertyEntries(schema) {
-  const keys = KeyOfPropertyKeys(schema);
-  const schemas = IndexFromPropertyKeys(schema, keys);
-  return keys.map((_, index) => [keys[index], schemas[index]]);
-}
-var init_keyof_property_entries = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-entries.mjs"() {
-    init_indexed();
-    init_keyof_property_keys();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/keyof/index.mjs
-var init_keyof2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/keyof/index.mjs"() {
-    init_keyof_from_mapped_result();
-    init_keyof_property_entries();
-    init_keyof_property_keys();
-    init_keyof();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/extends/extends-undefined.mjs
-function Intersect2(schema) {
-  return schema.allOf.every((schema2) => ExtendsUndefinedCheck(schema2));
-}
-function Union2(schema) {
-  return schema.anyOf.some((schema2) => ExtendsUndefinedCheck(schema2));
-}
-function Not(schema) {
-  return !ExtendsUndefinedCheck(schema.not);
-}
-function ExtendsUndefinedCheck(schema) {
-  return schema[Kind] === "Intersect" ? Intersect2(schema) : schema[Kind] === "Union" ? Union2(schema) : schema[Kind] === "Not" ? Not(schema) : schema[Kind] === "Undefined" ? true : false;
-}
-var init_extends_undefined = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/extends/extends-undefined.mjs"() {
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/errors/function.mjs
-function DefaultErrorFunction(error) {
-  switch (error.errorType) {
-    case ValueErrorType.ArrayContains:
-      return "Expected array to contain at least one matching value";
-    case ValueErrorType.ArrayMaxContains:
-      return `Expected array to contain no more than ${error.schema.maxContains} matching values`;
-    case ValueErrorType.ArrayMinContains:
-      return `Expected array to contain at least ${error.schema.minContains} matching values`;
-    case ValueErrorType.ArrayMaxItems:
-      return `Expected array length to be less or equal to ${error.schema.maxItems}`;
-    case ValueErrorType.ArrayMinItems:
-      return `Expected array length to be greater or equal to ${error.schema.minItems}`;
-    case ValueErrorType.ArrayUniqueItems:
-      return "Expected array elements to be unique";
-    case ValueErrorType.Array:
-      return "Expected array";
-    case ValueErrorType.AsyncIterator:
-      return "Expected AsyncIterator";
-    case ValueErrorType.BigIntExclusiveMaximum:
-      return `Expected bigint to be less than ${error.schema.exclusiveMaximum}`;
-    case ValueErrorType.BigIntExclusiveMinimum:
-      return `Expected bigint to be greater than ${error.schema.exclusiveMinimum}`;
-    case ValueErrorType.BigIntMaximum:
-      return `Expected bigint to be less or equal to ${error.schema.maximum}`;
-    case ValueErrorType.BigIntMinimum:
-      return `Expected bigint to be greater or equal to ${error.schema.minimum}`;
-    case ValueErrorType.BigIntMultipleOf:
-      return `Expected bigint to be a multiple of ${error.schema.multipleOf}`;
-    case ValueErrorType.BigInt:
-      return "Expected bigint";
-    case ValueErrorType.Boolean:
-      return "Expected boolean";
-    case ValueErrorType.DateExclusiveMinimumTimestamp:
-      return `Expected Date timestamp to be greater than ${error.schema.exclusiveMinimumTimestamp}`;
-    case ValueErrorType.DateExclusiveMaximumTimestamp:
-      return `Expected Date timestamp to be less than ${error.schema.exclusiveMaximumTimestamp}`;
-    case ValueErrorType.DateMinimumTimestamp:
-      return `Expected Date timestamp to be greater or equal to ${error.schema.minimumTimestamp}`;
-    case ValueErrorType.DateMaximumTimestamp:
-      return `Expected Date timestamp to be less or equal to ${error.schema.maximumTimestamp}`;
-    case ValueErrorType.DateMultipleOfTimestamp:
-      return `Expected Date timestamp to be a multiple of ${error.schema.multipleOfTimestamp}`;
-    case ValueErrorType.Date:
-      return "Expected Date";
-    case ValueErrorType.Function:
-      return "Expected function";
-    case ValueErrorType.IntegerExclusiveMaximum:
-      return `Expected integer to be less than ${error.schema.exclusiveMaximum}`;
-    case ValueErrorType.IntegerExclusiveMinimum:
-      return `Expected integer to be greater than ${error.schema.exclusiveMinimum}`;
-    case ValueErrorType.IntegerMaximum:
-      return `Expected integer to be less or equal to ${error.schema.maximum}`;
-    case ValueErrorType.IntegerMinimum:
-      return `Expected integer to be greater or equal to ${error.schema.minimum}`;
-    case ValueErrorType.IntegerMultipleOf:
-      return `Expected integer to be a multiple of ${error.schema.multipleOf}`;
-    case ValueErrorType.Integer:
-      return "Expected integer";
-    case ValueErrorType.IntersectUnevaluatedProperties:
-      return "Unexpected property";
-    case ValueErrorType.Intersect:
-      return "Expected all values to match";
-    case ValueErrorType.Iterator:
-      return "Expected Iterator";
-    case ValueErrorType.Literal:
-      return `Expected ${typeof error.schema.const === "string" ? `'${error.schema.const}'` : error.schema.const}`;
-    case ValueErrorType.Never:
-      return "Never";
-    case ValueErrorType.Not:
-      return "Value should not match";
-    case ValueErrorType.Null:
-      return "Expected null";
-    case ValueErrorType.NumberExclusiveMaximum:
-      return `Expected number to be less than ${error.schema.exclusiveMaximum}`;
-    case ValueErrorType.NumberExclusiveMinimum:
-      return `Expected number to be greater than ${error.schema.exclusiveMinimum}`;
-    case ValueErrorType.NumberMaximum:
-      return `Expected number to be less or equal to ${error.schema.maximum}`;
-    case ValueErrorType.NumberMinimum:
-      return `Expected number to be greater or equal to ${error.schema.minimum}`;
-    case ValueErrorType.NumberMultipleOf:
-      return `Expected number to be a multiple of ${error.schema.multipleOf}`;
-    case ValueErrorType.Number:
-      return "Expected number";
-    case ValueErrorType.Object:
-      return "Expected object";
-    case ValueErrorType.ObjectAdditionalProperties:
-      return "Unexpected property";
-    case ValueErrorType.ObjectMaxProperties:
-      return `Expected object to have no more than ${error.schema.maxProperties} properties`;
-    case ValueErrorType.ObjectMinProperties:
-      return `Expected object to have at least ${error.schema.minProperties} properties`;
-    case ValueErrorType.ObjectRequiredProperty:
-      return "Expected required property";
-    case ValueErrorType.Promise:
-      return "Expected Promise";
-    case ValueErrorType.RegExp:
-      return "Expected string to match regular expression";
-    case ValueErrorType.StringFormatUnknown:
-      return `Unknown format '${error.schema.format}'`;
-    case ValueErrorType.StringFormat:
-      return `Expected string to match '${error.schema.format}' format`;
-    case ValueErrorType.StringMaxLength:
-      return `Expected string length less or equal to ${error.schema.maxLength}`;
-    case ValueErrorType.StringMinLength:
-      return `Expected string length greater or equal to ${error.schema.minLength}`;
-    case ValueErrorType.StringPattern:
-      return `Expected string to match '${error.schema.pattern}'`;
-    case ValueErrorType.String:
-      return "Expected string";
-    case ValueErrorType.Symbol:
-      return "Expected symbol";
-    case ValueErrorType.TupleLength:
-      return `Expected tuple to have ${error.schema.maxItems || 0} elements`;
-    case ValueErrorType.Tuple:
-      return "Expected tuple";
-    case ValueErrorType.Uint8ArrayMaxByteLength:
-      return `Expected byte length less or equal to ${error.schema.maxByteLength}`;
-    case ValueErrorType.Uint8ArrayMinByteLength:
-      return `Expected byte length greater or equal to ${error.schema.minByteLength}`;
-    case ValueErrorType.Uint8Array:
-      return "Expected Uint8Array";
-    case ValueErrorType.Undefined:
-      return "Expected undefined";
-    case ValueErrorType.Union:
-      return "Expected union value";
-    case ValueErrorType.Void:
-      return "Expected void";
-    case ValueErrorType.Kind:
-      return `Expected kind '${error.schema[Kind]}'`;
-    default:
-      return "Unknown error type";
-  }
-}
-function GetErrorFunction() {
-  return errorFunction;
-}
-var errorFunction;
-var init_function3 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/errors/function.mjs"() {
-    init_symbols2();
-    init_errors();
-    errorFunction = DefaultErrorFunction;
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/deref/deref.mjs
-function Resolve(schema, references) {
-  const target = references.find((target2) => target2.$id === schema.$ref);
-  if (target === void 0)
-    throw new TypeDereferenceError(schema);
-  return Deref(target, references);
-}
-function Pushref(schema, references) {
-  if (!IsString(schema.$id) || references.some((target) => target.$id === schema.$id))
-    return references;
-  references.push(schema);
-  return references;
-}
-function Deref(schema, references) {
-  return schema[Kind] === "This" || schema[Kind] === "Ref" ? Resolve(schema, references) : schema;
-}
-var TypeDereferenceError;
-var init_deref = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/deref/deref.mjs"() {
-    init_error2();
-    init_symbols2();
-    init_guard();
-    TypeDereferenceError = class extends TypeBoxError {
-      constructor(schema) {
-        super(`Unable to dereference schema with $id '${schema.$ref}'`);
-        this.schema = schema;
-      }
-    };
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/deref/index.mjs
-var init_deref2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/deref/index.mjs"() {
-    init_deref();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/hash/hash.mjs
-function* NumberToBytes(value) {
-  const byteCount = value === 0 ? 1 : Math.ceil(Math.floor(Math.log2(value) + 1) / 8);
-  for (let i = 0; i < byteCount; i++) {
-    yield value >> 8 * (byteCount - 1 - i) & 255;
-  }
-}
-function ArrayType2(value) {
-  FNV1A64(ByteMarker.Array);
-  for (const item of value) {
-    Visit3(item);
-  }
-}
-function BooleanType(value) {
-  FNV1A64(ByteMarker.Boolean);
-  FNV1A64(value ? 1 : 0);
-}
-function BigIntType(value) {
-  FNV1A64(ByteMarker.BigInt);
-  F64In.setBigInt64(0, value);
-  for (const byte of F64Out) {
-    FNV1A64(byte);
-  }
-}
-function DateType2(value) {
-  FNV1A64(ByteMarker.Date);
-  Visit3(value.getTime());
-}
-function NullType(value) {
-  FNV1A64(ByteMarker.Null);
-}
-function NumberType(value) {
-  FNV1A64(ByteMarker.Number);
-  F64In.setFloat64(0, value);
-  for (const byte of F64Out) {
-    FNV1A64(byte);
-  }
-}
-function ObjectType2(value) {
-  FNV1A64(ByteMarker.Object);
-  for (const key of globalThis.Object.getOwnPropertyNames(value).sort()) {
-    Visit3(key);
-    Visit3(value[key]);
-  }
-}
-function StringType(value) {
-  FNV1A64(ByteMarker.String);
-  for (let i = 0; i < value.length; i++) {
-    for (const byte of NumberToBytes(value.charCodeAt(i))) {
-      FNV1A64(byte);
-    }
-  }
-}
-function SymbolType(value) {
-  FNV1A64(ByteMarker.Symbol);
-  Visit3(value.description);
-}
-function Uint8ArrayType2(value) {
-  FNV1A64(ByteMarker.Uint8Array);
-  for (let i = 0; i < value.length; i++) {
-    FNV1A64(value[i]);
-  }
-}
-function UndefinedType(value) {
-  return FNV1A64(ByteMarker.Undefined);
-}
-function Visit3(value) {
-  if (IsArray(value))
-    return ArrayType2(value);
-  if (IsBoolean(value))
-    return BooleanType(value);
-  if (IsBigInt(value))
-    return BigIntType(value);
-  if (IsDate(value))
-    return DateType2(value);
-  if (IsNull(value))
-    return NullType(value);
-  if (IsNumber(value))
-    return NumberType(value);
-  if (IsObject(value))
-    return ObjectType2(value);
-  if (IsString(value))
-    return StringType(value);
-  if (IsSymbol(value))
-    return SymbolType(value);
-  if (IsUint8Array(value))
-    return Uint8ArrayType2(value);
-  if (IsUndefined(value))
-    return UndefinedType(value);
-  throw new ValueHashError(value);
-}
-function FNV1A64(byte) {
-  Accumulator = Accumulator ^ Bytes[byte];
-  Accumulator = Accumulator * Prime % Size;
-}
-function Hash(value) {
-  Accumulator = BigInt("14695981039346656037");
-  Visit3(value);
-  return Accumulator;
-}
-var ValueHashError, ByteMarker, Accumulator, Prime, Size, Bytes, F64, F64In, F64Out;
-var init_hash = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/hash/hash.mjs"() {
-    init_guard2();
-    init_error2();
-    ValueHashError = class extends TypeBoxError {
-      constructor(value) {
-        super(`Unable to hash value`);
-        this.value = value;
-      }
-    };
-    (function(ByteMarker2) {
-      ByteMarker2[ByteMarker2["Undefined"] = 0] = "Undefined";
-      ByteMarker2[ByteMarker2["Null"] = 1] = "Null";
-      ByteMarker2[ByteMarker2["Boolean"] = 2] = "Boolean";
-      ByteMarker2[ByteMarker2["Number"] = 3] = "Number";
-      ByteMarker2[ByteMarker2["String"] = 4] = "String";
-      ByteMarker2[ByteMarker2["Object"] = 5] = "Object";
-      ByteMarker2[ByteMarker2["Array"] = 6] = "Array";
-      ByteMarker2[ByteMarker2["Date"] = 7] = "Date";
-      ByteMarker2[ByteMarker2["Uint8Array"] = 8] = "Uint8Array";
-      ByteMarker2[ByteMarker2["Symbol"] = 9] = "Symbol";
-      ByteMarker2[ByteMarker2["BigInt"] = 10] = "BigInt";
-    })(ByteMarker || (ByteMarker = {}));
-    Accumulator = BigInt("14695981039346656037");
-    [Prime, Size] = [BigInt("1099511628211"), BigInt(
-      "18446744073709551616"
-      /* 2 ^ 64 */
-    )];
-    Bytes = Array.from({ length: 256 }).map((_, i) => BigInt(i));
-    F64 = new Float64Array(1);
-    F64In = new DataView(F64.buffer);
-    F64Out = new Uint8Array(F64.buffer);
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/hash/index.mjs
-var init_hash2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/hash/index.mjs"() {
-    init_hash();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/any/any.mjs
-function Any(options) {
-  return CreateType({ [Kind]: "Any" }, options);
-}
-var init_any = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/any/any.mjs"() {
-    init_create();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/any/index.mjs
-var init_any2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/any/index.mjs"() {
-    init_any();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/unknown/unknown.mjs
-function Unknown(options) {
-  return CreateType({ [Kind]: "Unknown" }, options);
-}
-var init_unknown = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/unknown/unknown.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/unknown/index.mjs
-var init_unknown2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/unknown/index.mjs"() {
-    init_unknown();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/guard/type.mjs
-var type_exports2 = {};
-__export(type_exports2, {
-  IsAny: () => IsAny2,
-  IsArgument: () => IsArgument2,
-  IsArray: () => IsArray4,
-  IsAsyncIterator: () => IsAsyncIterator4,
-  IsBigInt: () => IsBigInt4,
-  IsBoolean: () => IsBoolean4,
-  IsComputed: () => IsComputed2,
-  IsConstructor: () => IsConstructor2,
-  IsDate: () => IsDate4,
-  IsFunction: () => IsFunction4,
-  IsImport: () => IsImport,
-  IsInteger: () => IsInteger3,
-  IsIntersect: () => IsIntersect2,
-  IsIterator: () => IsIterator4,
-  IsKind: () => IsKind2,
-  IsKindOf: () => IsKindOf2,
-  IsLiteral: () => IsLiteral2,
-  IsLiteralBoolean: () => IsLiteralBoolean,
-  IsLiteralNumber: () => IsLiteralNumber,
-  IsLiteralString: () => IsLiteralString,
-  IsLiteralValue: () => IsLiteralValue2,
-  IsMappedKey: () => IsMappedKey2,
-  IsMappedResult: () => IsMappedResult2,
-  IsNever: () => IsNever2,
-  IsNot: () => IsNot2,
-  IsNull: () => IsNull4,
-  IsNumber: () => IsNumber4,
-  IsObject: () => IsObject4,
-  IsOptional: () => IsOptional2,
-  IsPromise: () => IsPromise3,
-  IsProperties: () => IsProperties,
-  IsReadonly: () => IsReadonly2,
-  IsRecord: () => IsRecord2,
-  IsRecursive: () => IsRecursive,
-  IsRef: () => IsRef2,
-  IsRegExp: () => IsRegExp3,
-  IsSchema: () => IsSchema2,
-  IsString: () => IsString4,
-  IsSymbol: () => IsSymbol4,
-  IsTemplateLiteral: () => IsTemplateLiteral2,
-  IsThis: () => IsThis2,
-  IsTransform: () => IsTransform2,
-  IsTuple: () => IsTuple2,
-  IsUint8Array: () => IsUint8Array4,
-  IsUndefined: () => IsUndefined4,
-  IsUnion: () => IsUnion2,
-  IsUnionLiteral: () => IsUnionLiteral,
-  IsUnknown: () => IsUnknown2,
-  IsUnsafe: () => IsUnsafe2,
-  IsVoid: () => IsVoid2,
-  TypeGuardUnknownTypeError: () => TypeGuardUnknownTypeError
-});
-function IsPattern(value) {
-  try {
-    new RegExp(value);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function IsControlCharacterFree(value) {
-  if (!IsString2(value))
-    return false;
-  for (let i = 0; i < value.length; i++) {
-    const code = value.charCodeAt(i);
-    if (code >= 7 && code <= 13 || code === 27 || code === 127) {
-      return false;
-    }
-  }
-  return true;
-}
-function IsAdditionalProperties(value) {
-  return IsOptionalBoolean(value) || IsSchema2(value);
-}
-function IsOptionalBigInt(value) {
-  return IsUndefined2(value) || IsBigInt2(value);
-}
-function IsOptionalNumber(value) {
-  return IsUndefined2(value) || IsNumber2(value);
-}
-function IsOptionalBoolean(value) {
-  return IsUndefined2(value) || IsBoolean2(value);
-}
-function IsOptionalString(value) {
-  return IsUndefined2(value) || IsString2(value);
-}
-function IsOptionalPattern(value) {
-  return IsUndefined2(value) || IsString2(value) && IsControlCharacterFree(value) && IsPattern(value);
-}
-function IsOptionalFormat(value) {
-  return IsUndefined2(value) || IsString2(value) && IsControlCharacterFree(value);
-}
-function IsOptionalSchema(value) {
-  return IsUndefined2(value) || IsSchema2(value);
-}
-function IsReadonly2(value) {
-  return IsObject2(value) && value[ReadonlyKind] === "Readonly";
-}
-function IsOptional2(value) {
-  return IsObject2(value) && value[OptionalKind] === "Optional";
-}
-function IsAny2(value) {
-  return IsKindOf2(value, "Any") && IsOptionalString(value.$id);
-}
-function IsArgument2(value) {
-  return IsKindOf2(value, "Argument") && IsNumber2(value.index);
-}
-function IsArray4(value) {
-  return IsKindOf2(value, "Array") && value.type === "array" && IsOptionalString(value.$id) && IsSchema2(value.items) && IsOptionalNumber(value.minItems) && IsOptionalNumber(value.maxItems) && IsOptionalBoolean(value.uniqueItems) && IsOptionalSchema(value.contains) && IsOptionalNumber(value.minContains) && IsOptionalNumber(value.maxContains);
-}
-function IsAsyncIterator4(value) {
-  return IsKindOf2(value, "AsyncIterator") && value.type === "AsyncIterator" && IsOptionalString(value.$id) && IsSchema2(value.items);
-}
-function IsBigInt4(value) {
-  return IsKindOf2(value, "BigInt") && value.type === "bigint" && IsOptionalString(value.$id) && IsOptionalBigInt(value.exclusiveMaximum) && IsOptionalBigInt(value.exclusiveMinimum) && IsOptionalBigInt(value.maximum) && IsOptionalBigInt(value.minimum) && IsOptionalBigInt(value.multipleOf);
-}
-function IsBoolean4(value) {
-  return IsKindOf2(value, "Boolean") && value.type === "boolean" && IsOptionalString(value.$id);
-}
-function IsComputed2(value) {
-  return IsKindOf2(value, "Computed") && IsString2(value.target) && IsArray2(value.parameters) && value.parameters.every((schema) => IsSchema2(schema));
-}
-function IsConstructor2(value) {
-  return IsKindOf2(value, "Constructor") && value.type === "Constructor" && IsOptionalString(value.$id) && IsArray2(value.parameters) && value.parameters.every((schema) => IsSchema2(schema)) && IsSchema2(value.returns);
-}
-function IsDate4(value) {
-  return IsKindOf2(value, "Date") && value.type === "Date" && IsOptionalString(value.$id) && IsOptionalNumber(value.exclusiveMaximumTimestamp) && IsOptionalNumber(value.exclusiveMinimumTimestamp) && IsOptionalNumber(value.maximumTimestamp) && IsOptionalNumber(value.minimumTimestamp) && IsOptionalNumber(value.multipleOfTimestamp);
-}
-function IsFunction4(value) {
-  return IsKindOf2(value, "Function") && value.type === "Function" && IsOptionalString(value.$id) && IsArray2(value.parameters) && value.parameters.every((schema) => IsSchema2(schema)) && IsSchema2(value.returns);
-}
-function IsImport(value) {
-  return IsKindOf2(value, "Import") && HasPropertyKey2(value, "$defs") && IsObject2(value.$defs) && IsProperties(value.$defs) && HasPropertyKey2(value, "$ref") && IsString2(value.$ref) && value.$ref in value.$defs;
-}
-function IsInteger3(value) {
-  return IsKindOf2(value, "Integer") && value.type === "integer" && IsOptionalString(value.$id) && IsOptionalNumber(value.exclusiveMaximum) && IsOptionalNumber(value.exclusiveMinimum) && IsOptionalNumber(value.maximum) && IsOptionalNumber(value.minimum) && IsOptionalNumber(value.multipleOf);
-}
-function IsProperties(value) {
-  return IsObject2(value) && Object.entries(value).every(([key, schema]) => IsControlCharacterFree(key) && IsSchema2(schema));
-}
-function IsIntersect2(value) {
-  return IsKindOf2(value, "Intersect") && (IsString2(value.type) && value.type !== "object" ? false : true) && IsArray2(value.allOf) && value.allOf.every((schema) => IsSchema2(schema) && !IsTransform2(schema)) && IsOptionalString(value.type) && (IsOptionalBoolean(value.unevaluatedProperties) || IsOptionalSchema(value.unevaluatedProperties)) && IsOptionalString(value.$id);
-}
-function IsIterator4(value) {
-  return IsKindOf2(value, "Iterator") && value.type === "Iterator" && IsOptionalString(value.$id) && IsSchema2(value.items);
-}
-function IsKindOf2(value, kind) {
-  return IsObject2(value) && Kind in value && value[Kind] === kind;
-}
-function IsLiteralString(value) {
-  return IsLiteral2(value) && IsString2(value.const);
-}
-function IsLiteralNumber(value) {
-  return IsLiteral2(value) && IsNumber2(value.const);
-}
-function IsLiteralBoolean(value) {
-  return IsLiteral2(value) && IsBoolean2(value.const);
-}
-function IsLiteral2(value) {
-  return IsKindOf2(value, "Literal") && IsOptionalString(value.$id) && IsLiteralValue2(value.const);
-}
-function IsLiteralValue2(value) {
-  return IsBoolean2(value) || IsNumber2(value) || IsString2(value);
-}
-function IsMappedKey2(value) {
-  return IsKindOf2(value, "MappedKey") && IsArray2(value.keys) && value.keys.every((key) => IsNumber2(key) || IsString2(key));
-}
-function IsMappedResult2(value) {
-  return IsKindOf2(value, "MappedResult") && IsProperties(value.properties);
-}
-function IsNever2(value) {
-  return IsKindOf2(value, "Never") && IsObject2(value.not) && Object.getOwnPropertyNames(value.not).length === 0;
-}
-function IsNot2(value) {
-  return IsKindOf2(value, "Not") && IsSchema2(value.not);
-}
-function IsNull4(value) {
-  return IsKindOf2(value, "Null") && value.type === "null" && IsOptionalString(value.$id);
-}
-function IsNumber4(value) {
-  return IsKindOf2(value, "Number") && value.type === "number" && IsOptionalString(value.$id) && IsOptionalNumber(value.exclusiveMaximum) && IsOptionalNumber(value.exclusiveMinimum) && IsOptionalNumber(value.maximum) && IsOptionalNumber(value.minimum) && IsOptionalNumber(value.multipleOf);
-}
-function IsObject4(value) {
-  return IsKindOf2(value, "Object") && value.type === "object" && IsOptionalString(value.$id) && IsProperties(value.properties) && IsAdditionalProperties(value.additionalProperties) && IsOptionalNumber(value.minProperties) && IsOptionalNumber(value.maxProperties);
-}
-function IsPromise3(value) {
-  return IsKindOf2(value, "Promise") && value.type === "Promise" && IsOptionalString(value.$id) && IsSchema2(value.item);
-}
-function IsRecord2(value) {
-  return IsKindOf2(value, "Record") && value.type === "object" && IsOptionalString(value.$id) && IsAdditionalProperties(value.additionalProperties) && IsObject2(value.patternProperties) && ((schema) => {
-    const keys = Object.getOwnPropertyNames(schema.patternProperties);
-    return keys.length === 1 && IsPattern(keys[0]) && IsObject2(schema.patternProperties) && IsSchema2(schema.patternProperties[keys[0]]);
-  })(value);
-}
-function IsRecursive(value) {
-  return IsObject2(value) && Hint in value && value[Hint] === "Recursive";
-}
-function IsRef2(value) {
-  return IsKindOf2(value, "Ref") && IsOptionalString(value.$id) && IsString2(value.$ref);
-}
-function IsRegExp3(value) {
-  return IsKindOf2(value, "RegExp") && IsOptionalString(value.$id) && IsString2(value.source) && IsString2(value.flags) && IsOptionalNumber(value.maxLength) && IsOptionalNumber(value.minLength);
-}
-function IsString4(value) {
-  return IsKindOf2(value, "String") && value.type === "string" && IsOptionalString(value.$id) && IsOptionalNumber(value.minLength) && IsOptionalNumber(value.maxLength) && IsOptionalPattern(value.pattern) && IsOptionalFormat(value.format);
-}
-function IsSymbol4(value) {
-  return IsKindOf2(value, "Symbol") && value.type === "symbol" && IsOptionalString(value.$id);
-}
-function IsTemplateLiteral2(value) {
-  return IsKindOf2(value, "TemplateLiteral") && value.type === "string" && IsString2(value.pattern) && value.pattern[0] === "^" && value.pattern[value.pattern.length - 1] === "$";
-}
-function IsThis2(value) {
-  return IsKindOf2(value, "This") && IsOptionalString(value.$id) && IsString2(value.$ref);
-}
-function IsTransform2(value) {
-  return IsObject2(value) && TransformKind in value;
-}
-function IsTuple2(value) {
-  return IsKindOf2(value, "Tuple") && value.type === "array" && IsOptionalString(value.$id) && IsNumber2(value.minItems) && IsNumber2(value.maxItems) && value.minItems === value.maxItems && // empty
-  (IsUndefined2(value.items) && IsUndefined2(value.additionalItems) && value.minItems === 0 || IsArray2(value.items) && value.items.every((schema) => IsSchema2(schema)));
-}
-function IsUndefined4(value) {
-  return IsKindOf2(value, "Undefined") && value.type === "undefined" && IsOptionalString(value.$id);
-}
-function IsUnionLiteral(value) {
-  return IsUnion2(value) && value.anyOf.every((schema) => IsLiteralString(schema) || IsLiteralNumber(schema));
-}
-function IsUnion2(value) {
-  return IsKindOf2(value, "Union") && IsOptionalString(value.$id) && IsObject2(value) && IsArray2(value.anyOf) && value.anyOf.every((schema) => IsSchema2(schema));
-}
-function IsUint8Array4(value) {
-  return IsKindOf2(value, "Uint8Array") && value.type === "Uint8Array" && IsOptionalString(value.$id) && IsOptionalNumber(value.minByteLength) && IsOptionalNumber(value.maxByteLength);
-}
-function IsUnknown2(value) {
-  return IsKindOf2(value, "Unknown") && IsOptionalString(value.$id);
-}
-function IsUnsafe2(value) {
-  return IsKindOf2(value, "Unsafe");
-}
-function IsVoid2(value) {
-  return IsKindOf2(value, "Void") && value.type === "void" && IsOptionalString(value.$id);
-}
-function IsKind2(value) {
-  return IsObject2(value) && Kind in value && IsString2(value[Kind]) && !KnownTypes.includes(value[Kind]);
-}
-function IsSchema2(value) {
-  return IsObject2(value) && (IsAny2(value) || IsArgument2(value) || IsArray4(value) || IsBoolean4(value) || IsBigInt4(value) || IsAsyncIterator4(value) || IsComputed2(value) || IsConstructor2(value) || IsDate4(value) || IsFunction4(value) || IsInteger3(value) || IsIntersect2(value) || IsIterator4(value) || IsLiteral2(value) || IsMappedKey2(value) || IsMappedResult2(value) || IsNever2(value) || IsNot2(value) || IsNull4(value) || IsNumber4(value) || IsObject4(value) || IsPromise3(value) || IsRecord2(value) || IsRef2(value) || IsRegExp3(value) || IsString4(value) || IsSymbol4(value) || IsTemplateLiteral2(value) || IsThis2(value) || IsTuple2(value) || IsUndefined4(value) || IsUnion2(value) || IsUint8Array4(value) || IsUnknown2(value) || IsUnsafe2(value) || IsVoid2(value) || IsKind2(value));
-}
-var TypeGuardUnknownTypeError, KnownTypes;
-var init_type3 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/guard/type.mjs"() {
-    init_value();
-    init_symbols2();
-    init_error2();
-    TypeGuardUnknownTypeError = class extends TypeBoxError {
-    };
-    KnownTypes = [
-      "Argument",
-      "Any",
-      "Array",
-      "AsyncIterator",
-      "BigInt",
-      "Boolean",
-      "Computed",
-      "Constructor",
-      "Date",
-      "Enum",
-      "Function",
-      "Integer",
-      "Intersect",
-      "Iterator",
-      "Literal",
-      "MappedKey",
-      "MappedResult",
-      "Not",
-      "Null",
-      "Number",
-      "Object",
-      "Promise",
-      "Record",
-      "Ref",
-      "RegExp",
-      "String",
-      "Symbol",
-      "TemplateLiteral",
-      "This",
-      "Tuple",
-      "Undefined",
-      "Union",
-      "Uint8Array",
-      "Unknown",
-      "Void"
-    ];
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/guard/index.mjs
-var init_guard3 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/guard/index.mjs"() {
-    init_kind();
-    init_type3();
-    init_value();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/extends/extends-check.mjs
-function IntoBooleanResult(result) {
-  return result === ExtendsResult.False ? result : ExtendsResult.True;
-}
-function Throw(message) {
-  throw new ExtendsResolverError(message);
-}
-function IsStructuralRight(right) {
-  return type_exports2.IsNever(right) || type_exports2.IsIntersect(right) || type_exports2.IsUnion(right) || type_exports2.IsUnknown(right) || type_exports2.IsAny(right);
-}
-function StructuralRight(left, right) {
-  return type_exports2.IsNever(right) ? FromNeverRight(left, right) : type_exports2.IsIntersect(right) ? FromIntersectRight(left, right) : type_exports2.IsUnion(right) ? FromUnionRight(left, right) : type_exports2.IsUnknown(right) ? FromUnknownRight(left, right) : type_exports2.IsAny(right) ? FromAnyRight(left, right) : Throw("StructuralRight");
-}
-function FromAnyRight(left, right) {
-  return ExtendsResult.True;
-}
-function FromAny(left, right) {
-  return type_exports2.IsIntersect(right) ? FromIntersectRight(left, right) : type_exports2.IsUnion(right) && right.anyOf.some((schema) => type_exports2.IsAny(schema) || type_exports2.IsUnknown(schema)) ? ExtendsResult.True : type_exports2.IsUnion(right) ? ExtendsResult.Union : type_exports2.IsUnknown(right) ? ExtendsResult.True : type_exports2.IsAny(right) ? ExtendsResult.True : ExtendsResult.Union;
-}
-function FromArrayRight(left, right) {
-  return type_exports2.IsUnknown(left) ? ExtendsResult.False : type_exports2.IsAny(left) ? ExtendsResult.Union : type_exports2.IsNever(left) ? ExtendsResult.True : ExtendsResult.False;
-}
-function FromArray3(left, right) {
-  return type_exports2.IsObject(right) && IsObjectArrayLike(right) ? ExtendsResult.True : IsStructuralRight(right) ? StructuralRight(left, right) : !type_exports2.IsArray(right) ? ExtendsResult.False : IntoBooleanResult(Visit4(left.items, right.items));
-}
-function FromAsyncIterator(left, right) {
-  return IsStructuralRight(right) ? StructuralRight(left, right) : !type_exports2.IsAsyncIterator(right) ? ExtendsResult.False : IntoBooleanResult(Visit4(left.items, right.items));
-}
-function FromBigInt(left, right) {
-  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports2.IsObject(right) ? FromObjectRight(left, right) : type_exports2.IsRecord(right) ? FromRecordRight(left, right) : type_exports2.IsBigInt(right) ? ExtendsResult.True : ExtendsResult.False;
-}
-function FromBooleanRight(left, right) {
-  return type_exports2.IsLiteralBoolean(left) ? ExtendsResult.True : type_exports2.IsBoolean(left) ? ExtendsResult.True : ExtendsResult.False;
-}
-function FromBoolean(left, right) {
-  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports2.IsObject(right) ? FromObjectRight(left, right) : type_exports2.IsRecord(right) ? FromRecordRight(left, right) : type_exports2.IsBoolean(right) ? ExtendsResult.True : ExtendsResult.False;
-}
-function FromConstructor(left, right) {
-  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports2.IsObject(right) ? FromObjectRight(left, right) : !type_exports2.IsConstructor(right) ? ExtendsResult.False : left.parameters.length > right.parameters.length ? ExtendsResult.False : !left.parameters.every((schema, index) => IntoBooleanResult(Visit4(right.parameters[index], schema)) === ExtendsResult.True) ? ExtendsResult.False : IntoBooleanResult(Visit4(left.returns, right.returns));
-}
-function FromDate(left, right) {
-  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports2.IsObject(right) ? FromObjectRight(left, right) : type_exports2.IsRecord(right) ? FromRecordRight(left, right) : type_exports2.IsDate(right) ? ExtendsResult.True : ExtendsResult.False;
-}
-function FromFunction(left, right) {
-  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports2.IsObject(right) ? FromObjectRight(left, right) : !type_exports2.IsFunction(right) ? ExtendsResult.False : left.parameters.length > right.parameters.length ? ExtendsResult.False : !left.parameters.every((schema, index) => IntoBooleanResult(Visit4(right.parameters[index], schema)) === ExtendsResult.True) ? ExtendsResult.False : IntoBooleanResult(Visit4(left.returns, right.returns));
-}
-function FromIntegerRight(left, right) {
-  return type_exports2.IsLiteral(left) && value_exports.IsNumber(left.const) ? ExtendsResult.True : type_exports2.IsNumber(left) || type_exports2.IsInteger(left) ? ExtendsResult.True : ExtendsResult.False;
-}
-function FromInteger(left, right) {
-  return type_exports2.IsInteger(right) || type_exports2.IsNumber(right) ? ExtendsResult.True : IsStructuralRight(right) ? StructuralRight(left, right) : type_exports2.IsObject(right) ? FromObjectRight(left, right) : type_exports2.IsRecord(right) ? FromRecordRight(left, right) : ExtendsResult.False;
-}
-function FromIntersectRight(left, right) {
-  return right.allOf.every((schema) => Visit4(left, schema) === ExtendsResult.True) ? ExtendsResult.True : ExtendsResult.False;
-}
-function FromIntersect3(left, right) {
-  return left.allOf.some((schema) => Visit4(schema, right) === ExtendsResult.True) ? ExtendsResult.True : ExtendsResult.False;
-}
-function FromIterator(left, right) {
-  return IsStructuralRight(right) ? StructuralRight(left, right) : !type_exports2.IsIterator(right) ? ExtendsResult.False : IntoBooleanResult(Visit4(left.items, right.items));
-}
-function FromLiteral2(left, right) {
-  return type_exports2.IsLiteral(right) && right.const === left.const ? ExtendsResult.True : IsStructuralRight(right) ? StructuralRight(left, right) : type_exports2.IsObject(right) ? FromObjectRight(left, right) : type_exports2.IsRecord(right) ? FromRecordRight(left, right) : type_exports2.IsString(right) ? FromStringRight(left, right) : type_exports2.IsNumber(right) ? FromNumberRight(left, right) : type_exports2.IsInteger(right) ? FromIntegerRight(left, right) : type_exports2.IsBoolean(right) ? FromBooleanRight(left, right) : ExtendsResult.False;
-}
-function FromNeverRight(left, right) {
-  return ExtendsResult.False;
-}
-function FromNever(left, right) {
-  return ExtendsResult.True;
-}
-function UnwrapTNot(schema) {
-  let [current, depth] = [schema, 0];
-  while (true) {
-    if (!type_exports2.IsNot(current))
-      break;
-    current = current.not;
-    depth += 1;
-  }
-  return depth % 2 === 0 ? current : Unknown();
-}
-function FromNot(left, right) {
-  return type_exports2.IsNot(left) ? Visit4(UnwrapTNot(left), right) : type_exports2.IsNot(right) ? Visit4(left, UnwrapTNot(right)) : Throw("Invalid fallthrough for Not");
-}
-function FromNull(left, right) {
-  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports2.IsObject(right) ? FromObjectRight(left, right) : type_exports2.IsRecord(right) ? FromRecordRight(left, right) : type_exports2.IsNull(right) ? ExtendsResult.True : ExtendsResult.False;
-}
-function FromNumberRight(left, right) {
-  return type_exports2.IsLiteralNumber(left) ? ExtendsResult.True : type_exports2.IsNumber(left) || type_exports2.IsInteger(left) ? ExtendsResult.True : ExtendsResult.False;
-}
-function FromNumber(left, right) {
-  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports2.IsObject(right) ? FromObjectRight(left, right) : type_exports2.IsRecord(right) ? FromRecordRight(left, right) : type_exports2.IsInteger(right) || type_exports2.IsNumber(right) ? ExtendsResult.True : ExtendsResult.False;
-}
-function IsObjectPropertyCount(schema, count) {
-  return Object.getOwnPropertyNames(schema.properties).length === count;
-}
-function IsObjectStringLike(schema) {
-  return IsObjectArrayLike(schema);
-}
-function IsObjectSymbolLike(schema) {
-  return IsObjectPropertyCount(schema, 0) || IsObjectPropertyCount(schema, 1) && "description" in schema.properties && type_exports2.IsUnion(schema.properties.description) && schema.properties.description.anyOf.length === 2 && (type_exports2.IsString(schema.properties.description.anyOf[0]) && type_exports2.IsUndefined(schema.properties.description.anyOf[1]) || type_exports2.IsString(schema.properties.description.anyOf[1]) && type_exports2.IsUndefined(schema.properties.description.anyOf[0]));
-}
-function IsObjectNumberLike(schema) {
-  return IsObjectPropertyCount(schema, 0);
-}
-function IsObjectBooleanLike(schema) {
-  return IsObjectPropertyCount(schema, 0);
-}
-function IsObjectBigIntLike(schema) {
-  return IsObjectPropertyCount(schema, 0);
-}
-function IsObjectDateLike(schema) {
-  return IsObjectPropertyCount(schema, 0);
-}
-function IsObjectUint8ArrayLike(schema) {
-  return IsObjectArrayLike(schema);
-}
-function IsObjectFunctionLike(schema) {
-  const length = Number2();
-  return IsObjectPropertyCount(schema, 0) || IsObjectPropertyCount(schema, 1) && "length" in schema.properties && IntoBooleanResult(Visit4(schema.properties["length"], length)) === ExtendsResult.True;
-}
-function IsObjectConstructorLike(schema) {
-  return IsObjectPropertyCount(schema, 0);
-}
-function IsObjectArrayLike(schema) {
-  const length = Number2();
-  return IsObjectPropertyCount(schema, 0) || IsObjectPropertyCount(schema, 1) && "length" in schema.properties && IntoBooleanResult(Visit4(schema.properties["length"], length)) === ExtendsResult.True;
-}
-function IsObjectPromiseLike(schema) {
-  const then = Function([Any()], Any());
-  return IsObjectPropertyCount(schema, 0) || IsObjectPropertyCount(schema, 1) && "then" in schema.properties && IntoBooleanResult(Visit4(schema.properties["then"], then)) === ExtendsResult.True;
-}
-function Property(left, right) {
-  return Visit4(left, right) === ExtendsResult.False ? ExtendsResult.False : type_exports2.IsOptional(left) && !type_exports2.IsOptional(right) ? ExtendsResult.False : ExtendsResult.True;
-}
-function FromObjectRight(left, right) {
-  return type_exports2.IsUnknown(left) ? ExtendsResult.False : type_exports2.IsAny(left) ? ExtendsResult.Union : type_exports2.IsNever(left) || type_exports2.IsLiteralString(left) && IsObjectStringLike(right) || type_exports2.IsLiteralNumber(left) && IsObjectNumberLike(right) || type_exports2.IsLiteralBoolean(left) && IsObjectBooleanLike(right) || type_exports2.IsSymbol(left) && IsObjectSymbolLike(right) || type_exports2.IsBigInt(left) && IsObjectBigIntLike(right) || type_exports2.IsString(left) && IsObjectStringLike(right) || type_exports2.IsSymbol(left) && IsObjectSymbolLike(right) || type_exports2.IsNumber(left) && IsObjectNumberLike(right) || type_exports2.IsInteger(left) && IsObjectNumberLike(right) || type_exports2.IsBoolean(left) && IsObjectBooleanLike(right) || type_exports2.IsUint8Array(left) && IsObjectUint8ArrayLike(right) || type_exports2.IsDate(left) && IsObjectDateLike(right) || type_exports2.IsConstructor(left) && IsObjectConstructorLike(right) || type_exports2.IsFunction(left) && IsObjectFunctionLike(right) ? ExtendsResult.True : type_exports2.IsRecord(left) && type_exports2.IsString(RecordKey(left)) ? (() => {
-    return right[Hint] === "Record" ? ExtendsResult.True : ExtendsResult.False;
-  })() : type_exports2.IsRecord(left) && type_exports2.IsNumber(RecordKey(left)) ? (() => {
-    return IsObjectPropertyCount(right, 0) ? ExtendsResult.True : ExtendsResult.False;
-  })() : ExtendsResult.False;
-}
-function FromObject(left, right) {
-  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports2.IsRecord(right) ? FromRecordRight(left, right) : !type_exports2.IsObject(right) ? ExtendsResult.False : (() => {
-    for (const key of Object.getOwnPropertyNames(right.properties)) {
-      if (!(key in left.properties) && !type_exports2.IsOptional(right.properties[key])) {
-        return ExtendsResult.False;
-      }
-      if (type_exports2.IsOptional(right.properties[key])) {
-        return ExtendsResult.True;
-      }
-      if (Property(left.properties[key], right.properties[key]) === ExtendsResult.False) {
-        return ExtendsResult.False;
-      }
-    }
-    return ExtendsResult.True;
-  })();
-}
-function FromPromise(left, right) {
-  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports2.IsObject(right) && IsObjectPromiseLike(right) ? ExtendsResult.True : !type_exports2.IsPromise(right) ? ExtendsResult.False : IntoBooleanResult(Visit4(left.item, right.item));
-}
-function RecordKey(schema) {
-  return PatternNumberExact in schema.patternProperties ? Number2() : PatternStringExact in schema.patternProperties ? String2() : Throw("Unknown record key pattern");
-}
-function RecordValue(schema) {
-  return PatternNumberExact in schema.patternProperties ? schema.patternProperties[PatternNumberExact] : PatternStringExact in schema.patternProperties ? schema.patternProperties[PatternStringExact] : Throw("Unable to get record value schema");
-}
-function FromRecordRight(left, right) {
-  const [Key, Value] = [RecordKey(right), RecordValue(right)];
-  return type_exports2.IsLiteralString(left) && type_exports2.IsNumber(Key) && IntoBooleanResult(Visit4(left, Value)) === ExtendsResult.True ? ExtendsResult.True : type_exports2.IsUint8Array(left) && type_exports2.IsNumber(Key) ? Visit4(left, Value) : type_exports2.IsString(left) && type_exports2.IsNumber(Key) ? Visit4(left, Value) : type_exports2.IsArray(left) && type_exports2.IsNumber(Key) ? Visit4(left, Value) : type_exports2.IsObject(left) ? (() => {
-    for (const key of Object.getOwnPropertyNames(left.properties)) {
-      if (Property(Value, left.properties[key]) === ExtendsResult.False) {
-        return ExtendsResult.False;
-      }
-    }
-    return ExtendsResult.True;
-  })() : ExtendsResult.False;
-}
-function FromRecord(left, right) {
-  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports2.IsObject(right) ? FromObjectRight(left, right) : !type_exports2.IsRecord(right) ? ExtendsResult.False : Visit4(RecordValue(left), RecordValue(right));
-}
-function FromRegExp(left, right) {
-  const L = type_exports2.IsRegExp(left) ? String2() : left;
-  const R = type_exports2.IsRegExp(right) ? String2() : right;
-  return Visit4(L, R);
-}
-function FromStringRight(left, right) {
-  return type_exports2.IsLiteral(left) && value_exports.IsString(left.const) ? ExtendsResult.True : type_exports2.IsString(left) ? ExtendsResult.True : ExtendsResult.False;
-}
-function FromString(left, right) {
-  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports2.IsObject(right) ? FromObjectRight(left, right) : type_exports2.IsRecord(right) ? FromRecordRight(left, right) : type_exports2.IsString(right) ? ExtendsResult.True : ExtendsResult.False;
-}
-function FromSymbol(left, right) {
-  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports2.IsObject(right) ? FromObjectRight(left, right) : type_exports2.IsRecord(right) ? FromRecordRight(left, right) : type_exports2.IsSymbol(right) ? ExtendsResult.True : ExtendsResult.False;
-}
-function FromTemplateLiteral2(left, right) {
-  return type_exports2.IsTemplateLiteral(left) ? Visit4(TemplateLiteralToUnion(left), right) : type_exports2.IsTemplateLiteral(right) ? Visit4(left, TemplateLiteralToUnion(right)) : Throw("Invalid fallthrough for TemplateLiteral");
-}
-function IsArrayOfTuple(left, right) {
-  return type_exports2.IsArray(right) && left.items !== void 0 && left.items.every((schema) => Visit4(schema, right.items) === ExtendsResult.True);
-}
-function FromTupleRight(left, right) {
-  return type_exports2.IsNever(left) ? ExtendsResult.True : type_exports2.IsUnknown(left) ? ExtendsResult.False : type_exports2.IsAny(left) ? ExtendsResult.Union : ExtendsResult.False;
-}
-function FromTuple3(left, right) {
-  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports2.IsObject(right) && IsObjectArrayLike(right) ? ExtendsResult.True : type_exports2.IsArray(right) && IsArrayOfTuple(left, right) ? ExtendsResult.True : !type_exports2.IsTuple(right) ? ExtendsResult.False : value_exports.IsUndefined(left.items) && !value_exports.IsUndefined(right.items) || !value_exports.IsUndefined(left.items) && value_exports.IsUndefined(right.items) ? ExtendsResult.False : value_exports.IsUndefined(left.items) && !value_exports.IsUndefined(right.items) ? ExtendsResult.True : left.items.every((schema, index) => Visit4(schema, right.items[index]) === ExtendsResult.True) ? ExtendsResult.True : ExtendsResult.False;
-}
-function FromUint8Array(left, right) {
-  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports2.IsObject(right) ? FromObjectRight(left, right) : type_exports2.IsRecord(right) ? FromRecordRight(left, right) : type_exports2.IsUint8Array(right) ? ExtendsResult.True : ExtendsResult.False;
-}
-function FromUndefined(left, right) {
-  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports2.IsObject(right) ? FromObjectRight(left, right) : type_exports2.IsRecord(right) ? FromRecordRight(left, right) : type_exports2.IsVoid(right) ? FromVoidRight(left, right) : type_exports2.IsUndefined(right) ? ExtendsResult.True : ExtendsResult.False;
-}
-function FromUnionRight(left, right) {
-  return right.anyOf.some((schema) => Visit4(left, schema) === ExtendsResult.True) ? ExtendsResult.True : ExtendsResult.False;
-}
-function FromUnion5(left, right) {
-  return left.anyOf.every((schema) => Visit4(schema, right) === ExtendsResult.True) ? ExtendsResult.True : ExtendsResult.False;
-}
-function FromUnknownRight(left, right) {
-  return ExtendsResult.True;
-}
-function FromUnknown(left, right) {
-  return type_exports2.IsNever(right) ? FromNeverRight(left, right) : type_exports2.IsIntersect(right) ? FromIntersectRight(left, right) : type_exports2.IsUnion(right) ? FromUnionRight(left, right) : type_exports2.IsAny(right) ? FromAnyRight(left, right) : type_exports2.IsString(right) ? FromStringRight(left, right) : type_exports2.IsNumber(right) ? FromNumberRight(left, right) : type_exports2.IsInteger(right) ? FromIntegerRight(left, right) : type_exports2.IsBoolean(right) ? FromBooleanRight(left, right) : type_exports2.IsArray(right) ? FromArrayRight(left, right) : type_exports2.IsTuple(right) ? FromTupleRight(left, right) : type_exports2.IsObject(right) ? FromObjectRight(left, right) : type_exports2.IsUnknown(right) ? ExtendsResult.True : ExtendsResult.False;
-}
-function FromVoidRight(left, right) {
-  return type_exports2.IsUndefined(left) ? ExtendsResult.True : type_exports2.IsUndefined(left) ? ExtendsResult.True : ExtendsResult.False;
-}
-function FromVoid(left, right) {
-  return type_exports2.IsIntersect(right) ? FromIntersectRight(left, right) : type_exports2.IsUnion(right) ? FromUnionRight(left, right) : type_exports2.IsUnknown(right) ? FromUnknownRight(left, right) : type_exports2.IsAny(right) ? FromAnyRight(left, right) : type_exports2.IsObject(right) ? FromObjectRight(left, right) : type_exports2.IsVoid(right) ? ExtendsResult.True : ExtendsResult.False;
-}
-function Visit4(left, right) {
-  return (
-    // resolvable
-    type_exports2.IsTemplateLiteral(left) || type_exports2.IsTemplateLiteral(right) ? FromTemplateLiteral2(left, right) : type_exports2.IsRegExp(left) || type_exports2.IsRegExp(right) ? FromRegExp(left, right) : type_exports2.IsNot(left) || type_exports2.IsNot(right) ? FromNot(left, right) : (
-      // standard
-      type_exports2.IsAny(left) ? FromAny(left, right) : type_exports2.IsArray(left) ? FromArray3(left, right) : type_exports2.IsBigInt(left) ? FromBigInt(left, right) : type_exports2.IsBoolean(left) ? FromBoolean(left, right) : type_exports2.IsAsyncIterator(left) ? FromAsyncIterator(left, right) : type_exports2.IsConstructor(left) ? FromConstructor(left, right) : type_exports2.IsDate(left) ? FromDate(left, right) : type_exports2.IsFunction(left) ? FromFunction(left, right) : type_exports2.IsInteger(left) ? FromInteger(left, right) : type_exports2.IsIntersect(left) ? FromIntersect3(left, right) : type_exports2.IsIterator(left) ? FromIterator(left, right) : type_exports2.IsLiteral(left) ? FromLiteral2(left, right) : type_exports2.IsNever(left) ? FromNever(left, right) : type_exports2.IsNull(left) ? FromNull(left, right) : type_exports2.IsNumber(left) ? FromNumber(left, right) : type_exports2.IsObject(left) ? FromObject(left, right) : type_exports2.IsRecord(left) ? FromRecord(left, right) : type_exports2.IsString(left) ? FromString(left, right) : type_exports2.IsSymbol(left) ? FromSymbol(left, right) : type_exports2.IsTuple(left) ? FromTuple3(left, right) : type_exports2.IsPromise(left) ? FromPromise(left, right) : type_exports2.IsUint8Array(left) ? FromUint8Array(left, right) : type_exports2.IsUndefined(left) ? FromUndefined(left, right) : type_exports2.IsUnion(left) ? FromUnion5(left, right) : type_exports2.IsUnknown(left) ? FromUnknown(left, right) : type_exports2.IsVoid(left) ? FromVoid(left, right) : Throw(`Unknown left type operand '${left[Kind]}'`)
-    )
-  );
-}
-function ExtendsCheck(left, right) {
-  return Visit4(left, right);
-}
-var ExtendsResolverError, ExtendsResult;
-var init_extends_check = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/extends/extends-check.mjs"() {
-    init_any2();
-    init_function2();
-    init_number2();
-    init_string2();
-    init_unknown2();
-    init_template_literal2();
-    init_patterns2();
-    init_symbols2();
-    init_error2();
-    init_guard3();
-    ExtendsResolverError = class extends TypeBoxError {
-    };
-    (function(ExtendsResult3) {
-      ExtendsResult3[ExtendsResult3["Union"] = 0] = "Union";
-      ExtendsResult3[ExtendsResult3["True"] = 1] = "True";
-      ExtendsResult3[ExtendsResult3["False"] = 2] = "False";
-    })(ExtendsResult || (ExtendsResult = {}));
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-result.mjs
-function FromProperties7(P, Right, True, False, options) {
-  const Acc = {};
-  for (const K2 of globalThis.Object.getOwnPropertyNames(P))
-    Acc[K2] = Extends(P[K2], Right, True, False, Clone(options));
-  return Acc;
-}
-function FromMappedResult6(Left, Right, True, False, options) {
-  return FromProperties7(Left.properties, Right, True, False, options);
-}
-function ExtendsFromMappedResult(Left, Right, True, False, options) {
-  const P = FromMappedResult6(Left, Right, True, False, options);
-  return MappedResult(P);
-}
-var init_extends_from_mapped_result = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-result.mjs"() {
-    init_mapped2();
-    init_extends();
-    init_value2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/extends/extends.mjs
-function ExtendsResolve(left, right, trueType, falseType) {
-  const R = ExtendsCheck(left, right);
-  return R === ExtendsResult.Union ? Union([trueType, falseType]) : R === ExtendsResult.True ? trueType : falseType;
-}
-function Extends(L, R, T, F, options) {
-  return IsMappedResult(L) ? ExtendsFromMappedResult(L, R, T, F, options) : IsMappedKey(L) ? CreateType(ExtendsFromMappedKey(L, R, T, F, options)) : CreateType(ExtendsResolve(L, R, T, F), options);
-}
-var init_extends = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/extends/extends.mjs"() {
-    init_type2();
-    init_union2();
-    init_extends_check();
-    init_extends_from_mapped_key();
-    init_extends_from_mapped_result();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-key.mjs
-function FromPropertyKey(K, U, L, R, options) {
-  return {
-    [K]: Extends(Literal(K), U, L, R, Clone(options))
-  };
-}
-function FromPropertyKeys(K, U, L, R, options) {
-  return K.reduce((Acc, LK) => {
-    return { ...Acc, ...FromPropertyKey(LK, U, L, R, options) };
-  }, {});
-}
-function FromMappedKey2(K, U, L, R, options) {
-  return FromPropertyKeys(K.keys, U, L, R, options);
-}
-function ExtendsFromMappedKey(T, U, L, R, options) {
-  const P = FromMappedKey2(T, U, L, R, options);
-  return MappedResult(P);
-}
-var init_extends_from_mapped_key = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-key.mjs"() {
-    init_mapped2();
-    init_literal2();
-    init_extends();
-    init_value2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/extends/index.mjs
-var init_extends2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/extends/index.mjs"() {
-    init_extends_check();
-    init_extends_from_mapped_key();
-    init_extends_from_mapped_result();
-    init_extends_undefined();
-    init_extends();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/check/check.mjs
-function IsAnyOrUnknown(schema) {
-  return schema[Kind] === "Any" || schema[Kind] === "Unknown";
-}
-function IsDefined(value) {
-  return value !== void 0;
-}
-function FromAny2(schema, references, value) {
-  return true;
-}
-function FromArgument(schema, references, value) {
-  return true;
-}
-function FromArray4(schema, references, value) {
-  if (!IsArray(value))
-    return false;
-  if (IsDefined(schema.minItems) && !(value.length >= schema.minItems)) {
-    return false;
-  }
-  if (IsDefined(schema.maxItems) && !(value.length <= schema.maxItems)) {
-    return false;
-  }
-  for (const element of value) {
-    if (!Visit5(schema.items, references, element))
-      return false;
-  }
-  if (schema.uniqueItems === true && !(function() {
-    const set = /* @__PURE__ */ new Set();
-    for (const element of value) {
-      const hashed = Hash(element);
-      if (set.has(hashed)) {
-        return false;
-      } else {
-        set.add(hashed);
-      }
-    }
-    return true;
-  })()) {
-    return false;
-  }
-  if (!(IsDefined(schema.contains) || IsNumber(schema.minContains) || IsNumber(schema.maxContains))) {
-    return true;
-  }
-  const containsSchema = IsDefined(schema.contains) ? schema.contains : Never();
-  const containsCount = value.reduce((acc, value2) => Visit5(containsSchema, references, value2) ? acc + 1 : acc, 0);
-  if (containsCount === 0) {
-    return false;
-  }
-  if (IsNumber(schema.minContains) && containsCount < schema.minContains) {
-    return false;
-  }
-  if (IsNumber(schema.maxContains) && containsCount > schema.maxContains) {
-    return false;
-  }
-  return true;
-}
-function FromAsyncIterator2(schema, references, value) {
-  return IsAsyncIterator(value);
-}
-function FromBigInt2(schema, references, value) {
-  if (!IsBigInt(value))
-    return false;
-  if (IsDefined(schema.exclusiveMaximum) && !(value < schema.exclusiveMaximum)) {
-    return false;
-  }
-  if (IsDefined(schema.exclusiveMinimum) && !(value > schema.exclusiveMinimum)) {
-    return false;
-  }
-  if (IsDefined(schema.maximum) && !(value <= schema.maximum)) {
-    return false;
-  }
-  if (IsDefined(schema.minimum) && !(value >= schema.minimum)) {
-    return false;
-  }
-  if (IsDefined(schema.multipleOf) && !(value % schema.multipleOf === BigInt(0))) {
-    return false;
-  }
-  return true;
-}
-function FromBoolean2(schema, references, value) {
-  return IsBoolean(value);
-}
-function FromConstructor2(schema, references, value) {
-  return Visit5(schema.returns, references, value.prototype);
-}
-function FromDate2(schema, references, value) {
-  if (!IsDate(value))
-    return false;
-  if (IsDefined(schema.exclusiveMaximumTimestamp) && !(value.getTime() < schema.exclusiveMaximumTimestamp)) {
-    return false;
-  }
-  if (IsDefined(schema.exclusiveMinimumTimestamp) && !(value.getTime() > schema.exclusiveMinimumTimestamp)) {
-    return false;
-  }
-  if (IsDefined(schema.maximumTimestamp) && !(value.getTime() <= schema.maximumTimestamp)) {
-    return false;
-  }
-  if (IsDefined(schema.minimumTimestamp) && !(value.getTime() >= schema.minimumTimestamp)) {
-    return false;
-  }
-  if (IsDefined(schema.multipleOfTimestamp) && !(value.getTime() % schema.multipleOfTimestamp === 0)) {
-    return false;
-  }
-  return true;
-}
-function FromFunction2(schema, references, value) {
-  return IsFunction(value);
-}
-function FromImport(schema, references, value) {
-  const definitions = globalThis.Object.values(schema.$defs);
-  const target = schema.$defs[schema.$ref];
-  return Visit5(target, [...references, ...definitions], value);
-}
-function FromInteger2(schema, references, value) {
-  if (!IsInteger(value)) {
-    return false;
-  }
-  if (IsDefined(schema.exclusiveMaximum) && !(value < schema.exclusiveMaximum)) {
-    return false;
-  }
-  if (IsDefined(schema.exclusiveMinimum) && !(value > schema.exclusiveMinimum)) {
-    return false;
-  }
-  if (IsDefined(schema.maximum) && !(value <= schema.maximum)) {
-    return false;
-  }
-  if (IsDefined(schema.minimum) && !(value >= schema.minimum)) {
-    return false;
-  }
-  if (IsDefined(schema.multipleOf) && !(value % schema.multipleOf === 0)) {
-    return false;
-  }
-  return true;
-}
-function FromIntersect4(schema, references, value) {
-  const check1 = schema.allOf.every((schema2) => Visit5(schema2, references, value));
-  if (schema.unevaluatedProperties === false) {
-    const keyPattern = new RegExp(KeyOfPattern(schema));
-    const check2 = Object.getOwnPropertyNames(value).every((key) => keyPattern.test(key));
-    return check1 && check2;
-  } else if (IsSchema(schema.unevaluatedProperties)) {
-    const keyCheck = new RegExp(KeyOfPattern(schema));
-    const check2 = Object.getOwnPropertyNames(value).every((key) => keyCheck.test(key) || Visit5(schema.unevaluatedProperties, references, value[key]));
-    return check1 && check2;
-  } else {
-    return check1;
-  }
-}
-function FromIterator2(schema, references, value) {
-  return IsIterator(value);
-}
-function FromLiteral3(schema, references, value) {
-  return value === schema.const;
-}
-function FromNever2(schema, references, value) {
-  return false;
-}
-function FromNot2(schema, references, value) {
-  return !Visit5(schema.not, references, value);
-}
-function FromNull2(schema, references, value) {
-  return IsNull(value);
-}
-function FromNumber2(schema, references, value) {
-  if (!TypeSystemPolicy.IsNumberLike(value))
-    return false;
-  if (IsDefined(schema.exclusiveMaximum) && !(value < schema.exclusiveMaximum)) {
-    return false;
-  }
-  if (IsDefined(schema.exclusiveMinimum) && !(value > schema.exclusiveMinimum)) {
-    return false;
-  }
-  if (IsDefined(schema.minimum) && !(value >= schema.minimum)) {
-    return false;
-  }
-  if (IsDefined(schema.maximum) && !(value <= schema.maximum)) {
-    return false;
-  }
-  if (IsDefined(schema.multipleOf) && !(value % schema.multipleOf === 0)) {
-    return false;
-  }
-  return true;
-}
-function FromObject2(schema, references, value) {
-  if (!TypeSystemPolicy.IsObjectLike(value))
-    return false;
-  if (IsDefined(schema.minProperties) && !(Object.getOwnPropertyNames(value).length >= schema.minProperties)) {
-    return false;
-  }
-  if (IsDefined(schema.maxProperties) && !(Object.getOwnPropertyNames(value).length <= schema.maxProperties)) {
-    return false;
-  }
-  const knownKeys = Object.getOwnPropertyNames(schema.properties);
-  for (const knownKey of knownKeys) {
-    const property = schema.properties[knownKey];
-    if (schema.required && schema.required.includes(knownKey)) {
-      if (!Visit5(property, references, value[knownKey])) {
-        return false;
-      }
-      if ((ExtendsUndefinedCheck(property) || IsAnyOrUnknown(property)) && !(knownKey in value)) {
-        return false;
-      }
-    } else {
-      if (TypeSystemPolicy.IsExactOptionalProperty(value, knownKey) && !Visit5(property, references, value[knownKey])) {
-        return false;
-      }
-    }
-  }
-  if (schema.additionalProperties === false) {
-    const valueKeys = Object.getOwnPropertyNames(value);
-    if (schema.required && schema.required.length === knownKeys.length && valueKeys.length === knownKeys.length) {
-      return true;
-    } else {
-      return valueKeys.every((valueKey) => knownKeys.includes(valueKey));
-    }
-  } else if (typeof schema.additionalProperties === "object") {
-    const valueKeys = Object.getOwnPropertyNames(value);
-    return valueKeys.every((key) => knownKeys.includes(key) || Visit5(schema.additionalProperties, references, value[key]));
-  } else {
-    return true;
-  }
-}
-function FromPromise2(schema, references, value) {
-  return IsPromise(value);
-}
-function FromRecord2(schema, references, value) {
-  if (!TypeSystemPolicy.IsRecordLike(value)) {
-    return false;
-  }
-  if (IsDefined(schema.minProperties) && !(Object.getOwnPropertyNames(value).length >= schema.minProperties)) {
-    return false;
-  }
-  if (IsDefined(schema.maxProperties) && !(Object.getOwnPropertyNames(value).length <= schema.maxProperties)) {
-    return false;
-  }
-  const [patternKey, patternSchema] = Object.entries(schema.patternProperties)[0];
-  const regex = new RegExp(patternKey);
-  const check1 = Object.entries(value).every(([key, value2]) => {
-    return regex.test(key) ? Visit5(patternSchema, references, value2) : true;
-  });
-  const check2 = typeof schema.additionalProperties === "object" ? Object.entries(value).every(([key, value2]) => {
-    return !regex.test(key) ? Visit5(schema.additionalProperties, references, value2) : true;
-  }) : true;
-  const check3 = schema.additionalProperties === false ? Object.getOwnPropertyNames(value).every((key) => {
-    return regex.test(key);
-  }) : true;
-  return check1 && check2 && check3;
-}
-function FromRef2(schema, references, value) {
-  return Visit5(Deref(schema, references), references, value);
-}
-function FromRegExp2(schema, references, value) {
-  const regex = new RegExp(schema.source, schema.flags);
-  if (IsDefined(schema.minLength)) {
-    if (!(value.length >= schema.minLength))
-      return false;
-  }
-  if (IsDefined(schema.maxLength)) {
-    if (!(value.length <= schema.maxLength))
-      return false;
-  }
-  return regex.test(value);
-}
-function FromString2(schema, references, value) {
-  if (!IsString(value)) {
-    return false;
-  }
-  if (IsDefined(schema.minLength)) {
-    if (!(value.length >= schema.minLength))
-      return false;
-  }
-  if (IsDefined(schema.maxLength)) {
-    if (!(value.length <= schema.maxLength))
-      return false;
-  }
-  if (IsDefined(schema.pattern)) {
-    const regex = new RegExp(schema.pattern);
-    if (!regex.test(value))
-      return false;
-  }
-  if (IsDefined(schema.format)) {
-    if (!format_exports.Has(schema.format))
-      return false;
-    const func = format_exports.Get(schema.format);
-    return func(value);
-  }
-  return true;
-}
-function FromSymbol2(schema, references, value) {
-  return IsSymbol(value);
-}
-function FromTemplateLiteral3(schema, references, value) {
-  return IsString(value) && new RegExp(schema.pattern).test(value);
-}
-function FromThis(schema, references, value) {
-  return Visit5(Deref(schema, references), references, value);
-}
-function FromTuple4(schema, references, value) {
-  if (!IsArray(value)) {
-    return false;
-  }
-  if (schema.items === void 0 && !(value.length === 0)) {
-    return false;
-  }
-  if (!(value.length === schema.maxItems)) {
-    return false;
-  }
-  if (!schema.items) {
-    return true;
-  }
-  for (let i = 0; i < schema.items.length; i++) {
-    if (!Visit5(schema.items[i], references, value[i]))
-      return false;
-  }
-  return true;
-}
-function FromUndefined2(schema, references, value) {
-  return IsUndefined(value);
-}
-function FromUnion6(schema, references, value) {
-  return schema.anyOf.some((inner) => Visit5(inner, references, value));
-}
-function FromUint8Array2(schema, references, value) {
-  if (!IsUint8Array(value)) {
-    return false;
-  }
-  if (IsDefined(schema.maxByteLength) && !(value.length <= schema.maxByteLength)) {
-    return false;
-  }
-  if (IsDefined(schema.minByteLength) && !(value.length >= schema.minByteLength)) {
-    return false;
-  }
-  return true;
-}
-function FromUnknown2(schema, references, value) {
-  return true;
-}
-function FromVoid2(schema, references, value) {
-  return TypeSystemPolicy.IsVoidLike(value);
-}
-function FromKind(schema, references, value) {
-  if (!type_exports.Has(schema[Kind]))
-    return false;
-  const func = type_exports.Get(schema[Kind]);
-  return func(schema, value);
-}
-function Visit5(schema, references, value) {
-  const references_ = IsDefined(schema.$id) ? Pushref(schema, references) : references;
-  const schema_ = schema;
-  switch (schema_[Kind]) {
-    case "Any":
-      return FromAny2(schema_, references_, value);
-    case "Argument":
-      return FromArgument(schema_, references_, value);
-    case "Array":
-      return FromArray4(schema_, references_, value);
-    case "AsyncIterator":
-      return FromAsyncIterator2(schema_, references_, value);
-    case "BigInt":
-      return FromBigInt2(schema_, references_, value);
-    case "Boolean":
-      return FromBoolean2(schema_, references_, value);
-    case "Constructor":
-      return FromConstructor2(schema_, references_, value);
-    case "Date":
-      return FromDate2(schema_, references_, value);
-    case "Function":
-      return FromFunction2(schema_, references_, value);
-    case "Import":
-      return FromImport(schema_, references_, value);
-    case "Integer":
-      return FromInteger2(schema_, references_, value);
-    case "Intersect":
-      return FromIntersect4(schema_, references_, value);
-    case "Iterator":
-      return FromIterator2(schema_, references_, value);
-    case "Literal":
-      return FromLiteral3(schema_, references_, value);
-    case "Never":
-      return FromNever2(schema_, references_, value);
-    case "Not":
-      return FromNot2(schema_, references_, value);
-    case "Null":
-      return FromNull2(schema_, references_, value);
-    case "Number":
-      return FromNumber2(schema_, references_, value);
-    case "Object":
-      return FromObject2(schema_, references_, value);
-    case "Promise":
-      return FromPromise2(schema_, references_, value);
-    case "Record":
-      return FromRecord2(schema_, references_, value);
-    case "Ref":
-      return FromRef2(schema_, references_, value);
-    case "RegExp":
-      return FromRegExp2(schema_, references_, value);
-    case "String":
-      return FromString2(schema_, references_, value);
-    case "Symbol":
-      return FromSymbol2(schema_, references_, value);
-    case "TemplateLiteral":
-      return FromTemplateLiteral3(schema_, references_, value);
-    case "This":
-      return FromThis(schema_, references_, value);
-    case "Tuple":
-      return FromTuple4(schema_, references_, value);
-    case "Undefined":
-      return FromUndefined2(schema_, references_, value);
-    case "Union":
-      return FromUnion6(schema_, references_, value);
-    case "Uint8Array":
-      return FromUint8Array2(schema_, references_, value);
-    case "Unknown":
-      return FromUnknown2(schema_, references_, value);
-    case "Void":
-      return FromVoid2(schema_, references_, value);
-    default:
-      if (!type_exports.Has(schema_[Kind]))
-        throw new ValueCheckUnknownTypeError(schema_);
-      return FromKind(schema_, references_, value);
-  }
-}
-function Check(...args) {
-  return args.length === 3 ? Visit5(args[0], args[1], args[2]) : Visit5(args[0], [], args[1]);
-}
-var ValueCheckUnknownTypeError;
-var init_check = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/check/check.mjs"() {
-    init_system2();
-    init_deref2();
-    init_hash2();
-    init_symbols2();
-    init_keyof2();
-    init_extends2();
-    init_registry();
-    init_error2();
-    init_never2();
-    init_guard2();
-    init_kind();
-    ValueCheckUnknownTypeError = class extends TypeBoxError {
-      constructor(schema) {
-        super(`Unknown type`);
-        this.schema = schema;
-      }
-    };
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/check/index.mjs
-var init_check2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/check/index.mjs"() {
-    init_check();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/errors/errors.mjs
-function EscapeKey(key) {
-  return key.replace(/~/g, "~0").replace(/\//g, "~1");
-}
-function IsDefined2(value) {
-  return value !== void 0;
-}
-function Create(errorType, schema, path4, value, errors = []) {
-  return {
-    type: errorType,
-    schema,
-    path: path4,
-    value,
-    message: GetErrorFunction()({ errorType, path: path4, schema, value, errors }),
-    errors
-  };
-}
-function* FromAny3(schema, references, path4, value) {
-}
-function* FromArgument2(schema, references, path4, value) {
-}
-function* FromArray5(schema, references, path4, value) {
-  if (!IsArray(value)) {
-    return yield Create(ValueErrorType.Array, schema, path4, value);
-  }
-  if (IsDefined2(schema.minItems) && !(value.length >= schema.minItems)) {
-    yield Create(ValueErrorType.ArrayMinItems, schema, path4, value);
-  }
-  if (IsDefined2(schema.maxItems) && !(value.length <= schema.maxItems)) {
-    yield Create(ValueErrorType.ArrayMaxItems, schema, path4, value);
-  }
-  for (let i = 0; i < value.length; i++) {
-    yield* Visit6(schema.items, references, `${path4}/${i}`, value[i]);
-  }
-  if (schema.uniqueItems === true && !(function() {
-    const set = /* @__PURE__ */ new Set();
-    for (const element of value) {
-      const hashed = Hash(element);
-      if (set.has(hashed)) {
-        return false;
-      } else {
-        set.add(hashed);
-      }
-    }
-    return true;
-  })()) {
-    yield Create(ValueErrorType.ArrayUniqueItems, schema, path4, value);
-  }
-  if (!(IsDefined2(schema.contains) || IsDefined2(schema.minContains) || IsDefined2(schema.maxContains))) {
-    return;
-  }
-  const containsSchema = IsDefined2(schema.contains) ? schema.contains : Never();
-  const containsCount = value.reduce((acc, value2, index) => Visit6(containsSchema, references, `${path4}${index}`, value2).next().done === true ? acc + 1 : acc, 0);
-  if (containsCount === 0) {
-    yield Create(ValueErrorType.ArrayContains, schema, path4, value);
-  }
-  if (IsNumber(schema.minContains) && containsCount < schema.minContains) {
-    yield Create(ValueErrorType.ArrayMinContains, schema, path4, value);
-  }
-  if (IsNumber(schema.maxContains) && containsCount > schema.maxContains) {
-    yield Create(ValueErrorType.ArrayMaxContains, schema, path4, value);
-  }
-}
-function* FromAsyncIterator3(schema, references, path4, value) {
-  if (!IsAsyncIterator(value))
-    yield Create(ValueErrorType.AsyncIterator, schema, path4, value);
-}
-function* FromBigInt3(schema, references, path4, value) {
-  if (!IsBigInt(value))
-    return yield Create(ValueErrorType.BigInt, schema, path4, value);
-  if (IsDefined2(schema.exclusiveMaximum) && !(value < schema.exclusiveMaximum)) {
-    yield Create(ValueErrorType.BigIntExclusiveMaximum, schema, path4, value);
-  }
-  if (IsDefined2(schema.exclusiveMinimum) && !(value > schema.exclusiveMinimum)) {
-    yield Create(ValueErrorType.BigIntExclusiveMinimum, schema, path4, value);
-  }
-  if (IsDefined2(schema.maximum) && !(value <= schema.maximum)) {
-    yield Create(ValueErrorType.BigIntMaximum, schema, path4, value);
-  }
-  if (IsDefined2(schema.minimum) && !(value >= schema.minimum)) {
-    yield Create(ValueErrorType.BigIntMinimum, schema, path4, value);
-  }
-  if (IsDefined2(schema.multipleOf) && !(value % schema.multipleOf === BigInt(0))) {
-    yield Create(ValueErrorType.BigIntMultipleOf, schema, path4, value);
-  }
-}
-function* FromBoolean3(schema, references, path4, value) {
-  if (!IsBoolean(value))
-    yield Create(ValueErrorType.Boolean, schema, path4, value);
-}
-function* FromConstructor3(schema, references, path4, value) {
-  yield* Visit6(schema.returns, references, path4, value.prototype);
-}
-function* FromDate3(schema, references, path4, value) {
-  if (!IsDate(value))
-    return yield Create(ValueErrorType.Date, schema, path4, value);
-  if (IsDefined2(schema.exclusiveMaximumTimestamp) && !(value.getTime() < schema.exclusiveMaximumTimestamp)) {
-    yield Create(ValueErrorType.DateExclusiveMaximumTimestamp, schema, path4, value);
-  }
-  if (IsDefined2(schema.exclusiveMinimumTimestamp) && !(value.getTime() > schema.exclusiveMinimumTimestamp)) {
-    yield Create(ValueErrorType.DateExclusiveMinimumTimestamp, schema, path4, value);
-  }
-  if (IsDefined2(schema.maximumTimestamp) && !(value.getTime() <= schema.maximumTimestamp)) {
-    yield Create(ValueErrorType.DateMaximumTimestamp, schema, path4, value);
-  }
-  if (IsDefined2(schema.minimumTimestamp) && !(value.getTime() >= schema.minimumTimestamp)) {
-    yield Create(ValueErrorType.DateMinimumTimestamp, schema, path4, value);
-  }
-  if (IsDefined2(schema.multipleOfTimestamp) && !(value.getTime() % schema.multipleOfTimestamp === 0)) {
-    yield Create(ValueErrorType.DateMultipleOfTimestamp, schema, path4, value);
-  }
-}
-function* FromFunction3(schema, references, path4, value) {
-  if (!IsFunction(value))
-    yield Create(ValueErrorType.Function, schema, path4, value);
-}
-function* FromImport2(schema, references, path4, value) {
-  const definitions = globalThis.Object.values(schema.$defs);
-  const target = schema.$defs[schema.$ref];
-  yield* Visit6(target, [...references, ...definitions], path4, value);
-}
-function* FromInteger3(schema, references, path4, value) {
-  if (!IsInteger(value))
-    return yield Create(ValueErrorType.Integer, schema, path4, value);
-  if (IsDefined2(schema.exclusiveMaximum) && !(value < schema.exclusiveMaximum)) {
-    yield Create(ValueErrorType.IntegerExclusiveMaximum, schema, path4, value);
-  }
-  if (IsDefined2(schema.exclusiveMinimum) && !(value > schema.exclusiveMinimum)) {
-    yield Create(ValueErrorType.IntegerExclusiveMinimum, schema, path4, value);
-  }
-  if (IsDefined2(schema.maximum) && !(value <= schema.maximum)) {
-    yield Create(ValueErrorType.IntegerMaximum, schema, path4, value);
-  }
-  if (IsDefined2(schema.minimum) && !(value >= schema.minimum)) {
-    yield Create(ValueErrorType.IntegerMinimum, schema, path4, value);
-  }
-  if (IsDefined2(schema.multipleOf) && !(value % schema.multipleOf === 0)) {
-    yield Create(ValueErrorType.IntegerMultipleOf, schema, path4, value);
-  }
-}
-function* FromIntersect5(schema, references, path4, value) {
-  let hasError = false;
-  for (const inner of schema.allOf) {
-    for (const error of Visit6(inner, references, path4, value)) {
-      hasError = true;
-      yield error;
-    }
-  }
-  if (hasError) {
-    return yield Create(ValueErrorType.Intersect, schema, path4, value);
-  }
-  if (schema.unevaluatedProperties === false) {
-    const keyCheck = new RegExp(KeyOfPattern(schema));
-    for (const valueKey of Object.getOwnPropertyNames(value)) {
-      if (!keyCheck.test(valueKey)) {
-        yield Create(ValueErrorType.IntersectUnevaluatedProperties, schema, `${path4}/${valueKey}`, value);
-      }
-    }
-  }
-  if (typeof schema.unevaluatedProperties === "object") {
-    const keyCheck = new RegExp(KeyOfPattern(schema));
-    for (const valueKey of Object.getOwnPropertyNames(value)) {
-      if (!keyCheck.test(valueKey)) {
-        const next = Visit6(schema.unevaluatedProperties, references, `${path4}/${valueKey}`, value[valueKey]).next();
-        if (!next.done)
-          yield next.value;
-      }
-    }
-  }
-}
-function* FromIterator3(schema, references, path4, value) {
-  if (!IsIterator(value))
-    yield Create(ValueErrorType.Iterator, schema, path4, value);
-}
-function* FromLiteral4(schema, references, path4, value) {
-  if (!(value === schema.const))
-    yield Create(ValueErrorType.Literal, schema, path4, value);
-}
-function* FromNever3(schema, references, path4, value) {
-  yield Create(ValueErrorType.Never, schema, path4, value);
-}
-function* FromNot3(schema, references, path4, value) {
-  if (Visit6(schema.not, references, path4, value).next().done === true)
-    yield Create(ValueErrorType.Not, schema, path4, value);
-}
-function* FromNull3(schema, references, path4, value) {
-  if (!IsNull(value))
-    yield Create(ValueErrorType.Null, schema, path4, value);
-}
-function* FromNumber3(schema, references, path4, value) {
-  if (!TypeSystemPolicy.IsNumberLike(value))
-    return yield Create(ValueErrorType.Number, schema, path4, value);
-  if (IsDefined2(schema.exclusiveMaximum) && !(value < schema.exclusiveMaximum)) {
-    yield Create(ValueErrorType.NumberExclusiveMaximum, schema, path4, value);
-  }
-  if (IsDefined2(schema.exclusiveMinimum) && !(value > schema.exclusiveMinimum)) {
-    yield Create(ValueErrorType.NumberExclusiveMinimum, schema, path4, value);
-  }
-  if (IsDefined2(schema.maximum) && !(value <= schema.maximum)) {
-    yield Create(ValueErrorType.NumberMaximum, schema, path4, value);
-  }
-  if (IsDefined2(schema.minimum) && !(value >= schema.minimum)) {
-    yield Create(ValueErrorType.NumberMinimum, schema, path4, value);
-  }
-  if (IsDefined2(schema.multipleOf) && !(value % schema.multipleOf === 0)) {
-    yield Create(ValueErrorType.NumberMultipleOf, schema, path4, value);
-  }
-}
-function* FromObject3(schema, references, path4, value) {
-  if (!TypeSystemPolicy.IsObjectLike(value))
-    return yield Create(ValueErrorType.Object, schema, path4, value);
-  if (IsDefined2(schema.minProperties) && !(Object.getOwnPropertyNames(value).length >= schema.minProperties)) {
-    yield Create(ValueErrorType.ObjectMinProperties, schema, path4, value);
-  }
-  if (IsDefined2(schema.maxProperties) && !(Object.getOwnPropertyNames(value).length <= schema.maxProperties)) {
-    yield Create(ValueErrorType.ObjectMaxProperties, schema, path4, value);
-  }
-  const requiredKeys = Array.isArray(schema.required) ? schema.required : [];
-  const knownKeys = Object.getOwnPropertyNames(schema.properties);
-  const unknownKeys = Object.getOwnPropertyNames(value);
-  for (const requiredKey of requiredKeys) {
-    if (unknownKeys.includes(requiredKey))
-      continue;
-    yield Create(ValueErrorType.ObjectRequiredProperty, schema.properties[requiredKey], `${path4}/${EscapeKey(requiredKey)}`, void 0);
-  }
-  if (schema.additionalProperties === false) {
-    for (const valueKey of unknownKeys) {
-      if (!knownKeys.includes(valueKey)) {
-        yield Create(ValueErrorType.ObjectAdditionalProperties, schema, `${path4}/${EscapeKey(valueKey)}`, value[valueKey]);
-      }
-    }
-  }
-  if (typeof schema.additionalProperties === "object") {
-    for (const valueKey of unknownKeys) {
-      if (knownKeys.includes(valueKey))
-        continue;
-      yield* Visit6(schema.additionalProperties, references, `${path4}/${EscapeKey(valueKey)}`, value[valueKey]);
-    }
-  }
-  for (const knownKey of knownKeys) {
-    const property = schema.properties[knownKey];
-    if (schema.required && schema.required.includes(knownKey)) {
-      yield* Visit6(property, references, `${path4}/${EscapeKey(knownKey)}`, value[knownKey]);
-      if (ExtendsUndefinedCheck(schema) && !(knownKey in value)) {
-        yield Create(ValueErrorType.ObjectRequiredProperty, property, `${path4}/${EscapeKey(knownKey)}`, void 0);
-      }
-    } else {
-      if (TypeSystemPolicy.IsExactOptionalProperty(value, knownKey)) {
-        yield* Visit6(property, references, `${path4}/${EscapeKey(knownKey)}`, value[knownKey]);
-      }
-    }
-  }
-}
-function* FromPromise3(schema, references, path4, value) {
-  if (!IsPromise(value))
-    yield Create(ValueErrorType.Promise, schema, path4, value);
-}
-function* FromRecord3(schema, references, path4, value) {
-  if (!TypeSystemPolicy.IsRecordLike(value))
-    return yield Create(ValueErrorType.Object, schema, path4, value);
-  if (IsDefined2(schema.minProperties) && !(Object.getOwnPropertyNames(value).length >= schema.minProperties)) {
-    yield Create(ValueErrorType.ObjectMinProperties, schema, path4, value);
-  }
-  if (IsDefined2(schema.maxProperties) && !(Object.getOwnPropertyNames(value).length <= schema.maxProperties)) {
-    yield Create(ValueErrorType.ObjectMaxProperties, schema, path4, value);
-  }
-  const [patternKey, patternSchema] = Object.entries(schema.patternProperties)[0];
-  const regex = new RegExp(patternKey);
-  for (const [propertyKey, propertyValue] of Object.entries(value)) {
-    if (regex.test(propertyKey))
-      yield* Visit6(patternSchema, references, `${path4}/${EscapeKey(propertyKey)}`, propertyValue);
-  }
-  if (typeof schema.additionalProperties === "object") {
-    for (const [propertyKey, propertyValue] of Object.entries(value)) {
-      if (!regex.test(propertyKey))
-        yield* Visit6(schema.additionalProperties, references, `${path4}/${EscapeKey(propertyKey)}`, propertyValue);
-    }
-  }
-  if (schema.additionalProperties === false) {
-    for (const [propertyKey, propertyValue] of Object.entries(value)) {
-      if (regex.test(propertyKey))
-        continue;
-      return yield Create(ValueErrorType.ObjectAdditionalProperties, schema, `${path4}/${EscapeKey(propertyKey)}`, propertyValue);
-    }
-  }
-}
-function* FromRef3(schema, references, path4, value) {
-  yield* Visit6(Deref(schema, references), references, path4, value);
-}
-function* FromRegExp3(schema, references, path4, value) {
-  if (!IsString(value))
-    return yield Create(ValueErrorType.String, schema, path4, value);
-  if (IsDefined2(schema.minLength) && !(value.length >= schema.minLength)) {
-    yield Create(ValueErrorType.StringMinLength, schema, path4, value);
-  }
-  if (IsDefined2(schema.maxLength) && !(value.length <= schema.maxLength)) {
-    yield Create(ValueErrorType.StringMaxLength, schema, path4, value);
-  }
-  const regex = new RegExp(schema.source, schema.flags);
-  if (!regex.test(value)) {
-    return yield Create(ValueErrorType.RegExp, schema, path4, value);
-  }
-}
-function* FromString3(schema, references, path4, value) {
-  if (!IsString(value))
-    return yield Create(ValueErrorType.String, schema, path4, value);
-  if (IsDefined2(schema.minLength) && !(value.length >= schema.minLength)) {
-    yield Create(ValueErrorType.StringMinLength, schema, path4, value);
-  }
-  if (IsDefined2(schema.maxLength) && !(value.length <= schema.maxLength)) {
-    yield Create(ValueErrorType.StringMaxLength, schema, path4, value);
-  }
-  if (IsString(schema.pattern)) {
-    const regex = new RegExp(schema.pattern);
-    if (!regex.test(value)) {
-      yield Create(ValueErrorType.StringPattern, schema, path4, value);
-    }
-  }
-  if (IsString(schema.format)) {
-    if (!format_exports.Has(schema.format)) {
-      yield Create(ValueErrorType.StringFormatUnknown, schema, path4, value);
-    } else {
-      const format = format_exports.Get(schema.format);
-      if (!format(value)) {
-        yield Create(ValueErrorType.StringFormat, schema, path4, value);
-      }
-    }
-  }
-}
-function* FromSymbol3(schema, references, path4, value) {
-  if (!IsSymbol(value))
-    yield Create(ValueErrorType.Symbol, schema, path4, value);
-}
-function* FromTemplateLiteral4(schema, references, path4, value) {
-  if (!IsString(value))
-    return yield Create(ValueErrorType.String, schema, path4, value);
-  const regex = new RegExp(schema.pattern);
-  if (!regex.test(value)) {
-    yield Create(ValueErrorType.StringPattern, schema, path4, value);
-  }
-}
-function* FromThis2(schema, references, path4, value) {
-  yield* Visit6(Deref(schema, references), references, path4, value);
-}
-function* FromTuple5(schema, references, path4, value) {
-  if (!IsArray(value))
-    return yield Create(ValueErrorType.Tuple, schema, path4, value);
-  if (schema.items === void 0 && !(value.length === 0)) {
-    return yield Create(ValueErrorType.TupleLength, schema, path4, value);
-  }
-  if (!(value.length === schema.maxItems)) {
-    return yield Create(ValueErrorType.TupleLength, schema, path4, value);
-  }
-  if (!schema.items) {
-    return;
-  }
-  for (let i = 0; i < schema.items.length; i++) {
-    yield* Visit6(schema.items[i], references, `${path4}/${i}`, value[i]);
-  }
-}
-function* FromUndefined3(schema, references, path4, value) {
-  if (!IsUndefined(value))
-    yield Create(ValueErrorType.Undefined, schema, path4, value);
-}
-function* FromUnion7(schema, references, path4, value) {
-  if (Check(schema, references, value))
-    return;
-  const errors = schema.anyOf.map((variant) => new ValueErrorIterator(Visit6(variant, references, path4, value)));
-  yield Create(ValueErrorType.Union, schema, path4, value, errors);
-}
-function* FromUint8Array3(schema, references, path4, value) {
-  if (!IsUint8Array(value))
-    return yield Create(ValueErrorType.Uint8Array, schema, path4, value);
-  if (IsDefined2(schema.maxByteLength) && !(value.length <= schema.maxByteLength)) {
-    yield Create(ValueErrorType.Uint8ArrayMaxByteLength, schema, path4, value);
-  }
-  if (IsDefined2(schema.minByteLength) && !(value.length >= schema.minByteLength)) {
-    yield Create(ValueErrorType.Uint8ArrayMinByteLength, schema, path4, value);
-  }
-}
-function* FromUnknown3(schema, references, path4, value) {
-}
-function* FromVoid3(schema, references, path4, value) {
-  if (!TypeSystemPolicy.IsVoidLike(value))
-    yield Create(ValueErrorType.Void, schema, path4, value);
-}
-function* FromKind2(schema, references, path4, value) {
-  const check = type_exports.Get(schema[Kind]);
-  if (!check(schema, value))
-    yield Create(ValueErrorType.Kind, schema, path4, value);
-}
-function* Visit6(schema, references, path4, value) {
-  const references_ = IsDefined2(schema.$id) ? [...references, schema] : references;
-  const schema_ = schema;
-  switch (schema_[Kind]) {
-    case "Any":
-      return yield* FromAny3(schema_, references_, path4, value);
-    case "Argument":
-      return yield* FromArgument2(schema_, references_, path4, value);
-    case "Array":
-      return yield* FromArray5(schema_, references_, path4, value);
-    case "AsyncIterator":
-      return yield* FromAsyncIterator3(schema_, references_, path4, value);
-    case "BigInt":
-      return yield* FromBigInt3(schema_, references_, path4, value);
-    case "Boolean":
-      return yield* FromBoolean3(schema_, references_, path4, value);
-    case "Constructor":
-      return yield* FromConstructor3(schema_, references_, path4, value);
-    case "Date":
-      return yield* FromDate3(schema_, references_, path4, value);
-    case "Function":
-      return yield* FromFunction3(schema_, references_, path4, value);
-    case "Import":
-      return yield* FromImport2(schema_, references_, path4, value);
-    case "Integer":
-      return yield* FromInteger3(schema_, references_, path4, value);
-    case "Intersect":
-      return yield* FromIntersect5(schema_, references_, path4, value);
-    case "Iterator":
-      return yield* FromIterator3(schema_, references_, path4, value);
-    case "Literal":
-      return yield* FromLiteral4(schema_, references_, path4, value);
-    case "Never":
-      return yield* FromNever3(schema_, references_, path4, value);
-    case "Not":
-      return yield* FromNot3(schema_, references_, path4, value);
-    case "Null":
-      return yield* FromNull3(schema_, references_, path4, value);
-    case "Number":
-      return yield* FromNumber3(schema_, references_, path4, value);
-    case "Object":
-      return yield* FromObject3(schema_, references_, path4, value);
-    case "Promise":
-      return yield* FromPromise3(schema_, references_, path4, value);
-    case "Record":
-      return yield* FromRecord3(schema_, references_, path4, value);
-    case "Ref":
-      return yield* FromRef3(schema_, references_, path4, value);
-    case "RegExp":
-      return yield* FromRegExp3(schema_, references_, path4, value);
-    case "String":
-      return yield* FromString3(schema_, references_, path4, value);
-    case "Symbol":
-      return yield* FromSymbol3(schema_, references_, path4, value);
-    case "TemplateLiteral":
-      return yield* FromTemplateLiteral4(schema_, references_, path4, value);
-    case "This":
-      return yield* FromThis2(schema_, references_, path4, value);
-    case "Tuple":
-      return yield* FromTuple5(schema_, references_, path4, value);
-    case "Undefined":
-      return yield* FromUndefined3(schema_, references_, path4, value);
-    case "Union":
-      return yield* FromUnion7(schema_, references_, path4, value);
-    case "Uint8Array":
-      return yield* FromUint8Array3(schema_, references_, path4, value);
-    case "Unknown":
-      return yield* FromUnknown3(schema_, references_, path4, value);
-    case "Void":
-      return yield* FromVoid3(schema_, references_, path4, value);
-    default:
-      if (!type_exports.Has(schema_[Kind]))
-        throw new ValueErrorsUnknownTypeError(schema);
-      return yield* FromKind2(schema_, references_, path4, value);
-  }
-}
-function Errors(...args) {
-  const iterator = args.length === 3 ? Visit6(args[0], args[1], "", args[2]) : Visit6(args[0], [], "", args[1]);
-  return new ValueErrorIterator(iterator);
-}
-var ValueErrorType, ValueErrorsUnknownTypeError, ValueErrorIterator;
-var init_errors = __esm({
-  "node_modules/@sinclair/typebox/build/esm/errors/errors.mjs"() {
-    init_system2();
-    init_keyof2();
-    init_registry();
-    init_extends_undefined();
-    init_function3();
-    init_error2();
-    init_deref2();
-    init_hash2();
-    init_check2();
-    init_symbols2();
-    init_never2();
-    init_guard2();
-    (function(ValueErrorType2) {
-      ValueErrorType2[ValueErrorType2["ArrayContains"] = 0] = "ArrayContains";
-      ValueErrorType2[ValueErrorType2["ArrayMaxContains"] = 1] = "ArrayMaxContains";
-      ValueErrorType2[ValueErrorType2["ArrayMaxItems"] = 2] = "ArrayMaxItems";
-      ValueErrorType2[ValueErrorType2["ArrayMinContains"] = 3] = "ArrayMinContains";
-      ValueErrorType2[ValueErrorType2["ArrayMinItems"] = 4] = "ArrayMinItems";
-      ValueErrorType2[ValueErrorType2["ArrayUniqueItems"] = 5] = "ArrayUniqueItems";
-      ValueErrorType2[ValueErrorType2["Array"] = 6] = "Array";
-      ValueErrorType2[ValueErrorType2["AsyncIterator"] = 7] = "AsyncIterator";
-      ValueErrorType2[ValueErrorType2["BigIntExclusiveMaximum"] = 8] = "BigIntExclusiveMaximum";
-      ValueErrorType2[ValueErrorType2["BigIntExclusiveMinimum"] = 9] = "BigIntExclusiveMinimum";
-      ValueErrorType2[ValueErrorType2["BigIntMaximum"] = 10] = "BigIntMaximum";
-      ValueErrorType2[ValueErrorType2["BigIntMinimum"] = 11] = "BigIntMinimum";
-      ValueErrorType2[ValueErrorType2["BigIntMultipleOf"] = 12] = "BigIntMultipleOf";
-      ValueErrorType2[ValueErrorType2["BigInt"] = 13] = "BigInt";
-      ValueErrorType2[ValueErrorType2["Boolean"] = 14] = "Boolean";
-      ValueErrorType2[ValueErrorType2["DateExclusiveMaximumTimestamp"] = 15] = "DateExclusiveMaximumTimestamp";
-      ValueErrorType2[ValueErrorType2["DateExclusiveMinimumTimestamp"] = 16] = "DateExclusiveMinimumTimestamp";
-      ValueErrorType2[ValueErrorType2["DateMaximumTimestamp"] = 17] = "DateMaximumTimestamp";
-      ValueErrorType2[ValueErrorType2["DateMinimumTimestamp"] = 18] = "DateMinimumTimestamp";
-      ValueErrorType2[ValueErrorType2["DateMultipleOfTimestamp"] = 19] = "DateMultipleOfTimestamp";
-      ValueErrorType2[ValueErrorType2["Date"] = 20] = "Date";
-      ValueErrorType2[ValueErrorType2["Function"] = 21] = "Function";
-      ValueErrorType2[ValueErrorType2["IntegerExclusiveMaximum"] = 22] = "IntegerExclusiveMaximum";
-      ValueErrorType2[ValueErrorType2["IntegerExclusiveMinimum"] = 23] = "IntegerExclusiveMinimum";
-      ValueErrorType2[ValueErrorType2["IntegerMaximum"] = 24] = "IntegerMaximum";
-      ValueErrorType2[ValueErrorType2["IntegerMinimum"] = 25] = "IntegerMinimum";
-      ValueErrorType2[ValueErrorType2["IntegerMultipleOf"] = 26] = "IntegerMultipleOf";
-      ValueErrorType2[ValueErrorType2["Integer"] = 27] = "Integer";
-      ValueErrorType2[ValueErrorType2["IntersectUnevaluatedProperties"] = 28] = "IntersectUnevaluatedProperties";
-      ValueErrorType2[ValueErrorType2["Intersect"] = 29] = "Intersect";
-      ValueErrorType2[ValueErrorType2["Iterator"] = 30] = "Iterator";
-      ValueErrorType2[ValueErrorType2["Kind"] = 31] = "Kind";
-      ValueErrorType2[ValueErrorType2["Literal"] = 32] = "Literal";
-      ValueErrorType2[ValueErrorType2["Never"] = 33] = "Never";
-      ValueErrorType2[ValueErrorType2["Not"] = 34] = "Not";
-      ValueErrorType2[ValueErrorType2["Null"] = 35] = "Null";
-      ValueErrorType2[ValueErrorType2["NumberExclusiveMaximum"] = 36] = "NumberExclusiveMaximum";
-      ValueErrorType2[ValueErrorType2["NumberExclusiveMinimum"] = 37] = "NumberExclusiveMinimum";
-      ValueErrorType2[ValueErrorType2["NumberMaximum"] = 38] = "NumberMaximum";
-      ValueErrorType2[ValueErrorType2["NumberMinimum"] = 39] = "NumberMinimum";
-      ValueErrorType2[ValueErrorType2["NumberMultipleOf"] = 40] = "NumberMultipleOf";
-      ValueErrorType2[ValueErrorType2["Number"] = 41] = "Number";
-      ValueErrorType2[ValueErrorType2["ObjectAdditionalProperties"] = 42] = "ObjectAdditionalProperties";
-      ValueErrorType2[ValueErrorType2["ObjectMaxProperties"] = 43] = "ObjectMaxProperties";
-      ValueErrorType2[ValueErrorType2["ObjectMinProperties"] = 44] = "ObjectMinProperties";
-      ValueErrorType2[ValueErrorType2["ObjectRequiredProperty"] = 45] = "ObjectRequiredProperty";
-      ValueErrorType2[ValueErrorType2["Object"] = 46] = "Object";
-      ValueErrorType2[ValueErrorType2["Promise"] = 47] = "Promise";
-      ValueErrorType2[ValueErrorType2["RegExp"] = 48] = "RegExp";
-      ValueErrorType2[ValueErrorType2["StringFormatUnknown"] = 49] = "StringFormatUnknown";
-      ValueErrorType2[ValueErrorType2["StringFormat"] = 50] = "StringFormat";
-      ValueErrorType2[ValueErrorType2["StringMaxLength"] = 51] = "StringMaxLength";
-      ValueErrorType2[ValueErrorType2["StringMinLength"] = 52] = "StringMinLength";
-      ValueErrorType2[ValueErrorType2["StringPattern"] = 53] = "StringPattern";
-      ValueErrorType2[ValueErrorType2["String"] = 54] = "String";
-      ValueErrorType2[ValueErrorType2["Symbol"] = 55] = "Symbol";
-      ValueErrorType2[ValueErrorType2["TupleLength"] = 56] = "TupleLength";
-      ValueErrorType2[ValueErrorType2["Tuple"] = 57] = "Tuple";
-      ValueErrorType2[ValueErrorType2["Uint8ArrayMaxByteLength"] = 58] = "Uint8ArrayMaxByteLength";
-      ValueErrorType2[ValueErrorType2["Uint8ArrayMinByteLength"] = 59] = "Uint8ArrayMinByteLength";
-      ValueErrorType2[ValueErrorType2["Uint8Array"] = 60] = "Uint8Array";
-      ValueErrorType2[ValueErrorType2["Undefined"] = 61] = "Undefined";
-      ValueErrorType2[ValueErrorType2["Union"] = 62] = "Union";
-      ValueErrorType2[ValueErrorType2["Void"] = 63] = "Void";
-    })(ValueErrorType || (ValueErrorType = {}));
-    ValueErrorsUnknownTypeError = class extends TypeBoxError {
-      constructor(schema) {
-        super("Unknown type");
-        this.schema = schema;
-      }
-    };
-    ValueErrorIterator = class {
-      constructor(iterator) {
-        this.iterator = iterator;
-      }
-      [Symbol.iterator]() {
-        return this.iterator;
-      }
-      /** Returns the first value error or undefined if no errors */
-      First() {
-        const next = this.iterator.next();
-        return next.done ? void 0 : next.value;
-      }
-    };
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/errors/index.mjs
-var init_errors2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/errors/index.mjs"() {
-    init_errors();
-    init_function3();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/transform/decode.mjs
-function Default(schema, path4, value) {
-  try {
-    return IsTransform(schema) ? schema[TransformKind].Decode(value) : value;
-  } catch (error) {
-    throw new TransformDecodeError(schema, path4, value, error);
-  }
-}
-function FromArray6(schema, references, path4, value) {
-  return IsArray(value) ? Default(schema, path4, value.map((value2, index) => Visit7(schema.items, references, `${path4}/${index}`, value2))) : Default(schema, path4, value);
-}
-function FromIntersect6(schema, references, path4, value) {
-  if (!IsObject(value) || IsValueType(value))
-    return Default(schema, path4, value);
-  const knownEntries = KeyOfPropertyEntries(schema);
-  const knownKeys = knownEntries.map((entry) => entry[0]);
-  const knownProperties = { ...value };
-  for (const [knownKey, knownSchema] of knownEntries)
-    if (knownKey in knownProperties) {
-      knownProperties[knownKey] = Visit7(knownSchema, references, `${path4}/${knownKey}`, knownProperties[knownKey]);
-    }
-  if (!IsTransform(schema.unevaluatedProperties)) {
-    return Default(schema, path4, knownProperties);
-  }
-  const unknownKeys = Object.getOwnPropertyNames(knownProperties);
-  const unevaluatedProperties = schema.unevaluatedProperties;
-  const unknownProperties = { ...knownProperties };
-  for (const key of unknownKeys)
-    if (!knownKeys.includes(key)) {
-      unknownProperties[key] = Default(unevaluatedProperties, `${path4}/${key}`, unknownProperties[key]);
-    }
-  return Default(schema, path4, unknownProperties);
-}
-function FromImport3(schema, references, path4, value) {
-  const additional = globalThis.Object.values(schema.$defs);
-  const target = schema.$defs[schema.$ref];
-  const result = Visit7(target, [...references, ...additional], path4, value);
-  return Default(schema, path4, result);
-}
-function FromNot4(schema, references, path4, value) {
-  return Default(schema, path4, Visit7(schema.not, references, path4, value));
-}
-function FromObject4(schema, references, path4, value) {
-  if (!IsObject(value))
-    return Default(schema, path4, value);
-  const knownKeys = KeyOfPropertyKeys(schema);
-  const knownProperties = { ...value };
-  for (const key of knownKeys) {
-    if (!HasPropertyKey(knownProperties, key))
-      continue;
-    if (IsUndefined(knownProperties[key]) && (!IsUndefined3(schema.properties[key]) || TypeSystemPolicy.IsExactOptionalProperty(knownProperties, key)))
-      continue;
-    knownProperties[key] = Visit7(schema.properties[key], references, `${path4}/${key}`, knownProperties[key]);
-  }
-  if (!IsSchema(schema.additionalProperties)) {
-    return Default(schema, path4, knownProperties);
-  }
-  const unknownKeys = Object.getOwnPropertyNames(knownProperties);
-  const additionalProperties = schema.additionalProperties;
-  const unknownProperties = { ...knownProperties };
-  for (const key of unknownKeys)
-    if (!knownKeys.includes(key)) {
-      unknownProperties[key] = Default(additionalProperties, `${path4}/${key}`, unknownProperties[key]);
-    }
-  return Default(schema, path4, unknownProperties);
-}
-function FromRecord4(schema, references, path4, value) {
-  if (!IsObject(value))
-    return Default(schema, path4, value);
-  const pattern = Object.getOwnPropertyNames(schema.patternProperties)[0];
-  const knownKeys = new RegExp(pattern);
-  const knownProperties = { ...value };
-  for (const key of Object.getOwnPropertyNames(value))
-    if (knownKeys.test(key)) {
-      knownProperties[key] = Visit7(schema.patternProperties[pattern], references, `${path4}/${key}`, knownProperties[key]);
-    }
-  if (!IsSchema(schema.additionalProperties)) {
-    return Default(schema, path4, knownProperties);
-  }
-  const unknownKeys = Object.getOwnPropertyNames(knownProperties);
-  const additionalProperties = schema.additionalProperties;
-  const unknownProperties = { ...knownProperties };
-  for (const key of unknownKeys)
-    if (!knownKeys.test(key)) {
-      unknownProperties[key] = Default(additionalProperties, `${path4}/${key}`, unknownProperties[key]);
-    }
-  return Default(schema, path4, unknownProperties);
-}
-function FromRef4(schema, references, path4, value) {
-  const target = Deref(schema, references);
-  return Default(schema, path4, Visit7(target, references, path4, value));
-}
-function FromThis3(schema, references, path4, value) {
-  const target = Deref(schema, references);
-  return Default(schema, path4, Visit7(target, references, path4, value));
-}
-function FromTuple6(schema, references, path4, value) {
-  return IsArray(value) && IsArray(schema.items) ? Default(schema, path4, schema.items.map((schema2, index) => Visit7(schema2, references, `${path4}/${index}`, value[index]))) : Default(schema, path4, value);
-}
-function FromUnion8(schema, references, path4, value) {
-  for (const subschema of schema.anyOf) {
-    if (!Check(subschema, references, value))
-      continue;
-    const decoded = Visit7(subschema, references, path4, value);
-    return Default(schema, path4, decoded);
-  }
-  return Default(schema, path4, value);
-}
-function Visit7(schema, references, path4, value) {
-  const references_ = Pushref(schema, references);
-  const schema_ = schema;
-  switch (schema[Kind]) {
-    case "Array":
-      return FromArray6(schema_, references_, path4, value);
-    case "Import":
-      return FromImport3(schema_, references_, path4, value);
-    case "Intersect":
-      return FromIntersect6(schema_, references_, path4, value);
-    case "Not":
-      return FromNot4(schema_, references_, path4, value);
-    case "Object":
-      return FromObject4(schema_, references_, path4, value);
-    case "Record":
-      return FromRecord4(schema_, references_, path4, value);
-    case "Ref":
-      return FromRef4(schema_, references_, path4, value);
-    case "Symbol":
-      return Default(schema_, path4, value);
-    case "This":
-      return FromThis3(schema_, references_, path4, value);
-    case "Tuple":
-      return FromTuple6(schema_, references_, path4, value);
-    case "Union":
-      return FromUnion8(schema_, references_, path4, value);
-    default:
-      return Default(schema_, path4, value);
-  }
-}
-function TransformDecode(schema, references, value) {
-  return Visit7(schema, references, "", value);
-}
-var TransformDecodeCheckError, TransformDecodeError;
-var init_decode = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/transform/decode.mjs"() {
-    init_policy();
-    init_symbols2();
-    init_error2();
-    init_keyof2();
-    init_deref2();
-    init_check2();
-    init_guard2();
-    init_kind();
-    TransformDecodeCheckError = class extends TypeBoxError {
-      constructor(schema, value, error) {
-        super(`Unable to decode value as it does not match the expected schema`);
-        this.schema = schema;
-        this.value = value;
-        this.error = error;
-      }
-    };
-    TransformDecodeError = class extends TypeBoxError {
-      constructor(schema, path4, value, error) {
-        super(error instanceof Error ? error.message : "Unknown error");
-        this.schema = schema;
-        this.path = path4;
-        this.value = value;
-        this.error = error;
-      }
-    };
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/transform/encode.mjs
-function Default2(schema, path4, value) {
-  try {
-    return IsTransform(schema) ? schema[TransformKind].Encode(value) : value;
-  } catch (error) {
-    throw new TransformEncodeError(schema, path4, value, error);
-  }
-}
-function FromArray7(schema, references, path4, value) {
-  const defaulted = Default2(schema, path4, value);
-  return IsArray(defaulted) ? defaulted.map((value2, index) => Visit8(schema.items, references, `${path4}/${index}`, value2)) : defaulted;
-}
-function FromImport4(schema, references, path4, value) {
-  const additional = globalThis.Object.values(schema.$defs);
-  const target = schema.$defs[schema.$ref];
-  const result = Default2(schema, path4, value);
-  return Visit8(target, [...references, ...additional], path4, result);
-}
-function FromIntersect7(schema, references, path4, value) {
-  const defaulted = Default2(schema, path4, value);
-  if (!IsObject(value) || IsValueType(value))
-    return defaulted;
-  const knownEntries = KeyOfPropertyEntries(schema);
-  const knownKeys = knownEntries.map((entry) => entry[0]);
-  const knownProperties = { ...defaulted };
-  for (const [knownKey, knownSchema] of knownEntries)
-    if (knownKey in knownProperties) {
-      knownProperties[knownKey] = Visit8(knownSchema, references, `${path4}/${knownKey}`, knownProperties[knownKey]);
-    }
-  if (!IsTransform(schema.unevaluatedProperties)) {
-    return knownProperties;
-  }
-  const unknownKeys = Object.getOwnPropertyNames(knownProperties);
-  const unevaluatedProperties = schema.unevaluatedProperties;
-  const properties = { ...knownProperties };
-  for (const key of unknownKeys)
-    if (!knownKeys.includes(key)) {
-      properties[key] = Default2(unevaluatedProperties, `${path4}/${key}`, properties[key]);
-    }
-  return properties;
-}
-function FromNot5(schema, references, path4, value) {
-  return Default2(schema.not, path4, Default2(schema, path4, value));
-}
-function FromObject5(schema, references, path4, value) {
-  const defaulted = Default2(schema, path4, value);
-  if (!IsObject(defaulted))
-    return defaulted;
-  const knownKeys = KeyOfPropertyKeys(schema);
-  const knownProperties = { ...defaulted };
-  for (const key of knownKeys) {
-    if (!HasPropertyKey(knownProperties, key))
-      continue;
-    if (IsUndefined(knownProperties[key]) && (!IsUndefined3(schema.properties[key]) || TypeSystemPolicy.IsExactOptionalProperty(knownProperties, key)))
-      continue;
-    knownProperties[key] = Visit8(schema.properties[key], references, `${path4}/${key}`, knownProperties[key]);
-  }
-  if (!IsSchema(schema.additionalProperties)) {
-    return knownProperties;
-  }
-  const unknownKeys = Object.getOwnPropertyNames(knownProperties);
-  const additionalProperties = schema.additionalProperties;
-  const properties = { ...knownProperties };
-  for (const key of unknownKeys)
-    if (!knownKeys.includes(key)) {
-      properties[key] = Default2(additionalProperties, `${path4}/${key}`, properties[key]);
-    }
-  return properties;
-}
-function FromRecord5(schema, references, path4, value) {
-  const defaulted = Default2(schema, path4, value);
-  if (!IsObject(value))
-    return defaulted;
-  const pattern = Object.getOwnPropertyNames(schema.patternProperties)[0];
-  const knownKeys = new RegExp(pattern);
-  const knownProperties = { ...defaulted };
-  for (const key of Object.getOwnPropertyNames(value))
-    if (knownKeys.test(key)) {
-      knownProperties[key] = Visit8(schema.patternProperties[pattern], references, `${path4}/${key}`, knownProperties[key]);
-    }
-  if (!IsSchema(schema.additionalProperties)) {
-    return knownProperties;
-  }
-  const unknownKeys = Object.getOwnPropertyNames(knownProperties);
-  const additionalProperties = schema.additionalProperties;
-  const properties = { ...knownProperties };
-  for (const key of unknownKeys)
-    if (!knownKeys.test(key)) {
-      properties[key] = Default2(additionalProperties, `${path4}/${key}`, properties[key]);
-    }
-  return properties;
-}
-function FromRef5(schema, references, path4, value) {
-  const target = Deref(schema, references);
-  const resolved = Visit8(target, references, path4, value);
-  return Default2(schema, path4, resolved);
-}
-function FromThis4(schema, references, path4, value) {
-  const target = Deref(schema, references);
-  const resolved = Visit8(target, references, path4, value);
-  return Default2(schema, path4, resolved);
-}
-function FromTuple7(schema, references, path4, value) {
-  const value1 = Default2(schema, path4, value);
-  return IsArray(schema.items) ? schema.items.map((schema2, index) => Visit8(schema2, references, `${path4}/${index}`, value1[index])) : [];
-}
-function FromUnion9(schema, references, path4, value) {
-  for (const subschema of schema.anyOf) {
-    if (!Check(subschema, references, value))
-      continue;
-    const value1 = Visit8(subschema, references, path4, value);
-    return Default2(schema, path4, value1);
-  }
-  for (const subschema of schema.anyOf) {
-    const value1 = Visit8(subschema, references, path4, value);
-    if (!Check(schema, references, value1))
-      continue;
-    return Default2(schema, path4, value1);
-  }
-  return Default2(schema, path4, value);
-}
-function Visit8(schema, references, path4, value) {
-  const references_ = Pushref(schema, references);
-  const schema_ = schema;
-  switch (schema[Kind]) {
-    case "Array":
-      return FromArray7(schema_, references_, path4, value);
-    case "Import":
-      return FromImport4(schema_, references_, path4, value);
-    case "Intersect":
-      return FromIntersect7(schema_, references_, path4, value);
-    case "Not":
-      return FromNot5(schema_, references_, path4, value);
-    case "Object":
-      return FromObject5(schema_, references_, path4, value);
-    case "Record":
-      return FromRecord5(schema_, references_, path4, value);
-    case "Ref":
-      return FromRef5(schema_, references_, path4, value);
-    case "This":
-      return FromThis4(schema_, references_, path4, value);
-    case "Tuple":
-      return FromTuple7(schema_, references_, path4, value);
-    case "Union":
-      return FromUnion9(schema_, references_, path4, value);
-    default:
-      return Default2(schema_, path4, value);
-  }
-}
-function TransformEncode(schema, references, value) {
-  return Visit8(schema, references, "", value);
-}
-var TransformEncodeCheckError, TransformEncodeError;
-var init_encode = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/transform/encode.mjs"() {
-    init_policy();
-    init_symbols2();
-    init_error2();
-    init_keyof2();
-    init_deref2();
-    init_check2();
-    init_guard2();
-    init_kind();
-    TransformEncodeCheckError = class extends TypeBoxError {
-      constructor(schema, value, error) {
-        super(`The encoded value does not match the expected schema`);
-        this.schema = schema;
-        this.value = value;
-        this.error = error;
-      }
-    };
-    TransformEncodeError = class extends TypeBoxError {
-      constructor(schema, path4, value, error) {
-        super(`${error instanceof Error ? error.message : "Unknown error"}`);
-        this.schema = schema;
-        this.path = path4;
-        this.value = value;
-        this.error = error;
-      }
-    };
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/transform/has.mjs
-function FromArray8(schema, references) {
-  return IsTransform(schema) || Visit9(schema.items, references);
-}
-function FromAsyncIterator4(schema, references) {
-  return IsTransform(schema) || Visit9(schema.items, references);
-}
-function FromConstructor4(schema, references) {
-  return IsTransform(schema) || Visit9(schema.returns, references) || schema.parameters.some((schema2) => Visit9(schema2, references));
-}
-function FromFunction4(schema, references) {
-  return IsTransform(schema) || Visit9(schema.returns, references) || schema.parameters.some((schema2) => Visit9(schema2, references));
-}
-function FromIntersect8(schema, references) {
-  return IsTransform(schema) || IsTransform(schema.unevaluatedProperties) || schema.allOf.some((schema2) => Visit9(schema2, references));
-}
-function FromImport5(schema, references) {
-  const additional = globalThis.Object.getOwnPropertyNames(schema.$defs).reduce((result, key) => [...result, schema.$defs[key]], []);
-  const target = schema.$defs[schema.$ref];
-  return IsTransform(schema) || Visit9(target, [...additional, ...references]);
-}
-function FromIterator4(schema, references) {
-  return IsTransform(schema) || Visit9(schema.items, references);
-}
-function FromNot6(schema, references) {
-  return IsTransform(schema) || Visit9(schema.not, references);
-}
-function FromObject6(schema, references) {
-  return IsTransform(schema) || Object.values(schema.properties).some((schema2) => Visit9(schema2, references)) || IsSchema(schema.additionalProperties) && Visit9(schema.additionalProperties, references);
-}
-function FromPromise4(schema, references) {
-  return IsTransform(schema) || Visit9(schema.item, references);
-}
-function FromRecord6(schema, references) {
-  const pattern = Object.getOwnPropertyNames(schema.patternProperties)[0];
-  const property = schema.patternProperties[pattern];
-  return IsTransform(schema) || Visit9(property, references) || IsSchema(schema.additionalProperties) && IsTransform(schema.additionalProperties);
-}
-function FromRef6(schema, references) {
-  if (IsTransform(schema))
-    return true;
-  return Visit9(Deref(schema, references), references);
-}
-function FromThis5(schema, references) {
-  if (IsTransform(schema))
-    return true;
-  return Visit9(Deref(schema, references), references);
-}
-function FromTuple8(schema, references) {
-  return IsTransform(schema) || !IsUndefined(schema.items) && schema.items.some((schema2) => Visit9(schema2, references));
-}
-function FromUnion10(schema, references) {
-  return IsTransform(schema) || schema.anyOf.some((schema2) => Visit9(schema2, references));
-}
-function Visit9(schema, references) {
-  const references_ = Pushref(schema, references);
-  const schema_ = schema;
-  if (schema.$id && visited.has(schema.$id))
-    return false;
-  if (schema.$id)
-    visited.add(schema.$id);
-  switch (schema[Kind]) {
-    case "Array":
-      return FromArray8(schema_, references_);
-    case "AsyncIterator":
-      return FromAsyncIterator4(schema_, references_);
-    case "Constructor":
-      return FromConstructor4(schema_, references_);
-    case "Function":
-      return FromFunction4(schema_, references_);
-    case "Import":
-      return FromImport5(schema_, references_);
-    case "Intersect":
-      return FromIntersect8(schema_, references_);
-    case "Iterator":
-      return FromIterator4(schema_, references_);
-    case "Not":
-      return FromNot6(schema_, references_);
-    case "Object":
-      return FromObject6(schema_, references_);
-    case "Promise":
-      return FromPromise4(schema_, references_);
-    case "Record":
-      return FromRecord6(schema_, references_);
-    case "Ref":
-      return FromRef6(schema_, references_);
-    case "This":
-      return FromThis5(schema_, references_);
-    case "Tuple":
-      return FromTuple8(schema_, references_);
-    case "Union":
-      return FromUnion10(schema_, references_);
-    default:
-      return IsTransform(schema);
-  }
-}
-function HasTransform(schema, references) {
-  visited.clear();
-  return Visit9(schema, references);
-}
-var visited;
-var init_has = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/transform/has.mjs"() {
-    init_deref2();
-    init_symbols2();
-    init_kind();
-    init_guard2();
-    visited = /* @__PURE__ */ new Set();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/transform/index.mjs
-var init_transform = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/transform/index.mjs"() {
-    init_decode();
-    init_encode();
-    init_has();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/clone/type.mjs
-function CloneType(schema, options) {
-  return options === void 0 ? Clone(schema) : Clone({ ...options, ...schema });
-}
-var init_type4 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/clone/type.mjs"() {
-    init_value2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/clone/index.mjs
-var init_clone = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/clone/index.mjs"() {
-    init_type4();
-    init_value2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/helpers/helpers.mjs
-var init_helpers = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/helpers/helpers.mjs"() {
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/helpers/index.mjs
-var init_helpers2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/helpers/index.mjs"() {
-    init_helpers();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/argument/argument.mjs
-function Argument(index) {
-  return CreateType({ [Kind]: "Argument", index });
-}
-var init_argument = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/argument/argument.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/argument/index.mjs
-var init_argument2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/argument/index.mjs"() {
-    init_argument();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/awaited/awaited.mjs
-function FromComputed2(target, parameters) {
-  return Computed("Awaited", [Computed(target, parameters)]);
-}
-function FromRef7($ref) {
-  return Computed("Awaited", [Ref($ref)]);
-}
-function FromIntersect9(types) {
-  return Intersect(FromRest4(types));
-}
-function FromUnion11(types) {
-  return Union(FromRest4(types));
-}
-function FromPromise5(type) {
-  return Awaited(type);
-}
-function FromRest4(types) {
-  return types.map((type) => Awaited(type));
-}
-function Awaited(type, options) {
-  return CreateType(IsComputed(type) ? FromComputed2(type.target, type.parameters) : IsIntersect(type) ? FromIntersect9(type.allOf) : IsUnion(type) ? FromUnion11(type.anyOf) : IsPromise2(type) ? FromPromise5(type.item) : IsRef(type) ? FromRef7(type.$ref) : type, options);
-}
-var init_awaited = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/awaited/awaited.mjs"() {
-    init_type2();
-    init_computed2();
-    init_intersect2();
-    init_union2();
-    init_ref2();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/awaited/index.mjs
-var init_awaited2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/awaited/index.mjs"() {
-    init_awaited();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/composite/composite.mjs
-function CompositeKeys(T) {
-  const Acc = [];
-  for (const L of T)
-    Acc.push(...KeyOfPropertyKeys(L));
-  return SetDistinct(Acc);
-}
-function FilterNever(T) {
-  return T.filter((L) => !IsNever(L));
-}
-function CompositeProperty(T, K) {
-  const Acc = [];
-  for (const L of T)
-    Acc.push(...IndexFromPropertyKeys(L, [K]));
-  return FilterNever(Acc);
-}
-function CompositeProperties(T, K) {
-  const Acc = {};
-  for (const L of K) {
-    Acc[L] = IntersectEvaluated(CompositeProperty(T, L));
-  }
-  return Acc;
-}
-function Composite(T, options) {
-  const K = CompositeKeys(T);
-  const P = CompositeProperties(T, K);
-  const R = Object2(P, options);
-  return R;
-}
-var init_composite = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/composite/composite.mjs"() {
-    init_intersect2();
-    init_indexed2();
-    init_keyof2();
-    init_object2();
-    init_sets();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/composite/index.mjs
-var init_composite2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/composite/index.mjs"() {
-    init_composite();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/date/date.mjs
-function Date2(options) {
-  return CreateType({ [Kind]: "Date", type: "Date" }, options);
-}
-var init_date = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/date/date.mjs"() {
-    init_symbols2();
-    init_type2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/date/index.mjs
-var init_date2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/date/index.mjs"() {
-    init_date();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/null/null.mjs
-function Null(options) {
-  return CreateType({ [Kind]: "Null", type: "null" }, options);
-}
-var init_null = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/null/null.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/null/index.mjs
-var init_null2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/null/index.mjs"() {
-    init_null();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/symbol/symbol.mjs
-function Symbol2(options) {
-  return CreateType({ [Kind]: "Symbol", type: "symbol" }, options);
-}
-var init_symbol = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/symbol/symbol.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/symbol/index.mjs
-var init_symbol2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/symbol/index.mjs"() {
-    init_symbol();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/undefined/undefined.mjs
-function Undefined(options) {
-  return CreateType({ [Kind]: "Undefined", type: "undefined" }, options);
-}
-var init_undefined = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/undefined/undefined.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/undefined/index.mjs
-var init_undefined2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/undefined/index.mjs"() {
-    init_undefined();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/uint8array/uint8array.mjs
-function Uint8Array2(options) {
-  return CreateType({ [Kind]: "Uint8Array", type: "Uint8Array" }, options);
-}
-var init_uint8array = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/uint8array/uint8array.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/uint8array/index.mjs
-var init_uint8array2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/uint8array/index.mjs"() {
-    init_uint8array();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/const/const.mjs
-function FromArray9(T) {
-  return T.map((L) => FromValue(L, false));
-}
-function FromProperties8(value) {
-  const Acc = {};
-  for (const K of globalThis.Object.getOwnPropertyNames(value))
-    Acc[K] = Readonly(FromValue(value[K], false));
-  return Acc;
-}
-function ConditionalReadonly(T, root) {
-  return root === true ? T : Readonly(T);
-}
-function FromValue(value, root) {
-  return IsAsyncIterator2(value) ? ConditionalReadonly(Any(), root) : IsIterator2(value) ? ConditionalReadonly(Any(), root) : IsArray2(value) ? Readonly(Tuple(FromArray9(value))) : IsUint8Array2(value) ? Uint8Array2() : IsDate2(value) ? Date2() : IsObject2(value) ? ConditionalReadonly(Object2(FromProperties8(value)), root) : IsFunction2(value) ? ConditionalReadonly(Function([], Unknown()), root) : IsUndefined2(value) ? Undefined() : IsNull2(value) ? Null() : IsSymbol2(value) ? Symbol2() : IsBigInt2(value) ? BigInt2() : IsNumber2(value) ? Literal(value) : IsBoolean2(value) ? Literal(value) : IsString2(value) ? Literal(value) : Object2({});
-}
-function Const(T, options) {
-  return CreateType(FromValue(T, true), options);
-}
-var init_const = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/const/const.mjs"() {
-    init_any2();
-    init_bigint2();
-    init_date2();
-    init_function2();
-    init_literal2();
-    init_null2();
-    init_object2();
-    init_symbol2();
-    init_tuple2();
-    init_readonly2();
-    init_undefined2();
-    init_uint8array2();
-    init_unknown2();
-    init_create();
-    init_value();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/const/index.mjs
-var init_const2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/const/index.mjs"() {
-    init_const();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/constructor-parameters/constructor-parameters.mjs
-function ConstructorParameters(schema, options) {
-  return IsConstructor(schema) ? Tuple(schema.parameters, options) : Never(options);
-}
-var init_constructor_parameters = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/constructor-parameters/constructor-parameters.mjs"() {
-    init_tuple2();
-    init_never2();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/constructor-parameters/index.mjs
-var init_constructor_parameters2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/constructor-parameters/index.mjs"() {
-    init_constructor_parameters();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/enum/enum.mjs
-function Enum(item, options) {
-  if (IsUndefined2(item))
-    throw new Error("Enum undefined or empty");
-  const values1 = globalThis.Object.getOwnPropertyNames(item).filter((key) => isNaN(key)).map((key) => item[key]);
-  const values2 = [...new Set(values1)];
-  const anyOf = values2.map((value) => Literal(value));
-  return Union(anyOf, { ...options, [Hint]: "Enum" });
-}
-var init_enum = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/enum/enum.mjs"() {
-    init_literal2();
-    init_symbols2();
-    init_union2();
-    init_value();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/enum/index.mjs
-var init_enum2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/enum/index.mjs"() {
-    init_enum();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-template-literal.mjs
-function ExcludeFromTemplateLiteral(L, R) {
-  return Exclude(TemplateLiteralToUnion(L), R);
-}
-var init_exclude_from_template_literal = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-template-literal.mjs"() {
-    init_exclude();
-    init_template_literal2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/exclude/exclude.mjs
-function ExcludeRest(L, R) {
-  const excluded = L.filter((inner) => ExtendsCheck(inner, R) === ExtendsResult.False);
-  return excluded.length === 1 ? excluded[0] : Union(excluded);
-}
-function Exclude(L, R, options = {}) {
-  if (IsTemplateLiteral(L))
-    return CreateType(ExcludeFromTemplateLiteral(L, R), options);
-  if (IsMappedResult(L))
-    return CreateType(ExcludeFromMappedResult(L, R), options);
-  return CreateType(IsUnion(L) ? ExcludeRest(L.anyOf, R) : ExtendsCheck(L, R) !== ExtendsResult.False ? Never() : L, options);
-}
-var init_exclude = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/exclude/exclude.mjs"() {
-    init_type2();
-    init_union2();
-    init_never2();
-    init_extends2();
-    init_exclude_from_mapped_result();
-    init_exclude_from_template_literal();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-mapped-result.mjs
-function FromProperties9(P, U) {
-  const Acc = {};
-  for (const K2 of globalThis.Object.getOwnPropertyNames(P))
-    Acc[K2] = Exclude(P[K2], U);
-  return Acc;
-}
-function FromMappedResult7(R, T) {
-  return FromProperties9(R.properties, T);
-}
-function ExcludeFromMappedResult(R, T) {
-  const P = FromMappedResult7(R, T);
-  return MappedResult(P);
-}
-var init_exclude_from_mapped_result = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-mapped-result.mjs"() {
-    init_mapped2();
-    init_exclude();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/exclude/index.mjs
-var init_exclude2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/exclude/index.mjs"() {
-    init_exclude_from_mapped_result();
-    init_exclude_from_template_literal();
-    init_exclude();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-template-literal.mjs
-function ExtractFromTemplateLiteral(L, R) {
-  return Extract(TemplateLiteralToUnion(L), R);
-}
-var init_extract_from_template_literal = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-template-literal.mjs"() {
-    init_extract();
-    init_template_literal2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/extract/extract.mjs
-function ExtractRest(L, R) {
-  const extracted = L.filter((inner) => ExtendsCheck(inner, R) !== ExtendsResult.False);
-  return extracted.length === 1 ? extracted[0] : Union(extracted);
-}
-function Extract(L, R, options) {
-  if (IsTemplateLiteral(L))
-    return CreateType(ExtractFromTemplateLiteral(L, R), options);
-  if (IsMappedResult(L))
-    return CreateType(ExtractFromMappedResult(L, R), options);
-  return CreateType(IsUnion(L) ? ExtractRest(L.anyOf, R) : ExtendsCheck(L, R) !== ExtendsResult.False ? L : Never(), options);
-}
-var init_extract = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/extract/extract.mjs"() {
-    init_type2();
-    init_union2();
-    init_never2();
-    init_extends2();
-    init_extract_from_mapped_result();
-    init_extract_from_template_literal();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-mapped-result.mjs
-function FromProperties10(P, T) {
-  const Acc = {};
-  for (const K2 of globalThis.Object.getOwnPropertyNames(P))
-    Acc[K2] = Extract(P[K2], T);
-  return Acc;
-}
-function FromMappedResult8(R, T) {
-  return FromProperties10(R.properties, T);
-}
-function ExtractFromMappedResult(R, T) {
-  const P = FromMappedResult8(R, T);
-  return MappedResult(P);
-}
-var init_extract_from_mapped_result = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-mapped-result.mjs"() {
-    init_mapped2();
-    init_extract();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/extract/index.mjs
-var init_extract2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/extract/index.mjs"() {
-    init_extract_from_mapped_result();
-    init_extract_from_template_literal();
-    init_extract();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/instance-type/instance-type.mjs
-function InstanceType(schema, options) {
-  return IsConstructor(schema) ? CreateType(schema.returns, options) : Never(options);
-}
-var init_instance_type = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/instance-type/instance-type.mjs"() {
-    init_type2();
-    init_never2();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/instance-type/index.mjs
-var init_instance_type2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/instance-type/index.mjs"() {
-    init_instance_type();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/readonly-optional/readonly-optional.mjs
-function ReadonlyOptional(schema) {
-  return Readonly(Optional(schema));
-}
-var init_readonly_optional = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/readonly-optional/readonly-optional.mjs"() {
-    init_readonly2();
-    init_optional2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/readonly-optional/index.mjs
-var init_readonly_optional2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/readonly-optional/index.mjs"() {
-    init_readonly_optional();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/record/record.mjs
-function RecordCreateFromPattern(pattern, T, options) {
-  return CreateType({ [Kind]: "Record", type: "object", patternProperties: { [pattern]: T } }, options);
-}
-function RecordCreateFromKeys(K, T, options) {
-  const result = {};
-  for (const K2 of K)
-    result[K2] = T;
-  return Object2(result, { ...options, [Hint]: "Record" });
-}
-function FromTemplateLiteralKey(K, T, options) {
-  return IsTemplateLiteralFinite(K) ? RecordCreateFromKeys(IndexPropertyKeys(K), T, options) : RecordCreateFromPattern(K.pattern, T, options);
-}
-function FromUnionKey(key, type, options) {
-  return RecordCreateFromKeys(IndexPropertyKeys(Union(key)), type, options);
-}
-function FromLiteralKey(key, type, options) {
-  return RecordCreateFromKeys([key.toString()], type, options);
-}
-function FromRegExpKey(key, type, options) {
-  return RecordCreateFromPattern(key.source, type, options);
-}
-function FromStringKey(key, type, options) {
-  const pattern = IsUndefined2(key.pattern) ? PatternStringExact : key.pattern;
-  return RecordCreateFromPattern(pattern, type, options);
-}
-function FromAnyKey(_, type, options) {
-  return RecordCreateFromPattern(PatternStringExact, type, options);
-}
-function FromNeverKey(_key, type, options) {
-  return RecordCreateFromPattern(PatternNeverExact, type, options);
-}
-function FromBooleanKey(_key, type, options) {
-  return Object2({ true: type, false: type }, options);
-}
-function FromIntegerKey(_key, type, options) {
-  return RecordCreateFromPattern(PatternNumberExact, type, options);
-}
-function FromNumberKey(_, type, options) {
-  return RecordCreateFromPattern(PatternNumberExact, type, options);
-}
-function Record(key, type, options = {}) {
-  return IsUnion(key) ? FromUnionKey(key.anyOf, type, options) : IsTemplateLiteral(key) ? FromTemplateLiteralKey(key, type, options) : IsLiteral(key) ? FromLiteralKey(key.const, type, options) : IsBoolean3(key) ? FromBooleanKey(key, type, options) : IsInteger2(key) ? FromIntegerKey(key, type, options) : IsNumber3(key) ? FromNumberKey(key, type, options) : IsRegExp2(key) ? FromRegExpKey(key, type, options) : IsString3(key) ? FromStringKey(key, type, options) : IsAny(key) ? FromAnyKey(key, type, options) : IsNever(key) ? FromNeverKey(key, type, options) : Never(options);
-}
-function RecordPattern(record) {
-  return globalThis.Object.getOwnPropertyNames(record.patternProperties)[0];
-}
-function RecordKey2(type) {
-  const pattern = RecordPattern(type);
-  return pattern === PatternStringExact ? String2() : pattern === PatternNumberExact ? Number2() : String2({ pattern });
-}
-function RecordValue2(type) {
-  return type.patternProperties[RecordPattern(type)];
-}
-var init_record = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/record/record.mjs"() {
-    init_type2();
-    init_symbols2();
-    init_never2();
-    init_number2();
-    init_object2();
-    init_string2();
-    init_union2();
-    init_template_literal2();
-    init_patterns2();
-    init_indexed2();
-    init_value();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/record/index.mjs
-var init_record2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/record/index.mjs"() {
-    init_record();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/instantiate/instantiate.mjs
-function FromConstructor5(args, type) {
-  type.parameters = FromTypes(args, type.parameters);
-  type.returns = FromType(args, type.returns);
-  return type;
-}
-function FromFunction5(args, type) {
-  type.parameters = FromTypes(args, type.parameters);
-  type.returns = FromType(args, type.returns);
-  return type;
-}
-function FromIntersect10(args, type) {
-  type.allOf = FromTypes(args, type.allOf);
-  return type;
-}
-function FromUnion12(args, type) {
-  type.anyOf = FromTypes(args, type.anyOf);
-  return type;
-}
-function FromTuple9(args, type) {
-  if (IsUndefined2(type.items))
-    return type;
-  type.items = FromTypes(args, type.items);
-  return type;
-}
-function FromArray10(args, type) {
-  type.items = FromType(args, type.items);
-  return type;
-}
-function FromAsyncIterator5(args, type) {
-  type.items = FromType(args, type.items);
-  return type;
-}
-function FromIterator5(args, type) {
-  type.items = FromType(args, type.items);
-  return type;
-}
-function FromPromise6(args, type) {
-  type.item = FromType(args, type.item);
-  return type;
-}
-function FromObject7(args, type) {
-  const mappedProperties = FromProperties11(args, type.properties);
-  return { ...type, ...Object2(mappedProperties) };
-}
-function FromRecord7(args, type) {
-  const mappedKey = FromType(args, RecordKey2(type));
-  const mappedValue = FromType(args, RecordValue2(type));
-  const result = Record(mappedKey, mappedValue);
-  return { ...type, ...result };
-}
-function FromArgument3(args, argument) {
-  return argument.index in args ? args[argument.index] : Unknown();
-}
-function FromProperty2(args, type) {
-  const isReadonly = IsReadonly(type);
-  const isOptional = IsOptional(type);
-  const mapped = FromType(args, type);
-  return isReadonly && isOptional ? ReadonlyOptional(mapped) : isReadonly && !isOptional ? Readonly(mapped) : !isReadonly && isOptional ? Optional(mapped) : mapped;
-}
-function FromProperties11(args, properties) {
-  return globalThis.Object.getOwnPropertyNames(properties).reduce((result, key) => {
-    return { ...result, [key]: FromProperty2(args, properties[key]) };
-  }, {});
-}
-function FromTypes(args, types) {
-  return types.map((type) => FromType(args, type));
-}
-function FromType(args, type) {
-  return IsConstructor(type) ? FromConstructor5(args, type) : IsFunction3(type) ? FromFunction5(args, type) : IsIntersect(type) ? FromIntersect10(args, type) : IsUnion(type) ? FromUnion12(args, type) : IsTuple(type) ? FromTuple9(args, type) : IsArray3(type) ? FromArray10(args, type) : IsAsyncIterator3(type) ? FromAsyncIterator5(args, type) : IsIterator3(type) ? FromIterator5(args, type) : IsPromise2(type) ? FromPromise6(args, type) : IsObject3(type) ? FromObject7(args, type) : IsRecord(type) ? FromRecord7(args, type) : IsArgument(type) ? FromArgument3(args, type) : type;
-}
-function Instantiate(type, args) {
-  return FromType(args, CloneType(type));
-}
-var init_instantiate = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/instantiate/instantiate.mjs"() {
-    init_type4();
-    init_unknown2();
-    init_readonly_optional2();
-    init_readonly2();
-    init_optional2();
-    init_object2();
-    init_record2();
-    init_value();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/instantiate/index.mjs
-var init_instantiate2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/instantiate/index.mjs"() {
-    init_instantiate();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/integer/integer.mjs
-function Integer(options) {
-  return CreateType({ [Kind]: "Integer", type: "integer" }, options);
-}
-var init_integer = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/integer/integer.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/integer/index.mjs
-var init_integer2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/integer/index.mjs"() {
-    init_integer();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic-from-mapped-key.mjs
-function MappedIntrinsicPropertyKey(K, M, options) {
-  return {
-    [K]: Intrinsic(Literal(K), M, Clone(options))
-  };
-}
-function MappedIntrinsicPropertyKeys(K, M, options) {
-  const result = K.reduce((Acc, L) => {
-    return { ...Acc, ...MappedIntrinsicPropertyKey(L, M, options) };
-  }, {});
-  return result;
-}
-function MappedIntrinsicProperties(T, M, options) {
-  return MappedIntrinsicPropertyKeys(T["keys"], M, options);
-}
-function IntrinsicFromMappedKey(T, M, options) {
-  const P = MappedIntrinsicProperties(T, M, options);
-  return MappedResult(P);
-}
-var init_intrinsic_from_mapped_key = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic-from-mapped-key.mjs"() {
-    init_mapped2();
-    init_intrinsic();
-    init_literal2();
-    init_value2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic.mjs
-function ApplyUncapitalize(value) {
-  const [first, rest] = [value.slice(0, 1), value.slice(1)];
-  return [first.toLowerCase(), rest].join("");
-}
-function ApplyCapitalize(value) {
-  const [first, rest] = [value.slice(0, 1), value.slice(1)];
-  return [first.toUpperCase(), rest].join("");
-}
-function ApplyUppercase(value) {
-  return value.toUpperCase();
-}
-function ApplyLowercase(value) {
-  return value.toLowerCase();
-}
-function FromTemplateLiteral5(schema, mode, options) {
-  const expression = TemplateLiteralParseExact(schema.pattern);
-  const finite = IsTemplateLiteralExpressionFinite(expression);
-  if (!finite)
-    return { ...schema, pattern: FromLiteralValue(schema.pattern, mode) };
-  const strings = [...TemplateLiteralExpressionGenerate(expression)];
-  const literals = strings.map((value) => Literal(value));
-  const mapped = FromRest5(literals, mode);
-  const union = Union(mapped);
-  return TemplateLiteral([union], options);
-}
-function FromLiteralValue(value, mode) {
-  return typeof value === "string" ? mode === "Uncapitalize" ? ApplyUncapitalize(value) : mode === "Capitalize" ? ApplyCapitalize(value) : mode === "Uppercase" ? ApplyUppercase(value) : mode === "Lowercase" ? ApplyLowercase(value) : value : value.toString();
-}
-function FromRest5(T, M) {
-  return T.map((L) => Intrinsic(L, M));
-}
-function Intrinsic(schema, mode, options = {}) {
-  return (
-    // Intrinsic-Mapped-Inference
-    IsMappedKey(schema) ? IntrinsicFromMappedKey(schema, mode, options) : (
-      // Standard-Inference
-      IsTemplateLiteral(schema) ? FromTemplateLiteral5(schema, mode, options) : IsUnion(schema) ? Union(FromRest5(schema.anyOf, mode), options) : IsLiteral(schema) ? Literal(FromLiteralValue(schema.const, mode), options) : (
-        // Default Type
-        CreateType(schema, options)
-      )
-    )
-  );
-}
-var init_intrinsic = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic.mjs"() {
-    init_type2();
-    init_template_literal2();
-    init_intrinsic_from_mapped_key();
-    init_literal2();
-    init_union2();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/intrinsic/capitalize.mjs
-function Capitalize(T, options = {}) {
-  return Intrinsic(T, "Capitalize", options);
-}
-var init_capitalize = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/capitalize.mjs"() {
-    init_intrinsic();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/intrinsic/lowercase.mjs
-function Lowercase(T, options = {}) {
-  return Intrinsic(T, "Lowercase", options);
-}
-var init_lowercase = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/lowercase.mjs"() {
-    init_intrinsic();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/intrinsic/uncapitalize.mjs
-function Uncapitalize(T, options = {}) {
-  return Intrinsic(T, "Uncapitalize", options);
-}
-var init_uncapitalize = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/uncapitalize.mjs"() {
-    init_intrinsic();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/intrinsic/uppercase.mjs
-function Uppercase(T, options = {}) {
-  return Intrinsic(T, "Uppercase", options);
-}
-var init_uppercase = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/uppercase.mjs"() {
-    init_intrinsic();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/intrinsic/index.mjs
-var init_intrinsic2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/index.mjs"() {
-    init_capitalize();
-    init_intrinsic_from_mapped_key();
-    init_intrinsic();
-    init_lowercase();
-    init_uncapitalize();
-    init_uppercase();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-result.mjs
-function FromProperties12(properties, propertyKeys, options) {
-  const result = {};
-  for (const K2 of globalThis.Object.getOwnPropertyNames(properties))
-    result[K2] = Omit(properties[K2], propertyKeys, Clone(options));
-  return result;
-}
-function FromMappedResult9(mappedResult, propertyKeys, options) {
-  return FromProperties12(mappedResult.properties, propertyKeys, options);
-}
-function OmitFromMappedResult(mappedResult, propertyKeys, options) {
-  const properties = FromMappedResult9(mappedResult, propertyKeys, options);
-  return MappedResult(properties);
-}
-var init_omit_from_mapped_result = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-result.mjs"() {
-    init_mapped2();
-    init_omit();
-    init_value2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/omit/omit.mjs
-function FromIntersect11(types, propertyKeys) {
-  return types.map((type) => OmitResolve(type, propertyKeys));
-}
-function FromUnion13(types, propertyKeys) {
-  return types.map((type) => OmitResolve(type, propertyKeys));
-}
-function FromProperty3(properties, key) {
-  const { [key]: _, ...R } = properties;
-  return R;
-}
-function FromProperties13(properties, propertyKeys) {
-  return propertyKeys.reduce((T, K2) => FromProperty3(T, K2), properties);
-}
-function FromObject8(type, propertyKeys, properties) {
-  const options = Discard(type, [TransformKind, "$id", "required", "properties"]);
-  const mappedProperties = FromProperties13(properties, propertyKeys);
-  return Object2(mappedProperties, options);
-}
-function UnionFromPropertyKeys(propertyKeys) {
-  const result = propertyKeys.reduce((result2, key) => IsLiteralValue(key) ? [...result2, Literal(key)] : result2, []);
-  return Union(result);
-}
-function OmitResolve(type, propertyKeys) {
-  return IsIntersect(type) ? Intersect(FromIntersect11(type.allOf, propertyKeys)) : IsUnion(type) ? Union(FromUnion13(type.anyOf, propertyKeys)) : IsObject3(type) ? FromObject8(type, propertyKeys, type.properties) : Object2({});
-}
-function Omit(type, key, options) {
-  const typeKey = IsArray2(key) ? UnionFromPropertyKeys(key) : key;
-  const propertyKeys = IsSchema(key) ? IndexPropertyKeys(key) : key;
-  const isTypeRef = IsRef(type);
-  const isKeyRef = IsRef(key);
-  return IsMappedResult(type) ? OmitFromMappedResult(type, propertyKeys, options) : IsMappedKey(key) ? OmitFromMappedKey(type, key, options) : isTypeRef && isKeyRef ? Computed("Omit", [type, typeKey], options) : !isTypeRef && isKeyRef ? Computed("Omit", [type, typeKey], options) : isTypeRef && !isKeyRef ? Computed("Omit", [type, typeKey], options) : CreateType({ ...OmitResolve(type, propertyKeys), ...options });
-}
-var init_omit = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/omit/omit.mjs"() {
-    init_type2();
-    init_discard();
-    init_symbols();
-    init_computed2();
-    init_literal2();
-    init_indexed2();
-    init_intersect2();
-    init_union2();
-    init_object2();
-    init_omit_from_mapped_key();
-    init_omit_from_mapped_result();
-    init_kind();
-    init_value();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-key.mjs
-function FromPropertyKey2(type, key, options) {
-  return { [key]: Omit(type, [key], Clone(options)) };
-}
-function FromPropertyKeys2(type, propertyKeys, options) {
-  return propertyKeys.reduce((Acc, LK) => {
-    return { ...Acc, ...FromPropertyKey2(type, LK, options) };
-  }, {});
-}
-function FromMappedKey3(type, mappedKey, options) {
-  return FromPropertyKeys2(type, mappedKey.keys, options);
-}
-function OmitFromMappedKey(type, mappedKey, options) {
-  const properties = FromMappedKey3(type, mappedKey, options);
-  return MappedResult(properties);
-}
-var init_omit_from_mapped_key = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-key.mjs"() {
-    init_mapped2();
-    init_omit();
-    init_value2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/omit/index.mjs
-var init_omit2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/omit/index.mjs"() {
-    init_omit_from_mapped_key();
-    init_omit_from_mapped_result();
-    init_omit();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-result.mjs
-function FromProperties14(properties, propertyKeys, options) {
-  const result = {};
-  for (const K2 of globalThis.Object.getOwnPropertyNames(properties))
-    result[K2] = Pick(properties[K2], propertyKeys, Clone(options));
-  return result;
-}
-function FromMappedResult10(mappedResult, propertyKeys, options) {
-  return FromProperties14(mappedResult.properties, propertyKeys, options);
-}
-function PickFromMappedResult(mappedResult, propertyKeys, options) {
-  const properties = FromMappedResult10(mappedResult, propertyKeys, options);
-  return MappedResult(properties);
-}
-var init_pick_from_mapped_result = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-result.mjs"() {
-    init_mapped2();
-    init_pick();
-    init_value2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/pick/pick.mjs
-function FromIntersect12(types, propertyKeys) {
-  return types.map((type) => PickResolve(type, propertyKeys));
-}
-function FromUnion14(types, propertyKeys) {
-  return types.map((type) => PickResolve(type, propertyKeys));
-}
-function FromProperties15(properties, propertyKeys) {
-  const result = {};
-  for (const K2 of propertyKeys)
-    if (K2 in properties)
-      result[K2] = properties[K2];
-  return result;
-}
-function FromObject9(Type3, keys, properties) {
-  const options = Discard(Type3, [TransformKind, "$id", "required", "properties"]);
-  const mappedProperties = FromProperties15(properties, keys);
-  return Object2(mappedProperties, options);
-}
-function UnionFromPropertyKeys2(propertyKeys) {
-  const result = propertyKeys.reduce((result2, key) => IsLiteralValue(key) ? [...result2, Literal(key)] : result2, []);
-  return Union(result);
-}
-function PickResolve(type, propertyKeys) {
-  return IsIntersect(type) ? Intersect(FromIntersect12(type.allOf, propertyKeys)) : IsUnion(type) ? Union(FromUnion14(type.anyOf, propertyKeys)) : IsObject3(type) ? FromObject9(type, propertyKeys, type.properties) : Object2({});
-}
-function Pick(type, key, options) {
-  const typeKey = IsArray2(key) ? UnionFromPropertyKeys2(key) : key;
-  const propertyKeys = IsSchema(key) ? IndexPropertyKeys(key) : key;
-  const isTypeRef = IsRef(type);
-  const isKeyRef = IsRef(key);
-  return IsMappedResult(type) ? PickFromMappedResult(type, propertyKeys, options) : IsMappedKey(key) ? PickFromMappedKey(type, key, options) : isTypeRef && isKeyRef ? Computed("Pick", [type, typeKey], options) : !isTypeRef && isKeyRef ? Computed("Pick", [type, typeKey], options) : isTypeRef && !isKeyRef ? Computed("Pick", [type, typeKey], options) : CreateType({ ...PickResolve(type, propertyKeys), ...options });
-}
-var init_pick = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/pick/pick.mjs"() {
-    init_type2();
-    init_discard();
-    init_computed2();
-    init_intersect2();
-    init_literal2();
-    init_object2();
-    init_union2();
-    init_indexed2();
-    init_symbols();
-    init_kind();
-    init_value();
-    init_pick_from_mapped_key();
-    init_pick_from_mapped_result();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-key.mjs
-function FromPropertyKey3(type, key, options) {
-  return {
-    [key]: Pick(type, [key], Clone(options))
-  };
-}
-function FromPropertyKeys3(type, propertyKeys, options) {
-  return propertyKeys.reduce((result, leftKey) => {
-    return { ...result, ...FromPropertyKey3(type, leftKey, options) };
-  }, {});
-}
-function FromMappedKey4(type, mappedKey, options) {
-  return FromPropertyKeys3(type, mappedKey.keys, options);
-}
-function PickFromMappedKey(type, mappedKey, options) {
-  const properties = FromMappedKey4(type, mappedKey, options);
-  return MappedResult(properties);
-}
-var init_pick_from_mapped_key = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-key.mjs"() {
-    init_mapped2();
-    init_pick();
-    init_value2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/pick/index.mjs
-var init_pick2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/pick/index.mjs"() {
-    init_pick_from_mapped_key();
-    init_pick_from_mapped_result();
-    init_pick();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/partial/partial.mjs
-function FromComputed3(target, parameters) {
-  return Computed("Partial", [Computed(target, parameters)]);
-}
-function FromRef8($ref) {
-  return Computed("Partial", [Ref($ref)]);
-}
-function FromProperties16(properties) {
-  const partialProperties = {};
-  for (const K of globalThis.Object.getOwnPropertyNames(properties))
-    partialProperties[K] = Optional(properties[K]);
-  return partialProperties;
-}
-function FromObject10(type, properties) {
-  const options = Discard(type, [TransformKind, "$id", "required", "properties"]);
-  const mappedProperties = FromProperties16(properties);
-  return Object2(mappedProperties, options);
-}
-function FromRest6(types) {
-  return types.map((type) => PartialResolve(type));
-}
-function PartialResolve(type) {
-  return (
-    // Mappable
-    IsComputed(type) ? FromComputed3(type.target, type.parameters) : IsRef(type) ? FromRef8(type.$ref) : IsIntersect(type) ? Intersect(FromRest6(type.allOf)) : IsUnion(type) ? Union(FromRest6(type.anyOf)) : IsObject3(type) ? FromObject10(type, type.properties) : (
-      // Intrinsic
-      IsBigInt3(type) ? type : IsBoolean3(type) ? type : IsInteger2(type) ? type : IsLiteral(type) ? type : IsNull3(type) ? type : IsNumber3(type) ? type : IsString3(type) ? type : IsSymbol3(type) ? type : IsUndefined3(type) ? type : (
-        // Passthrough
-        Object2({})
-      )
-    )
-  );
-}
-function Partial(type, options) {
-  if (IsMappedResult(type)) {
-    return PartialFromMappedResult(type, options);
-  } else {
-    return CreateType({ ...PartialResolve(type), ...options });
-  }
-}
-var init_partial = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/partial/partial.mjs"() {
-    init_type2();
-    init_computed2();
-    init_optional2();
-    init_object2();
-    init_intersect2();
-    init_union2();
-    init_ref2();
-    init_discard2();
-    init_symbols2();
-    init_partial_from_mapped_result();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/partial/partial-from-mapped-result.mjs
-function FromProperties17(K, options) {
-  const Acc = {};
-  for (const K2 of globalThis.Object.getOwnPropertyNames(K))
-    Acc[K2] = Partial(K[K2], Clone(options));
-  return Acc;
-}
-function FromMappedResult11(R, options) {
-  return FromProperties17(R.properties, options);
-}
-function PartialFromMappedResult(R, options) {
-  const P = FromMappedResult11(R, options);
-  return MappedResult(P);
-}
-var init_partial_from_mapped_result = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/partial/partial-from-mapped-result.mjs"() {
-    init_mapped2();
-    init_partial();
-    init_value2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/partial/index.mjs
-var init_partial2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/partial/index.mjs"() {
-    init_partial_from_mapped_result();
-    init_partial();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/required/required.mjs
-function FromComputed4(target, parameters) {
-  return Computed("Required", [Computed(target, parameters)]);
-}
-function FromRef9($ref) {
-  return Computed("Required", [Ref($ref)]);
-}
-function FromProperties18(properties) {
-  const requiredProperties = {};
-  for (const K of globalThis.Object.getOwnPropertyNames(properties))
-    requiredProperties[K] = Discard(properties[K], [OptionalKind]);
-  return requiredProperties;
-}
-function FromObject11(type, properties) {
-  const options = Discard(type, [TransformKind, "$id", "required", "properties"]);
-  const mappedProperties = FromProperties18(properties);
-  return Object2(mappedProperties, options);
-}
-function FromRest7(types) {
-  return types.map((type) => RequiredResolve(type));
-}
-function RequiredResolve(type) {
-  return (
-    // Mappable
-    IsComputed(type) ? FromComputed4(type.target, type.parameters) : IsRef(type) ? FromRef9(type.$ref) : IsIntersect(type) ? Intersect(FromRest7(type.allOf)) : IsUnion(type) ? Union(FromRest7(type.anyOf)) : IsObject3(type) ? FromObject11(type, type.properties) : (
-      // Intrinsic
-      IsBigInt3(type) ? type : IsBoolean3(type) ? type : IsInteger2(type) ? type : IsLiteral(type) ? type : IsNull3(type) ? type : IsNumber3(type) ? type : IsString3(type) ? type : IsSymbol3(type) ? type : IsUndefined3(type) ? type : (
-        // Passthrough
-        Object2({})
-      )
-    )
-  );
-}
-function Required(type, options) {
-  if (IsMappedResult(type)) {
-    return RequiredFromMappedResult(type, options);
-  } else {
-    return CreateType({ ...RequiredResolve(type), ...options });
-  }
-}
-var init_required = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/required/required.mjs"() {
-    init_type2();
-    init_computed2();
-    init_object2();
-    init_intersect2();
-    init_union2();
-    init_ref2();
-    init_symbols2();
-    init_discard2();
-    init_required_from_mapped_result();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/required/required-from-mapped-result.mjs
-function FromProperties19(P, options) {
-  const Acc = {};
-  for (const K2 of globalThis.Object.getOwnPropertyNames(P))
-    Acc[K2] = Required(P[K2], options);
-  return Acc;
-}
-function FromMappedResult12(R, options) {
-  return FromProperties19(R.properties, options);
-}
-function RequiredFromMappedResult(R, options) {
-  const P = FromMappedResult12(R, options);
-  return MappedResult(P);
-}
-var init_required_from_mapped_result = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/required/required-from-mapped-result.mjs"() {
-    init_mapped2();
-    init_required();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/required/index.mjs
-var init_required2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/required/index.mjs"() {
-    init_required_from_mapped_result();
-    init_required();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/module/compute.mjs
-function DereferenceParameters(moduleProperties, types) {
-  return types.map((type) => {
-    return IsRef(type) ? Dereference(moduleProperties, type.$ref) : FromType2(moduleProperties, type);
-  });
-}
-function Dereference(moduleProperties, ref) {
-  return ref in moduleProperties ? IsRef(moduleProperties[ref]) ? Dereference(moduleProperties, moduleProperties[ref].$ref) : FromType2(moduleProperties, moduleProperties[ref]) : Never();
-}
-function FromAwaited(parameters) {
-  return Awaited(parameters[0]);
-}
-function FromIndex(parameters) {
-  return Index(parameters[0], parameters[1]);
-}
-function FromKeyOf(parameters) {
-  return KeyOf(parameters[0]);
-}
-function FromPartial(parameters) {
-  return Partial(parameters[0]);
-}
-function FromOmit(parameters) {
-  return Omit(parameters[0], parameters[1]);
-}
-function FromPick(parameters) {
-  return Pick(parameters[0], parameters[1]);
-}
-function FromRequired(parameters) {
-  return Required(parameters[0]);
-}
-function FromComputed5(moduleProperties, target, parameters) {
-  const dereferenced = DereferenceParameters(moduleProperties, parameters);
-  return target === "Awaited" ? FromAwaited(dereferenced) : target === "Index" ? FromIndex(dereferenced) : target === "KeyOf" ? FromKeyOf(dereferenced) : target === "Partial" ? FromPartial(dereferenced) : target === "Omit" ? FromOmit(dereferenced) : target === "Pick" ? FromPick(dereferenced) : target === "Required" ? FromRequired(dereferenced) : Never();
-}
-function FromArray11(moduleProperties, type) {
-  return Array2(FromType2(moduleProperties, type));
-}
-function FromAsyncIterator6(moduleProperties, type) {
-  return AsyncIterator(FromType2(moduleProperties, type));
-}
-function FromConstructor6(moduleProperties, parameters, instanceType) {
-  return Constructor(FromTypes2(moduleProperties, parameters), FromType2(moduleProperties, instanceType));
-}
-function FromFunction6(moduleProperties, parameters, returnType) {
-  return Function(FromTypes2(moduleProperties, parameters), FromType2(moduleProperties, returnType));
-}
-function FromIntersect13(moduleProperties, types) {
-  return Intersect(FromTypes2(moduleProperties, types));
-}
-function FromIterator6(moduleProperties, type) {
-  return Iterator(FromType2(moduleProperties, type));
-}
-function FromObject12(moduleProperties, properties) {
-  return Object2(globalThis.Object.keys(properties).reduce((result, key) => {
-    return { ...result, [key]: FromType2(moduleProperties, properties[key]) };
-  }, {}));
-}
-function FromRecord8(moduleProperties, type) {
-  const [value, pattern] = [FromType2(moduleProperties, RecordValue2(type)), RecordPattern(type)];
-  const result = CloneType(type);
-  result.patternProperties[pattern] = value;
-  return result;
-}
-function FromTransform(moduleProperties, transform) {
-  return IsRef(transform) ? { ...Dereference(moduleProperties, transform.$ref), [TransformKind]: transform[TransformKind] } : transform;
-}
-function FromTuple10(moduleProperties, types) {
-  return Tuple(FromTypes2(moduleProperties, types));
-}
-function FromUnion15(moduleProperties, types) {
-  return Union(FromTypes2(moduleProperties, types));
-}
-function FromTypes2(moduleProperties, types) {
-  return types.map((type) => FromType2(moduleProperties, type));
-}
-function FromType2(moduleProperties, type) {
-  return (
-    // Modifiers
-    IsOptional(type) ? CreateType(FromType2(moduleProperties, Discard(type, [OptionalKind])), type) : IsReadonly(type) ? CreateType(FromType2(moduleProperties, Discard(type, [ReadonlyKind])), type) : (
-      // Transform
-      IsTransform(type) ? CreateType(FromTransform(moduleProperties, type), type) : (
-        // Types
-        IsArray3(type) ? CreateType(FromArray11(moduleProperties, type.items), type) : IsAsyncIterator3(type) ? CreateType(FromAsyncIterator6(moduleProperties, type.items), type) : IsComputed(type) ? CreateType(FromComputed5(moduleProperties, type.target, type.parameters)) : IsConstructor(type) ? CreateType(FromConstructor6(moduleProperties, type.parameters, type.returns), type) : IsFunction3(type) ? CreateType(FromFunction6(moduleProperties, type.parameters, type.returns), type) : IsIntersect(type) ? CreateType(FromIntersect13(moduleProperties, type.allOf), type) : IsIterator3(type) ? CreateType(FromIterator6(moduleProperties, type.items), type) : IsObject3(type) ? CreateType(FromObject12(moduleProperties, type.properties), type) : IsRecord(type) ? CreateType(FromRecord8(moduleProperties, type)) : IsTuple(type) ? CreateType(FromTuple10(moduleProperties, type.items || []), type) : IsUnion(type) ? CreateType(FromUnion15(moduleProperties, type.anyOf), type) : type
-      )
-    )
-  );
-}
-function ComputeType(moduleProperties, key) {
-  return key in moduleProperties ? FromType2(moduleProperties, moduleProperties[key]) : Never();
-}
-function ComputeModuleProperties(moduleProperties) {
-  return globalThis.Object.getOwnPropertyNames(moduleProperties).reduce((result, key) => {
-    return { ...result, [key]: ComputeType(moduleProperties, key) };
-  }, {});
-}
-var init_compute = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/module/compute.mjs"() {
-    init_create();
-    init_clone();
-    init_discard2();
-    init_array2();
-    init_awaited2();
-    init_async_iterator2();
-    init_constructor2();
-    init_indexed2();
-    init_function2();
-    init_intersect2();
-    init_iterator2();
-    init_keyof2();
-    init_object2();
-    init_omit2();
-    init_pick2();
-    init_never2();
-    init_partial2();
-    init_record2();
-    init_required2();
-    init_tuple2();
-    init_union2();
-    init_symbols2();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/module/module.mjs
-function Module(properties) {
-  return new TModule(properties);
-}
-var TModule;
-var init_module = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/module/module.mjs"() {
-    init_create();
-    init_symbols2();
-    init_compute();
-    TModule = class {
-      constructor($defs) {
-        const computed = ComputeModuleProperties($defs);
-        const identified = this.WithIdentifiers(computed);
-        this.$defs = identified;
-      }
-      /** `[Json]` Imports a Type by Key. */
-      Import(key, options) {
-        const $defs = { ...this.$defs, [key]: CreateType(this.$defs[key], options) };
-        return CreateType({ [Kind]: "Import", $defs, $ref: key });
-      }
-      // prettier-ignore
-      WithIdentifiers($defs) {
-        return globalThis.Object.getOwnPropertyNames($defs).reduce((result, key) => {
-          return { ...result, [key]: { ...$defs[key], $id: key } };
-        }, {});
-      }
-    };
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/module/index.mjs
-var init_module2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/module/index.mjs"() {
-    init_module();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/not/not.mjs
-function Not2(type, options) {
-  return CreateType({ [Kind]: "Not", not: type }, options);
-}
-var init_not = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/not/not.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/not/index.mjs
-var init_not2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/not/index.mjs"() {
-    init_not();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/parameters/parameters.mjs
-function Parameters(schema, options) {
-  return IsFunction3(schema) ? Tuple(schema.parameters, options) : Never();
-}
-var init_parameters = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/parameters/parameters.mjs"() {
-    init_tuple2();
-    init_never2();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/parameters/index.mjs
-var init_parameters2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/parameters/index.mjs"() {
-    init_parameters();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/recursive/recursive.mjs
-function Recursive(callback, options = {}) {
-  if (IsUndefined2(options.$id))
-    options.$id = `T${Ordinal++}`;
-  const thisType = CloneType(callback({ [Kind]: "This", $ref: `${options.$id}` }));
-  thisType.$id = options.$id;
-  return CreateType({ [Hint]: "Recursive", ...thisType }, options);
-}
-var Ordinal;
-var init_recursive = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/recursive/recursive.mjs"() {
-    init_type4();
-    init_type2();
-    init_value();
-    init_symbols2();
-    Ordinal = 0;
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/recursive/index.mjs
-var init_recursive2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/recursive/index.mjs"() {
-    init_recursive();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/regexp/regexp.mjs
-function RegExp2(unresolved, options) {
-  const expr = IsString2(unresolved) ? new globalThis.RegExp(unresolved) : unresolved;
-  return CreateType({ [Kind]: "RegExp", type: "RegExp", source: expr.source, flags: expr.flags }, options);
-}
-var init_regexp = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/regexp/regexp.mjs"() {
-    init_type2();
-    init_value();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/regexp/index.mjs
-var init_regexp2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/regexp/index.mjs"() {
-    init_regexp();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/rest/rest.mjs
-function RestResolve(T) {
-  return IsIntersect(T) ? T.allOf : IsUnion(T) ? T.anyOf : IsTuple(T) ? T.items ?? [] : [];
-}
-function Rest(T) {
-  return RestResolve(T);
-}
-var init_rest = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/rest/rest.mjs"() {
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/rest/index.mjs
-var init_rest2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/rest/index.mjs"() {
-    init_rest();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/return-type/return-type.mjs
-function ReturnType(schema, options) {
-  return IsFunction3(schema) ? CreateType(schema.returns, options) : Never(options);
-}
-var init_return_type = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/return-type/return-type.mjs"() {
-    init_type2();
-    init_never2();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/return-type/index.mjs
-var init_return_type2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/return-type/index.mjs"() {
-    init_return_type();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/schema/anyschema.mjs
-var init_anyschema = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/schema/anyschema.mjs"() {
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/schema/schema.mjs
-var init_schema = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/schema/schema.mjs"() {
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/schema/index.mjs
-var init_schema2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/schema/index.mjs"() {
-    init_anyschema();
-    init_schema();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/static/static.mjs
-var init_static = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/static/static.mjs"() {
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/static/index.mjs
-var init_static2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/static/index.mjs"() {
-    init_static();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/transform/transform.mjs
-function Transform(schema) {
-  return new TransformDecodeBuilder(schema);
-}
-var TransformDecodeBuilder, TransformEncodeBuilder;
-var init_transform2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/transform/transform.mjs"() {
-    init_symbols2();
-    init_kind();
-    TransformDecodeBuilder = class {
-      constructor(schema) {
-        this.schema = schema;
-      }
-      Decode(decode) {
-        return new TransformEncodeBuilder(this.schema, decode);
-      }
-    };
-    TransformEncodeBuilder = class {
-      constructor(schema, decode) {
-        this.schema = schema;
-        this.decode = decode;
-      }
-      EncodeTransform(encode, schema) {
-        const Encode2 = (value) => schema[TransformKind].Encode(encode(value));
-        const Decode2 = (value) => this.decode(schema[TransformKind].Decode(value));
-        const Codec = { Encode: Encode2, Decode: Decode2 };
-        return { ...schema, [TransformKind]: Codec };
-      }
-      EncodeSchema(encode, schema) {
-        const Codec = { Decode: this.decode, Encode: encode };
-        return { ...schema, [TransformKind]: Codec };
-      }
-      Encode(encode) {
-        return IsTransform(this.schema) ? this.EncodeTransform(encode, this.schema) : this.EncodeSchema(encode, this.schema);
-      }
-    };
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/transform/index.mjs
-var init_transform3 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/transform/index.mjs"() {
-    init_transform2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/void/void.mjs
-function Void(options) {
-  return CreateType({ [Kind]: "Void", type: "void" }, options);
-}
-var init_void = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/void/void.mjs"() {
-    init_type2();
-    init_symbols2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/void/index.mjs
-var init_void2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/void/index.mjs"() {
-    init_void();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/type/type.mjs
-var type_exports3 = {};
-__export(type_exports3, {
-  Any: () => Any,
-  Argument: () => Argument,
-  Array: () => Array2,
-  AsyncIterator: () => AsyncIterator,
-  Awaited: () => Awaited,
-  BigInt: () => BigInt2,
-  Boolean: () => Boolean2,
-  Capitalize: () => Capitalize,
-  Composite: () => Composite,
-  Const: () => Const,
-  Constructor: () => Constructor,
-  ConstructorParameters: () => ConstructorParameters,
-  Date: () => Date2,
-  Enum: () => Enum,
-  Exclude: () => Exclude,
-  Extends: () => Extends,
-  Extract: () => Extract,
-  Function: () => Function,
-  Index: () => Index,
-  InstanceType: () => InstanceType,
-  Instantiate: () => Instantiate,
-  Integer: () => Integer,
-  Intersect: () => Intersect,
-  Iterator: () => Iterator,
-  KeyOf: () => KeyOf,
-  Literal: () => Literal,
-  Lowercase: () => Lowercase,
-  Mapped: () => Mapped,
-  Module: () => Module,
-  Never: () => Never,
-  Not: () => Not2,
-  Null: () => Null,
-  Number: () => Number2,
-  Object: () => Object2,
-  Omit: () => Omit,
-  Optional: () => Optional,
-  Parameters: () => Parameters,
-  Partial: () => Partial,
-  Pick: () => Pick,
-  Promise: () => Promise2,
-  Readonly: () => Readonly,
-  ReadonlyOptional: () => ReadonlyOptional,
-  Record: () => Record,
-  Recursive: () => Recursive,
-  Ref: () => Ref,
-  RegExp: () => RegExp2,
-  Required: () => Required,
-  Rest: () => Rest,
-  ReturnType: () => ReturnType,
-  String: () => String2,
-  Symbol: () => Symbol2,
-  TemplateLiteral: () => TemplateLiteral,
-  Transform: () => Transform,
-  Tuple: () => Tuple,
-  Uint8Array: () => Uint8Array2,
-  Uncapitalize: () => Uncapitalize,
-  Undefined: () => Undefined,
-  Union: () => Union,
-  Unknown: () => Unknown,
-  Unsafe: () => Unsafe,
-  Uppercase: () => Uppercase,
-  Void: () => Void
-});
-var init_type5 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/type/type.mjs"() {
-    init_any2();
-    init_argument2();
-    init_array2();
-    init_async_iterator2();
-    init_awaited2();
-    init_bigint2();
-    init_boolean2();
-    init_composite2();
-    init_const2();
-    init_constructor2();
-    init_constructor_parameters2();
-    init_date2();
-    init_enum2();
-    init_exclude2();
-    init_extends2();
-    init_extract2();
-    init_function2();
-    init_indexed2();
-    init_instance_type2();
-    init_instantiate2();
-    init_integer2();
-    init_intersect2();
-    init_intrinsic2();
-    init_iterator2();
-    init_keyof2();
-    init_literal2();
-    init_mapped2();
-    init_module2();
-    init_never2();
-    init_not2();
-    init_null2();
-    init_number2();
-    init_object2();
-    init_omit2();
-    init_optional2();
-    init_parameters2();
-    init_partial2();
-    init_pick2();
-    init_promise2();
-    init_readonly2();
-    init_readonly_optional2();
-    init_record2();
-    init_recursive2();
-    init_ref2();
-    init_regexp2();
-    init_required2();
-    init_rest2();
-    init_return_type2();
-    init_string2();
-    init_symbol2();
-    init_template_literal2();
-    init_transform3();
-    init_tuple2();
-    init_uint8array2();
-    init_undefined2();
-    init_union2();
-    init_unknown2();
-    init_unsafe2();
-    init_void2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/type/type/index.mjs
-var Type;
-var init_type6 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/type/type/index.mjs"() {
-    init_type5();
-    Type = type_exports3;
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/index.mjs
-var init_esm = __esm({
-  "node_modules/@sinclair/typebox/build/esm/index.mjs"() {
-    init_clone();
-    init_create();
-    init_error2();
-    init_guard3();
-    init_helpers2();
-    init_patterns2();
-    init_registry();
-    init_sets();
-    init_symbols2();
-    init_any2();
-    init_array2();
-    init_argument2();
-    init_async_iterator2();
-    init_awaited2();
-    init_bigint2();
-    init_boolean2();
-    init_composite2();
-    init_const2();
-    init_constructor2();
-    init_constructor_parameters2();
-    init_date2();
-    init_enum2();
-    init_exclude2();
-    init_extends2();
-    init_extract2();
-    init_function2();
-    init_indexed2();
-    init_instance_type2();
-    init_instantiate2();
-    init_integer2();
-    init_intersect2();
-    init_iterator2();
-    init_intrinsic2();
-    init_keyof2();
-    init_literal2();
-    init_module2();
-    init_mapped2();
-    init_never2();
-    init_not2();
-    init_null2();
-    init_number2();
-    init_object2();
-    init_omit2();
-    init_optional2();
-    init_parameters2();
-    init_partial2();
-    init_pick2();
-    init_promise2();
-    init_readonly2();
-    init_readonly_optional2();
-    init_record2();
-    init_recursive2();
-    init_ref2();
-    init_regexp2();
-    init_required2();
-    init_rest2();
-    init_return_type2();
-    init_schema2();
-    init_static2();
-    init_string2();
-    init_symbol2();
-    init_template_literal2();
-    init_transform3();
-    init_tuple2();
-    init_uint8array2();
-    init_undefined2();
-    init_union2();
-    init_unknown2();
-    init_unsafe2();
-    init_void2();
-    init_type6();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/assert/assert.mjs
-function AssertValue(schema, references, value) {
-  if (Check(schema, references, value))
-    return;
-  throw new AssertError(Errors(schema, references, value));
-}
-function Assert(...args) {
-  return args.length === 3 ? AssertValue(args[0], args[1], args[2]) : AssertValue(args[0], [], args[1]);
-}
-var __classPrivateFieldSet, __classPrivateFieldGet, _AssertError_instances, _AssertError_iterator, _AssertError_Iterator, AssertError;
-var init_assert = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/assert/assert.mjs"() {
-    init_errors2();
-    init_error();
-    init_check();
-    __classPrivateFieldSet = function(receiver, state4, value, kind, f) {
-      if (kind === "m") throw new TypeError("Private method is not writable");
-      if (kind === "a" && !f) throw new TypeError("Private accessor was defined without a setter");
-      if (typeof state4 === "function" ? receiver !== state4 || !f : !state4.has(receiver)) throw new TypeError("Cannot write private member to an object whose class did not declare it");
-      return kind === "a" ? f.call(receiver, value) : f ? f.value = value : state4.set(receiver, value), value;
-    };
-    __classPrivateFieldGet = function(receiver, state4, kind, f) {
-      if (kind === "a" && !f) throw new TypeError("Private accessor was defined without a getter");
-      if (typeof state4 === "function" ? receiver !== state4 || !f : !state4.has(receiver)) throw new TypeError("Cannot read private member from an object whose class did not declare it");
-      return kind === "m" ? f : kind === "a" ? f.call(receiver) : f ? f.value : state4.get(receiver);
-    };
-    AssertError = class extends TypeBoxError {
-      constructor(iterator) {
-        const error = iterator.First();
-        super(error === void 0 ? "Invalid Value" : error.message);
-        _AssertError_instances.add(this);
-        _AssertError_iterator.set(this, void 0);
-        __classPrivateFieldSet(this, _AssertError_iterator, iterator, "f");
-        this.error = error;
-      }
-      /** Returns an iterator for each error in this value. */
-      Errors() {
-        return new ValueErrorIterator(__classPrivateFieldGet(this, _AssertError_instances, "m", _AssertError_Iterator).call(this));
-      }
-    };
-    _AssertError_iterator = /* @__PURE__ */ new WeakMap(), _AssertError_instances = /* @__PURE__ */ new WeakSet(), _AssertError_Iterator = function* _AssertError_Iterator2() {
-      if (this.error)
-        yield this.error;
-      yield* __classPrivateFieldGet(this, _AssertError_iterator, "f");
-    };
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/assert/index.mjs
-var init_assert2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/assert/index.mjs"() {
-    init_assert();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/clone/clone.mjs
-function FromObject13(value) {
-  const Acc = {};
-  for (const key of Object.getOwnPropertyNames(value)) {
-    Acc[key] = Clone2(value[key]);
-  }
-  for (const key of Object.getOwnPropertySymbols(value)) {
-    Acc[key] = Clone2(value[key]);
-  }
-  return Acc;
-}
-function FromArray12(value) {
-  return value.map((element) => Clone2(element));
-}
-function FromTypedArray(value) {
-  return value.slice();
-}
-function FromMap(value) {
-  return new Map(Clone2([...value.entries()]));
-}
-function FromSet(value) {
-  return new Set(Clone2([...value.entries()]));
-}
-function FromDate4(value) {
-  return new Date(value.toISOString());
-}
-function FromValue2(value) {
-  return value;
-}
-function Clone2(value) {
-  if (IsArray(value))
-    return FromArray12(value);
-  if (IsDate(value))
-    return FromDate4(value);
-  if (IsTypedArray(value))
-    return FromTypedArray(value);
-  if (IsMap(value))
-    return FromMap(value);
-  if (IsSet(value))
-    return FromSet(value);
-  if (IsObject(value))
-    return FromObject13(value);
-  if (IsValueType(value))
-    return FromValue2(value);
-  throw new Error("ValueClone: Unable to clone value");
-}
-var init_clone2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/clone/clone.mjs"() {
-    init_guard2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/clone/index.mjs
-var init_clone3 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/clone/index.mjs"() {
-    init_clone2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/create/create.mjs
-function FromDefault(value) {
-  return IsFunction(value) ? value() : Clone2(value);
-}
-function FromAny4(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    return {};
-  }
-}
-function FromArgument4(schema, references) {
-  return {};
-}
-function FromArray13(schema, references) {
-  if (schema.uniqueItems === true && !HasPropertyKey(schema, "default")) {
-    throw new ValueCreateError(schema, "Array with the uniqueItems constraint requires a default value");
-  } else if ("contains" in schema && !HasPropertyKey(schema, "default")) {
-    throw new ValueCreateError(schema, "Array with the contains constraint requires a default value");
-  } else if ("default" in schema) {
-    return FromDefault(schema.default);
-  } else if (schema.minItems !== void 0) {
-    return Array.from({ length: schema.minItems }).map((item) => {
-      return Visit10(schema.items, references);
-    });
-  } else {
-    return [];
-  }
-}
-function FromAsyncIterator7(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    return (async function* () {
-    })();
-  }
-}
-function FromBigInt4(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    return BigInt(0);
-  }
-}
-function FromBoolean4(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    return false;
-  }
-}
-function FromConstructor7(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    const value = Visit10(schema.returns, references);
-    if (typeof value === "object" && !Array.isArray(value)) {
-      return class {
-        constructor() {
-          for (const [key, val] of Object.entries(value)) {
-            const self = this;
-            self[key] = val;
-          }
-        }
-      };
-    } else {
-      return class {
-      };
-    }
-  }
-}
-function FromDate5(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else if (schema.minimumTimestamp !== void 0) {
-    return new Date(schema.minimumTimestamp);
-  } else {
-    return /* @__PURE__ */ new Date();
-  }
-}
-function FromFunction7(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    return () => Visit10(schema.returns, references);
-  }
-}
-function FromImport6(schema, references) {
-  const definitions = globalThis.Object.values(schema.$defs);
-  const target = schema.$defs[schema.$ref];
-  return Visit10(target, [...references, ...definitions]);
-}
-function FromInteger4(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else if (schema.minimum !== void 0) {
-    return schema.minimum;
-  } else {
-    return 0;
-  }
-}
-function FromIntersect14(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    const value = schema.allOf.reduce((acc, schema2) => {
-      const next = Visit10(schema2, references);
-      return typeof next === "object" ? { ...acc, ...next } : next;
-    }, {});
-    if (!Check(schema, references, value))
-      throw new ValueCreateError(schema, "Intersect produced invalid value. Consider using a default value.");
-    return value;
-  }
-}
-function FromIterator7(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    return (function* () {
-    })();
-  }
-}
-function FromLiteral5(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    return schema.const;
-  }
-}
-function FromNever4(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    throw new ValueCreateError(schema, "Never types cannot be created. Consider using a default value.");
-  }
-}
-function FromNot7(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    throw new ValueCreateError(schema, "Not types must have a default value");
-  }
-}
-function FromNull4(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    return null;
-  }
-}
-function FromNumber4(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else if (schema.minimum !== void 0) {
-    return schema.minimum;
-  } else {
-    return 0;
-  }
-}
-function FromObject14(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    const required2 = new Set(schema.required);
-    const Acc = {};
-    for (const [key, subschema] of Object.entries(schema.properties)) {
-      if (!required2.has(key))
-        continue;
-      Acc[key] = Visit10(subschema, references);
-    }
-    return Acc;
-  }
-}
-function FromPromise7(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    return Promise.resolve(Visit10(schema.item, references));
-  }
-}
-function FromRecord9(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    return {};
-  }
-}
-function FromRef10(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    return Visit10(Deref(schema, references), references);
-  }
-}
-function FromRegExp4(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    throw new ValueCreateError(schema, "RegExp types cannot be created. Consider using a default value.");
-  }
-}
-function FromString4(schema, references) {
-  if (schema.pattern !== void 0) {
-    if (!HasPropertyKey(schema, "default")) {
-      throw new ValueCreateError(schema, "String types with patterns must specify a default value");
-    } else {
-      return FromDefault(schema.default);
-    }
-  } else if (schema.format !== void 0) {
-    if (!HasPropertyKey(schema, "default")) {
-      throw new ValueCreateError(schema, "String types with formats must specify a default value");
-    } else {
-      return FromDefault(schema.default);
-    }
-  } else {
-    if (HasPropertyKey(schema, "default")) {
-      return FromDefault(schema.default);
-    } else if (schema.minLength !== void 0) {
-      return Array.from({ length: schema.minLength }).map(() => " ").join("");
-    } else {
-      return "";
-    }
-  }
-}
-function FromSymbol4(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else if ("value" in schema) {
-    return Symbol.for(schema.value);
-  } else {
-    return /* @__PURE__ */ Symbol();
-  }
-}
-function FromTemplateLiteral6(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  }
-  if (!IsTemplateLiteralFinite(schema))
-    throw new ValueCreateError(schema, "Can only create template literals that produce a finite variants. Consider using a default value.");
-  const generated = TemplateLiteralGenerate(schema);
-  return generated[0];
-}
-function FromThis6(schema, references) {
-  if (recursiveDepth++ > recursiveMaxDepth)
-    throw new ValueCreateError(schema, "Cannot create recursive type as it appears possibly infinite. Consider using a default.");
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    return Visit10(Deref(schema, references), references);
-  }
-}
-function FromTuple11(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  }
-  if (schema.items === void 0) {
-    return [];
-  } else {
-    return Array.from({ length: schema.minItems }).map((_, index) => Visit10(schema.items[index], references));
-  }
-}
-function FromUndefined4(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    return void 0;
-  }
-}
-function FromUnion16(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else if (schema.anyOf.length === 0) {
-    throw new Error("ValueCreate.Union: Cannot create Union with zero variants");
-  } else {
-    return Visit10(schema.anyOf[0], references);
-  }
-}
-function FromUint8Array4(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else if (schema.minByteLength !== void 0) {
-    return new Uint8Array(schema.minByteLength);
-  } else {
-    return new Uint8Array(0);
-  }
-}
-function FromUnknown4(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    return {};
-  }
-}
-function FromVoid4(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    return void 0;
-  }
-}
-function FromKind3(schema, references) {
-  if (HasPropertyKey(schema, "default")) {
-    return FromDefault(schema.default);
-  } else {
-    throw new Error("User defined types must specify a default value");
-  }
-}
-function Visit10(schema, references) {
-  const references_ = Pushref(schema, references);
-  const schema_ = schema;
-  switch (schema_[Kind]) {
-    case "Any":
-      return FromAny4(schema_, references_);
-    case "Argument":
-      return FromArgument4(schema_, references_);
-    case "Array":
-      return FromArray13(schema_, references_);
-    case "AsyncIterator":
-      return FromAsyncIterator7(schema_, references_);
-    case "BigInt":
-      return FromBigInt4(schema_, references_);
-    case "Boolean":
-      return FromBoolean4(schema_, references_);
-    case "Constructor":
-      return FromConstructor7(schema_, references_);
-    case "Date":
-      return FromDate5(schema_, references_);
-    case "Function":
-      return FromFunction7(schema_, references_);
-    case "Import":
-      return FromImport6(schema_, references_);
-    case "Integer":
-      return FromInteger4(schema_, references_);
-    case "Intersect":
-      return FromIntersect14(schema_, references_);
-    case "Iterator":
-      return FromIterator7(schema_, references_);
-    case "Literal":
-      return FromLiteral5(schema_, references_);
-    case "Never":
-      return FromNever4(schema_, references_);
-    case "Not":
-      return FromNot7(schema_, references_);
-    case "Null":
-      return FromNull4(schema_, references_);
-    case "Number":
-      return FromNumber4(schema_, references_);
-    case "Object":
-      return FromObject14(schema_, references_);
-    case "Promise":
-      return FromPromise7(schema_, references_);
-    case "Record":
-      return FromRecord9(schema_, references_);
-    case "Ref":
-      return FromRef10(schema_, references_);
-    case "RegExp":
-      return FromRegExp4(schema_, references_);
-    case "String":
-      return FromString4(schema_, references_);
-    case "Symbol":
-      return FromSymbol4(schema_, references_);
-    case "TemplateLiteral":
-      return FromTemplateLiteral6(schema_, references_);
-    case "This":
-      return FromThis6(schema_, references_);
-    case "Tuple":
-      return FromTuple11(schema_, references_);
-    case "Undefined":
-      return FromUndefined4(schema_, references_);
-    case "Union":
-      return FromUnion16(schema_, references_);
-    case "Uint8Array":
-      return FromUint8Array4(schema_, references_);
-    case "Unknown":
-      return FromUnknown4(schema_, references_);
-    case "Void":
-      return FromVoid4(schema_, references_);
-    default:
-      if (!type_exports.Has(schema_[Kind]))
-        throw new ValueCreateError(schema_, "Unknown type");
-      return FromKind3(schema_, references_);
-  }
-}
-function Create2(...args) {
-  recursiveDepth = 0;
-  return args.length === 2 ? Visit10(args[0], args[1]) : Visit10(args[0], []);
-}
-var ValueCreateError, recursiveMaxDepth, recursiveDepth;
-var init_create2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/create/create.mjs"() {
-    init_guard2();
-    init_check2();
-    init_clone3();
-    init_deref2();
-    init_template_literal2();
-    init_registry();
-    init_symbols2();
-    init_error2();
-    init_guard();
-    ValueCreateError = class extends TypeBoxError {
-      constructor(schema, message) {
-        super(message);
-        this.schema = schema;
-      }
-    };
-    recursiveMaxDepth = 512;
-    recursiveDepth = 0;
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/create/index.mjs
-var init_create3 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/create/index.mjs"() {
-    init_create2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/cast/cast.mjs
-function ScoreUnion(schema, references, value) {
-  if (schema[Kind] === "Object" && typeof value === "object" && !IsNull(value)) {
-    const object = schema;
-    const keys = Object.getOwnPropertyNames(value);
-    const entries = Object.entries(object.properties);
-    return entries.reduce((acc, [key, schema2]) => {
-      const literal = schema2[Kind] === "Literal" && schema2.const === value[key] ? 100 : 0;
-      const checks = Check(schema2, references, value[key]) ? 10 : 0;
-      const exists = keys.includes(key) ? 1 : 0;
-      return acc + (literal + checks + exists);
-    }, 0);
-  } else if (schema[Kind] === "Union") {
-    const schemas = schema.anyOf.map((schema2) => Deref(schema2, references));
-    const scores = schemas.map((schema2) => ScoreUnion(schema2, references, value));
-    return Math.max(...scores);
-  } else {
-    return Check(schema, references, value) ? 1 : 0;
-  }
-}
-function SelectUnion(union, references, value) {
-  const schemas = union.anyOf.map((schema) => Deref(schema, references));
-  let [select, best] = [schemas[0], 0];
-  for (const schema of schemas) {
-    const score = ScoreUnion(schema, references, value);
-    if (score > best) {
-      select = schema;
-      best = score;
-    }
-  }
-  return select;
-}
-function CastUnion(union, references, value) {
-  if ("default" in union) {
-    return typeof value === "function" ? union.default : Clone2(union.default);
-  } else {
-    const schema = SelectUnion(union, references, value);
-    return Cast(schema, references, value);
-  }
-}
-function DefaultClone(schema, references, value) {
-  return Check(schema, references, value) ? Clone2(value) : Create2(schema, references);
-}
-function Default3(schema, references, value) {
-  return Check(schema, references, value) ? value : Create2(schema, references);
-}
-function FromArray14(schema, references, value) {
-  if (Check(schema, references, value))
-    return Clone2(value);
-  const created = IsArray(value) ? Clone2(value) : Create2(schema, references);
-  const minimum = IsNumber(schema.minItems) && created.length < schema.minItems ? [...created, ...Array.from({ length: schema.minItems - created.length }, () => null)] : created;
-  const maximum = IsNumber(schema.maxItems) && minimum.length > schema.maxItems ? minimum.slice(0, schema.maxItems) : minimum;
-  const casted = maximum.map((value2) => Visit11(schema.items, references, value2));
-  if (schema.uniqueItems !== true)
-    return casted;
-  const unique = [...new Set(casted)];
-  if (!Check(schema, references, unique))
-    throw new ValueCastError(schema, "Array cast produced invalid data due to uniqueItems constraint");
-  return unique;
-}
-function FromConstructor8(schema, references, value) {
-  if (Check(schema, references, value))
-    return Create2(schema, references);
-  const required2 = new Set(schema.returns.required || []);
-  const result = function() {
-  };
-  for (const [key, property] of Object.entries(schema.returns.properties)) {
-    if (!required2.has(key) && value.prototype[key] === void 0)
-      continue;
-    result.prototype[key] = Visit11(property, references, value.prototype[key]);
-  }
-  return result;
-}
-function FromImport7(schema, references, value) {
-  const definitions = globalThis.Object.values(schema.$defs);
-  const target = schema.$defs[schema.$ref];
-  return Visit11(target, [...references, ...definitions], value);
-}
-function IntersectAssign(correct, value) {
-  if (IsObject(correct) && !IsObject(value) || !IsObject(correct) && IsObject(value))
-    return correct;
-  if (!IsObject(correct) || !IsObject(value))
-    return value;
-  return globalThis.Object.getOwnPropertyNames(correct).reduce((result, key) => {
-    const property = key in value ? IntersectAssign(correct[key], value[key]) : correct[key];
-    return { ...result, [key]: property };
-  }, {});
-}
-function FromIntersect15(schema, references, value) {
-  if (Check(schema, references, value))
-    return value;
-  const correct = Create2(schema, references);
-  const assigned = IntersectAssign(correct, value);
-  return Check(schema, references, assigned) ? assigned : correct;
-}
-function FromNever5(schema, references, value) {
-  throw new ValueCastError(schema, "Never types cannot be cast");
-}
-function FromObject15(schema, references, value) {
-  if (Check(schema, references, value))
-    return value;
-  if (value === null || typeof value !== "object")
-    return Create2(schema, references);
-  const required2 = new Set(schema.required || []);
-  const result = {};
-  for (const [key, property] of Object.entries(schema.properties)) {
-    if (!required2.has(key) && value[key] === void 0)
-      continue;
-    result[key] = Visit11(property, references, value[key]);
-  }
-  if (typeof schema.additionalProperties === "object") {
-    const propertyNames = Object.getOwnPropertyNames(schema.properties);
-    for (const propertyName of Object.getOwnPropertyNames(value)) {
-      if (propertyNames.includes(propertyName))
-        continue;
-      result[propertyName] = Visit11(schema.additionalProperties, references, value[propertyName]);
-    }
-  }
-  return result;
-}
-function FromRecord10(schema, references, value) {
-  if (Check(schema, references, value))
-    return Clone2(value);
-  if (value === null || typeof value !== "object" || Array.isArray(value) || value instanceof Date)
-    return Create2(schema, references);
-  const subschemaPropertyName = Object.getOwnPropertyNames(schema.patternProperties)[0];
-  const subschema = schema.patternProperties[subschemaPropertyName];
-  const result = {};
-  for (const [propKey, propValue] of Object.entries(value)) {
-    result[propKey] = Visit11(subschema, references, propValue);
-  }
-  return result;
-}
-function FromRef11(schema, references, value) {
-  return Visit11(Deref(schema, references), references, value);
-}
-function FromThis7(schema, references, value) {
-  return Visit11(Deref(schema, references), references, value);
-}
-function FromTuple12(schema, references, value) {
-  if (Check(schema, references, value))
-    return Clone2(value);
-  if (!IsArray(value))
-    return Create2(schema, references);
-  if (schema.items === void 0)
-    return [];
-  return schema.items.map((schema2, index) => Visit11(schema2, references, value[index]));
-}
-function FromUnion17(schema, references, value) {
-  return Check(schema, references, value) ? Clone2(value) : CastUnion(schema, references, value);
-}
-function Visit11(schema, references, value) {
-  const references_ = IsString(schema.$id) ? Pushref(schema, references) : references;
-  const schema_ = schema;
-  switch (schema[Kind]) {
-    // --------------------------------------------------------------
-    // Structural
-    // --------------------------------------------------------------
-    case "Array":
-      return FromArray14(schema_, references_, value);
-    case "Constructor":
-      return FromConstructor8(schema_, references_, value);
-    case "Import":
-      return FromImport7(schema_, references_, value);
-    case "Intersect":
-      return FromIntersect15(schema_, references_, value);
-    case "Never":
-      return FromNever5(schema_, references_, value);
-    case "Object":
-      return FromObject15(schema_, references_, value);
-    case "Record":
-      return FromRecord10(schema_, references_, value);
-    case "Ref":
-      return FromRef11(schema_, references_, value);
-    case "This":
-      return FromThis7(schema_, references_, value);
-    case "Tuple":
-      return FromTuple12(schema_, references_, value);
-    case "Union":
-      return FromUnion17(schema_, references_, value);
-    // --------------------------------------------------------------
-    // DefaultClone
-    // --------------------------------------------------------------
-    case "Date":
-    case "Symbol":
-    case "Uint8Array":
-      return DefaultClone(schema, references, value);
-    // --------------------------------------------------------------
-    // Default
-    // --------------------------------------------------------------
-    default:
-      return Default3(schema_, references_, value);
-  }
-}
-function Cast(...args) {
-  return args.length === 3 ? Visit11(args[0], args[1], args[2]) : Visit11(args[0], [], args[1]);
-}
-var ValueCastError;
-var init_cast = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/cast/cast.mjs"() {
-    init_guard2();
-    init_error2();
-    init_symbols2();
-    init_create3();
-    init_check2();
-    init_clone3();
-    init_deref2();
-    ValueCastError = class extends TypeBoxError {
-      constructor(schema, message) {
-        super(message);
-        this.schema = schema;
-      }
-    };
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/cast/index.mjs
-var init_cast2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/cast/index.mjs"() {
-    init_cast();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/clean/clean.mjs
-function IsCheckable(schema) {
-  return IsKind(schema) && schema[Kind] !== "Unsafe";
-}
-function FromArray15(schema, references, value) {
-  if (!IsArray(value))
-    return value;
-  return value.map((value2) => Visit12(schema.items, references, value2));
-}
-function FromImport8(schema, references, value) {
-  const definitions = globalThis.Object.values(schema.$defs);
-  const target = schema.$defs[schema.$ref];
-  return Visit12(target, [...references, ...definitions], value);
-}
-function FromIntersect16(schema, references, value) {
-  const unevaluatedProperties = schema.unevaluatedProperties;
-  const intersections = schema.allOf.map((schema2) => Visit12(schema2, references, Clone2(value)));
-  const composite = intersections.reduce((acc, value2) => IsObject(value2) ? { ...acc, ...value2 } : value2, {});
-  if (!IsObject(value) || !IsObject(composite) || !IsKind(unevaluatedProperties))
-    return composite;
-  const knownkeys = KeyOfPropertyKeys(schema);
-  for (const key of Object.getOwnPropertyNames(value)) {
-    if (knownkeys.includes(key))
-      continue;
-    if (Check(unevaluatedProperties, references, value[key])) {
-      composite[key] = Visit12(unevaluatedProperties, references, value[key]);
-    }
-  }
-  return composite;
-}
-function FromObject16(schema, references, value) {
-  if (!IsObject(value) || IsArray(value))
-    return value;
-  const additionalProperties = schema.additionalProperties;
-  for (const key of Object.getOwnPropertyNames(value)) {
-    if (HasPropertyKey(schema.properties, key)) {
-      value[key] = Visit12(schema.properties[key], references, value[key]);
-      continue;
-    }
-    if (IsKind(additionalProperties) && Check(additionalProperties, references, value[key])) {
-      value[key] = Visit12(additionalProperties, references, value[key]);
-      continue;
-    }
-    delete value[key];
-  }
-  return value;
-}
-function FromRecord11(schema, references, value) {
-  if (!IsObject(value))
-    return value;
-  const additionalProperties = schema.additionalProperties;
-  const propertyKeys = Object.getOwnPropertyNames(value);
-  const [propertyKey, propertySchema] = Object.entries(schema.patternProperties)[0];
-  const propertyKeyTest = new RegExp(propertyKey);
-  for (const key of propertyKeys) {
-    if (propertyKeyTest.test(key)) {
-      value[key] = Visit12(propertySchema, references, value[key]);
-      continue;
-    }
-    if (IsKind(additionalProperties) && Check(additionalProperties, references, value[key])) {
-      value[key] = Visit12(additionalProperties, references, value[key]);
-      continue;
-    }
-    delete value[key];
-  }
-  return value;
-}
-function FromRef12(schema, references, value) {
-  return Visit12(Deref(schema, references), references, value);
-}
-function FromThis8(schema, references, value) {
-  return Visit12(Deref(schema, references), references, value);
-}
-function FromTuple13(schema, references, value) {
-  if (!IsArray(value))
-    return value;
-  if (IsUndefined(schema.items))
-    return [];
-  const length = Math.min(value.length, schema.items.length);
-  for (let i = 0; i < length; i++) {
-    value[i] = Visit12(schema.items[i], references, value[i]);
-  }
-  return value.length > length ? value.slice(0, length) : value;
-}
-function FromUnion18(schema, references, value) {
-  for (const inner of schema.anyOf) {
-    if (IsCheckable(inner) && Check(inner, references, value)) {
-      return Visit12(inner, references, value);
-    }
-  }
-  return value;
-}
-function Visit12(schema, references, value) {
-  const references_ = IsString(schema.$id) ? Pushref(schema, references) : references;
-  const schema_ = schema;
-  switch (schema_[Kind]) {
-    case "Array":
-      return FromArray15(schema_, references_, value);
-    case "Import":
-      return FromImport8(schema_, references_, value);
-    case "Intersect":
-      return FromIntersect16(schema_, references_, value);
-    case "Object":
-      return FromObject16(schema_, references_, value);
-    case "Record":
-      return FromRecord11(schema_, references_, value);
-    case "Ref":
-      return FromRef12(schema_, references_, value);
-    case "This":
-      return FromThis8(schema_, references_, value);
-    case "Tuple":
-      return FromTuple13(schema_, references_, value);
-    case "Union":
-      return FromUnion18(schema_, references_, value);
-    default:
-      return value;
-  }
-}
-function Clean(...args) {
-  return args.length === 3 ? Visit12(args[0], args[1], args[2]) : Visit12(args[0], [], args[1]);
-}
-var init_clean = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/clean/clean.mjs"() {
-    init_keyof2();
-    init_check2();
-    init_clone3();
-    init_deref2();
-    init_symbols2();
-    init_guard2();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/clean/index.mjs
-var init_clean2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/clean/index.mjs"() {
-    init_clean();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/convert/convert.mjs
-function IsStringNumeric(value) {
-  return IsString(value) && !isNaN(value) && !isNaN(parseFloat(value));
-}
-function IsValueToString(value) {
-  return IsBigInt(value) || IsBoolean(value) || IsNumber(value);
-}
-function IsValueTrue(value) {
-  return value === true || IsNumber(value) && value === 1 || IsBigInt(value) && value === BigInt("1") || IsString(value) && (value.toLowerCase() === "true" || value === "1");
-}
-function IsValueFalse(value) {
-  return value === false || IsNumber(value) && (value === 0 || Object.is(value, -0)) || IsBigInt(value) && value === BigInt("0") || IsString(value) && (value.toLowerCase() === "false" || value === "0" || value === "-0");
-}
-function IsTimeStringWithTimeZone(value) {
-  return IsString(value) && /^(?:[0-2]\d:[0-5]\d:[0-5]\d|23:59:60)(?:\.\d+)?(?:z|[+-]\d\d(?::?\d\d)?)$/i.test(value);
-}
-function IsTimeStringWithoutTimeZone(value) {
-  return IsString(value) && /^(?:[0-2]\d:[0-5]\d:[0-5]\d|23:59:60)?$/i.test(value);
-}
-function IsDateTimeStringWithTimeZone(value) {
-  return IsString(value) && /^\d\d\d\d-[0-1]\d-[0-3]\dt(?:[0-2]\d:[0-5]\d:[0-5]\d|23:59:60)(?:\.\d+)?(?:z|[+-]\d\d(?::?\d\d)?)$/i.test(value);
-}
-function IsDateTimeStringWithoutTimeZone(value) {
-  return IsString(value) && /^\d\d\d\d-[0-1]\d-[0-3]\dt(?:[0-2]\d:[0-5]\d:[0-5]\d|23:59:60)?$/i.test(value);
-}
-function IsDateString(value) {
-  return IsString(value) && /^\d\d\d\d-[0-1]\d-[0-3]\d$/i.test(value);
-}
-function TryConvertLiteralString(value, target) {
-  const conversion = TryConvertString(value);
-  return conversion === target ? conversion : value;
-}
-function TryConvertLiteralNumber(value, target) {
-  const conversion = TryConvertNumber(value);
-  return conversion === target ? conversion : value;
-}
-function TryConvertLiteralBoolean(value, target) {
-  const conversion = TryConvertBoolean(value);
-  return conversion === target ? conversion : value;
-}
-function TryConvertLiteral(schema, value) {
-  return IsString(schema.const) ? TryConvertLiteralString(value, schema.const) : IsNumber(schema.const) ? TryConvertLiteralNumber(value, schema.const) : IsBoolean(schema.const) ? TryConvertLiteralBoolean(value, schema.const) : value;
-}
-function TryConvertBoolean(value) {
-  return IsValueTrue(value) ? true : IsValueFalse(value) ? false : value;
-}
-function TryConvertBigInt(value) {
-  const truncateInteger = (value2) => value2.split(".")[0];
-  return IsStringNumeric(value) ? BigInt(truncateInteger(value)) : IsNumber(value) ? BigInt(Math.trunc(value)) : IsValueFalse(value) ? BigInt(0) : IsValueTrue(value) ? BigInt(1) : value;
-}
-function TryConvertString(value) {
-  return IsSymbol(value) && value.description !== void 0 ? value.description.toString() : IsValueToString(value) ? value.toString() : value;
-}
-function TryConvertNumber(value) {
-  return IsStringNumeric(value) ? parseFloat(value) : IsValueTrue(value) ? 1 : IsValueFalse(value) ? 0 : value;
-}
-function TryConvertInteger(value) {
-  return IsStringNumeric(value) ? parseInt(value) : IsNumber(value) ? Math.trunc(value) : IsValueTrue(value) ? 1 : IsValueFalse(value) ? 0 : value;
-}
-function TryConvertNull(value) {
-  return IsString(value) && value.toLowerCase() === "null" ? null : value;
-}
-function TryConvertUndefined(value) {
-  return IsString(value) && value === "undefined" ? void 0 : value;
-}
-function TryConvertDate(value) {
-  return IsDate(value) ? value : IsNumber(value) ? new Date(value) : IsValueTrue(value) ? /* @__PURE__ */ new Date(1) : IsValueFalse(value) ? /* @__PURE__ */ new Date(0) : IsStringNumeric(value) ? new Date(parseInt(value)) : IsTimeStringWithoutTimeZone(value) ? /* @__PURE__ */ new Date(`1970-01-01T${value}.000Z`) : IsTimeStringWithTimeZone(value) ? /* @__PURE__ */ new Date(`1970-01-01T${value}`) : IsDateTimeStringWithoutTimeZone(value) ? /* @__PURE__ */ new Date(`${value}.000Z`) : IsDateTimeStringWithTimeZone(value) ? new Date(value) : IsDateString(value) ? /* @__PURE__ */ new Date(`${value}T00:00:00.000Z`) : value;
-}
-function Default4(value) {
-  return value;
-}
-function FromArray16(schema, references, value) {
-  const elements = IsArray(value) ? value : [value];
-  return elements.map((element) => Visit13(schema.items, references, element));
-}
-function FromBigInt5(schema, references, value) {
-  return TryConvertBigInt(value);
-}
-function FromBoolean5(schema, references, value) {
-  return TryConvertBoolean(value);
-}
-function FromDate6(schema, references, value) {
-  return TryConvertDate(value);
-}
-function FromImport9(schema, references, value) {
-  const definitions = globalThis.Object.values(schema.$defs);
-  const target = schema.$defs[schema.$ref];
-  return Visit13(target, [...references, ...definitions], value);
-}
-function FromInteger5(schema, references, value) {
-  return TryConvertInteger(value);
-}
-function FromIntersect17(schema, references, value) {
-  return schema.allOf.reduce((value2, schema2) => Visit13(schema2, references, value2), value);
-}
-function FromLiteral6(schema, references, value) {
-  return TryConvertLiteral(schema, value);
-}
-function FromNull5(schema, references, value) {
-  return TryConvertNull(value);
-}
-function FromNumber5(schema, references, value) {
-  return TryConvertNumber(value);
-}
-function FromObject17(schema, references, value) {
-  if (!IsObject(value) || IsArray(value))
-    return value;
-  for (const propertyKey of Object.getOwnPropertyNames(schema.properties)) {
-    if (!HasPropertyKey(value, propertyKey))
-      continue;
-    value[propertyKey] = Visit13(schema.properties[propertyKey], references, value[propertyKey]);
-  }
-  return value;
-}
-function FromRecord12(schema, references, value) {
-  const isConvertable = IsObject(value) && !IsArray(value);
-  if (!isConvertable)
-    return value;
-  const propertyKey = Object.getOwnPropertyNames(schema.patternProperties)[0];
-  const property = schema.patternProperties[propertyKey];
-  for (const [propKey, propValue] of Object.entries(value)) {
-    value[propKey] = Visit13(property, references, propValue);
-  }
-  return value;
-}
-function FromRef13(schema, references, value) {
-  return Visit13(Deref(schema, references), references, value);
-}
-function FromString5(schema, references, value) {
-  return TryConvertString(value);
-}
-function FromSymbol5(schema, references, value) {
-  return IsString(value) || IsNumber(value) ? Symbol(value) : value;
-}
-function FromThis9(schema, references, value) {
-  return Visit13(Deref(schema, references), references, value);
-}
-function FromTuple14(schema, references, value) {
-  const isConvertable = IsArray(value) && !IsUndefined(schema.items);
-  if (!isConvertable)
-    return value;
-  return value.map((value2, index) => {
-    return index < schema.items.length ? Visit13(schema.items[index], references, value2) : value2;
-  });
-}
-function FromUndefined5(schema, references, value) {
-  return TryConvertUndefined(value);
-}
-function FromUnion19(schema, references, value) {
-  for (const subschema of schema.anyOf) {
-    if (Check(subschema, references, value)) {
-      return value;
-    }
-  }
-  for (const subschema of schema.anyOf) {
-    const converted = Visit13(subschema, references, Clone2(value));
-    if (!Check(subschema, references, converted))
-      continue;
-    return converted;
-  }
-  return value;
-}
-function Visit13(schema, references, value) {
-  const references_ = Pushref(schema, references);
-  const schema_ = schema;
-  switch (schema[Kind]) {
-    case "Array":
-      return FromArray16(schema_, references_, value);
-    case "BigInt":
-      return FromBigInt5(schema_, references_, value);
-    case "Boolean":
-      return FromBoolean5(schema_, references_, value);
-    case "Date":
-      return FromDate6(schema_, references_, value);
-    case "Import":
-      return FromImport9(schema_, references_, value);
-    case "Integer":
-      return FromInteger5(schema_, references_, value);
-    case "Intersect":
-      return FromIntersect17(schema_, references_, value);
-    case "Literal":
-      return FromLiteral6(schema_, references_, value);
-    case "Null":
-      return FromNull5(schema_, references_, value);
-    case "Number":
-      return FromNumber5(schema_, references_, value);
-    case "Object":
-      return FromObject17(schema_, references_, value);
-    case "Record":
-      return FromRecord12(schema_, references_, value);
-    case "Ref":
-      return FromRef13(schema_, references_, value);
-    case "String":
-      return FromString5(schema_, references_, value);
-    case "Symbol":
-      return FromSymbol5(schema_, references_, value);
-    case "This":
-      return FromThis9(schema_, references_, value);
-    case "Tuple":
-      return FromTuple14(schema_, references_, value);
-    case "Undefined":
-      return FromUndefined5(schema_, references_, value);
-    case "Union":
-      return FromUnion19(schema_, references_, value);
-    default:
-      return Default4(value);
-  }
-}
-function Convert(...args) {
-  return args.length === 3 ? Visit13(args[0], args[1], args[2]) : Visit13(args[0], [], args[1]);
-}
-var init_convert = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/convert/convert.mjs"() {
-    init_clone3();
-    init_check2();
-    init_deref2();
-    init_symbols2();
-    init_guard2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/convert/index.mjs
-var init_convert2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/convert/index.mjs"() {
-    init_convert();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/decode/decode.mjs
-function Decode(...args) {
-  const [schema, references, value] = args.length === 3 ? [args[0], args[1], args[2]] : [args[0], [], args[1]];
-  if (!Check(schema, references, value))
-    throw new TransformDecodeCheckError(schema, value, Errors(schema, references, value).First());
-  return HasTransform(schema, references) ? TransformDecode(schema, references, value) : value;
-}
-var init_decode2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/decode/decode.mjs"() {
-    init_transform();
-    init_check2();
-    init_errors2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/decode/index.mjs
-var init_decode3 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/decode/index.mjs"() {
-    init_decode2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/default/default.mjs
-function ValueOrDefault(schema, value) {
-  const defaultValue = HasPropertyKey(schema, "default") ? schema.default : void 0;
-  const clone = IsFunction(defaultValue) ? defaultValue() : Clone2(defaultValue);
-  return IsUndefined(value) ? clone : IsObject(value) && IsObject(clone) ? Object.assign(clone, value) : value;
-}
-function HasDefaultProperty(schema) {
-  return IsKind(schema) && "default" in schema;
-}
-function FromArray17(schema, references, value) {
-  if (IsArray(value)) {
-    for (let i = 0; i < value.length; i++) {
-      value[i] = Visit14(schema.items, references, value[i]);
-    }
-    return value;
-  }
-  const defaulted = ValueOrDefault(schema, value);
-  if (!IsArray(defaulted))
-    return defaulted;
-  for (let i = 0; i < defaulted.length; i++) {
-    defaulted[i] = Visit14(schema.items, references, defaulted[i]);
-  }
-  return defaulted;
-}
-function FromDate7(schema, references, value) {
-  return IsDate(value) ? value : ValueOrDefault(schema, value);
-}
-function FromImport10(schema, references, value) {
-  const definitions = globalThis.Object.values(schema.$defs);
-  const target = schema.$defs[schema.$ref];
-  return Visit14(target, [...references, ...definitions], value);
-}
-function FromIntersect18(schema, references, value) {
-  const defaulted = ValueOrDefault(schema, value);
-  return schema.allOf.reduce((acc, schema2) => {
-    const next = Visit14(schema2, references, defaulted);
-    return IsObject(next) ? { ...acc, ...next } : next;
-  }, {});
-}
-function FromObject18(schema, references, value) {
-  const defaulted = ValueOrDefault(schema, value);
-  if (!IsObject(defaulted))
-    return defaulted;
-  const knownPropertyKeys = Object.getOwnPropertyNames(schema.properties);
-  for (const key of knownPropertyKeys) {
-    const propertyValue = Visit14(schema.properties[key], references, defaulted[key]);
-    if (IsUndefined(propertyValue))
-      continue;
-    defaulted[key] = Visit14(schema.properties[key], references, defaulted[key]);
-  }
-  if (!HasDefaultProperty(schema.additionalProperties))
-    return defaulted;
-  for (const key of Object.getOwnPropertyNames(defaulted)) {
-    if (knownPropertyKeys.includes(key))
-      continue;
-    defaulted[key] = Visit14(schema.additionalProperties, references, defaulted[key]);
-  }
-  return defaulted;
-}
-function FromRecord13(schema, references, value) {
-  const defaulted = ValueOrDefault(schema, value);
-  if (!IsObject(defaulted))
-    return defaulted;
-  const additionalPropertiesSchema = schema.additionalProperties;
-  const [propertyKeyPattern, propertySchema] = Object.entries(schema.patternProperties)[0];
-  const knownPropertyKey = new RegExp(propertyKeyPattern);
-  for (const key of Object.getOwnPropertyNames(defaulted)) {
-    if (!(knownPropertyKey.test(key) && HasDefaultProperty(propertySchema)))
-      continue;
-    defaulted[key] = Visit14(propertySchema, references, defaulted[key]);
-  }
-  if (!HasDefaultProperty(additionalPropertiesSchema))
-    return defaulted;
-  for (const key of Object.getOwnPropertyNames(defaulted)) {
-    if (knownPropertyKey.test(key))
-      continue;
-    defaulted[key] = Visit14(additionalPropertiesSchema, references, defaulted[key]);
-  }
-  return defaulted;
-}
-function FromRef14(schema, references, value) {
-  return Visit14(Deref(schema, references), references, ValueOrDefault(schema, value));
-}
-function FromThis10(schema, references, value) {
-  return Visit14(Deref(schema, references), references, value);
-}
-function FromTuple15(schema, references, value) {
-  const defaulted = ValueOrDefault(schema, value);
-  if (!IsArray(defaulted) || IsUndefined(schema.items))
-    return defaulted;
-  const [items, max] = [schema.items, Math.max(schema.items.length, defaulted.length)];
-  for (let i = 0; i < max; i++) {
-    if (i < items.length)
-      defaulted[i] = Visit14(items[i], references, defaulted[i]);
-  }
-  return defaulted;
-}
-function FromUnion20(schema, references, value) {
-  const defaulted = ValueOrDefault(schema, value);
-  for (const inner of schema.anyOf) {
-    const result = Visit14(inner, references, Clone2(defaulted));
-    if (Check(inner, references, result)) {
-      return result;
-    }
-  }
-  return defaulted;
-}
-function Visit14(schema, references, value) {
-  const references_ = Pushref(schema, references);
-  const schema_ = schema;
-  switch (schema_[Kind]) {
-    case "Array":
-      return FromArray17(schema_, references_, value);
-    case "Date":
-      return FromDate7(schema_, references_, value);
-    case "Import":
-      return FromImport10(schema_, references_, value);
-    case "Intersect":
-      return FromIntersect18(schema_, references_, value);
-    case "Object":
-      return FromObject18(schema_, references_, value);
-    case "Record":
-      return FromRecord13(schema_, references_, value);
-    case "Ref":
-      return FromRef14(schema_, references_, value);
-    case "This":
-      return FromThis10(schema_, references_, value);
-    case "Tuple":
-      return FromTuple15(schema_, references_, value);
-    case "Union":
-      return FromUnion20(schema_, references_, value);
-    default:
-      return ValueOrDefault(schema_, value);
-  }
-}
-function Default5(...args) {
-  return args.length === 3 ? Visit14(args[0], args[1], args[2]) : Visit14(args[0], [], args[1]);
-}
-var init_default = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/default/default.mjs"() {
-    init_check2();
-    init_clone3();
-    init_deref2();
-    init_symbols2();
-    init_guard2();
-    init_kind();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/default/index.mjs
-var init_default2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/default/index.mjs"() {
-    init_default();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/pointer/pointer.mjs
-var pointer_exports = {};
-__export(pointer_exports, {
-  Delete: () => Delete3,
-  Format: () => Format,
-  Get: () => Get3,
-  Has: () => Has3,
-  Set: () => Set4,
-  ValuePointerRootDeleteError: () => ValuePointerRootDeleteError,
-  ValuePointerRootSetError: () => ValuePointerRootSetError
-});
-function Escape2(component) {
-  return component.indexOf("~") === -1 ? component : component.replace(/~1/g, "/").replace(/~0/g, "~");
-}
-function* Format(pointer) {
-  if (pointer === "")
-    return;
-  let [start, end] = [0, 0];
-  for (let i = 0; i < pointer.length; i++) {
-    const char = pointer.charAt(i);
-    if (char === "/") {
-      if (i === 0) {
-        start = i + 1;
-      } else {
-        end = i;
-        yield Escape2(pointer.slice(start, end));
-        start = i + 1;
-      }
-    } else {
-      end = i;
-    }
-  }
-  yield Escape2(pointer.slice(start));
-}
-function Set4(value, pointer, update) {
-  if (pointer === "")
-    throw new ValuePointerRootSetError(value, pointer, update);
-  let [owner, next, key] = [null, value, ""];
-  for (const component of Format(pointer)) {
-    if (next[component] === void 0)
-      next[component] = {};
-    owner = next;
-    next = next[component];
-    key = component;
-  }
-  owner[key] = update;
-}
-function Delete3(value, pointer) {
-  if (pointer === "")
-    throw new ValuePointerRootDeleteError(value, pointer);
-  let [owner, next, key] = [null, value, ""];
-  for (const component of Format(pointer)) {
-    if (next[component] === void 0 || next[component] === null)
-      return;
-    owner = next;
-    next = next[component];
-    key = component;
-  }
-  if (Array.isArray(owner)) {
-    const index = parseInt(key);
-    owner.splice(index, 1);
-  } else {
-    delete owner[key];
-  }
-}
-function Has3(value, pointer) {
-  if (pointer === "")
-    return true;
-  let [owner, next, key] = [null, value, ""];
-  for (const component of Format(pointer)) {
-    if (next[component] === void 0)
-      return false;
-    owner = next;
-    next = next[component];
-    key = component;
-  }
-  return Object.getOwnPropertyNames(owner).includes(key);
-}
-function Get3(value, pointer) {
-  if (pointer === "")
-    return value;
-  let current = value;
-  for (const component of Format(pointer)) {
-    if (current[component] === void 0)
-      return void 0;
-    current = current[component];
-  }
-  return current;
-}
-var ValuePointerRootSetError, ValuePointerRootDeleteError;
-var init_pointer = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/pointer/pointer.mjs"() {
-    init_error2();
-    ValuePointerRootSetError = class extends TypeBoxError {
-      constructor(value, path4, update) {
-        super("Cannot set root value");
-        this.value = value;
-        this.path = path4;
-        this.update = update;
-      }
-    };
-    ValuePointerRootDeleteError = class extends TypeBoxError {
-      constructor(value, path4) {
-        super("Cannot delete root value");
-        this.value = value;
-        this.path = path4;
-      }
-    };
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/pointer/index.mjs
-var init_pointer2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/pointer/index.mjs"() {
-    init_pointer();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/equal/equal.mjs
-function ObjectType3(left, right) {
-  if (!IsObject(right))
-    return false;
-  const leftKeys = [...Object.keys(left), ...Object.getOwnPropertySymbols(left)];
-  const rightKeys = [...Object.keys(right), ...Object.getOwnPropertySymbols(right)];
-  if (leftKeys.length !== rightKeys.length)
-    return false;
-  return leftKeys.every((key) => Equal(left[key], right[key]));
-}
-function DateType3(left, right) {
-  return IsDate(right) && left.getTime() === right.getTime();
-}
-function ArrayType3(left, right) {
-  if (!IsArray(right) || left.length !== right.length)
-    return false;
-  return left.every((value, index) => Equal(value, right[index]));
-}
-function TypedArrayType(left, right) {
-  if (!IsTypedArray(right) || left.length !== right.length || Object.getPrototypeOf(left).constructor.name !== Object.getPrototypeOf(right).constructor.name)
-    return false;
-  return left.every((value, index) => Equal(value, right[index]));
-}
-function ValueType(left, right) {
-  return left === right;
-}
-function Equal(left, right) {
-  if (IsDate(left))
-    return DateType3(left, right);
-  if (IsTypedArray(left))
-    return TypedArrayType(left, right);
-  if (IsArray(left))
-    return ArrayType3(left, right);
-  if (IsObject(left))
-    return ObjectType3(left, right);
-  if (IsValueType(left))
-    return ValueType(left, right);
-  throw new Error("ValueEquals: Unable to compare value");
-}
-var init_equal = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/equal/equal.mjs"() {
-    init_guard2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/delta/delta.mjs
-function CreateUpdate(path4, value) {
-  return { type: "update", path: path4, value };
-}
-function CreateInsert(path4, value) {
-  return { type: "insert", path: path4, value };
-}
-function CreateDelete(path4) {
-  return { type: "delete", path: path4 };
-}
-function AssertDiffable(value) {
-  if (globalThis.Object.getOwnPropertySymbols(value).length > 0)
-    throw new ValueDiffError(value, "Cannot diff objects with symbols");
-}
-function* ObjectType4(path4, current, next) {
-  AssertDiffable(current);
-  AssertDiffable(next);
-  if (!IsStandardObject(next))
-    return yield CreateUpdate(path4, next);
-  const currentKeys = globalThis.Object.getOwnPropertyNames(current);
-  const nextKeys = globalThis.Object.getOwnPropertyNames(next);
-  for (const key of nextKeys) {
-    if (HasPropertyKey(current, key))
-      continue;
-    yield CreateInsert(`${path4}/${key}`, next[key]);
-  }
-  for (const key of currentKeys) {
-    if (!HasPropertyKey(next, key))
-      continue;
-    if (Equal(current, next))
-      continue;
-    yield* Visit15(`${path4}/${key}`, current[key], next[key]);
-  }
-  for (const key of currentKeys) {
-    if (HasPropertyKey(next, key))
-      continue;
-    yield CreateDelete(`${path4}/${key}`);
-  }
-}
-function* ArrayType4(path4, current, next) {
-  if (!IsArray(next))
-    return yield CreateUpdate(path4, next);
-  for (let i = 0; i < Math.min(current.length, next.length); i++) {
-    yield* Visit15(`${path4}/${i}`, current[i], next[i]);
-  }
-  for (let i = 0; i < next.length; i++) {
-    if (i < current.length)
-      continue;
-    yield CreateInsert(`${path4}/${i}`, next[i]);
-  }
-  for (let i = current.length - 1; i >= 0; i--) {
-    if (i < next.length)
-      continue;
-    yield CreateDelete(`${path4}/${i}`);
-  }
-}
-function* TypedArrayType2(path4, current, next) {
-  if (!IsTypedArray(next) || current.length !== next.length || globalThis.Object.getPrototypeOf(current).constructor.name !== globalThis.Object.getPrototypeOf(next).constructor.name)
-    return yield CreateUpdate(path4, next);
-  for (let i = 0; i < Math.min(current.length, next.length); i++) {
-    yield* Visit15(`${path4}/${i}`, current[i], next[i]);
-  }
-}
-function* ValueType2(path4, current, next) {
-  if (current === next)
-    return;
-  yield CreateUpdate(path4, next);
-}
-function* Visit15(path4, current, next) {
-  if (IsStandardObject(current))
-    return yield* ObjectType4(path4, current, next);
-  if (IsArray(current))
-    return yield* ArrayType4(path4, current, next);
-  if (IsTypedArray(current))
-    return yield* TypedArrayType2(path4, current, next);
-  if (IsValueType(current))
-    return yield* ValueType2(path4, current, next);
-  throw new ValueDiffError(current, "Unable to diff value");
-}
-function Diff(current, next) {
-  return [...Visit15("", current, next)];
-}
-function IsRootUpdate(edits) {
-  return edits.length > 0 && edits[0].path === "" && edits[0].type === "update";
-}
-function IsIdentity(edits) {
-  return edits.length === 0;
-}
-function Patch(current, edits) {
-  if (IsRootUpdate(edits)) {
-    return Clone2(edits[0].value);
-  }
-  if (IsIdentity(edits)) {
-    return Clone2(current);
-  }
-  const clone = Clone2(current);
-  for (const edit of edits) {
-    switch (edit.type) {
-      case "insert": {
-        pointer_exports.Set(clone, edit.path, edit.value);
-        break;
-      }
-      case "update": {
-        pointer_exports.Set(clone, edit.path, edit.value);
-        break;
-      }
-      case "delete": {
-        pointer_exports.Delete(clone, edit.path);
-        break;
-      }
-    }
-  }
-  return clone;
-}
-var Insert, Update, Delete4, Edit, ValueDiffError;
-var init_delta = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/delta/delta.mjs"() {
-    init_guard2();
-    init_pointer2();
-    init_clone3();
-    init_equal();
-    init_error2();
-    init_literal2();
-    init_object2();
-    init_string2();
-    init_unknown2();
-    init_union2();
-    Insert = Object2({
-      type: Literal("insert"),
-      path: String2(),
-      value: Unknown()
-    });
-    Update = Object2({
-      type: Literal("update"),
-      path: String2(),
-      value: Unknown()
-    });
-    Delete4 = Object2({
-      type: Literal("delete"),
-      path: String2()
-    });
-    Edit = Union([Insert, Update, Delete4]);
-    ValueDiffError = class extends TypeBoxError {
-      constructor(value, message) {
-        super(message);
-        this.value = value;
-      }
-    };
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/delta/index.mjs
-var init_delta2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/delta/index.mjs"() {
-    init_delta();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/encode/encode.mjs
-function Encode(...args) {
-  const [schema, references, value] = args.length === 3 ? [args[0], args[1], args[2]] : [args[0], [], args[1]];
-  const encoded = HasTransform(schema, references) ? TransformEncode(schema, references, value) : value;
-  if (!Check(schema, references, encoded))
-    throw new TransformEncodeCheckError(schema, encoded, Errors(schema, references, encoded).First());
-  return encoded;
-}
-var init_encode2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/encode/encode.mjs"() {
-    init_transform();
-    init_check2();
-    init_errors2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/encode/index.mjs
-var init_encode3 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/encode/index.mjs"() {
-    init_encode2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/equal/index.mjs
-var init_equal2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/equal/index.mjs"() {
-    init_equal();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/mutate/mutate.mjs
-function IsStandardObject2(value) {
-  return IsObject(value) && !IsArray(value);
-}
-function ObjectType5(root, path4, current, next) {
-  if (!IsStandardObject2(current)) {
-    pointer_exports.Set(root, path4, Clone2(next));
-  } else {
-    const currentKeys = Object.getOwnPropertyNames(current);
-    const nextKeys = Object.getOwnPropertyNames(next);
-    for (const currentKey of currentKeys) {
-      if (!nextKeys.includes(currentKey)) {
-        delete current[currentKey];
-      }
-    }
-    for (const nextKey of nextKeys) {
-      if (!currentKeys.includes(nextKey)) {
-        current[nextKey] = null;
-      }
-    }
-    for (const nextKey of nextKeys) {
-      Visit16(root, `${path4}/${nextKey}`, current[nextKey], next[nextKey]);
-    }
-  }
-}
-function ArrayType5(root, path4, current, next) {
-  if (!IsArray(current)) {
-    pointer_exports.Set(root, path4, Clone2(next));
-  } else {
-    for (let index = 0; index < next.length; index++) {
-      Visit16(root, `${path4}/${index}`, current[index], next[index]);
-    }
-    current.splice(next.length);
-  }
-}
-function TypedArrayType3(root, path4, current, next) {
-  if (IsTypedArray(current) && current.length === next.length) {
-    for (let i = 0; i < current.length; i++) {
-      current[i] = next[i];
-    }
-  } else {
-    pointer_exports.Set(root, path4, Clone2(next));
-  }
-}
-function ValueType3(root, path4, current, next) {
-  if (current === next)
-    return;
-  pointer_exports.Set(root, path4, next);
-}
-function Visit16(root, path4, current, next) {
-  if (IsArray(next))
-    return ArrayType5(root, path4, current, next);
-  if (IsTypedArray(next))
-    return TypedArrayType3(root, path4, current, next);
-  if (IsStandardObject2(next))
-    return ObjectType5(root, path4, current, next);
-  if (IsValueType(next))
-    return ValueType3(root, path4, current, next);
-}
-function IsNonMutableValue(value) {
-  return IsTypedArray(value) || IsValueType(value);
-}
-function IsMismatchedValue(current, next) {
-  return IsStandardObject2(current) && IsArray(next) || IsArray(current) && IsStandardObject2(next);
-}
-function Mutate(current, next) {
-  if (IsNonMutableValue(current) || IsNonMutableValue(next))
-    throw new ValueMutateError("Only object and array types can be mutated at the root level");
-  if (IsMismatchedValue(current, next))
-    throw new ValueMutateError("Cannot assign due type mismatch of assignable values");
-  Visit16(current, "", current, next);
-}
-var ValueMutateError;
-var init_mutate = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/mutate/mutate.mjs"() {
-    init_guard2();
-    init_pointer2();
-    init_clone3();
-    init_error2();
-    ValueMutateError = class extends TypeBoxError {
-      constructor(message) {
-        super(message);
-      }
-    };
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/mutate/index.mjs
-var init_mutate2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/mutate/index.mjs"() {
-    init_mutate();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/parse/parse.mjs
-function ParseValue(operations, type, references, value) {
-  return operations.reduce((value2, operationKey) => {
-    const operation = ParseRegistry.Get(operationKey);
-    if (IsUndefined(operation))
-      throw new ParseError(`Unable to find Parse operation '${operationKey}'`);
-    return operation(type, references, value2);
-  }, value);
-}
-function Parse(...args) {
-  const [operations, schema, references, value] = args.length === 4 ? [args[0], args[1], args[2], args[3]] : args.length === 3 ? IsArray(args[0]) ? [args[0], args[1], [], args[2]] : [ParseDefault, args[0], args[1], args[2]] : args.length === 2 ? [ParseDefault, args[0], [], args[1]] : (() => {
-    throw new ParseError("Invalid Arguments");
-  })();
-  return ParseValue(operations, schema, references, value);
-}
-var ParseError, ParseRegistry, ParseDefault;
-var init_parse2 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/parse/parse.mjs"() {
-    init_error2();
-    init_transform();
-    init_assert2();
-    init_cast2();
-    init_clean2();
-    init_clone3();
-    init_convert2();
-    init_default2();
-    init_guard2();
-    ParseError = class extends TypeBoxError {
-      constructor(message) {
-        super(message);
-      }
-    };
-    (function(ParseRegistry2) {
-      const registry2 = /* @__PURE__ */ new Map([
-        ["Assert", (type, references, value) => {
-          Assert(type, references, value);
-          return value;
-        }],
-        ["Cast", (type, references, value) => Cast(type, references, value)],
-        ["Clean", (type, references, value) => Clean(type, references, value)],
-        ["Clone", (_type, _references, value) => Clone2(value)],
-        ["Convert", (type, references, value) => Convert(type, references, value)],
-        ["Decode", (type, references, value) => HasTransform(type, references) ? TransformDecode(type, references, value) : value],
-        ["Default", (type, references, value) => Default5(type, references, value)],
-        ["Encode", (type, references, value) => HasTransform(type, references) ? TransformEncode(type, references, value) : value]
-      ]);
-      function Delete5(key) {
-        registry2.delete(key);
-      }
-      ParseRegistry2.Delete = Delete5;
-      function Set5(key, callback) {
-        registry2.set(key, callback);
-      }
-      ParseRegistry2.Set = Set5;
-      function Get4(key) {
-        return registry2.get(key);
-      }
-      ParseRegistry2.Get = Get4;
-    })(ParseRegistry || (ParseRegistry = {}));
-    ParseDefault = [
-      "Clone",
-      "Clean",
-      "Default",
-      "Convert",
-      "Assert",
-      "Decode"
-    ];
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/parse/index.mjs
-var init_parse3 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/parse/index.mjs"() {
-    init_parse2();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/value/value.mjs
-var value_exports2 = {};
-__export(value_exports2, {
-  Assert: () => Assert,
-  Cast: () => Cast,
-  Check: () => Check,
-  Clean: () => Clean,
-  Clone: () => Clone2,
-  Convert: () => Convert,
-  Create: () => Create2,
-  Decode: () => Decode,
-  Default: () => Default5,
-  Diff: () => Diff,
-  Edit: () => Edit,
-  Encode: () => Encode,
-  Equal: () => Equal,
-  Errors: () => Errors,
-  Hash: () => Hash,
-  Mutate: () => Mutate,
-  Parse: () => Parse,
-  Patch: () => Patch,
-  ValueErrorIterator: () => ValueErrorIterator
-});
-var init_value3 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/value/value.mjs"() {
-    init_errors2();
-    init_assert2();
-    init_cast2();
-    init_check2();
-    init_clean2();
-    init_clone3();
-    init_convert2();
-    init_create3();
-    init_decode3();
-    init_default2();
-    init_delta2();
-    init_encode3();
-    init_equal2();
-    init_hash2();
-    init_mutate2();
-    init_parse3();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/value/index.mjs
-var init_value4 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/value/index.mjs"() {
-    init_value3();
-  }
-});
-
-// node_modules/@sinclair/typebox/build/esm/value/index.mjs
-var init_value5 = __esm({
-  "node_modules/@sinclair/typebox/build/esm/value/index.mjs"() {
-    init_guard2();
-    init_assert2();
-    init_cast2();
-    init_check2();
-    init_clean2();
-    init_clone3();
-    init_convert2();
-    init_create3();
-    init_decode3();
-    init_default2();
-    init_delta2();
-    init_encode3();
-    init_equal2();
-    init_hash2();
-    init_mutate2();
-    init_parse3();
-    init_pointer2();
-    init_transform();
-    init_value4();
-  }
-});
-
 // src/write-gate.ts
 function isPolluted(text) {
   if (!text || text.length < 20) return false;
@@ -10840,6 +2255,157 @@ var init_dual_rag = __esm({
   }
 });
 
+// src/agents/agent-registry.ts
+function persistToRedis(agentId, entry) {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  const serialised = JSON.stringify({
+    handshake: entry.handshake,
+    registeredAt: entry.registeredAt.toISOString(),
+    lastSeenAt: entry.lastSeenAt.toISOString()
+  });
+  redis2.hset(REDIS_KEY2, agentId, serialised).catch((err) => {
+    logger.warn({ err: String(err), agent_id: agentId }, "Redis persist failed");
+  });
+}
+function removeFromRedis(agentId) {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  redis2.hdel(REDIS_KEY2, agentId).catch(() => {
+  });
+}
+var REDIS_KEY2, registry, AgentRegistry;
+var init_agent_registry = __esm({
+  "src/agents/agent-registry.ts"() {
+    "use strict";
+    init_logger();
+    init_redis();
+    REDIS_KEY2 = "orchestrator:agents";
+    registry = /* @__PURE__ */ new Map();
+    AgentRegistry = {
+      /** Hydrate registry from Redis on startup */
+      async hydrate() {
+        const redis2 = getRedis();
+        if (!redis2) return;
+        try {
+          const all = await redis2.hgetall(REDIS_KEY2);
+          let count = 0;
+          for (const [agentId, json] of Object.entries(all)) {
+            try {
+              const data = JSON.parse(json);
+              registry.set(agentId, {
+                handshake: data.handshake,
+                registeredAt: new Date(data.registeredAt),
+                lastSeenAt: new Date(data.lastSeenAt),
+                activeCalls: 0
+                // reset on restart
+              });
+              count++;
+            } catch {
+              logger.warn({ agent_id: agentId }, "Skipped corrupt Redis entry");
+            }
+          }
+          if (count > 0) {
+            logger.info({ count }, "Hydrated agent registry from Redis");
+          }
+        } catch (err) {
+          logger.warn({ err: String(err) }, "Redis hydration failed \u2014 starting with empty registry");
+        }
+      },
+      register(handshake) {
+        const existing = registry.get(handshake.agent_id);
+        const entry = {
+          handshake,
+          registeredAt: existing?.registeredAt ?? /* @__PURE__ */ new Date(),
+          lastSeenAt: /* @__PURE__ */ new Date(),
+          activeCalls: existing?.activeCalls ?? 0
+        };
+        registry.set(handshake.agent_id, entry);
+        persistToRedis(handshake.agent_id, entry);
+        logger.info({ agent_id: handshake.agent_id, status: handshake.status }, "Agent registered");
+      },
+      heartbeat(agentId) {
+        const entry = registry.get(agentId);
+        if (entry) {
+          entry.lastSeenAt = /* @__PURE__ */ new Date();
+          persistToRedis(agentId, entry);
+        }
+      },
+      get(agentId) {
+        return registry.get(agentId);
+      },
+      all() {
+        return Array.from(registry.values());
+      },
+      canCallTool(agentId, toolName2) {
+        let entry = registry.get(agentId);
+        if (!entry) {
+          const autoHandshake = {
+            agent_id: agentId,
+            display_name: agentId,
+            source: "auto-discovered",
+            status: "online",
+            capabilities: ["mcp_tools"],
+            allowed_tool_namespaces: ["*"],
+            registered_at: (/* @__PURE__ */ new Date()).toISOString(),
+            last_seen_at: (/* @__PURE__ */ new Date()).toISOString()
+          };
+          const autoEntry = {
+            handshake: autoHandshake,
+            registeredAt: /* @__PURE__ */ new Date(),
+            lastSeenAt: /* @__PURE__ */ new Date(),
+            activeCalls: 0
+          };
+          registry.set(agentId, autoEntry);
+          persistToRedis(agentId, autoEntry);
+          logger.info({ agent_id: agentId }, "Auto-discovered and registered new agent");
+          entry = autoEntry;
+        }
+        if (entry.handshake.status === "offline") return { allowed: false, reason: `Agent '${agentId}' is offline.` };
+        const namespaces = entry.handshake.allowed_tool_namespaces;
+        if (namespaces.includes("*")) return { allowed: true };
+        const namespace = toolName2.split(".")[0];
+        if (!namespace) return { allowed: false, reason: `Invalid tool name '${toolName2}'. Expected 'namespace.method'.` };
+        if (namespaces.includes(namespace)) return { allowed: true };
+        return { allowed: false, reason: `Agent '${agentId}' not authorized for '${namespace}'. Allowed: [${namespaces.join(", ")}]` };
+      },
+      remove(agentId) {
+        const existed = registry.delete(agentId);
+        if (existed) removeFromRedis(agentId);
+        return existed;
+      },
+      update(agentId, fields) {
+        const entry = registry.get(agentId);
+        if (!entry) return false;
+        Object.assign(entry.handshake, fields);
+        entry.lastSeenAt = /* @__PURE__ */ new Date();
+        persistToRedis(agentId, entry);
+        return true;
+      },
+      /** Remove all agents from registry and Redis */
+      async purgeAll() {
+        const count = registry.size;
+        registry.clear();
+        const redis2 = getRedis();
+        if (redis2) await redis2.del(REDIS_KEY2).catch(() => {
+        });
+        return count;
+      },
+      incrementActive(agentId) {
+        const e = registry.get(agentId);
+        if (e) e.activeCalls++;
+      },
+      decrementActive(agentId) {
+        const e = registry.get(agentId);
+        if (e) e.activeCalls = Math.max(0, e.activeCalls - 1);
+      },
+      getActiveCalls(agentId) {
+        return registry.get(agentId)?.activeCalls ?? 0;
+      }
+    };
+  }
+});
+
 // src/agents/routing-engine.ts
 import { v4 as uuid4 } from "uuid";
 function roundScore(value) {
@@ -11050,905 +2616,6 @@ var init_routing_engine = __esm({
       }
     };
     recentRoutingDecisions = [];
-  }
-});
-
-// src/swarm/pheromone-layer.ts
-var pheromone_layer_exports = {};
-__export(pheromone_layer_exports, {
-  amplify: () => amplify,
-  deposit: () => deposit,
-  getHeatmap: () => getHeatmap,
-  getPheromoneState: () => getPheromoneState,
-  getTrailSummary: () => getTrailSummary,
-  initPheromoneLayer: () => initPheromoneLayer,
-  onAnomaly: () => onAnomaly,
-  onChainStepFailure: () => onChainStepFailure,
-  onChainStepSuccess: () => onChainStepSuccess,
-  onExternalSignal: () => onExternalSignal,
-  onInventorTrial: () => onInventorTrial,
-  persistToGraph: () => persistToGraph,
-  reinforce: () => reinforce,
-  runDecayCycle: () => runDecayCycle,
-  runPheromoneCron: () => runPheromoneCron,
-  sense: () => sense
-});
-import { v4 as uuid5 } from "uuid";
-async function deposit(agentId, type, domain, strength, label, metrics2 = {}, tags = [], ttlSeconds = DEFAULT_TTL) {
-  const pheromone = {
-    id: `ph-${uuid5().slice(0, 12)}`,
-    type,
-    agentId,
-    domain,
-    strength: Math.max(0, Math.min(1, strength)),
-    label,
-    metrics: metrics2,
-    tags: [...tags, type, domain],
-    depositedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    ttlSeconds,
-    reinforcements: 0
-  };
-  const redis2 = getRedis();
-  if (redis2) {
-    const key = `${REDIS_PREFIX}${pheromone.id}`;
-    await redis2.set(key, JSON.stringify(pheromone), "EX", ttlSeconds);
-    await redis2.zadd(REDIS_INDEX_KEY, pheromone.strength, pheromone.id);
-    await redis2.zadd(`${REDIS_PREFIX}domain:${domain}`, pheromone.strength, pheromone.id);
-    await redis2.zadd(`${REDIS_PREFIX}type:${type}`, pheromone.strength, pheromone.id);
-  }
-  state.totalDeposits++;
-  state.activePheromones++;
-  if (type !== "amplification") {
-    tryActiveAmplification(domain).catch(() => {
-    });
-  }
-  broadcastSSE("pheromone", {
-    event: "deposit",
-    pheromone: { id: pheromone.id, type, domain, strength: pheromone.strength, agentId }
-  });
-  logger.debug(
-    { id: pheromone.id, type, domain, strength: pheromone.strength, agentId },
-    "Pheromone deposited"
-  );
-  return pheromone;
-}
-async function sense(query) {
-  const redis2 = getRedis();
-  if (!redis2) return [];
-  const limit = query.limit ?? 20;
-  const minStrength = query.minStrength ?? 0.1;
-  let candidateIds;
-  if (query.domain) {
-    candidateIds = await redis2.zrevrangebyscore(
-      `${REDIS_PREFIX}domain:${query.domain}`,
-      "+inf",
-      String(minStrength),
-      "LIMIT",
-      "0",
-      String(limit * 2)
-    );
-  } else if (query.type) {
-    candidateIds = await redis2.zrevrangebyscore(
-      `${REDIS_PREFIX}type:${query.type}`,
-      "+inf",
-      String(minStrength),
-      "LIMIT",
-      "0",
-      String(limit * 2)
-    );
-  } else {
-    candidateIds = await redis2.zrevrangebyscore(
-      REDIS_INDEX_KEY,
-      "+inf",
-      String(minStrength),
-      "LIMIT",
-      "0",
-      String(limit * 2)
-    );
-  }
-  if (candidateIds.length === 0) return [];
-  const pipeline = redis2.pipeline();
-  for (const id of candidateIds) {
-    pipeline.get(`${REDIS_PREFIX}${id}`);
-  }
-  const results = await pipeline.exec();
-  if (!results) return [];
-  const pheromones = [];
-  for (const [err, raw] of results) {
-    if (err || !raw) continue;
-    try {
-      const p = JSON.parse(raw);
-      if (query.tags && query.tags.length > 0) {
-        if (!query.tags.some((t) => p.tags.includes(t))) continue;
-      }
-      if (query.type && !query.domain && p.type !== query.type) continue;
-      pheromones.push(p);
-    } catch {
-    }
-  }
-  return pheromones.slice(0, limit);
-}
-async function reinforce(pheromoneId, boostFactor = 0.2) {
-  const redis2 = getRedis();
-  if (!redis2) return false;
-  const key = `${REDIS_PREFIX}${pheromoneId}`;
-  const raw = await redis2.get(key);
-  if (!raw) return false;
-  try {
-    const p = JSON.parse(raw);
-    p.strength = Math.min(1, p.strength + boostFactor);
-    p.reinforcements++;
-    const newTtl = Math.min(p.ttlSeconds * 1.5, 86400);
-    p.ttlSeconds = newTtl;
-    await redis2.set(key, JSON.stringify(p), "EX", Math.round(newTtl));
-    await redis2.zadd(REDIS_INDEX_KEY, p.strength, pheromoneId);
-    if (p.type === "trail" || p.type === "attraction") {
-      await redis2.zadd(`${REDIS_PREFIX}domain:${p.domain}`, p.strength, pheromoneId);
-    }
-    state.totalAmplifications++;
-    return true;
-  } catch {
-    return false;
-  }
-}
-async function runDecayCycle() {
-  const redis2 = getRedis();
-  if (!redis2) return { decayed: 0, evaporated: 0 };
-  const LOCK_KEY = `${REDIS_PREFIX}decay-lock`;
-  const locked = await redis2.set(LOCK_KEY, "1", "EX", 60, "NX");
-  if (!locked) return { decayed: 0, evaporated: 0 };
-  try {
-    const allIds = await redis2.zrangebyscore(REDIS_INDEX_KEY, "0", "+inf");
-    let decayed = 0;
-    let evaporated = 0;
-    for (const id of allIds) {
-      const key = `${REDIS_PREFIX}${id}`;
-      const raw = await redis2.get(key);
-      if (!raw) {
-        await redis2.zrem(REDIS_INDEX_KEY, id);
-        evaporated++;
-        continue;
-      }
-      try {
-        const p = JSON.parse(raw);
-        p.strength *= DECAY_FACTOR;
-        if (p.strength < 0.05) {
-          await redis2.del(key);
-          await redis2.zrem(REDIS_INDEX_KEY, id);
-          await redis2.zrem(`${REDIS_PREFIX}domain:${p.domain}`, id);
-          await redis2.zrem(`${REDIS_PREFIX}type:${p.type}`, id);
-          evaporated++;
-        } else {
-          await redis2.set(key, JSON.stringify(p), "KEEPTTL");
-          await redis2.zadd(REDIS_INDEX_KEY, p.strength, id);
-          decayed++;
-        }
-      } catch {
-        await redis2.zrem(REDIS_INDEX_KEY, id);
-        evaporated++;
-      }
-    }
-    state.totalDecays++;
-    state.activePheromones = Math.max(0, state.activePheromones - evaporated);
-    state.lastDecayAt = (/* @__PURE__ */ new Date()).toISOString();
-    logger.info({ decayed, evaporated, remaining: state.activePheromones }, "Pheromone decay cycle");
-    return { decayed, evaporated };
-  } finally {
-    await redis2.del(LOCK_KEY).catch(() => {
-    });
-  }
-}
-async function amplify(domain, contributingPheromones, label) {
-  if (contributingPheromones.length < 2) return null;
-  const strengths = contributingPheromones.map((p) => p.strength);
-  const geoMean = Math.pow(strengths.reduce((a, b) => a * b, 1), 1 / strengths.length);
-  const compoundStrength = Math.min(1, geoMean * AMPLIFICATION_MULTIPLIER);
-  const allTags = [...new Set(contributingPheromones.flatMap((p) => p.tags))];
-  const allMetrics = {};
-  for (const p of contributingPheromones) {
-    for (const [k, v] of Object.entries(p.metrics)) {
-      allMetrics[`${p.type}_${k}`] = v;
-    }
-  }
-  allMetrics.contributing_count = contributingPheromones.length;
-  allMetrics.compound_strength = compoundStrength;
-  const amplified = await deposit(
-    "flywheel-coordinator",
-    "amplification",
-    domain,
-    compoundStrength,
-    label,
-    allMetrics,
-    [...allTags, "cross-pillar", "compound"],
-    7200
-    // 2h TTL for compound signals
-  );
-  for (const p of contributingPheromones) {
-    await reinforce(p.id, 0.1);
-  }
-  return amplified;
-}
-async function tryActiveAmplification(domain) {
-  const existing = await sense({ domain, limit: 20, minStrength: 0.3 });
-  const types = new Set(existing.map((p) => p.type));
-  if (types.size >= 2 && !types.has("amplification")) {
-    const byType = /* @__PURE__ */ new Map();
-    for (const p of existing) {
-      const current = byType.get(p.type);
-      if (!current || p.strength > current.strength) byType.set(p.type, p);
-    }
-    const contributors = [...byType.values()];
-    if (contributors.length >= 2) {
-      await amplify(domain, contributors, `Cross-pillar: ${[...types].join("+")} on ${domain}`);
-    }
-  }
-}
-async function persistToGraph() {
-  const strong = await sense({ minStrength: PERSIST_THRESHOLD, limit: 50 });
-  let persisted = 0;
-  for (const p of strong) {
-    try {
-      await callMcpTool({
-        toolName: "memory_store",
-        args: {
-          agent_id: "pheromone-layer",
-          key: `trail:${p.domain}:${p.id}`,
-          value: JSON.stringify({
-            type: p.type,
-            domain: p.domain,
-            strength: p.strength,
-            label: p.label,
-            metrics: p.metrics,
-            reinforcements: p.reinforcements,
-            agentId: p.agentId
-          }),
-          metadata: {
-            pheromone_type: p.type,
-            domain: p.domain,
-            strength: p.strength,
-            reinforcements: p.reinforcements
-          }
-        },
-        callId: `ph-persist-${p.id}`
-      });
-      try {
-        const verify2 = await callMcpTool({
-          toolName: "memory_retrieve",
-          args: { agent_id: "pheromone-layer", key: `trail:${p.domain}:${p.id}` },
-          callId: `ph-verify-${p.id}`
-        });
-        if (verify2) persisted++;
-        else logger.warn({ id: p.id }, "Pheromone persist verification failed");
-      } catch {
-        logger.warn({ id: p.id }, "Pheromone persist verification error");
-      }
-    } catch {
-    }
-  }
-  state.lastPersistAt = (/* @__PURE__ */ new Date()).toISOString();
-  logger.info({ persisted, total: strong.length }, "Pheromone trails persisted to memory");
-  return persisted;
-}
-async function getTrailSummary(domain) {
-  const trails = await sense({ domain, limit: 50 });
-  if (trails.length === 0) return null;
-  const totalStrength = trails.reduce((sum, p) => sum + p.strength, 0);
-  const avgStrength = totalStrength / trails.length;
-  const typeCounts = /* @__PURE__ */ new Map();
-  for (const p of trails) {
-    typeCounts.set(p.type, (typeCounts.get(p.type) ?? 0) + p.strength);
-  }
-  const strongestType = [...typeCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "trail";
-  const agentStrength = /* @__PURE__ */ new Map();
-  for (const p of trails) {
-    agentStrength.set(p.agentId, (agentStrength.get(p.agentId) ?? 0) + p.strength);
-  }
-  const topContributors = [...agentStrength.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([id]) => id);
-  return {
-    trailId: `trail:${domain}`,
-    domain,
-    totalStrength,
-    pheromoneCount: trails.length,
-    avgStrength,
-    topContributors,
-    strongestType
-  };
-}
-async function getHeatmap() {
-  const redis2 = getRedis();
-  if (!redis2) return [];
-  const domains = [];
-  let cursor = "0";
-  do {
-    const [next, found] = await redis2.scan(cursor, "MATCH", `${REDIS_PREFIX}domain:*`, "COUNT", "50");
-    cursor = next;
-    for (const k of found) domains.push(k.replace(`${REDIS_PREFIX}domain:`, ""));
-  } while (cursor !== "0" && domains.length < 50);
-  const summaries = [];
-  for (const domain of domains.slice(0, 20)) {
-    const summary = await getTrailSummary(domain);
-    if (summary) summaries.push(summary);
-  }
-  return summaries.sort((a, b) => b.totalStrength - a.totalStrength);
-}
-async function onChainStepSuccess(agentId, toolName2, durationMs, chainMode) {
-  await deposit(
-    agentId,
-    "trail",
-    `chain:${toolName2}`,
-    Math.min(1, 0.5 + 1e3 / Math.max(durationMs, 100) * 0.5),
-    // faster = stronger
-    `${agentId} succeeded at ${toolName2} in ${durationMs}ms`,
-    { duration_ms: durationMs },
-    [chainMode, toolName2],
-    3600
-    // 1h TTL
-  );
-}
-async function onChainStepFailure(agentId, toolName2, error) {
-  await deposit(
-    agentId,
-    "repellent",
-    `chain:${toolName2}`,
-    0.7,
-    `${agentId} failed at ${toolName2}: ${error.slice(0, 100)}`,
-    { failure: 1 },
-    ["error", toolName2],
-    1800
-    // 30min TTL (failures fade faster)
-  );
-}
-async function onInventorTrial(nodeId, score, experiment, island) {
-  if (score >= 0.7) {
-    await deposit(
-      "inventor",
-      "attraction",
-      `inventor:${experiment}`,
-      score,
-      `Inventor trial ${nodeId} scored ${(score * 100).toFixed(1)}% on island ${island}`,
-      { score, island },
-      ["inventor", experiment, `island-${island}`],
-      7200
-      // 2h for good trials
-    );
-  } else if (score < 0.3) {
-    await deposit(
-      "inventor",
-      "repellent",
-      `inventor:${experiment}`,
-      0.3 + (0.3 - score),
-      // worse score = stronger repellent
-      `Inventor trial ${nodeId} scored poorly: ${(score * 100).toFixed(1)}%`,
-      { score, island },
-      ["inventor", experiment, `island-${island}`],
-      900
-      // 15min for bad trials
-    );
-  }
-}
-async function onAnomaly(type, valence, source, severity) {
-  const pType = valence === "positive" ? "attraction" : "repellent";
-  const strength = severity === "critical" ? 0.9 : severity === "warning" ? 0.6 : 0.3;
-  const ttl = valence === "positive" ? 7200 : 1800;
-  await deposit(
-    "anomaly-watcher",
-    pType,
-    `anomaly:${type}`,
-    strength,
-    `Anomaly ${type} (${valence}) from ${source} [${severity}]`,
-    {},
-    [valence, severity, source, type],
-    ttl
-  );
-}
-async function onExternalSignal(source, domain, label, strength, metrics2 = {}) {
-  await deposit(
-    source,
-    "external",
-    `external:${domain}`,
-    strength,
-    label,
-    metrics2,
-    ["external", source, domain],
-    14400
-    // 4h for external signals
-  );
-}
-function getPheromoneState() {
-  return { ...state };
-}
-async function persistPheromoneState() {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  try {
-    const count = await redis2.zcard(REDIS_INDEX_KEY);
-    state.activePheromones = count;
-    await redis2.set(REDIS_STATE_KEY, JSON.stringify(state));
-  } catch {
-  }
-}
-async function loadPheromoneState() {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  try {
-    const raw = await redis2.get(REDIS_STATE_KEY);
-    if (raw) {
-      state = { ...state, ...JSON.parse(raw) };
-      logger.info(
-        { totalDeposits: state.totalDeposits, activePheromones: state.activePheromones },
-        "Pheromone layer: restored state from Redis"
-      );
-    }
-  } catch {
-  }
-}
-async function runPheromoneCron() {
-  const { decayed, evaporated } = await runDecayCycle();
-  const persisted = await persistToGraph();
-  let amplified = 0;
-  try {
-    const heatmap = await getHeatmap();
-    for (const trail of heatmap) {
-      if (trail.pheromoneCount >= 3 && trail.avgStrength >= 0.5) {
-        const pheromonesInDomain = await sense({ domain: trail.domain, minStrength: 0.4, limit: 5 });
-        const uniqueTypes = new Set(pheromonesInDomain.map((p) => p.type));
-        if (uniqueTypes.size >= 2) {
-          await amplify(
-            trail.domain,
-            pheromonesInDomain,
-            `Cross-pillar convergence in ${trail.domain}: ${[...uniqueTypes].join("+")}`
-          );
-          amplified++;
-        }
-      }
-    }
-  } catch {
-  }
-  await persistPheromoneState();
-  broadcastSSE("pheromone", {
-    event: "cron_complete",
-    decayed,
-    evaporated,
-    persisted,
-    amplified,
-    activePheromones: state.activePheromones
-  });
-  return { decayed, evaporated, persisted, amplified };
-}
-async function initPheromoneLayer() {
-  await loadPheromoneState();
-  logger.info(
-    { totalDeposits: state.totalDeposits, activePheromones: state.activePheromones },
-    "Pheromone layer initialized"
-  );
-}
-var REDIS_PREFIX, REDIS_STATE_KEY, REDIS_INDEX_KEY, DEFAULT_TTL, PERSIST_THRESHOLD, AMPLIFICATION_MULTIPLIER, DECAY_FACTOR, state;
-var init_pheromone_layer = __esm({
-  "src/swarm/pheromone-layer.ts"() {
-    "use strict";
-    init_redis();
-    init_mcp_caller();
-    init_logger();
-    init_sse();
-    REDIS_PREFIX = "pheromone:";
-    REDIS_STATE_KEY = "pheromone:state";
-    REDIS_INDEX_KEY = "pheromone:index";
-    DEFAULT_TTL = 3600;
-    PERSIST_THRESHOLD = 0.7;
-    AMPLIFICATION_MULTIPLIER = 1.5;
-    DECAY_FACTOR = 0.85;
-    state = {
-      totalDeposits: 0,
-      totalDecays: 0,
-      totalAmplifications: 0,
-      activePheromones: 0,
-      trailCount: 0,
-      lastDecayAt: null,
-      lastPersistAt: null
-    };
-  }
-});
-
-// src/swarm/peer-eval.ts
-var peer_eval_exports = {};
-__export(peer_eval_exports, {
-  getAllFleetLearnings: () => getAllFleetLearnings,
-  getFleetLearning: () => getFleetLearning,
-  getPeerEvalState: () => getPeerEvalState,
-  getRecentEvals: () => getRecentEvals,
-  getWhatWorks: () => getWhatWorks,
-  hookIntoExecution: () => hookIntoExecution,
-  initPeerEval: () => initPeerEval,
-  isFleetReliable: () => isFleetReliable,
-  runFleetAnalysis: () => runFleetAnalysis
-});
-import { v4 as uuid6 } from "uuid";
-async function hookIntoExecution(agentId, taskId, context) {
-  const t0 = Date.now();
-  const qualityScore = context.metrics?.quality_score ?? (context.success ? 0.7 : 0.2);
-  const latencyMs = context.metrics?.latency_ms ?? 1e3;
-  const latencyPenalty = latencyMs > 1e4 ? 0.1 : 0;
-  const selfScore = Math.max(0, Math.min(1, qualityScore - latencyPenalty));
-  let novelty = 0.5;
-  try {
-    const existingTrails = await sense({
-      domain: `chain:${context.taskType}`,
-      type: "trail",
-      minStrength: 0.3,
-      limit: 5
-    });
-    novelty = existingTrails.length === 0 ? 1 : existingTrails.length < 3 ? 0.7 : existingTrails.length < 10 ? 0.4 : 0.2;
-  } catch {
-  }
-  const evalReport = {
-    id: `eval-${uuid6().slice(0, 12)}`,
-    agentId,
-    taskId,
-    taskType: context.taskType,
-    chainId: context.chainId ?? null,
-    selfScore,
-    confidence: context.success ? 0.8 : 0.5,
-    metrics: {
-      cost_usd: context.metrics?.cost_usd ?? 0,
-      latency_ms: latencyMs,
-      quality_score: qualityScore,
-      token_count: context.metrics?.token_count
-    },
-    insights: context.insights ?? [],
-    novelty,
-    upstreamAgentId: context.upstreamAgentId ?? null,
-    upstreamQuality: context.upstreamQuality ?? null,
-    success: context.success,
-    createdAt: (/* @__PURE__ */ new Date()).toISOString()
-  };
-  if (context.success) {
-    await onChainStepSuccess(agentId, context.taskType, latencyMs, "evaluated");
-  } else {
-    await onChainStepFailure(agentId, context.taskType, "Task failed");
-  }
-  try {
-    await callMcpTool({
-      toolName: "memory_store",
-      args: {
-        agent_id: "peer-eval",
-        key: `eval:${agentId}:${taskId}`,
-        value: JSON.stringify({
-          selfScore: evalReport.selfScore,
-          taskType: evalReport.taskType,
-          success: evalReport.success,
-          metrics: evalReport.metrics,
-          insights: evalReport.insights,
-          novelty: evalReport.novelty
-        }),
-        metadata: {
-          agent_id: agentId,
-          task_type: context.taskType,
-          score: evalReport.selfScore,
-          novelty: evalReport.novelty,
-          success: evalReport.success
-        }
-      },
-      callId: `peereval-mem-${evalReport.id}`
-    });
-  } catch {
-  }
-  try {
-    await callMcpTool({
-      toolName: "adaptive_rag_reward",
-      args: {
-        query: context.taskType,
-        reward: evalReport.selfScore,
-        metadata: {
-          source: "peer-eval",
-          agent_id: agentId,
-          novelty: evalReport.novelty
-        }
-      },
-      callId: `peereval-rag-${evalReport.id}`
-    });
-  } catch {
-  }
-  updateFleetLearning(evalReport);
-  if (evalReport.selfScore >= BROADCAST_THRESHOLD && evalReport.novelty >= NOVELTY_THRESHOLD) {
-    await broadcastBestPractice(evalReport);
-  }
-  const redis2 = getRedis();
-  if (redis2) {
-    await redis2.zadd(`${REDIS_PREFIX2}recent`, Date.now(), JSON.stringify(evalReport));
-    await redis2.zremrangebyrank(`${REDIS_PREFIX2}recent`, 0, -201);
-  }
-  state2.totalEvals++;
-  state2.lastEvalAt = (/* @__PURE__ */ new Date()).toISOString();
-  await persistState();
-  broadcastSSE("peer-eval", {
-    event: "eval_complete",
-    evalId: evalReport.id,
-    agentId,
-    taskType: context.taskType,
-    selfScore: evalReport.selfScore,
-    novelty: evalReport.novelty,
-    success: evalReport.success,
-    duration_ms: Date.now() - t0
-  });
-  logger.debug({
-    evalId: evalReport.id,
-    agentId,
-    taskType: context.taskType,
-    score: evalReport.selfScore,
-    novelty: evalReport.novelty
-  }, "PeerEval: evaluation complete");
-  return evalReport;
-}
-function updateFleetLearning(eval_) {
-  let learning = state2.fleetLearnings.get(eval_.taskType);
-  if (!learning) {
-    learning = {
-      taskType: eval_.taskType,
-      totalEvals: 0,
-      avgScore: 0,
-      avgCost: 0,
-      avgLatency: 0,
-      bestAgent: null,
-      bestScore: 0,
-      bestPractices: [],
-      lastUpdated: (/* @__PURE__ */ new Date()).toISOString(),
-      reliable: false
-    };
-    state2.fleetLearnings.set(eval_.taskType, learning);
-  }
-  const alpha = 0.1;
-  learning.totalEvals++;
-  learning.avgScore = learning.avgScore * (1 - alpha) + eval_.selfScore * alpha;
-  learning.avgCost = learning.avgCost * (1 - alpha) + eval_.metrics.cost_usd * alpha;
-  learning.avgLatency = learning.avgLatency * (1 - alpha) + eval_.metrics.latency_ms * alpha;
-  learning.lastUpdated = (/* @__PURE__ */ new Date()).toISOString();
-  if (eval_.selfScore > learning.bestScore) {
-    learning.bestScore = eval_.selfScore;
-    learning.bestAgent = eval_.agentId;
-  }
-  learning.reliable = learning.totalEvals >= 20;
-}
-async function broadcastBestPractice(eval_) {
-  const insightText = eval_.insights.length > 0 ? eval_.insights.join("; ") : `Agent ${eval_.agentId} scored ${(eval_.selfScore * 100).toFixed(1)}% on ${eval_.taskType} (novelty: ${(eval_.novelty * 100).toFixed(0)}%)`;
-  const bp = {
-    id: `bp-${uuid6().slice(0, 8)}`,
-    agentId: eval_.agentId,
-    taskType: eval_.taskType,
-    score: eval_.selfScore,
-    novelty: eval_.novelty,
-    insight: insightText,
-    discoveredAt: (/* @__PURE__ */ new Date()).toISOString(),
-    reinforcements: 0
-  };
-  const learning = state2.fleetLearnings.get(eval_.taskType);
-  if (learning) {
-    learning.bestPractices.push(bp);
-    if (learning.bestPractices.length > MAX_BEST_PRACTICES) {
-      learning.bestPractices.sort((a, b) => b.score - a.score);
-      learning.bestPractices = learning.bestPractices.slice(0, MAX_BEST_PRACTICES);
-    }
-  }
-  await deposit(
-    eval_.agentId,
-    "attraction",
-    `best-practice:${eval_.taskType}`,
-    Math.min(1, eval_.selfScore * 1.2),
-    `Best practice: ${insightText.slice(0, 200)}`,
-    { score: eval_.selfScore, novelty: eval_.novelty },
-    ["best-practice", eval_.taskType, eval_.agentId],
-    14400
-    // 4h TTL for best practices
-  );
-  broadcastMessage({
-    from: "PeerEval",
-    to: "All",
-    source: "orchestrator",
-    type: "Message",
-    message: `New best practice from ${eval_.agentId}: ${insightText.slice(0, 200)}`
-  });
-  state2.totalBestPracticesShared++;
-  logger.info({
-    bpId: bp.id,
-    agentId: eval_.agentId,
-    taskType: eval_.taskType,
-    score: eval_.selfScore,
-    novelty: eval_.novelty
-  }, "PeerEval: best practice broadcast");
-}
-function getFleetLearning(taskType) {
-  const learning = state2.fleetLearnings.get(taskType);
-  if (!learning) return null;
-  return {
-    ...learning,
-    bestPractices: [...learning.bestPractices]
-  };
-}
-function isFleetReliable(taskType) {
-  const learning = state2.fleetLearnings.get(taskType);
-  return learning?.reliable ?? false;
-}
-function getAllFleetLearnings() {
-  return [...state2.fleetLearnings.values()].map((l) => ({
-    ...l,
-    bestPractices: [...l.bestPractices]
-  }));
-}
-async function getWhatWorks(taskType) {
-  const learning = state2.fleetLearnings.get(taskType);
-  const trails = await sense({ domain: `chain:${taskType}`, type: "attraction", limit: 10 });
-  const topStrategies = trails.filter((p) => p.strength >= 0.5).sort((a, b) => b.strength - a.strength).slice(0, 5).map((p) => p.label);
-  const totalPheromoneStrength = trails.reduce((sum, p) => sum + p.strength, 0);
-  return {
-    bestAgent: learning?.bestAgent ?? null,
-    avgEfficiency: learning ? learning.avgScore / Math.max(learning.avgCost, 0.01) : 0,
-    topStrategies,
-    pheromoneStrength: totalPheromoneStrength
-  };
-}
-async function getRecentEvals(limit = 20) {
-  const redis2 = getRedis();
-  if (!redis2) return [];
-  const raw = await redis2.zrevrange(`${REDIS_PREFIX2}recent`, 0, limit - 1);
-  return raw.map((r) => {
-    try {
-      return JSON.parse(r);
-    } catch {
-      return null;
-    }
-  }).filter((e) => e !== null);
-}
-async function runFleetAnalysis() {
-  if (!isRlmAvailable()) return "RLM unavailable";
-  const learnings = getAllFleetLearnings();
-  if (learnings.length === 0) return "No fleet learnings yet";
-  try {
-    const result = await callCognitiveRaw("reason", {
-      prompt: `You are the Fleet Intelligence Analyst for WidgeTDC.
-
-FLEET LEARNING SUMMARY (${learnings.length} task types tracked):
-${learnings.map((l) => `- ${l.taskType}: ${l.totalEvals} evals, avg score ${l.avgScore.toFixed(2)}, avg cost $${l.avgCost.toFixed(2)}, best agent: ${l.bestAgent || "none"} (${l.bestScore.toFixed(2)}), ${l.bestPractices.length} best practices`).join("\n")}
-
-TOP BEST PRACTICES:
-${learnings.flatMap((l) => l.bestPractices).sort((a, b) => b.score - a.score).slice(0, 10).map((bp) => `- [${bp.taskType}] ${bp.agentId}: ${bp.insight.slice(0, 150)} (score: ${bp.score.toFixed(2)}, novelty: ${bp.novelty.toFixed(2)})`).join("\n") || "(none yet)"}
-
-Analyze:
-1. FLEET HEALTH: Which task types are well-served? Which are underperforming?
-2. COST EFFICIENCY: Where is cost/quality ratio best? Worst?
-3. LEARNING VELOCITY: Which areas are improving fastest?
-4. STRATEGIC RECOMMENDATIONS: What should we double down on? What should we deprecate?
-5. PHEROMONE STRATEGY: Which trails should be reinforced? Which should decay faster?`,
-      agent_id: "peer-eval",
-      depth: 2
-    }, 2e4);
-    const analysis = result ? String(result.answer ?? result.result ?? "") : "RLM cognitive analysis returned no results (check RLM health and fleet data volume)";
-    if (!analysis || analysis.length === 0) {
-      return "Fleet analysis produced empty output (insufficient data or RLM unavailable)";
-    }
-    if (analysis.length > 50) {
-      try {
-        await callMcpTool({
-          toolName: "memory_store",
-          args: {
-            agent_id: "peer-eval",
-            key: `fleet-analysis:${Date.now()}`,
-            value: analysis.slice(0, 2e3),
-            metadata: {
-              task_types: learnings.map((l) => l.taskType),
-              total_evals: learnings.reduce((s, l) => s + l.totalEvals, 0)
-            }
-          },
-          callId: `fleet-analysis-${Date.now()}`
-        });
-      } catch {
-      }
-    }
-    return analysis;
-  } catch (err) {
-    logger.warn({ error: String(err) }, "PeerEval: fleet analysis failed");
-    return `Fleet analysis failed: ${err}`;
-  }
-}
-function getPeerEvalState() {
-  return {
-    totalEvals: state2.totalEvals,
-    totalPeerReviews: state2.totalPeerReviews,
-    totalBestPracticesShared: state2.totalBestPracticesShared,
-    taskTypesTracked: state2.fleetLearnings.size,
-    lastEvalAt: state2.lastEvalAt
-  };
-}
-async function persistState() {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  try {
-    const serializable = {
-      ...state2,
-      fleetLearnings: Object.fromEntries(state2.fleetLearnings)
-    };
-    await redis2.set(REDIS_STATE_KEY2, JSON.stringify(serializable));
-  } catch {
-  }
-}
-async function loadState() {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  try {
-    const raw = await redis2.get(REDIS_STATE_KEY2);
-    if (raw) {
-      const loaded = JSON.parse(raw);
-      state2 = {
-        ...state2,
-        ...loaded,
-        fleetLearnings: new Map(Object.entries(loaded.fleetLearnings ?? {}))
-      };
-      logger.info(
-        { totalEvals: state2.totalEvals, taskTypes: state2.fleetLearnings.size },
-        "PeerEval: restored state from Redis"
-      );
-    } else {
-      await rebuildStateFromRecentEvals(redis2);
-    }
-  } catch (err) {
-    logger.warn({ err: String(err) }, "PeerEval: failed to load state from Redis, starting fresh");
-  }
-}
-async function rebuildStateFromRecentEvals(redis2) {
-  try {
-    const recentRaw = await redis2.zrange(`${REDIS_PREFIX2}recent`, "-inf", "+inf", "BYSCORE");
-    if (recentRaw && recentRaw.length > 0) {
-      let rebuilt = 0;
-      for (const raw of recentRaw) {
-        try {
-          const eval_ = JSON.parse(raw);
-          updateFleetLearning(eval_);
-          state2.totalEvals++;
-          state2.lastEvalAt = eval_.createdAt;
-          if (eval_.selfScore >= BROADCAST_THRESHOLD && eval_.novelty >= NOVELTY_THRESHOLD) {
-            state2.totalBestPracticesShared++;
-          }
-          rebuilt++;
-        } catch {
-        }
-      }
-      logger.info(
-        { rebuilt, totalEvals: state2.totalEvals, taskTypes: state2.fleetLearnings.size },
-        "PeerEval: rebuilt state from recent evals in Redis"
-      );
-      await persistState();
-    }
-  } catch {
-  }
-}
-async function initPeerEval() {
-  await loadState();
-  logger.info(
-    { totalEvals: state2.totalEvals, taskTypes: state2.fleetLearnings.size },
-    "PeerEval engine initialized"
-  );
-}
-var REDIS_PREFIX2, REDIS_STATE_KEY2, MAX_BEST_PRACTICES, NOVELTY_THRESHOLD, BROADCAST_THRESHOLD, state2;
-var init_peer_eval = __esm({
-  "src/swarm/peer-eval.ts"() {
-    "use strict";
-    init_redis();
-    init_mcp_caller();
-    init_cognitive_proxy();
-    init_sse();
-    init_chat_broadcaster();
-    init_logger();
-    init_pheromone_layer();
-    REDIS_PREFIX2 = "peer-eval:";
-    REDIS_STATE_KEY2 = "peer-eval:state";
-    MAX_BEST_PRACTICES = 50;
-    NOVELTY_THRESHOLD = 0.6;
-    BROADCAST_THRESHOLD = 0.75;
-    state2 = {
-      totalEvals: 0,
-      totalPeerReviews: 0,
-      totalBestPracticesShared: 0,
-      fleetLearnings: /* @__PURE__ */ new Map(),
-      lastEvalAt: null
-    };
   }
 });
 
@@ -14459,7 +5126,7 @@ __export(failure_harvester_exports, {
   harvestFailures: () => harvestFailures,
   runFailureHarvest: () => runFailureHarvest
 });
-import { v4 as uuid7 } from "uuid";
+import { v4 as uuid5 } from "uuid";
 function sanitizeErrorMessage(msg) {
   return msg.replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]").replace(/api[_-]?key[=:]\s*\S+/gi, "api_key=[REDACTED]").replace(/password[=:]\s*\S+/gi, "password=[REDACTED]").replace(/token[=:]\s*\S+/gi, "token=[REDACTED]").replace(/https?:\/\/[^\s"']+[?&][^\s"']*/g, (url) => {
     try {
@@ -14503,7 +5170,7 @@ async function harvestFailures(windowHours = 24) {
           const failedSteps = exec.results?.filter((r) => r.status === "error") ?? [];
           const errorMsg = exec.error ?? failedSteps.map((s) => String(s.output)).join("; ") ?? "unknown";
           events.push({
-            $id: `failure-event:${uuid7()}`,
+            $id: `failure-event:${uuid5()}`,
             execution_id: execId,
             chain_name: exec.name,
             category: categorizeFailure(errorMsg),
@@ -14522,7 +5189,7 @@ async function harvestFailures(windowHours = 24) {
   }
   return events;
 }
-async function persistToGraph2(events) {
+async function persistToGraph(events) {
   let persisted = 0;
   for (const evt of events) {
     try {
@@ -14549,7 +5216,7 @@ async function persistToGraph2(events) {
             timestamp: evt.timestamp
           }
         },
-        callId: uuid7(),
+        callId: uuid5(),
         timeoutMs: 1e4
       });
       persisted++;
@@ -14569,7 +5236,7 @@ async function persistToGraph2(events) {
           `,
           params: {}
         },
-        callId: uuid7(),
+        callId: uuid5(),
         timeoutMs: 1e4
       });
       await callMcpTool({
@@ -14582,7 +5249,7 @@ async function persistToGraph2(events) {
           `,
           params: {}
         },
-        callId: uuid7(),
+        callId: uuid5(),
         timeoutMs: 1e4
       });
     } catch {
@@ -14621,7 +5288,7 @@ function buildFailureSummary(events, windowHours = 24) {
 }
 async function runFailureHarvest(windowHours = 24) {
   const events = await harvestFailures(windowHours);
-  const persisted = await persistToGraph2(events);
+  const persisted = await persistToGraph(events);
   const summary = buildFailureSummary(events, windowHours);
   const redis2 = getRedis();
   if (redis2) {
@@ -14757,7 +5424,7 @@ async function persistToRedis2() {
   try {
     const pipeline = redis2.multi();
     for (const [key, profile] of profiles.entries()) {
-      pipeline.set(`${REDIS_PREFIX3}profile:${key}`, JSON.stringify(profile), { EX: 30 * 24 * 3600 });
+      pipeline.set(`${REDIS_PREFIX}profile:${key}`, JSON.stringify(profile), { EX: 30 * 24 * 3600 });
     }
     pipeline.sadd(REDIS_INDEX, ...[...profiles.keys()]);
     await pipeline.exec();
@@ -14771,7 +5438,7 @@ async function loadFromRedis() {
   try {
     const keys = await redis2.smembers(REDIS_INDEX);
     if (!keys.length) return;
-    const values = await redis2.mGet(keys.map((k) => `${REDIS_PREFIX3}profile:${k}`));
+    const values = await redis2.mGet(keys.map((k) => `${REDIS_PREFIX}profile:${k}`));
     let loaded = 0;
     for (const v of values) {
       if (!v) continue;
@@ -14789,14 +5456,14 @@ async function loadFromRedis() {
     logger.warn({ error: String(err) }, "[CostOptimizer] Redis load failed");
   }
 }
-var REDIS_PREFIX3, REDIS_INDEX, MIN_SAMPLES_FOR_ROUTING, MAX_PROFILES, profiles, persistTimer;
+var REDIS_PREFIX, REDIS_INDEX, MIN_SAMPLES_FOR_ROUTING, MAX_PROFILES, profiles, persistTimer;
 var init_cost_optimizer = __esm({
   "src/flywheel/cost-optimizer.ts"() {
     "use strict";
     init_redis();
     init_logger();
-    REDIS_PREFIX3 = "orchestrator:cost:";
-    REDIS_INDEX = `${REDIS_PREFIX3}index`;
+    REDIS_PREFIX = "orchestrator:cost:";
+    REDIS_INDEX = `${REDIS_PREFIX}index`;
     MIN_SAMPLES_FOR_ROUTING = 5;
     MAX_PROFILES = 1e3;
     profiles = /* @__PURE__ */ new Map();
@@ -15351,7 +6018,7 @@ __export(chain_engine_exports, {
   getExecution: () => getExecution,
   listExecutions: () => listExecutions
 });
-import { v4 as uuid8 } from "uuid";
+import { v4 as uuid6 } from "uuid";
 function persistExecution(exec) {
   executions.set(exec.execution_id, exec);
   const redis2 = getRedis();
@@ -15369,7 +6036,7 @@ function listExecutions() {
   return Array.from(executions.values()).sort((a, b) => b.started_at.localeCompare(a.started_at)).slice(0, 50);
 }
 async function executeStep(step, previousOutput) {
-  const stepId = step.id ?? uuid8().slice(0, 8);
+  const stepId = step.id ?? uuid6().slice(0, 8);
   const t0 = Date.now();
   const prevStr = typeof previousOutput === "string" ? previousOutput : JSON.stringify(previousOutput ?? "");
   try {
@@ -15408,7 +6075,7 @@ async function executeStep(step, previousOutput) {
         output = result;
       } else if (backendToolName === step.tool_name) {
         const result = await executeToolUnified(step.tool_name, args, {
-          call_id: uuid8(),
+          call_id: uuid6(),
           fold: false
         });
         if (result.error) {
@@ -15420,7 +6087,7 @@ async function executeStep(step, previousOutput) {
         const result = await callMcpTool({
           toolName: firstTool,
           args,
-          callId: uuid8(),
+          callId: uuid6(),
           timeoutMs: step.timeout_ms ?? toolDef?.timeoutMs ?? 3e4
         });
         if (result.status !== "success") {
@@ -15431,7 +6098,7 @@ async function executeStep(step, previousOutput) {
         const result = await callMcpTool({
           toolName: backendToolName,
           args,
-          callId: uuid8(),
+          callId: uuid6(),
           timeoutMs: step.timeout_ms ?? toolDef?.timeoutMs ?? 3e4
         });
         if (result.status !== "success") {
@@ -15487,7 +6154,7 @@ async function executeStep(step, previousOutput) {
             strategy: "error-pattern-extraction",
             target_length: 300
           },
-          callId: uuid8(),
+          callId: uuid6(),
           timeoutMs: 5e3
         });
         if (folded.status === "success") {
@@ -15616,7 +6283,7 @@ async function loadFunnelState(executionId) {
   }
 }
 async function runFunnel(steps, entryStage = "signal", preloadedContext, executionId) {
-  const execId = executionId ?? uuid8();
+  const execId = executionId ?? uuid6();
   const entryIndex = FUNNEL_STAGES.indexOf(entryStage);
   let state4 = await loadFunnelState(execId);
   if (!state4) {
@@ -15728,8 +6395,8 @@ async function resolveAutoSteps(def) {
   return { steps: resolvedSteps, routingDecisions, workflowEnvelope };
 }
 async function executeChain(def) {
-  const executionId = uuid8();
-  const chainId = def.chain_id ?? uuid8().slice(0, 12);
+  const executionId = uuid6();
+  const chainId = def.chain_id ?? uuid6().slice(0, 12);
   const t0 = Date.now();
   const currentDepth = def.recursion_depth ?? 0;
   const depthCheck = enforceMaxRecursionDepth(currentDepth);
@@ -15902,7 +6569,7 @@ var init_chain_engine = __esm({
 });
 
 // src/chain/verification-gate.ts
-import { v4 as uuid9 } from "uuid";
+import { v4 as uuid7 } from "uuid";
 async function verifyChainOutput(chainOutput, config2) {
   const maxRetries = config2.max_retries ?? 3;
   const start = Date.now();
@@ -15948,7 +6615,7 @@ async function runChecksParallel(checks, chainOutput) {
         const result = await callMcpTool({
           toolName: check.tool_name,
           args,
-          callId: `verify-${uuid9().substring(0, 8)}`,
+          callId: `verify-${uuid7().substring(0, 8)}`,
           timeoutMs: 15e3
         });
         let passed = true;
@@ -16223,7 +6890,7 @@ __export(hyperagent_exports, {
   rejectPlan: () => rejectPlan,
   validateWebhookSignature: () => validateWebhookSignature
 });
-import { v4 as uuid10 } from "uuid";
+import { v4 as uuid8 } from "uuid";
 import * as crypto2 from "crypto";
 function onPlanEvent(fn) {
   planEventSubscribers.add(fn);
@@ -16324,7 +6991,7 @@ async function createPlan(goal, sessionId, profileId = "read_only", opts) {
     logger.info({ sessionId, requested: profileId }, "HyperAgent: auto-downgraded to read_only due to consecutive failures");
   }
   const profile = POLICY_PROFILES[effectiveProfileId] ?? POLICY_PROFILES.read_only;
-  const planId = `hyp-${uuid10().slice(0, 12)}`;
+  const planId = `hyp-${uuid8().slice(0, 12)}`;
   let steps = [];
   try {
     const cogResult = await callCognitiveRaw("plan", {
@@ -16754,18 +7421,18 @@ __export(document_intelligence_exports, {
   batchIngest: () => batchIngest,
   ingestDocument: () => ingestDocument
 });
-import { v4 as uuid11 } from "uuid";
+import { v4 as uuid9 } from "uuid";
 async function persistResult(result) {
   const redis2 = getRedis();
   if (!redis2) return;
   try {
-    await redis2.set(`${REDIS_PREFIX4}${result.$id}`, JSON.stringify(result), "EX", 604800);
+    await redis2.set(`${REDIS_PREFIX2}${result.$id}`, JSON.stringify(result), "EX", 604800);
   } catch {
   }
 }
 async function ingestDocument(req) {
   const t0 = Date.now();
-  const ingestionId = `widgetdc:ingestion:${uuid11()}`;
+  const ingestionId = `widgetdc:ingestion:${uuid9()}`;
   logger.info({
     id: ingestionId,
     filename: req.filename,
@@ -16833,7 +7500,7 @@ async function ingestDocument(req) {
             source: req.source_url ?? req.filename,
             domain: req.domain ?? "general"
           },
-          callId: uuid11(),
+          callId: uuid9(),
           timeoutMs: 2e4
         });
       } catch {
@@ -16909,7 +7576,7 @@ async function tryMercuryExtract(prompt) {
     const result = await callMcpTool({
       toolName: "llm.generate",
       args: { prompt },
-      callId: uuid11(),
+      callId: uuid9(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return null;
@@ -16975,7 +7642,7 @@ MERGE (n)-[:EXTRACTED_FROM]->(d)`,
             filename: req.filename
           }
         },
-        callId: uuid11(),
+        callId: uuid9(),
         timeoutMs: 1e4
       });
       merged++;
@@ -16992,7 +7659,7 @@ MERGE (n)-[:EXTRACTED_FROM]->(d)`,
 MERGE (a)-[:${rel.type.replace(/[^A-Z_]/g, "_")}]->(b)`,
           params: { from: rel.from, to: rel.to }
         },
-        callId: uuid11(),
+        callId: uuid9(),
         timeoutMs: 5e3
       });
     } catch {
@@ -17012,7 +7679,7 @@ async function batchIngest(documents) {
   }
   return results;
 }
-var REDIS_PREFIX4;
+var REDIS_PREFIX2;
 var init_document_intelligence = __esm({
   "src/engagement/document-intelligence.ts"() {
     "use strict";
@@ -17021,7 +7688,99 @@ var init_document_intelligence = __esm({
     init_llm_proxy();
     init_logger();
     init_redis();
-    REDIS_PREFIX4 = "orchestrator:ingestion:";
+    REDIS_PREFIX2 = "orchestrator:ingestion:";
+  }
+});
+
+// src/slack.ts
+function isSlackEnabled() {
+  return Boolean(config.backendUrl) && Boolean(config.backendApiKey);
+}
+async function postToSlack(payload) {
+  if (!isSlackEnabled() || !_slackToolAvailable) return;
+  try {
+    const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${config.backendApiKey}`
+      },
+      body: JSON.stringify({
+        tool: "slack.channel.post",
+        payload
+      })
+    });
+    if (!res.ok) {
+      if (res.status === 404) {
+        _slackToolAvailable = false;
+        logger.warn("slack.channel.post not found on backend \u2014 Slack notifications disabled until restart. Register slack as a deferred namespace on the backend to fix.");
+      } else {
+        logger.warn({ status: res.status }, "Slack MCP post failed");
+      }
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, "Slack MCP post error");
+  }
+}
+function notifyAgentRegistered(agentId, displayName, namespaces) {
+  postToSlack({
+    text: `Agent *${displayName}* (\`${agentId}\`) registered
+Namespaces: ${namespaces.join(", ")}`,
+    level: "info",
+    title: `Agent Registered: ${displayName}`,
+    source: "orchestrator",
+    channel: "#ops-alerts"
+  });
+}
+function notifyToolCall(agentId, toolName2, status, durationMs, errorMessage) {
+  const emoji = status === "success" ? ":white_check_mark:" : ":x:";
+  const level = status === "success" ? "info" : "error";
+  const errorLine = errorMessage ? `
+Error: \`${errorMessage.slice(0, 200)}\`` : "";
+  postToSlack({
+    text: `${emoji} \`${agentId}\` called \`${toolName2}\` \u2192 *${status}* (${durationMs}ms)${errorLine}
+Orchestrator: \`${config.orchestratorId}\``,
+    level,
+    title: `Tool Call: ${toolName2} \u2192 ${status}`,
+    source: "orchestrator",
+    channel: "#ops-alerts"
+  });
+}
+function notifyChatMessage(from, to, message) {
+  postToSlack({
+    text: `*${from}* \u2192 *${to}*
+${message.slice(0, 500)}`,
+    level: "info",
+    title: `Chat: ${from} \u2192 ${to}`,
+    source: "orchestrator",
+    channel: "#ops-alerts"
+  });
+}
+function notifyAdoptionDigest(digest) {
+  const trendEmoji2 = digest.trend === "up" ? ":chart_with_upwards_trend:" : digest.trend === "down" ? ":chart_with_downwards_trend:" : ":bar_chart:";
+  postToSlack({
+    text: [
+      `${trendEmoji2} *Weekly Adoption Report* (${digest.period})`,
+      "",
+      `*Conversations:* ${digest.conversations} | *Pipelines:* ${digest.pipelines} | *Artifacts:* ${digest.artifacts}`,
+      `*Active Agents:* ${digest.agents} | *Tool Calls:* ${digest.toolCalls} | *Chains:* ${digest.chains}`,
+      `*Feature Adoption:* ${digest.featuresPct}%`,
+      "",
+      `Trend: ${digest.trend === "up" ? "Growing" : digest.trend === "down" ? "Declining" : "Stable"}`
+    ].join("\n"),
+    level: "info",
+    title: `Weekly Adoption Digest \u2014 ${digest.period}`,
+    source: "orchestrator",
+    channel: "#ops-status"
+  });
+}
+var _slackToolAvailable;
+var init_slack = __esm({
+  "src/slack.ts"() {
+    "use strict";
+    init_config();
+    init_logger();
+    _slackToolAvailable = true;
   }
 });
 
@@ -17030,7 +7789,7 @@ var graph_hygiene_cron_exports = {};
 __export(graph_hygiene_cron_exports, {
   runGraphHygiene: () => runGraphHygiene
 });
-import { v4 as uuid12 } from "uuid";
+import { v4 as uuid10 } from "uuid";
 function neo4jInt(val) {
   if (typeof val === "number") return val;
   if (val && typeof val === "object" && "low" in val) return val.low;
@@ -17040,7 +7799,7 @@ async function queryMetric(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid12(),
+    callId: uuid10(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -17151,7 +7910,7 @@ SET s.orphan_ratio = $orphan_ratio,
         _force: true
         // Infrastructure write — bypass validation
       },
-      callId: uuid12(),
+      callId: uuid10(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -17164,7 +7923,7 @@ SET s.orphan_ratio = $orphan_ratio,
         query: `MATCH (s:GraphHealthSnapshot) WHERE s.timestamp < datetime() - duration('P90D') DETACH DELETE s`,
         _force: true
       },
-      callId: uuid12(),
+      callId: uuid10(),
       timeoutMs: 1e4
     });
   } catch {
@@ -17211,7 +7970,7 @@ __export(similarity_engine_exports, {
   findSimilarClients: () => findSimilarClients,
   getClientDetails: () => getClientDetails
 });
-import { v4 as uuid13 } from "uuid";
+import { v4 as uuid11 } from "uuid";
 async function findSimilarClients(req) {
   const t0 = Date.now();
   const maxResults = Math.min(Math.max(req.max_results ?? 5, 1), 20);
@@ -17260,7 +8019,7 @@ RETURN n.id AS id, labels(n) AS labels, coalesce(n.name, n.title) AS name
 LIMIT 1`,
         params: { q: query }
       },
-      callId: uuid13(),
+      callId: uuid11(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -17309,7 +8068,7 @@ RETURN other.id AS client_id,
     const result = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params: { sourceId: nodeId, relTypes } },
-      callId: uuid13(),
+      callId: uuid11(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return [];
@@ -17355,7 +8114,7 @@ async function computeSemanticSimilarity(query, maxResults) {
     const result = await callMcpTool({
       toolName: "srag.query",
       args: { query },
-      callId: uuid13(),
+      callId: uuid11(),
       timeoutMs: 2e4
     });
     if (result.status !== "success") return [];
@@ -17414,7 +8173,7 @@ RETURN n AS client,
        collect(DISTINCT {rel: type(r), target: coalesce(related.name, related.title), target_type: labels(related)[0]}) AS relationships`,
         params: { id: clientId }
       },
-      callId: uuid13(),
+      callId: uuid11(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -17453,7 +8212,7 @@ __export(deliverable_engine_exports, {
   getDeliverable: () => getDeliverable,
   listDeliverables: () => listDeliverables
 });
-import { v4 as uuid14 } from "uuid";
+import { v4 as uuid12 } from "uuid";
 async function persist(d) {
   deliverableCache.set(d.$id, d);
   if (deliverableCache.size > CACHE_MAX_SIZE) {
@@ -17464,7 +8223,7 @@ async function persist(d) {
   const redis2 = getRedis();
   if (!redis2) return;
   try {
-    await redis2.set(`${REDIS_PREFIX5}${d.$id}`, JSON.stringify(d), "EX", TTL_SECONDS2);
+    await redis2.set(`${REDIS_PREFIX3}${d.$id}`, JSON.stringify(d), "EX", TTL_SECONDS2);
     await redis2.sadd(REDIS_INDEX2, d.$id);
   } catch {
   }
@@ -17474,7 +8233,7 @@ async function getDeliverable(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX5}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX3}${id}`);
     if (raw) {
       const d = JSON.parse(raw);
       deliverableCache.set(id, d);
@@ -17505,7 +8264,7 @@ async function generateDeliverable(req) {
   }
   activeGenerations++;
   const t0 = Date.now();
-  const deliverableId = `widgetdc:deliverable:${uuid14()}`;
+  const deliverableId = `widgetdc:deliverable:${uuid12()}`;
   const format = req.format ?? "markdown";
   const maxSections = Math.min(Math.max(req.max_sections ?? 5, 2), 8);
   const deliverable = {
@@ -17790,7 +8549,7 @@ async function renderPDF(deliverable) {
         content: deliverable.markdown,
         template: deliverable.type
       },
-      callId: uuid14(),
+      callId: uuid12(),
       timeoutMs: 45e3
     });
     if (result.status === "success" && result.result) {
@@ -17802,7 +8561,7 @@ async function renderPDF(deliverable) {
     deliverable.format = "markdown";
   }
 }
-var REDIS_PREFIX5, REDIS_INDEX2, TTL_SECONDS2, deliverableCache, CACHE_MAX_SIZE, activeGenerations, MAX_CONCURRENT, TYPE_PROMPTS;
+var REDIS_PREFIX3, REDIS_INDEX2, TTL_SECONDS2, deliverableCache, CACHE_MAX_SIZE, activeGenerations, MAX_CONCURRENT, TYPE_PROMPTS;
 var init_deliverable_engine = __esm({
   "src/engagement/deliverable-engine.ts"() {
     "use strict";
@@ -17811,7 +8570,7 @@ var init_deliverable_engine = __esm({
     init_dual_rag();
     init_redis();
     init_logger();
-    REDIS_PREFIX5 = "orchestrator:deliverable:";
+    REDIS_PREFIX3 = "orchestrator:deliverable:";
     REDIS_INDEX2 = "orchestrator:deliverables:index";
     TTL_SECONDS2 = 604800;
     deliverableCache = /* @__PURE__ */ new Map();
@@ -17993,7 +8752,7 @@ __export(osint_scanner_exports, {
   getOsintStatus: () => getOsintStatus,
   runOsintScan: () => runOsintScan
 });
-import { v4 as uuid15 } from "uuid";
+import { v4 as uuid13 } from "uuid";
 async function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -18018,7 +8777,7 @@ async function checkToolAvailability() {
     const result = await callMcpTool({
       toolName: "the_snout.domain_intel",
       args: { domain: "borger.dk", type: "basic" },
-      callId: uuid15(),
+      callId: uuid13(),
       timeoutMs: 1e4
     });
     return result.status === "success";
@@ -18035,7 +8794,7 @@ async function scanCTForDomain(domain, toolsAvailable) {
       const result = await callMcpTool({
         toolName: "the_snout.ct_transparency",
         args: { domain },
-        callId: uuid15(),
+        callId: uuid13(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (result.status === "success" && result.result) {
@@ -18050,7 +8809,7 @@ async function scanCTForDomain(domain, toolsAvailable) {
       const fallbackResult = await callMcpTool({
         toolName: "the_snout.domain_intel",
         args: { domain, type: "ct" },
-        callId: uuid15(),
+        callId: uuid13(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (fallbackResult.status === "success" && fallbackResult.result) {
@@ -18095,7 +8854,7 @@ async function scanDMARCForDomain(domain, toolsAvailable) {
       const result = await callMcpTool({
         toolName: "the_snout.domain_intel",
         args: { domain, type: "dmarc" },
-        callId: uuid15(),
+        callId: uuid13(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (result.status === "success" && result.result) {
@@ -18178,7 +8937,7 @@ async function ingestCTResults(ctResults) {
             },
             _force: true
           },
-          callId: uuid15(),
+          callId: uuid13(),
           timeoutMs: 15e3
         });
         if (result.status === "success") {
@@ -18241,7 +9000,7 @@ async function ingestDMARCResults(dmarcResults) {
             },
             _force: true
           },
-          callId: uuid15(),
+          callId: uuid13(),
           timeoutMs: 15e3
         });
         if (result.status === "success") {
@@ -18276,7 +9035,7 @@ async function persistScanResult(result) {
   }
 }
 async function runOsintScan(options) {
-  const scanId = uuid15();
+  const scanId = uuid13();
   const startedAt2 = (/* @__PURE__ */ new Date()).toISOString();
   const t0 = Date.now();
   const domains = options?.domains ?? [...DK_PUBLIC_DOMAINS];
@@ -18421,12 +9180,12 @@ __export(evolution_loop_exports, {
   getEvolutionStatus: () => getEvolutionStatus,
   runEvolutionLoop: () => runEvolutionLoop
 });
-import { v4 as uuid16 } from "uuid";
+import { v4 as uuid14 } from "uuid";
 async function persistCycle(cycle) {
   const redis2 = getRedis();
   if (!redis2) return;
   try {
-    await redis2.set(`${REDIS_PREFIX6}${cycle.cycle_id}`, JSON.stringify(cycle), "EX", REDIS_TTL);
+    await redis2.set(`${REDIS_PREFIX4}${cycle.cycle_id}`, JSON.stringify(cycle), "EX", REDIS_TTL);
     await redis2.lpush(REDIS_HISTORY_KEY, JSON.stringify(cycle));
     await redis2.ltrim(REDIS_HISTORY_KEY, 0, 19);
     await redis2.expire(REDIS_HISTORY_KEY, REDIS_TTL);
@@ -18470,7 +9229,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (n) RETURN labels(n)[0] AS label, count(*) AS count ORDER BY count DESC LIMIT 15"
       },
-      callId: uuid16(),
+      callId: uuid14(),
       timeoutMs: 1e4
     }),
     callMcpTool({
@@ -18478,7 +9237,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (f:FailureMemory) WHERE f.last_seen > datetime() - duration('P7D') RETURN f.category AS category, f.pattern AS pattern, f.hit_count AS hits ORDER BY f.hit_count DESC LIMIT 10"
       },
-      callId: uuid16(),
+      callId: uuid14(),
       timeoutMs: 1e4
     }),
     callMcpTool({
@@ -18486,7 +9245,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (l:Lesson) WHERE l.created_at > datetime() - duration('P7D') RETURN l.agent_id AS agent, l.lesson AS lesson, l.context AS context ORDER BY l.created_at DESC LIMIT 10"
       },
-      callId: uuid16(),
+      callId: uuid14(),
       timeoutMs: 1e4
     })
   ]);
@@ -18542,7 +9301,7 @@ async function stageOrient(observeResult, focusArea) {
         RETURN labels(b)[0] AS label, coalesce(b.name, b.title, b.id) AS name, b.status AS status, b.quality_score AS quality
         ORDER BY coalesce(b.quality_score, 0) ASC LIMIT 10`
     },
-    callId: uuid16(),
+    callId: uuid14(),
     timeoutMs: 1e4
   });
   const blocks = blocksResult.status === "success" ? Array.isArray(blocksResult.result) ? blocksResult.result : blocksResult.result?.results ?? [] : [];
@@ -18664,7 +9423,7 @@ async function stageLearn(cycleId, observeResult, orientResult, actResult) {
           estimated_impact: orientResult.estimated_impact
         }
       },
-      callId: uuid16(),
+      callId: uuid14(),
       timeoutMs: 15e3
     });
     if (writeResult.status === "success") {
@@ -18694,7 +9453,7 @@ async function stageLearn(cycleId, observeResult, orientResult, actResult) {
             cycle_id: cycleId
           }
         },
-        callId: uuid16(),
+        callId: uuid14(),
         timeoutMs: 1e4
       });
       if (lessonResult.status === "success") {
@@ -18711,7 +9470,7 @@ async function runEvolutionLoop(opts) {
     throw new Error("Evolution loop already running. Only 1 concurrent cycle allowed.");
   }
   isRunning = true;
-  const cycleId = uuid16();
+  const cycleId = uuid14();
   const startedAt2 = (/* @__PURE__ */ new Date()).toISOString();
   const t0 = Date.now();
   const focusArea = opts?.focus_area?.slice(0, 200);
@@ -18843,7 +9602,7 @@ async function getEvolutionHistory(limit = 10) {
     return lastCycle ? [lastCycle] : [];
   }
 }
-var isRunning, currentStage, lastCycle, totalCycles, STAGE_TIMEOUT_MS, TOTAL_TIMEOUT_MS, REDIS_PREFIX6, REDIS_HISTORY_KEY, REDIS_TTL;
+var isRunning, currentStage, lastCycle, totalCycles, STAGE_TIMEOUT_MS, TOTAL_TIMEOUT_MS, REDIS_PREFIX4, REDIS_HISTORY_KEY, REDIS_TTL;
 var init_evolution_loop = __esm({
   "src/intelligence/evolution-loop.ts"() {
     "use strict";
@@ -18858,9 +9617,8174 @@ var init_evolution_loop = __esm({
     totalCycles = 0;
     STAGE_TIMEOUT_MS = 5 * 60 * 1e3;
     TOTAL_TIMEOUT_MS = 20 * 60 * 1e3;
-    REDIS_PREFIX6 = "orchestrator:evolution:";
+    REDIS_PREFIX4 = "orchestrator:evolution:";
     REDIS_HISTORY_KEY = "orchestrator:evolution:history";
     REDIS_TTL = 7 * 86400;
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/guard/value.mjs
+var value_exports = {};
+__export(value_exports, {
+  HasPropertyKey: () => HasPropertyKey,
+  IsArray: () => IsArray,
+  IsAsyncIterator: () => IsAsyncIterator,
+  IsBigInt: () => IsBigInt,
+  IsBoolean: () => IsBoolean,
+  IsDate: () => IsDate,
+  IsFunction: () => IsFunction,
+  IsIterator: () => IsIterator,
+  IsNull: () => IsNull,
+  IsNumber: () => IsNumber,
+  IsObject: () => IsObject,
+  IsRegExp: () => IsRegExp,
+  IsString: () => IsString,
+  IsSymbol: () => IsSymbol,
+  IsUint8Array: () => IsUint8Array,
+  IsUndefined: () => IsUndefined
+});
+function HasPropertyKey(value, key) {
+  return key in value;
+}
+function IsAsyncIterator(value) {
+  return IsObject(value) && !IsArray(value) && !IsUint8Array(value) && Symbol.asyncIterator in value;
+}
+function IsArray(value) {
+  return Array.isArray(value);
+}
+function IsBigInt(value) {
+  return typeof value === "bigint";
+}
+function IsBoolean(value) {
+  return typeof value === "boolean";
+}
+function IsDate(value) {
+  return value instanceof globalThis.Date;
+}
+function IsFunction(value) {
+  return typeof value === "function";
+}
+function IsIterator(value) {
+  return IsObject(value) && !IsArray(value) && !IsUint8Array(value) && Symbol.iterator in value;
+}
+function IsNull(value) {
+  return value === null;
+}
+function IsNumber(value) {
+  return typeof value === "number";
+}
+function IsObject(value) {
+  return typeof value === "object" && value !== null;
+}
+function IsRegExp(value) {
+  return value instanceof globalThis.RegExp;
+}
+function IsString(value) {
+  return typeof value === "string";
+}
+function IsSymbol(value) {
+  return typeof value === "symbol";
+}
+function IsUint8Array(value) {
+  return value instanceof globalThis.Uint8Array;
+}
+function IsUndefined(value) {
+  return value === void 0;
+}
+var init_value = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/guard/value.mjs"() {
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/clone/value.mjs
+function ArrayType(value) {
+  return value.map((value2) => Visit(value2));
+}
+function DateType(value) {
+  return new Date(value.getTime());
+}
+function Uint8ArrayType(value) {
+  return new Uint8Array(value);
+}
+function RegExpType(value) {
+  return new RegExp(value.source, value.flags);
+}
+function ObjectType(value) {
+  const result = {};
+  for (const key of Object.getOwnPropertyNames(value)) {
+    result[key] = Visit(value[key]);
+  }
+  for (const key of Object.getOwnPropertySymbols(value)) {
+    result[key] = Visit(value[key]);
+  }
+  return result;
+}
+function Visit(value) {
+  return IsArray(value) ? ArrayType(value) : IsDate(value) ? DateType(value) : IsUint8Array(value) ? Uint8ArrayType(value) : IsRegExp(value) ? RegExpType(value) : IsObject(value) ? ObjectType(value) : value;
+}
+function Clone(value) {
+  return Visit(value);
+}
+var init_value2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/clone/value.mjs"() {
+    init_value();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/clone/type.mjs
+function CloneType(schema, options) {
+  return options === void 0 ? Clone(schema) : Clone({ ...options, ...schema });
+}
+var init_type = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/clone/type.mjs"() {
+    init_value2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/clone/index.mjs
+var init_clone = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/clone/index.mjs"() {
+    init_type();
+    init_value2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/guard/guard.mjs
+function IsAsyncIterator2(value) {
+  return IsObject2(value) && globalThis.Symbol.asyncIterator in value;
+}
+function IsIterator2(value) {
+  return IsObject2(value) && globalThis.Symbol.iterator in value;
+}
+function IsStandardObject(value) {
+  return IsObject2(value) && (globalThis.Object.getPrototypeOf(value) === Object.prototype || globalThis.Object.getPrototypeOf(value) === null);
+}
+function IsPromise(value) {
+  return value instanceof globalThis.Promise;
+}
+function IsDate2(value) {
+  return value instanceof Date && globalThis.Number.isFinite(value.getTime());
+}
+function IsMap(value) {
+  return value instanceof globalThis.Map;
+}
+function IsSet(value) {
+  return value instanceof globalThis.Set;
+}
+function IsTypedArray(value) {
+  return globalThis.ArrayBuffer.isView(value);
+}
+function IsUint8Array2(value) {
+  return value instanceof globalThis.Uint8Array;
+}
+function HasPropertyKey2(value, key) {
+  return key in value;
+}
+function IsObject2(value) {
+  return value !== null && typeof value === "object";
+}
+function IsArray2(value) {
+  return globalThis.Array.isArray(value) && !globalThis.ArrayBuffer.isView(value);
+}
+function IsUndefined2(value) {
+  return value === void 0;
+}
+function IsNull2(value) {
+  return value === null;
+}
+function IsBoolean2(value) {
+  return typeof value === "boolean";
+}
+function IsNumber2(value) {
+  return typeof value === "number";
+}
+function IsInteger(value) {
+  return globalThis.Number.isInteger(value);
+}
+function IsBigInt2(value) {
+  return typeof value === "bigint";
+}
+function IsString2(value) {
+  return typeof value === "string";
+}
+function IsFunction2(value) {
+  return typeof value === "function";
+}
+function IsSymbol2(value) {
+  return typeof value === "symbol";
+}
+function IsValueType(value) {
+  return IsBigInt2(value) || IsBoolean2(value) || IsNull2(value) || IsNumber2(value) || IsString2(value) || IsSymbol2(value) || IsUndefined2(value);
+}
+var init_guard = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/guard/guard.mjs"() {
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/guard/index.mjs
+var init_guard2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/guard/index.mjs"() {
+    init_guard();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/system/policy.mjs
+var TypeSystemPolicy;
+var init_policy = __esm({
+  "node_modules/@sinclair/typebox/build/esm/system/policy.mjs"() {
+    init_guard2();
+    (function(TypeSystemPolicy3) {
+      TypeSystemPolicy3.InstanceMode = "default";
+      TypeSystemPolicy3.ExactOptionalPropertyTypes = false;
+      TypeSystemPolicy3.AllowArrayObject = false;
+      TypeSystemPolicy3.AllowNaN = false;
+      TypeSystemPolicy3.AllowNullVoid = false;
+      function IsExactOptionalProperty(value, key) {
+        return TypeSystemPolicy3.ExactOptionalPropertyTypes ? key in value : value[key] !== void 0;
+      }
+      TypeSystemPolicy3.IsExactOptionalProperty = IsExactOptionalProperty;
+      function IsObjectLike(value) {
+        const isObject = IsObject2(value);
+        return TypeSystemPolicy3.AllowArrayObject ? isObject : isObject && !IsArray2(value);
+      }
+      TypeSystemPolicy3.IsObjectLike = IsObjectLike;
+      function IsRecordLike(value) {
+        return IsObjectLike(value) && !(value instanceof Date) && !(value instanceof Uint8Array);
+      }
+      TypeSystemPolicy3.IsRecordLike = IsRecordLike;
+      function IsNumberLike(value) {
+        return TypeSystemPolicy3.AllowNaN ? IsNumber2(value) : Number.isFinite(value);
+      }
+      TypeSystemPolicy3.IsNumberLike = IsNumberLike;
+      function IsVoidLike(value) {
+        const isUndefined = IsUndefined2(value);
+        return TypeSystemPolicy3.AllowNullVoid ? isUndefined || value === null : isUndefined;
+      }
+      TypeSystemPolicy3.IsVoidLike = IsVoidLike;
+    })(TypeSystemPolicy || (TypeSystemPolicy = {}));
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/create/immutable.mjs
+function ImmutableArray(value) {
+  return globalThis.Object.freeze(value).map((value2) => Immutable(value2));
+}
+function ImmutableDate(value) {
+  return value;
+}
+function ImmutableUint8Array(value) {
+  return value;
+}
+function ImmutableRegExp(value) {
+  return value;
+}
+function ImmutableObject(value) {
+  const result = {};
+  for (const key of Object.getOwnPropertyNames(value)) {
+    result[key] = Immutable(value[key]);
+  }
+  for (const key of Object.getOwnPropertySymbols(value)) {
+    result[key] = Immutable(value[key]);
+  }
+  return globalThis.Object.freeze(result);
+}
+function Immutable(value) {
+  return IsArray(value) ? ImmutableArray(value) : IsDate(value) ? ImmutableDate(value) : IsUint8Array(value) ? ImmutableUint8Array(value) : IsRegExp(value) ? ImmutableRegExp(value) : IsObject(value) ? ImmutableObject(value) : value;
+}
+var init_immutable = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/create/immutable.mjs"() {
+    init_value();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/create/type.mjs
+function CreateType(schema, options) {
+  const result = options !== void 0 ? { ...options, ...schema } : schema;
+  switch (TypeSystemPolicy.InstanceMode) {
+    case "freeze":
+      return Immutable(result);
+    case "clone":
+      return Clone(result);
+    default:
+      return result;
+  }
+}
+var init_type2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/create/type.mjs"() {
+    init_policy();
+    init_immutable();
+    init_value2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/create/index.mjs
+var init_create = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/create/index.mjs"() {
+    init_type2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/error/error.mjs
+var TypeBoxError;
+var init_error = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/error/error.mjs"() {
+    TypeBoxError = class extends Error {
+      constructor(message) {
+        super(message);
+      }
+    };
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/error/index.mjs
+var init_error2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/error/index.mjs"() {
+    init_error();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/symbols/symbols.mjs
+var TransformKind, ReadonlyKind, OptionalKind, Hint, Kind;
+var init_symbols = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/symbols/symbols.mjs"() {
+    TransformKind = /* @__PURE__ */ Symbol.for("TypeBox.Transform");
+    ReadonlyKind = /* @__PURE__ */ Symbol.for("TypeBox.Readonly");
+    OptionalKind = /* @__PURE__ */ Symbol.for("TypeBox.Optional");
+    Hint = /* @__PURE__ */ Symbol.for("TypeBox.Hint");
+    Kind = /* @__PURE__ */ Symbol.for("TypeBox.Kind");
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/symbols/index.mjs
+var init_symbols2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/symbols/index.mjs"() {
+    init_symbols();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/guard/kind.mjs
+function IsReadonly(value) {
+  return IsObject(value) && value[ReadonlyKind] === "Readonly";
+}
+function IsOptional(value) {
+  return IsObject(value) && value[OptionalKind] === "Optional";
+}
+function IsAny(value) {
+  return IsKindOf(value, "Any");
+}
+function IsArgument(value) {
+  return IsKindOf(value, "Argument");
+}
+function IsArray3(value) {
+  return IsKindOf(value, "Array");
+}
+function IsAsyncIterator3(value) {
+  return IsKindOf(value, "AsyncIterator");
+}
+function IsBigInt3(value) {
+  return IsKindOf(value, "BigInt");
+}
+function IsBoolean3(value) {
+  return IsKindOf(value, "Boolean");
+}
+function IsComputed(value) {
+  return IsKindOf(value, "Computed");
+}
+function IsConstructor(value) {
+  return IsKindOf(value, "Constructor");
+}
+function IsDate3(value) {
+  return IsKindOf(value, "Date");
+}
+function IsFunction3(value) {
+  return IsKindOf(value, "Function");
+}
+function IsInteger2(value) {
+  return IsKindOf(value, "Integer");
+}
+function IsIntersect(value) {
+  return IsKindOf(value, "Intersect");
+}
+function IsIterator3(value) {
+  return IsKindOf(value, "Iterator");
+}
+function IsKindOf(value, kind) {
+  return IsObject(value) && Kind in value && value[Kind] === kind;
+}
+function IsLiteralValue(value) {
+  return IsBoolean(value) || IsNumber(value) || IsString(value);
+}
+function IsLiteral(value) {
+  return IsKindOf(value, "Literal");
+}
+function IsMappedKey(value) {
+  return IsKindOf(value, "MappedKey");
+}
+function IsMappedResult(value) {
+  return IsKindOf(value, "MappedResult");
+}
+function IsNever(value) {
+  return IsKindOf(value, "Never");
+}
+function IsNot(value) {
+  return IsKindOf(value, "Not");
+}
+function IsNull3(value) {
+  return IsKindOf(value, "Null");
+}
+function IsNumber3(value) {
+  return IsKindOf(value, "Number");
+}
+function IsObject3(value) {
+  return IsKindOf(value, "Object");
+}
+function IsPromise2(value) {
+  return IsKindOf(value, "Promise");
+}
+function IsRecord(value) {
+  return IsKindOf(value, "Record");
+}
+function IsRef(value) {
+  return IsKindOf(value, "Ref");
+}
+function IsRegExp2(value) {
+  return IsKindOf(value, "RegExp");
+}
+function IsString3(value) {
+  return IsKindOf(value, "String");
+}
+function IsSymbol3(value) {
+  return IsKindOf(value, "Symbol");
+}
+function IsTemplateLiteral(value) {
+  return IsKindOf(value, "TemplateLiteral");
+}
+function IsThis(value) {
+  return IsKindOf(value, "This");
+}
+function IsTransform(value) {
+  return IsObject(value) && TransformKind in value;
+}
+function IsTuple(value) {
+  return IsKindOf(value, "Tuple");
+}
+function IsUndefined3(value) {
+  return IsKindOf(value, "Undefined");
+}
+function IsUnion(value) {
+  return IsKindOf(value, "Union");
+}
+function IsUint8Array3(value) {
+  return IsKindOf(value, "Uint8Array");
+}
+function IsUnknown(value) {
+  return IsKindOf(value, "Unknown");
+}
+function IsUnsafe(value) {
+  return IsKindOf(value, "Unsafe");
+}
+function IsVoid(value) {
+  return IsKindOf(value, "Void");
+}
+function IsKind(value) {
+  return IsObject(value) && Kind in value && IsString(value[Kind]);
+}
+function IsSchema(value) {
+  return IsAny(value) || IsArgument(value) || IsArray3(value) || IsBoolean3(value) || IsBigInt3(value) || IsAsyncIterator3(value) || IsComputed(value) || IsConstructor(value) || IsDate3(value) || IsFunction3(value) || IsInteger2(value) || IsIntersect(value) || IsIterator3(value) || IsLiteral(value) || IsMappedKey(value) || IsMappedResult(value) || IsNever(value) || IsNot(value) || IsNull3(value) || IsNumber3(value) || IsObject3(value) || IsPromise2(value) || IsRecord(value) || IsRef(value) || IsRegExp2(value) || IsString3(value) || IsSymbol3(value) || IsTemplateLiteral(value) || IsThis(value) || IsTuple(value) || IsUndefined3(value) || IsUnion(value) || IsUint8Array3(value) || IsUnknown(value) || IsUnsafe(value) || IsVoid(value) || IsKind(value);
+}
+var init_kind = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/guard/kind.mjs"() {
+    init_value();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/guard/type.mjs
+var type_exports = {};
+__export(type_exports, {
+  IsAny: () => IsAny2,
+  IsArgument: () => IsArgument2,
+  IsArray: () => IsArray4,
+  IsAsyncIterator: () => IsAsyncIterator4,
+  IsBigInt: () => IsBigInt4,
+  IsBoolean: () => IsBoolean4,
+  IsComputed: () => IsComputed2,
+  IsConstructor: () => IsConstructor2,
+  IsDate: () => IsDate4,
+  IsFunction: () => IsFunction4,
+  IsImport: () => IsImport,
+  IsInteger: () => IsInteger3,
+  IsIntersect: () => IsIntersect2,
+  IsIterator: () => IsIterator4,
+  IsKind: () => IsKind2,
+  IsKindOf: () => IsKindOf2,
+  IsLiteral: () => IsLiteral2,
+  IsLiteralBoolean: () => IsLiteralBoolean,
+  IsLiteralNumber: () => IsLiteralNumber,
+  IsLiteralString: () => IsLiteralString,
+  IsLiteralValue: () => IsLiteralValue2,
+  IsMappedKey: () => IsMappedKey2,
+  IsMappedResult: () => IsMappedResult2,
+  IsNever: () => IsNever2,
+  IsNot: () => IsNot2,
+  IsNull: () => IsNull4,
+  IsNumber: () => IsNumber4,
+  IsObject: () => IsObject4,
+  IsOptional: () => IsOptional2,
+  IsPromise: () => IsPromise3,
+  IsProperties: () => IsProperties,
+  IsReadonly: () => IsReadonly2,
+  IsRecord: () => IsRecord2,
+  IsRecursive: () => IsRecursive,
+  IsRef: () => IsRef2,
+  IsRegExp: () => IsRegExp3,
+  IsSchema: () => IsSchema2,
+  IsString: () => IsString4,
+  IsSymbol: () => IsSymbol4,
+  IsTemplateLiteral: () => IsTemplateLiteral2,
+  IsThis: () => IsThis2,
+  IsTransform: () => IsTransform2,
+  IsTuple: () => IsTuple2,
+  IsUint8Array: () => IsUint8Array4,
+  IsUndefined: () => IsUndefined4,
+  IsUnion: () => IsUnion2,
+  IsUnionLiteral: () => IsUnionLiteral,
+  IsUnknown: () => IsUnknown2,
+  IsUnsafe: () => IsUnsafe2,
+  IsVoid: () => IsVoid2,
+  TypeGuardUnknownTypeError: () => TypeGuardUnknownTypeError
+});
+function IsPattern(value) {
+  try {
+    new RegExp(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function IsControlCharacterFree(value) {
+  if (!IsString(value))
+    return false;
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code >= 7 && code <= 13 || code === 27 || code === 127) {
+      return false;
+    }
+  }
+  return true;
+}
+function IsAdditionalProperties(value) {
+  return IsOptionalBoolean(value) || IsSchema2(value);
+}
+function IsOptionalBigInt(value) {
+  return IsUndefined(value) || IsBigInt(value);
+}
+function IsOptionalNumber(value) {
+  return IsUndefined(value) || IsNumber(value);
+}
+function IsOptionalBoolean(value) {
+  return IsUndefined(value) || IsBoolean(value);
+}
+function IsOptionalString(value) {
+  return IsUndefined(value) || IsString(value);
+}
+function IsOptionalPattern(value) {
+  return IsUndefined(value) || IsString(value) && IsControlCharacterFree(value) && IsPattern(value);
+}
+function IsOptionalFormat(value) {
+  return IsUndefined(value) || IsString(value) && IsControlCharacterFree(value);
+}
+function IsOptionalSchema(value) {
+  return IsUndefined(value) || IsSchema2(value);
+}
+function IsReadonly2(value) {
+  return IsObject(value) && value[ReadonlyKind] === "Readonly";
+}
+function IsOptional2(value) {
+  return IsObject(value) && value[OptionalKind] === "Optional";
+}
+function IsAny2(value) {
+  return IsKindOf2(value, "Any") && IsOptionalString(value.$id);
+}
+function IsArgument2(value) {
+  return IsKindOf2(value, "Argument") && IsNumber(value.index);
+}
+function IsArray4(value) {
+  return IsKindOf2(value, "Array") && value.type === "array" && IsOptionalString(value.$id) && IsSchema2(value.items) && IsOptionalNumber(value.minItems) && IsOptionalNumber(value.maxItems) && IsOptionalBoolean(value.uniqueItems) && IsOptionalSchema(value.contains) && IsOptionalNumber(value.minContains) && IsOptionalNumber(value.maxContains);
+}
+function IsAsyncIterator4(value) {
+  return IsKindOf2(value, "AsyncIterator") && value.type === "AsyncIterator" && IsOptionalString(value.$id) && IsSchema2(value.items);
+}
+function IsBigInt4(value) {
+  return IsKindOf2(value, "BigInt") && value.type === "bigint" && IsOptionalString(value.$id) && IsOptionalBigInt(value.exclusiveMaximum) && IsOptionalBigInt(value.exclusiveMinimum) && IsOptionalBigInt(value.maximum) && IsOptionalBigInt(value.minimum) && IsOptionalBigInt(value.multipleOf);
+}
+function IsBoolean4(value) {
+  return IsKindOf2(value, "Boolean") && value.type === "boolean" && IsOptionalString(value.$id);
+}
+function IsComputed2(value) {
+  return IsKindOf2(value, "Computed") && IsString(value.target) && IsArray(value.parameters) && value.parameters.every((schema) => IsSchema2(schema));
+}
+function IsConstructor2(value) {
+  return IsKindOf2(value, "Constructor") && value.type === "Constructor" && IsOptionalString(value.$id) && IsArray(value.parameters) && value.parameters.every((schema) => IsSchema2(schema)) && IsSchema2(value.returns);
+}
+function IsDate4(value) {
+  return IsKindOf2(value, "Date") && value.type === "Date" && IsOptionalString(value.$id) && IsOptionalNumber(value.exclusiveMaximumTimestamp) && IsOptionalNumber(value.exclusiveMinimumTimestamp) && IsOptionalNumber(value.maximumTimestamp) && IsOptionalNumber(value.minimumTimestamp) && IsOptionalNumber(value.multipleOfTimestamp);
+}
+function IsFunction4(value) {
+  return IsKindOf2(value, "Function") && value.type === "Function" && IsOptionalString(value.$id) && IsArray(value.parameters) && value.parameters.every((schema) => IsSchema2(schema)) && IsSchema2(value.returns);
+}
+function IsImport(value) {
+  return IsKindOf2(value, "Import") && HasPropertyKey(value, "$defs") && IsObject(value.$defs) && IsProperties(value.$defs) && HasPropertyKey(value, "$ref") && IsString(value.$ref) && value.$ref in value.$defs;
+}
+function IsInteger3(value) {
+  return IsKindOf2(value, "Integer") && value.type === "integer" && IsOptionalString(value.$id) && IsOptionalNumber(value.exclusiveMaximum) && IsOptionalNumber(value.exclusiveMinimum) && IsOptionalNumber(value.maximum) && IsOptionalNumber(value.minimum) && IsOptionalNumber(value.multipleOf);
+}
+function IsProperties(value) {
+  return IsObject(value) && Object.entries(value).every(([key, schema]) => IsControlCharacterFree(key) && IsSchema2(schema));
+}
+function IsIntersect2(value) {
+  return IsKindOf2(value, "Intersect") && (IsString(value.type) && value.type !== "object" ? false : true) && IsArray(value.allOf) && value.allOf.every((schema) => IsSchema2(schema) && !IsTransform2(schema)) && IsOptionalString(value.type) && (IsOptionalBoolean(value.unevaluatedProperties) || IsOptionalSchema(value.unevaluatedProperties)) && IsOptionalString(value.$id);
+}
+function IsIterator4(value) {
+  return IsKindOf2(value, "Iterator") && value.type === "Iterator" && IsOptionalString(value.$id) && IsSchema2(value.items);
+}
+function IsKindOf2(value, kind) {
+  return IsObject(value) && Kind in value && value[Kind] === kind;
+}
+function IsLiteralString(value) {
+  return IsLiteral2(value) && IsString(value.const);
+}
+function IsLiteralNumber(value) {
+  return IsLiteral2(value) && IsNumber(value.const);
+}
+function IsLiteralBoolean(value) {
+  return IsLiteral2(value) && IsBoolean(value.const);
+}
+function IsLiteral2(value) {
+  return IsKindOf2(value, "Literal") && IsOptionalString(value.$id) && IsLiteralValue2(value.const);
+}
+function IsLiteralValue2(value) {
+  return IsBoolean(value) || IsNumber(value) || IsString(value);
+}
+function IsMappedKey2(value) {
+  return IsKindOf2(value, "MappedKey") && IsArray(value.keys) && value.keys.every((key) => IsNumber(key) || IsString(key));
+}
+function IsMappedResult2(value) {
+  return IsKindOf2(value, "MappedResult") && IsProperties(value.properties);
+}
+function IsNever2(value) {
+  return IsKindOf2(value, "Never") && IsObject(value.not) && Object.getOwnPropertyNames(value.not).length === 0;
+}
+function IsNot2(value) {
+  return IsKindOf2(value, "Not") && IsSchema2(value.not);
+}
+function IsNull4(value) {
+  return IsKindOf2(value, "Null") && value.type === "null" && IsOptionalString(value.$id);
+}
+function IsNumber4(value) {
+  return IsKindOf2(value, "Number") && value.type === "number" && IsOptionalString(value.$id) && IsOptionalNumber(value.exclusiveMaximum) && IsOptionalNumber(value.exclusiveMinimum) && IsOptionalNumber(value.maximum) && IsOptionalNumber(value.minimum) && IsOptionalNumber(value.multipleOf);
+}
+function IsObject4(value) {
+  return IsKindOf2(value, "Object") && value.type === "object" && IsOptionalString(value.$id) && IsProperties(value.properties) && IsAdditionalProperties(value.additionalProperties) && IsOptionalNumber(value.minProperties) && IsOptionalNumber(value.maxProperties);
+}
+function IsPromise3(value) {
+  return IsKindOf2(value, "Promise") && value.type === "Promise" && IsOptionalString(value.$id) && IsSchema2(value.item);
+}
+function IsRecord2(value) {
+  return IsKindOf2(value, "Record") && value.type === "object" && IsOptionalString(value.$id) && IsAdditionalProperties(value.additionalProperties) && IsObject(value.patternProperties) && ((schema) => {
+    const keys = Object.getOwnPropertyNames(schema.patternProperties);
+    return keys.length === 1 && IsPattern(keys[0]) && IsObject(schema.patternProperties) && IsSchema2(schema.patternProperties[keys[0]]);
+  })(value);
+}
+function IsRecursive(value) {
+  return IsObject(value) && Hint in value && value[Hint] === "Recursive";
+}
+function IsRef2(value) {
+  return IsKindOf2(value, "Ref") && IsOptionalString(value.$id) && IsString(value.$ref);
+}
+function IsRegExp3(value) {
+  return IsKindOf2(value, "RegExp") && IsOptionalString(value.$id) && IsString(value.source) && IsString(value.flags) && IsOptionalNumber(value.maxLength) && IsOptionalNumber(value.minLength);
+}
+function IsString4(value) {
+  return IsKindOf2(value, "String") && value.type === "string" && IsOptionalString(value.$id) && IsOptionalNumber(value.minLength) && IsOptionalNumber(value.maxLength) && IsOptionalPattern(value.pattern) && IsOptionalFormat(value.format);
+}
+function IsSymbol4(value) {
+  return IsKindOf2(value, "Symbol") && value.type === "symbol" && IsOptionalString(value.$id);
+}
+function IsTemplateLiteral2(value) {
+  return IsKindOf2(value, "TemplateLiteral") && value.type === "string" && IsString(value.pattern) && value.pattern[0] === "^" && value.pattern[value.pattern.length - 1] === "$";
+}
+function IsThis2(value) {
+  return IsKindOf2(value, "This") && IsOptionalString(value.$id) && IsString(value.$ref);
+}
+function IsTransform2(value) {
+  return IsObject(value) && TransformKind in value;
+}
+function IsTuple2(value) {
+  return IsKindOf2(value, "Tuple") && value.type === "array" && IsOptionalString(value.$id) && IsNumber(value.minItems) && IsNumber(value.maxItems) && value.minItems === value.maxItems && // empty
+  (IsUndefined(value.items) && IsUndefined(value.additionalItems) && value.minItems === 0 || IsArray(value.items) && value.items.every((schema) => IsSchema2(schema)));
+}
+function IsUndefined4(value) {
+  return IsKindOf2(value, "Undefined") && value.type === "undefined" && IsOptionalString(value.$id);
+}
+function IsUnionLiteral(value) {
+  return IsUnion2(value) && value.anyOf.every((schema) => IsLiteralString(schema) || IsLiteralNumber(schema));
+}
+function IsUnion2(value) {
+  return IsKindOf2(value, "Union") && IsOptionalString(value.$id) && IsObject(value) && IsArray(value.anyOf) && value.anyOf.every((schema) => IsSchema2(schema));
+}
+function IsUint8Array4(value) {
+  return IsKindOf2(value, "Uint8Array") && value.type === "Uint8Array" && IsOptionalString(value.$id) && IsOptionalNumber(value.minByteLength) && IsOptionalNumber(value.maxByteLength);
+}
+function IsUnknown2(value) {
+  return IsKindOf2(value, "Unknown") && IsOptionalString(value.$id);
+}
+function IsUnsafe2(value) {
+  return IsKindOf2(value, "Unsafe");
+}
+function IsVoid2(value) {
+  return IsKindOf2(value, "Void") && value.type === "void" && IsOptionalString(value.$id);
+}
+function IsKind2(value) {
+  return IsObject(value) && Kind in value && IsString(value[Kind]) && !KnownTypes.includes(value[Kind]);
+}
+function IsSchema2(value) {
+  return IsObject(value) && (IsAny2(value) || IsArgument2(value) || IsArray4(value) || IsBoolean4(value) || IsBigInt4(value) || IsAsyncIterator4(value) || IsComputed2(value) || IsConstructor2(value) || IsDate4(value) || IsFunction4(value) || IsInteger3(value) || IsIntersect2(value) || IsIterator4(value) || IsLiteral2(value) || IsMappedKey2(value) || IsMappedResult2(value) || IsNever2(value) || IsNot2(value) || IsNull4(value) || IsNumber4(value) || IsObject4(value) || IsPromise3(value) || IsRecord2(value) || IsRef2(value) || IsRegExp3(value) || IsString4(value) || IsSymbol4(value) || IsTemplateLiteral2(value) || IsThis2(value) || IsTuple2(value) || IsUndefined4(value) || IsUnion2(value) || IsUint8Array4(value) || IsUnknown2(value) || IsUnsafe2(value) || IsVoid2(value) || IsKind2(value));
+}
+var TypeGuardUnknownTypeError, KnownTypes;
+var init_type3 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/guard/type.mjs"() {
+    init_value();
+    init_symbols2();
+    init_error2();
+    TypeGuardUnknownTypeError = class extends TypeBoxError {
+    };
+    KnownTypes = [
+      "Argument",
+      "Any",
+      "Array",
+      "AsyncIterator",
+      "BigInt",
+      "Boolean",
+      "Computed",
+      "Constructor",
+      "Date",
+      "Enum",
+      "Function",
+      "Integer",
+      "Intersect",
+      "Iterator",
+      "Literal",
+      "MappedKey",
+      "MappedResult",
+      "Not",
+      "Null",
+      "Number",
+      "Object",
+      "Promise",
+      "Record",
+      "Ref",
+      "RegExp",
+      "String",
+      "Symbol",
+      "TemplateLiteral",
+      "This",
+      "Tuple",
+      "Undefined",
+      "Union",
+      "Uint8Array",
+      "Unknown",
+      "Void"
+    ];
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/guard/index.mjs
+var init_guard3 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/guard/index.mjs"() {
+    init_kind();
+    init_type3();
+    init_value();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/helpers/helpers.mjs
+var init_helpers = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/helpers/helpers.mjs"() {
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/helpers/index.mjs
+var init_helpers2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/helpers/index.mjs"() {
+    init_helpers();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/patterns/patterns.mjs
+var PatternBoolean, PatternNumber, PatternString, PatternNever, PatternBooleanExact, PatternNumberExact, PatternStringExact, PatternNeverExact;
+var init_patterns = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/patterns/patterns.mjs"() {
+    PatternBoolean = "(true|false)";
+    PatternNumber = "(0|[1-9][0-9]*)";
+    PatternString = "(.*)";
+    PatternNever = "(?!.*)";
+    PatternBooleanExact = `^${PatternBoolean}$`;
+    PatternNumberExact = `^${PatternNumber}$`;
+    PatternStringExact = `^${PatternString}$`;
+    PatternNeverExact = `^${PatternNever}$`;
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/patterns/index.mjs
+var init_patterns2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/patterns/index.mjs"() {
+    init_patterns();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/registry/format.mjs
+var format_exports = {};
+__export(format_exports, {
+  Clear: () => Clear,
+  Delete: () => Delete,
+  Entries: () => Entries,
+  Get: () => Get,
+  Has: () => Has,
+  Set: () => Set2
+});
+function Entries() {
+  return new Map(map);
+}
+function Clear() {
+  return map.clear();
+}
+function Delete(format) {
+  return map.delete(format);
+}
+function Has(format) {
+  return map.has(format);
+}
+function Set2(format, func) {
+  map.set(format, func);
+}
+function Get(format) {
+  return map.get(format);
+}
+var map;
+var init_format = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/registry/format.mjs"() {
+    map = /* @__PURE__ */ new Map();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/registry/type.mjs
+var type_exports2 = {};
+__export(type_exports2, {
+  Clear: () => Clear2,
+  Delete: () => Delete2,
+  Entries: () => Entries2,
+  Get: () => Get2,
+  Has: () => Has2,
+  Set: () => Set3
+});
+function Entries2() {
+  return new Map(map2);
+}
+function Clear2() {
+  return map2.clear();
+}
+function Delete2(kind) {
+  return map2.delete(kind);
+}
+function Has2(kind) {
+  return map2.has(kind);
+}
+function Set3(kind, func) {
+  map2.set(kind, func);
+}
+function Get2(kind) {
+  return map2.get(kind);
+}
+var map2;
+var init_type4 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/registry/type.mjs"() {
+    map2 = /* @__PURE__ */ new Map();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/registry/index.mjs
+var init_registry = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/registry/index.mjs"() {
+    init_format();
+    init_type4();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/sets/set.mjs
+function SetIncludes(T, S) {
+  return T.includes(S);
+}
+function SetDistinct(T) {
+  return [...new Set(T)];
+}
+function SetIntersect(T, S) {
+  return T.filter((L) => S.includes(L));
+}
+function SetIntersectManyResolve(T, Init) {
+  return T.reduce((Acc, L) => {
+    return SetIntersect(Acc, L);
+  }, Init);
+}
+function SetIntersectMany(T) {
+  return T.length === 1 ? T[0] : T.length > 1 ? SetIntersectManyResolve(T.slice(1), T[0]) : [];
+}
+function SetUnionMany(T) {
+  const Acc = [];
+  for (const L of T)
+    Acc.push(...L);
+  return Acc;
+}
+var init_set = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/sets/set.mjs"() {
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/sets/index.mjs
+var init_sets = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/sets/index.mjs"() {
+    init_set();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/any/any.mjs
+function Any(options) {
+  return CreateType({ [Kind]: "Any" }, options);
+}
+var init_any = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/any/any.mjs"() {
+    init_create();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/any/index.mjs
+var init_any2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/any/index.mjs"() {
+    init_any();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/array/array.mjs
+function Array2(items, options) {
+  return CreateType({ [Kind]: "Array", type: "array", items }, options);
+}
+var init_array = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/array/array.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/array/index.mjs
+var init_array2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/array/index.mjs"() {
+    init_array();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/argument/argument.mjs
+function Argument(index) {
+  return CreateType({ [Kind]: "Argument", index });
+}
+var init_argument = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/argument/argument.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/argument/index.mjs
+var init_argument2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/argument/index.mjs"() {
+    init_argument();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/async-iterator/async-iterator.mjs
+function AsyncIterator(items, options) {
+  return CreateType({ [Kind]: "AsyncIterator", type: "AsyncIterator", items }, options);
+}
+var init_async_iterator = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/async-iterator/async-iterator.mjs"() {
+    init_symbols2();
+    init_type2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/async-iterator/index.mjs
+var init_async_iterator2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/async-iterator/index.mjs"() {
+    init_async_iterator();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/computed/computed.mjs
+function Computed(target, parameters, options) {
+  return CreateType({ [Kind]: "Computed", target, parameters }, options);
+}
+var init_computed = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/computed/computed.mjs"() {
+    init_create();
+    init_symbols();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/computed/index.mjs
+var init_computed2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/computed/index.mjs"() {
+    init_computed();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/discard/discard.mjs
+function DiscardKey(value, key) {
+  const { [key]: _, ...rest } = value;
+  return rest;
+}
+function Discard(value, keys) {
+  return keys.reduce((acc, key) => DiscardKey(acc, key), value);
+}
+var init_discard = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/discard/discard.mjs"() {
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/discard/index.mjs
+var init_discard2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/discard/index.mjs"() {
+    init_discard();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/never/never.mjs
+function Never(options) {
+  return CreateType({ [Kind]: "Never", not: {} }, options);
+}
+var init_never = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/never/never.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/never/index.mjs
+var init_never2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/never/index.mjs"() {
+    init_never();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-key.mjs
+var init_mapped_key = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-key.mjs"() {
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-result.mjs
+function MappedResult(properties) {
+  return CreateType({
+    [Kind]: "MappedResult",
+    properties
+  });
+}
+var init_mapped_result = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/mapped/mapped-result.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/constructor/constructor.mjs
+function Constructor(parameters, returns, options) {
+  return CreateType({ [Kind]: "Constructor", type: "Constructor", parameters, returns }, options);
+}
+var init_constructor = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/constructor/constructor.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/constructor/index.mjs
+var init_constructor2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/constructor/index.mjs"() {
+    init_constructor();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/function/function.mjs
+function Function(parameters, returns, options) {
+  return CreateType({ [Kind]: "Function", type: "Function", parameters, returns }, options);
+}
+var init_function = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/function/function.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/function/index.mjs
+var init_function2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/function/index.mjs"() {
+    init_function();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/union/union-create.mjs
+function UnionCreate(T, options) {
+  return CreateType({ [Kind]: "Union", anyOf: T }, options);
+}
+var init_union_create = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/union/union-create.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/union/union-evaluated.mjs
+function IsUnionOptional(types) {
+  return types.some((type) => IsOptional(type));
+}
+function RemoveOptionalFromRest(types) {
+  return types.map((left) => IsOptional(left) ? RemoveOptionalFromType(left) : left);
+}
+function RemoveOptionalFromType(T) {
+  return Discard(T, [OptionalKind]);
+}
+function ResolveUnion(types, options) {
+  const isOptional = IsUnionOptional(types);
+  return isOptional ? Optional(UnionCreate(RemoveOptionalFromRest(types), options)) : UnionCreate(RemoveOptionalFromRest(types), options);
+}
+function UnionEvaluated(T, options) {
+  return T.length === 1 ? CreateType(T[0], options) : T.length === 0 ? Never(options) : ResolveUnion(T, options);
+}
+var init_union_evaluated = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/union/union-evaluated.mjs"() {
+    init_type2();
+    init_symbols2();
+    init_discard2();
+    init_never2();
+    init_optional2();
+    init_union_create();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/union/union-type.mjs
+var init_union_type = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/union/union-type.mjs"() {
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/union/union.mjs
+function Union(types, options) {
+  return types.length === 0 ? Never(options) : types.length === 1 ? CreateType(types[0], options) : UnionCreate(types, options);
+}
+var init_union = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/union/union.mjs"() {
+    init_never2();
+    init_type2();
+    init_union_create();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/union/index.mjs
+var init_union2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/union/index.mjs"() {
+    init_union_evaluated();
+    init_union_type();
+    init_union();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/template-literal/parse.mjs
+function Unescape(pattern) {
+  return pattern.replace(/\\\$/g, "$").replace(/\\\*/g, "*").replace(/\\\^/g, "^").replace(/\\\|/g, "|").replace(/\\\(/g, "(").replace(/\\\)/g, ")");
+}
+function IsNonEscaped(pattern, index, char) {
+  return pattern[index] === char && pattern.charCodeAt(index - 1) !== 92;
+}
+function IsOpenParen(pattern, index) {
+  return IsNonEscaped(pattern, index, "(");
+}
+function IsCloseParen(pattern, index) {
+  return IsNonEscaped(pattern, index, ")");
+}
+function IsSeparator(pattern, index) {
+  return IsNonEscaped(pattern, index, "|");
+}
+function IsGroup(pattern) {
+  if (!(IsOpenParen(pattern, 0) && IsCloseParen(pattern, pattern.length - 1)))
+    return false;
+  let count = 0;
+  for (let index = 0; index < pattern.length; index++) {
+    if (IsOpenParen(pattern, index))
+      count += 1;
+    if (IsCloseParen(pattern, index))
+      count -= 1;
+    if (count === 0 && index !== pattern.length - 1)
+      return false;
+  }
+  return true;
+}
+function InGroup(pattern) {
+  return pattern.slice(1, pattern.length - 1);
+}
+function IsPrecedenceOr(pattern) {
+  let count = 0;
+  for (let index = 0; index < pattern.length; index++) {
+    if (IsOpenParen(pattern, index))
+      count += 1;
+    if (IsCloseParen(pattern, index))
+      count -= 1;
+    if (IsSeparator(pattern, index) && count === 0)
+      return true;
+  }
+  return false;
+}
+function IsPrecedenceAnd(pattern) {
+  for (let index = 0; index < pattern.length; index++) {
+    if (IsOpenParen(pattern, index))
+      return true;
+  }
+  return false;
+}
+function Or(pattern) {
+  let [count, start] = [0, 0];
+  const expressions = [];
+  for (let index = 0; index < pattern.length; index++) {
+    if (IsOpenParen(pattern, index))
+      count += 1;
+    if (IsCloseParen(pattern, index))
+      count -= 1;
+    if (IsSeparator(pattern, index) && count === 0) {
+      const range2 = pattern.slice(start, index);
+      if (range2.length > 0)
+        expressions.push(TemplateLiteralParse(range2));
+      start = index + 1;
+    }
+  }
+  const range = pattern.slice(start);
+  if (range.length > 0)
+    expressions.push(TemplateLiteralParse(range));
+  if (expressions.length === 0)
+    return { type: "const", const: "" };
+  if (expressions.length === 1)
+    return expressions[0];
+  return { type: "or", expr: expressions };
+}
+function And(pattern) {
+  function Group(value, index) {
+    if (!IsOpenParen(value, index))
+      throw new TemplateLiteralParserError(`TemplateLiteralParser: Index must point to open parens`);
+    let count = 0;
+    for (let scan = index; scan < value.length; scan++) {
+      if (IsOpenParen(value, scan))
+        count += 1;
+      if (IsCloseParen(value, scan))
+        count -= 1;
+      if (count === 0)
+        return [index, scan];
+    }
+    throw new TemplateLiteralParserError(`TemplateLiteralParser: Unclosed group parens in expression`);
+  }
+  function Range(pattern2, index) {
+    for (let scan = index; scan < pattern2.length; scan++) {
+      if (IsOpenParen(pattern2, scan))
+        return [index, scan];
+    }
+    return [index, pattern2.length];
+  }
+  const expressions = [];
+  for (let index = 0; index < pattern.length; index++) {
+    if (IsOpenParen(pattern, index)) {
+      const [start, end] = Group(pattern, index);
+      const range = pattern.slice(start, end + 1);
+      expressions.push(TemplateLiteralParse(range));
+      index = end;
+    } else {
+      const [start, end] = Range(pattern, index);
+      const range = pattern.slice(start, end);
+      if (range.length > 0)
+        expressions.push(TemplateLiteralParse(range));
+      index = end - 1;
+    }
+  }
+  return expressions.length === 0 ? { type: "const", const: "" } : expressions.length === 1 ? expressions[0] : { type: "and", expr: expressions };
+}
+function TemplateLiteralParse(pattern) {
+  return IsGroup(pattern) ? TemplateLiteralParse(InGroup(pattern)) : IsPrecedenceOr(pattern) ? Or(pattern) : IsPrecedenceAnd(pattern) ? And(pattern) : { type: "const", const: Unescape(pattern) };
+}
+function TemplateLiteralParseExact(pattern) {
+  return TemplateLiteralParse(pattern.slice(1, pattern.length - 1));
+}
+var TemplateLiteralParserError;
+var init_parse = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/template-literal/parse.mjs"() {
+    init_error2();
+    TemplateLiteralParserError = class extends TypeBoxError {
+    };
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/template-literal/finite.mjs
+function IsNumberExpression(expression) {
+  return expression.type === "or" && expression.expr.length === 2 && expression.expr[0].type === "const" && expression.expr[0].const === "0" && expression.expr[1].type === "const" && expression.expr[1].const === "[1-9][0-9]*";
+}
+function IsBooleanExpression(expression) {
+  return expression.type === "or" && expression.expr.length === 2 && expression.expr[0].type === "const" && expression.expr[0].const === "true" && expression.expr[1].type === "const" && expression.expr[1].const === "false";
+}
+function IsStringExpression(expression) {
+  return expression.type === "const" && expression.const === ".*";
+}
+function IsTemplateLiteralExpressionFinite(expression) {
+  return IsNumberExpression(expression) || IsStringExpression(expression) ? false : IsBooleanExpression(expression) ? true : expression.type === "and" ? expression.expr.every((expr) => IsTemplateLiteralExpressionFinite(expr)) : expression.type === "or" ? expression.expr.every((expr) => IsTemplateLiteralExpressionFinite(expr)) : expression.type === "const" ? true : (() => {
+    throw new TemplateLiteralFiniteError(`Unknown expression type`);
+  })();
+}
+function IsTemplateLiteralFinite(schema) {
+  const expression = TemplateLiteralParseExact(schema.pattern);
+  return IsTemplateLiteralExpressionFinite(expression);
+}
+var TemplateLiteralFiniteError;
+var init_finite = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/template-literal/finite.mjs"() {
+    init_parse();
+    init_error2();
+    TemplateLiteralFiniteError = class extends TypeBoxError {
+    };
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/template-literal/generate.mjs
+function* GenerateReduce(buffer) {
+  if (buffer.length === 1)
+    return yield* buffer[0];
+  for (const left of buffer[0]) {
+    for (const right of GenerateReduce(buffer.slice(1))) {
+      yield `${left}${right}`;
+    }
+  }
+}
+function* GenerateAnd(expression) {
+  return yield* GenerateReduce(expression.expr.map((expr) => [...TemplateLiteralExpressionGenerate(expr)]));
+}
+function* GenerateOr(expression) {
+  for (const expr of expression.expr)
+    yield* TemplateLiteralExpressionGenerate(expr);
+}
+function* GenerateConst(expression) {
+  return yield expression.const;
+}
+function* TemplateLiteralExpressionGenerate(expression) {
+  return expression.type === "and" ? yield* GenerateAnd(expression) : expression.type === "or" ? yield* GenerateOr(expression) : expression.type === "const" ? yield* GenerateConst(expression) : (() => {
+    throw new TemplateLiteralGenerateError("Unknown expression");
+  })();
+}
+function TemplateLiteralGenerate(schema) {
+  const expression = TemplateLiteralParseExact(schema.pattern);
+  return IsTemplateLiteralExpressionFinite(expression) ? [...TemplateLiteralExpressionGenerate(expression)] : [];
+}
+var TemplateLiteralGenerateError;
+var init_generate = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/template-literal/generate.mjs"() {
+    init_finite();
+    init_parse();
+    init_error2();
+    TemplateLiteralGenerateError = class extends TypeBoxError {
+    };
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/literal/literal.mjs
+function Literal(value, options) {
+  return CreateType({
+    [Kind]: "Literal",
+    const: value,
+    type: typeof value
+  }, options);
+}
+var init_literal = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/literal/literal.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/literal/index.mjs
+var init_literal2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/literal/index.mjs"() {
+    init_literal();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/boolean/boolean.mjs
+function Boolean2(options) {
+  return CreateType({ [Kind]: "Boolean", type: "boolean" }, options);
+}
+var init_boolean = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/boolean/boolean.mjs"() {
+    init_symbols2();
+    init_create();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/boolean/index.mjs
+var init_boolean2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/boolean/index.mjs"() {
+    init_boolean();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/bigint/bigint.mjs
+function BigInt2(options) {
+  return CreateType({ [Kind]: "BigInt", type: "bigint" }, options);
+}
+var init_bigint = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/bigint/bigint.mjs"() {
+    init_symbols2();
+    init_create();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/bigint/index.mjs
+var init_bigint2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/bigint/index.mjs"() {
+    init_bigint();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/number/number.mjs
+function Number2(options) {
+  return CreateType({ [Kind]: "Number", type: "number" }, options);
+}
+var init_number = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/number/number.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/number/index.mjs
+var init_number2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/number/index.mjs"() {
+    init_number();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/string/string.mjs
+function String2(options) {
+  return CreateType({ [Kind]: "String", type: "string" }, options);
+}
+var init_string = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/string/string.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/string/index.mjs
+var init_string2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/string/index.mjs"() {
+    init_string();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/template-literal/syntax.mjs
+function* FromUnion(syntax) {
+  const trim = syntax.trim().replace(/"|'/g, "");
+  return trim === "boolean" ? yield Boolean2() : trim === "number" ? yield Number2() : trim === "bigint" ? yield BigInt2() : trim === "string" ? yield String2() : yield (() => {
+    const literals = trim.split("|").map((literal) => Literal(literal.trim()));
+    return literals.length === 0 ? Never() : literals.length === 1 ? literals[0] : UnionEvaluated(literals);
+  })();
+}
+function* FromTerminal(syntax) {
+  if (syntax[1] !== "{") {
+    const L = Literal("$");
+    const R = FromSyntax(syntax.slice(1));
+    return yield* [L, ...R];
+  }
+  for (let i = 2; i < syntax.length; i++) {
+    if (syntax[i] === "}") {
+      const L = FromUnion(syntax.slice(2, i));
+      const R = FromSyntax(syntax.slice(i + 1));
+      return yield* [...L, ...R];
+    }
+  }
+  yield Literal(syntax);
+}
+function* FromSyntax(syntax) {
+  for (let i = 0; i < syntax.length; i++) {
+    if (syntax[i] === "$") {
+      const L = Literal(syntax.slice(0, i));
+      const R = FromTerminal(syntax.slice(i));
+      return yield* [L, ...R];
+    }
+  }
+  yield Literal(syntax);
+}
+function TemplateLiteralSyntax(syntax) {
+  return [...FromSyntax(syntax)];
+}
+var init_syntax = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/template-literal/syntax.mjs"() {
+    init_literal2();
+    init_boolean2();
+    init_bigint2();
+    init_number2();
+    init_string2();
+    init_union2();
+    init_never2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/template-literal/pattern.mjs
+function Escape(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function Visit2(schema, acc) {
+  return IsTemplateLiteral(schema) ? schema.pattern.slice(1, schema.pattern.length - 1) : IsUnion(schema) ? `(${schema.anyOf.map((schema2) => Visit2(schema2, acc)).join("|")})` : IsNumber3(schema) ? `${acc}${PatternNumber}` : IsInteger2(schema) ? `${acc}${PatternNumber}` : IsBigInt3(schema) ? `${acc}${PatternNumber}` : IsString3(schema) ? `${acc}${PatternString}` : IsLiteral(schema) ? `${acc}${Escape(schema.const.toString())}` : IsBoolean3(schema) ? `${acc}${PatternBoolean}` : (() => {
+    throw new TemplateLiteralPatternError(`Unexpected Kind '${schema[Kind]}'`);
+  })();
+}
+function TemplateLiteralPattern(kinds) {
+  return `^${kinds.map((schema) => Visit2(schema, "")).join("")}$`;
+}
+var TemplateLiteralPatternError;
+var init_pattern = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/template-literal/pattern.mjs"() {
+    init_patterns2();
+    init_symbols2();
+    init_error2();
+    init_kind();
+    TemplateLiteralPatternError = class extends TypeBoxError {
+    };
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/template-literal/union.mjs
+function TemplateLiteralToUnion(schema) {
+  const R = TemplateLiteralGenerate(schema);
+  const L = R.map((S) => Literal(S));
+  return UnionEvaluated(L);
+}
+var init_union3 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/template-literal/union.mjs"() {
+    init_union2();
+    init_literal2();
+    init_generate();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/template-literal/template-literal.mjs
+function TemplateLiteral(unresolved, options) {
+  const pattern = IsString(unresolved) ? TemplateLiteralPattern(TemplateLiteralSyntax(unresolved)) : TemplateLiteralPattern(unresolved);
+  return CreateType({ [Kind]: "TemplateLiteral", type: "string", pattern }, options);
+}
+var init_template_literal = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/template-literal/template-literal.mjs"() {
+    init_type2();
+    init_syntax();
+    init_pattern();
+    init_value();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/template-literal/index.mjs
+var init_template_literal2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/template-literal/index.mjs"() {
+    init_finite();
+    init_generate();
+    init_syntax();
+    init_parse();
+    init_pattern();
+    init_union3();
+    init_template_literal();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-property-keys.mjs
+function FromTemplateLiteral(templateLiteral) {
+  const keys = TemplateLiteralGenerate(templateLiteral);
+  return keys.map((key) => key.toString());
+}
+function FromUnion2(types) {
+  const result = [];
+  for (const type of types)
+    result.push(...IndexPropertyKeys(type));
+  return result;
+}
+function FromLiteral(literalValue) {
+  return [literalValue.toString()];
+}
+function IndexPropertyKeys(type) {
+  return [...new Set(IsTemplateLiteral(type) ? FromTemplateLiteral(type) : IsUnion(type) ? FromUnion2(type.anyOf) : IsLiteral(type) ? FromLiteral(type.const) : IsNumber3(type) ? ["[number]"] : IsInteger2(type) ? ["[number]"] : [])];
+}
+var init_indexed_property_keys = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-property-keys.mjs"() {
+    init_template_literal2();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-result.mjs
+function FromProperties(type, properties, options) {
+  const result = {};
+  for (const K2 of Object.getOwnPropertyNames(properties)) {
+    result[K2] = Index(type, IndexPropertyKeys(properties[K2]), options);
+  }
+  return result;
+}
+function FromMappedResult(type, mappedResult, options) {
+  return FromProperties(type, mappedResult.properties, options);
+}
+function IndexFromMappedResult(type, mappedResult, options) {
+  const properties = FromMappedResult(type, mappedResult, options);
+  return MappedResult(properties);
+}
+var init_indexed_from_mapped_result = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-result.mjs"() {
+    init_mapped2();
+    init_indexed_property_keys();
+    init_indexed2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/indexed/indexed.mjs
+function FromRest(types, key) {
+  return types.map((type) => IndexFromPropertyKey(type, key));
+}
+function FromIntersectRest(types) {
+  return types.filter((type) => !IsNever(type));
+}
+function FromIntersect(types, key) {
+  return IntersectEvaluated(FromIntersectRest(FromRest(types, key)));
+}
+function FromUnionRest(types) {
+  return types.some((L) => IsNever(L)) ? [] : types;
+}
+function FromUnion3(types, key) {
+  return UnionEvaluated(FromUnionRest(FromRest(types, key)));
+}
+function FromTuple(types, key) {
+  return key in types ? types[key] : key === "[number]" ? UnionEvaluated(types) : Never();
+}
+function FromArray(type, key) {
+  return key === "[number]" ? type : Never();
+}
+function FromProperty(properties, propertyKey) {
+  return propertyKey in properties ? properties[propertyKey] : Never();
+}
+function IndexFromPropertyKey(type, propertyKey) {
+  return IsIntersect(type) ? FromIntersect(type.allOf, propertyKey) : IsUnion(type) ? FromUnion3(type.anyOf, propertyKey) : IsTuple(type) ? FromTuple(type.items ?? [], propertyKey) : IsArray3(type) ? FromArray(type.items, propertyKey) : IsObject3(type) ? FromProperty(type.properties, propertyKey) : Never();
+}
+function IndexFromPropertyKeys(type, propertyKeys) {
+  return propertyKeys.map((propertyKey) => IndexFromPropertyKey(type, propertyKey));
+}
+function FromSchema(type, propertyKeys) {
+  return UnionEvaluated(IndexFromPropertyKeys(type, propertyKeys));
+}
+function Index(type, key, options) {
+  if (IsRef(type) || IsRef(key)) {
+    const error = `Index types using Ref parameters require both Type and Key to be of TSchema`;
+    if (!IsSchema(type) || !IsSchema(key))
+      throw new TypeBoxError(error);
+    return Computed("Index", [type, key]);
+  }
+  if (IsMappedResult(key))
+    return IndexFromMappedResult(type, key, options);
+  if (IsMappedKey(key))
+    return IndexFromMappedKey(type, key, options);
+  return CreateType(IsSchema(key) ? FromSchema(type, IndexPropertyKeys(key)) : FromSchema(type, key), options);
+}
+var init_indexed = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/indexed/indexed.mjs"() {
+    init_type2();
+    init_error2();
+    init_computed2();
+    init_never2();
+    init_intersect2();
+    init_union2();
+    init_indexed_property_keys();
+    init_indexed_from_mapped_key();
+    init_indexed_from_mapped_result();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-key.mjs
+function MappedIndexPropertyKey(type, key, options) {
+  return { [key]: Index(type, [key], Clone(options)) };
+}
+function MappedIndexPropertyKeys(type, propertyKeys, options) {
+  return propertyKeys.reduce((result, left) => {
+    return { ...result, ...MappedIndexPropertyKey(type, left, options) };
+  }, {});
+}
+function MappedIndexProperties(type, mappedKey, options) {
+  return MappedIndexPropertyKeys(type, mappedKey.keys, options);
+}
+function IndexFromMappedKey(type, mappedKey, options) {
+  const properties = MappedIndexProperties(type, mappedKey, options);
+  return MappedResult(properties);
+}
+var init_indexed_from_mapped_key = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/indexed/indexed-from-mapped-key.mjs"() {
+    init_indexed();
+    init_mapped2();
+    init_value2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/indexed/index.mjs
+var init_indexed2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/indexed/index.mjs"() {
+    init_indexed_from_mapped_key();
+    init_indexed_from_mapped_result();
+    init_indexed_property_keys();
+    init_indexed();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/iterator/iterator.mjs
+function Iterator(items, options) {
+  return CreateType({ [Kind]: "Iterator", type: "Iterator", items }, options);
+}
+var init_iterator = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/iterator/iterator.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/iterator/index.mjs
+var init_iterator2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/iterator/index.mjs"() {
+    init_iterator();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/object/object.mjs
+function RequiredArray(properties) {
+  return globalThis.Object.keys(properties).filter((key) => !IsOptional(properties[key]));
+}
+function _Object(properties, options) {
+  const required2 = RequiredArray(properties);
+  const schema = required2.length > 0 ? { [Kind]: "Object", type: "object", required: required2, properties } : { [Kind]: "Object", type: "object", properties };
+  return CreateType(schema, options);
+}
+var Object2;
+var init_object = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/object/object.mjs"() {
+    init_type2();
+    init_symbols2();
+    init_kind();
+    Object2 = _Object;
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/object/index.mjs
+var init_object2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/object/index.mjs"() {
+    init_object();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/promise/promise.mjs
+function Promise2(item, options) {
+  return CreateType({ [Kind]: "Promise", type: "Promise", item }, options);
+}
+var init_promise = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/promise/promise.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/promise/index.mjs
+var init_promise2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/promise/index.mjs"() {
+    init_promise();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/readonly/readonly.mjs
+function RemoveReadonly(schema) {
+  return CreateType(Discard(schema, [ReadonlyKind]));
+}
+function AddReadonly(schema) {
+  return CreateType({ ...schema, [ReadonlyKind]: "Readonly" });
+}
+function ReadonlyWithFlag(schema, F) {
+  return F === false ? RemoveReadonly(schema) : AddReadonly(schema);
+}
+function Readonly(schema, enable) {
+  const F = enable ?? true;
+  return IsMappedResult(schema) ? ReadonlyFromMappedResult(schema, F) : ReadonlyWithFlag(schema, F);
+}
+var init_readonly = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/readonly/readonly.mjs"() {
+    init_type2();
+    init_symbols2();
+    init_discard2();
+    init_readonly_from_mapped_result();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/readonly/readonly-from-mapped-result.mjs
+function FromProperties2(K, F) {
+  const Acc = {};
+  for (const K2 of globalThis.Object.getOwnPropertyNames(K))
+    Acc[K2] = Readonly(K[K2], F);
+  return Acc;
+}
+function FromMappedResult2(R, F) {
+  return FromProperties2(R.properties, F);
+}
+function ReadonlyFromMappedResult(R, F) {
+  const P = FromMappedResult2(R, F);
+  return MappedResult(P);
+}
+var init_readonly_from_mapped_result = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/readonly/readonly-from-mapped-result.mjs"() {
+    init_mapped2();
+    init_readonly();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/readonly/index.mjs
+var init_readonly2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/readonly/index.mjs"() {
+    init_readonly_from_mapped_result();
+    init_readonly();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/tuple/tuple.mjs
+function Tuple(types, options) {
+  return CreateType(types.length > 0 ? { [Kind]: "Tuple", type: "array", items: types, additionalItems: false, minItems: types.length, maxItems: types.length } : { [Kind]: "Tuple", type: "array", minItems: types.length, maxItems: types.length }, options);
+}
+var init_tuple = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/tuple/tuple.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/tuple/index.mjs
+var init_tuple2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/tuple/index.mjs"() {
+    init_tuple();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/mapped/mapped.mjs
+function FromMappedResult3(K, P) {
+  return K in P ? FromSchemaType(K, P[K]) : MappedResult(P);
+}
+function MappedKeyToKnownMappedResultProperties(K) {
+  return { [K]: Literal(K) };
+}
+function MappedKeyToUnknownMappedResultProperties(P) {
+  const Acc = {};
+  for (const L of P)
+    Acc[L] = Literal(L);
+  return Acc;
+}
+function MappedKeyToMappedResultProperties(K, P) {
+  return SetIncludes(P, K) ? MappedKeyToKnownMappedResultProperties(K) : MappedKeyToUnknownMappedResultProperties(P);
+}
+function FromMappedKey(K, P) {
+  const R = MappedKeyToMappedResultProperties(K, P);
+  return FromMappedResult3(K, R);
+}
+function FromRest2(K, T) {
+  return T.map((L) => FromSchemaType(K, L));
+}
+function FromProperties3(K, T) {
+  const Acc = {};
+  for (const K2 of globalThis.Object.getOwnPropertyNames(T))
+    Acc[K2] = FromSchemaType(K, T[K2]);
+  return Acc;
+}
+function FromSchemaType(K, T) {
+  const options = { ...T };
+  return (
+    // unevaluated modifier types
+    IsOptional(T) ? Optional(FromSchemaType(K, Discard(T, [OptionalKind]))) : IsReadonly(T) ? Readonly(FromSchemaType(K, Discard(T, [ReadonlyKind]))) : (
+      // unevaluated mapped types
+      IsMappedResult(T) ? FromMappedResult3(K, T.properties) : IsMappedKey(T) ? FromMappedKey(K, T.keys) : (
+        // unevaluated types
+        IsConstructor(T) ? Constructor(FromRest2(K, T.parameters), FromSchemaType(K, T.returns), options) : IsFunction3(T) ? Function(FromRest2(K, T.parameters), FromSchemaType(K, T.returns), options) : IsAsyncIterator3(T) ? AsyncIterator(FromSchemaType(K, T.items), options) : IsIterator3(T) ? Iterator(FromSchemaType(K, T.items), options) : IsIntersect(T) ? Intersect(FromRest2(K, T.allOf), options) : IsUnion(T) ? Union(FromRest2(K, T.anyOf), options) : IsTuple(T) ? Tuple(FromRest2(K, T.items ?? []), options) : IsObject3(T) ? Object2(FromProperties3(K, T.properties), options) : IsArray3(T) ? Array2(FromSchemaType(K, T.items), options) : IsPromise2(T) ? Promise2(FromSchemaType(K, T.item), options) : T
+      )
+    )
+  );
+}
+function MappedFunctionReturnType(K, T) {
+  const Acc = {};
+  for (const L of K)
+    Acc[L] = FromSchemaType(L, T);
+  return Acc;
+}
+function Mapped(key, map3, options) {
+  const K = IsSchema(key) ? IndexPropertyKeys(key) : key;
+  const RT = map3({ [Kind]: "MappedKey", keys: K });
+  const R = MappedFunctionReturnType(K, RT);
+  return Object2(R, options);
+}
+var init_mapped = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/mapped/mapped.mjs"() {
+    init_symbols2();
+    init_discard2();
+    init_array2();
+    init_async_iterator2();
+    init_constructor2();
+    init_function2();
+    init_indexed2();
+    init_intersect2();
+    init_iterator2();
+    init_literal2();
+    init_object2();
+    init_optional2();
+    init_promise2();
+    init_readonly2();
+    init_tuple2();
+    init_union2();
+    init_sets();
+    init_mapped_result();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/mapped/index.mjs
+var init_mapped2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/mapped/index.mjs"() {
+    init_mapped_key();
+    init_mapped_result();
+    init_mapped();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/optional/optional.mjs
+function RemoveOptional(schema) {
+  return CreateType(Discard(schema, [OptionalKind]));
+}
+function AddOptional(schema) {
+  return CreateType({ ...schema, [OptionalKind]: "Optional" });
+}
+function OptionalWithFlag(schema, F) {
+  return F === false ? RemoveOptional(schema) : AddOptional(schema);
+}
+function Optional(schema, enable) {
+  const F = enable ?? true;
+  return IsMappedResult(schema) ? OptionalFromMappedResult(schema, F) : OptionalWithFlag(schema, F);
+}
+var init_optional = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/optional/optional.mjs"() {
+    init_type2();
+    init_symbols2();
+    init_discard2();
+    init_optional_from_mapped_result();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/optional/optional-from-mapped-result.mjs
+function FromProperties4(P, F) {
+  const Acc = {};
+  for (const K2 of globalThis.Object.getOwnPropertyNames(P))
+    Acc[K2] = Optional(P[K2], F);
+  return Acc;
+}
+function FromMappedResult4(R, F) {
+  return FromProperties4(R.properties, F);
+}
+function OptionalFromMappedResult(R, F) {
+  const P = FromMappedResult4(R, F);
+  return MappedResult(P);
+}
+var init_optional_from_mapped_result = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/optional/optional-from-mapped-result.mjs"() {
+    init_mapped2();
+    init_optional();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/optional/index.mjs
+var init_optional2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/optional/index.mjs"() {
+    init_optional_from_mapped_result();
+    init_optional();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-create.mjs
+function IntersectCreate(T, options = {}) {
+  const allObjects = T.every((schema) => IsObject3(schema));
+  const clonedUnevaluatedProperties = IsSchema(options.unevaluatedProperties) ? { unevaluatedProperties: options.unevaluatedProperties } : {};
+  return CreateType(options.unevaluatedProperties === false || IsSchema(options.unevaluatedProperties) || allObjects ? { ...clonedUnevaluatedProperties, [Kind]: "Intersect", type: "object", allOf: T } : { ...clonedUnevaluatedProperties, [Kind]: "Intersect", allOf: T }, options);
+}
+var init_intersect_create = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-create.mjs"() {
+    init_type2();
+    init_symbols2();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-evaluated.mjs
+function IsIntersectOptional(types) {
+  return types.every((left) => IsOptional(left));
+}
+function RemoveOptionalFromType2(type) {
+  return Discard(type, [OptionalKind]);
+}
+function RemoveOptionalFromRest2(types) {
+  return types.map((left) => IsOptional(left) ? RemoveOptionalFromType2(left) : left);
+}
+function ResolveIntersect(types, options) {
+  return IsIntersectOptional(types) ? Optional(IntersectCreate(RemoveOptionalFromRest2(types), options)) : IntersectCreate(RemoveOptionalFromRest2(types), options);
+}
+function IntersectEvaluated(types, options = {}) {
+  if (types.length === 1)
+    return CreateType(types[0], options);
+  if (types.length === 0)
+    return Never(options);
+  if (types.some((schema) => IsTransform(schema)))
+    throw new Error("Cannot intersect transform types");
+  return ResolveIntersect(types, options);
+}
+var init_intersect_evaluated = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-evaluated.mjs"() {
+    init_symbols2();
+    init_type2();
+    init_discard2();
+    init_never2();
+    init_optional2();
+    init_intersect_create();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-type.mjs
+var init_intersect_type = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/intersect/intersect-type.mjs"() {
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/intersect/intersect.mjs
+function Intersect(types, options) {
+  if (types.length === 1)
+    return CreateType(types[0], options);
+  if (types.length === 0)
+    return Never(options);
+  if (types.some((schema) => IsTransform(schema)))
+    throw new Error("Cannot intersect transform types");
+  return IntersectCreate(types, options);
+}
+var init_intersect = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/intersect/intersect.mjs"() {
+    init_type2();
+    init_never2();
+    init_intersect_create();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/intersect/index.mjs
+var init_intersect2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/intersect/index.mjs"() {
+    init_intersect_evaluated();
+    init_intersect_type();
+    init_intersect();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/ref/ref.mjs
+function Ref(...args) {
+  const [$ref, options] = typeof args[0] === "string" ? [args[0], args[1]] : [args[0].$id, args[1]];
+  if (typeof $ref !== "string")
+    throw new TypeBoxError("Ref: $ref must be a string");
+  return CreateType({ [Kind]: "Ref", $ref }, options);
+}
+var init_ref = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/ref/ref.mjs"() {
+    init_error2();
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/ref/index.mjs
+var init_ref2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/ref/index.mjs"() {
+    init_ref();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/awaited/awaited.mjs
+function FromComputed(target, parameters) {
+  return Computed("Awaited", [Computed(target, parameters)]);
+}
+function FromRef($ref) {
+  return Computed("Awaited", [Ref($ref)]);
+}
+function FromIntersect2(types) {
+  return Intersect(FromRest3(types));
+}
+function FromUnion4(types) {
+  return Union(FromRest3(types));
+}
+function FromPromise(type) {
+  return Awaited(type);
+}
+function FromRest3(types) {
+  return types.map((type) => Awaited(type));
+}
+function Awaited(type, options) {
+  return CreateType(IsComputed(type) ? FromComputed(type.target, type.parameters) : IsIntersect(type) ? FromIntersect2(type.allOf) : IsUnion(type) ? FromUnion4(type.anyOf) : IsPromise2(type) ? FromPromise(type.item) : IsRef(type) ? FromRef(type.$ref) : type, options);
+}
+var init_awaited = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/awaited/awaited.mjs"() {
+    init_type2();
+    init_computed2();
+    init_intersect2();
+    init_union2();
+    init_ref2();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/awaited/index.mjs
+var init_awaited2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/awaited/index.mjs"() {
+    init_awaited();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-keys.mjs
+function FromRest4(types) {
+  const result = [];
+  for (const L of types)
+    result.push(KeyOfPropertyKeys(L));
+  return result;
+}
+function FromIntersect3(types) {
+  const propertyKeysArray = FromRest4(types);
+  const propertyKeys = SetUnionMany(propertyKeysArray);
+  return propertyKeys;
+}
+function FromUnion5(types) {
+  const propertyKeysArray = FromRest4(types);
+  const propertyKeys = SetIntersectMany(propertyKeysArray);
+  return propertyKeys;
+}
+function FromTuple2(types) {
+  return types.map((_, indexer) => indexer.toString());
+}
+function FromArray2(_) {
+  return ["[number]"];
+}
+function FromProperties5(T) {
+  return globalThis.Object.getOwnPropertyNames(T);
+}
+function FromPatternProperties(patternProperties) {
+  if (!includePatternProperties)
+    return [];
+  const patternPropertyKeys = globalThis.Object.getOwnPropertyNames(patternProperties);
+  return patternPropertyKeys.map((key) => {
+    return key[0] === "^" && key[key.length - 1] === "$" ? key.slice(1, key.length - 1) : key;
+  });
+}
+function KeyOfPropertyKeys(type) {
+  return IsIntersect(type) ? FromIntersect3(type.allOf) : IsUnion(type) ? FromUnion5(type.anyOf) : IsTuple(type) ? FromTuple2(type.items ?? []) : IsArray3(type) ? FromArray2(type.items) : IsObject3(type) ? FromProperties5(type.properties) : IsRecord(type) ? FromPatternProperties(type.patternProperties) : [];
+}
+function KeyOfPattern(schema) {
+  includePatternProperties = true;
+  const keys = KeyOfPropertyKeys(schema);
+  includePatternProperties = false;
+  const pattern = keys.map((key) => `(${key})`);
+  return `^(${pattern.join("|")})$`;
+}
+var includePatternProperties;
+var init_keyof_property_keys = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-keys.mjs"() {
+    init_sets();
+    init_kind();
+    includePatternProperties = false;
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/keyof/keyof.mjs
+function FromComputed2(target, parameters) {
+  return Computed("KeyOf", [Computed(target, parameters)]);
+}
+function FromRef2($ref) {
+  return Computed("KeyOf", [Ref($ref)]);
+}
+function KeyOfFromType(type, options) {
+  const propertyKeys = KeyOfPropertyKeys(type);
+  const propertyKeyTypes = KeyOfPropertyKeysToRest(propertyKeys);
+  const result = UnionEvaluated(propertyKeyTypes);
+  return CreateType(result, options);
+}
+function KeyOfPropertyKeysToRest(propertyKeys) {
+  return propertyKeys.map((L) => L === "[number]" ? Number2() : Literal(L));
+}
+function KeyOf(type, options) {
+  return IsComputed(type) ? FromComputed2(type.target, type.parameters) : IsRef(type) ? FromRef2(type.$ref) : IsMappedResult(type) ? KeyOfFromMappedResult(type, options) : KeyOfFromType(type, options);
+}
+var init_keyof = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/keyof/keyof.mjs"() {
+    init_type2();
+    init_literal2();
+    init_number2();
+    init_computed2();
+    init_ref2();
+    init_keyof_property_keys();
+    init_union2();
+    init_keyof_from_mapped_result();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-from-mapped-result.mjs
+function FromProperties6(properties, options) {
+  const result = {};
+  for (const K2 of globalThis.Object.getOwnPropertyNames(properties))
+    result[K2] = KeyOf(properties[K2], Clone(options));
+  return result;
+}
+function FromMappedResult5(mappedResult, options) {
+  return FromProperties6(mappedResult.properties, options);
+}
+function KeyOfFromMappedResult(mappedResult, options) {
+  const properties = FromMappedResult5(mappedResult, options);
+  return MappedResult(properties);
+}
+var init_keyof_from_mapped_result = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-from-mapped-result.mjs"() {
+    init_mapped2();
+    init_keyof();
+    init_value2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-entries.mjs
+function KeyOfPropertyEntries(schema) {
+  const keys = KeyOfPropertyKeys(schema);
+  const schemas = IndexFromPropertyKeys(schema, keys);
+  return keys.map((_, index) => [keys[index], schemas[index]]);
+}
+var init_keyof_property_entries = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/keyof/keyof-property-entries.mjs"() {
+    init_indexed();
+    init_keyof_property_keys();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/keyof/index.mjs
+var init_keyof2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/keyof/index.mjs"() {
+    init_keyof_from_mapped_result();
+    init_keyof_property_entries();
+    init_keyof_property_keys();
+    init_keyof();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/composite/composite.mjs
+function CompositeKeys(T) {
+  const Acc = [];
+  for (const L of T)
+    Acc.push(...KeyOfPropertyKeys(L));
+  return SetDistinct(Acc);
+}
+function FilterNever(T) {
+  return T.filter((L) => !IsNever(L));
+}
+function CompositeProperty(T, K) {
+  const Acc = [];
+  for (const L of T)
+    Acc.push(...IndexFromPropertyKeys(L, [K]));
+  return FilterNever(Acc);
+}
+function CompositeProperties(T, K) {
+  const Acc = {};
+  for (const L of K) {
+    Acc[L] = IntersectEvaluated(CompositeProperty(T, L));
+  }
+  return Acc;
+}
+function Composite(T, options) {
+  const K = CompositeKeys(T);
+  const P = CompositeProperties(T, K);
+  const R = Object2(P, options);
+  return R;
+}
+var init_composite = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/composite/composite.mjs"() {
+    init_intersect2();
+    init_indexed2();
+    init_keyof2();
+    init_object2();
+    init_sets();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/composite/index.mjs
+var init_composite2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/composite/index.mjs"() {
+    init_composite();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/date/date.mjs
+function Date2(options) {
+  return CreateType({ [Kind]: "Date", type: "Date" }, options);
+}
+var init_date = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/date/date.mjs"() {
+    init_symbols2();
+    init_type2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/date/index.mjs
+var init_date2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/date/index.mjs"() {
+    init_date();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/null/null.mjs
+function Null(options) {
+  return CreateType({ [Kind]: "Null", type: "null" }, options);
+}
+var init_null = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/null/null.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/null/index.mjs
+var init_null2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/null/index.mjs"() {
+    init_null();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/symbol/symbol.mjs
+function Symbol2(options) {
+  return CreateType({ [Kind]: "Symbol", type: "symbol" }, options);
+}
+var init_symbol = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/symbol/symbol.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/symbol/index.mjs
+var init_symbol2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/symbol/index.mjs"() {
+    init_symbol();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/undefined/undefined.mjs
+function Undefined(options) {
+  return CreateType({ [Kind]: "Undefined", type: "undefined" }, options);
+}
+var init_undefined = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/undefined/undefined.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/undefined/index.mjs
+var init_undefined2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/undefined/index.mjs"() {
+    init_undefined();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/uint8array/uint8array.mjs
+function Uint8Array2(options) {
+  return CreateType({ [Kind]: "Uint8Array", type: "Uint8Array" }, options);
+}
+var init_uint8array = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/uint8array/uint8array.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/uint8array/index.mjs
+var init_uint8array2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/uint8array/index.mjs"() {
+    init_uint8array();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/unknown/unknown.mjs
+function Unknown(options) {
+  return CreateType({ [Kind]: "Unknown" }, options);
+}
+var init_unknown = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/unknown/unknown.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/unknown/index.mjs
+var init_unknown2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/unknown/index.mjs"() {
+    init_unknown();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/const/const.mjs
+function FromArray3(T) {
+  return T.map((L) => FromValue(L, false));
+}
+function FromProperties7(value) {
+  const Acc = {};
+  for (const K of globalThis.Object.getOwnPropertyNames(value))
+    Acc[K] = Readonly(FromValue(value[K], false));
+  return Acc;
+}
+function ConditionalReadonly(T, root) {
+  return root === true ? T : Readonly(T);
+}
+function FromValue(value, root) {
+  return IsAsyncIterator(value) ? ConditionalReadonly(Any(), root) : IsIterator(value) ? ConditionalReadonly(Any(), root) : IsArray(value) ? Readonly(Tuple(FromArray3(value))) : IsUint8Array(value) ? Uint8Array2() : IsDate(value) ? Date2() : IsObject(value) ? ConditionalReadonly(Object2(FromProperties7(value)), root) : IsFunction(value) ? ConditionalReadonly(Function([], Unknown()), root) : IsUndefined(value) ? Undefined() : IsNull(value) ? Null() : IsSymbol(value) ? Symbol2() : IsBigInt(value) ? BigInt2() : IsNumber(value) ? Literal(value) : IsBoolean(value) ? Literal(value) : IsString(value) ? Literal(value) : Object2({});
+}
+function Const(T, options) {
+  return CreateType(FromValue(T, true), options);
+}
+var init_const = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/const/const.mjs"() {
+    init_any2();
+    init_bigint2();
+    init_date2();
+    init_function2();
+    init_literal2();
+    init_null2();
+    init_object2();
+    init_symbol2();
+    init_tuple2();
+    init_readonly2();
+    init_undefined2();
+    init_uint8array2();
+    init_unknown2();
+    init_create();
+    init_value();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/const/index.mjs
+var init_const2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/const/index.mjs"() {
+    init_const();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/constructor-parameters/constructor-parameters.mjs
+function ConstructorParameters(schema, options) {
+  return IsConstructor(schema) ? Tuple(schema.parameters, options) : Never(options);
+}
+var init_constructor_parameters = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/constructor-parameters/constructor-parameters.mjs"() {
+    init_tuple2();
+    init_never2();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/constructor-parameters/index.mjs
+var init_constructor_parameters2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/constructor-parameters/index.mjs"() {
+    init_constructor_parameters();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/enum/enum.mjs
+function Enum(item, options) {
+  if (IsUndefined(item))
+    throw new Error("Enum undefined or empty");
+  const values1 = globalThis.Object.getOwnPropertyNames(item).filter((key) => isNaN(key)).map((key) => item[key]);
+  const values2 = [...new Set(values1)];
+  const anyOf = values2.map((value) => Literal(value));
+  return Union(anyOf, { ...options, [Hint]: "Enum" });
+}
+var init_enum = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/enum/enum.mjs"() {
+    init_literal2();
+    init_symbols2();
+    init_union2();
+    init_value();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/enum/index.mjs
+var init_enum2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/enum/index.mjs"() {
+    init_enum();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/extends/extends-check.mjs
+function IntoBooleanResult(result) {
+  return result === ExtendsResult.False ? result : ExtendsResult.True;
+}
+function Throw(message) {
+  throw new ExtendsResolverError(message);
+}
+function IsStructuralRight(right) {
+  return type_exports.IsNever(right) || type_exports.IsIntersect(right) || type_exports.IsUnion(right) || type_exports.IsUnknown(right) || type_exports.IsAny(right);
+}
+function StructuralRight(left, right) {
+  return type_exports.IsNever(right) ? FromNeverRight(left, right) : type_exports.IsIntersect(right) ? FromIntersectRight(left, right) : type_exports.IsUnion(right) ? FromUnionRight(left, right) : type_exports.IsUnknown(right) ? FromUnknownRight(left, right) : type_exports.IsAny(right) ? FromAnyRight(left, right) : Throw("StructuralRight");
+}
+function FromAnyRight(left, right) {
+  return ExtendsResult.True;
+}
+function FromAny(left, right) {
+  return type_exports.IsIntersect(right) ? FromIntersectRight(left, right) : type_exports.IsUnion(right) && right.anyOf.some((schema) => type_exports.IsAny(schema) || type_exports.IsUnknown(schema)) ? ExtendsResult.True : type_exports.IsUnion(right) ? ExtendsResult.Union : type_exports.IsUnknown(right) ? ExtendsResult.True : type_exports.IsAny(right) ? ExtendsResult.True : ExtendsResult.Union;
+}
+function FromArrayRight(left, right) {
+  return type_exports.IsUnknown(left) ? ExtendsResult.False : type_exports.IsAny(left) ? ExtendsResult.Union : type_exports.IsNever(left) ? ExtendsResult.True : ExtendsResult.False;
+}
+function FromArray4(left, right) {
+  return type_exports.IsObject(right) && IsObjectArrayLike(right) ? ExtendsResult.True : IsStructuralRight(right) ? StructuralRight(left, right) : !type_exports.IsArray(right) ? ExtendsResult.False : IntoBooleanResult(Visit3(left.items, right.items));
+}
+function FromAsyncIterator(left, right) {
+  return IsStructuralRight(right) ? StructuralRight(left, right) : !type_exports.IsAsyncIterator(right) ? ExtendsResult.False : IntoBooleanResult(Visit3(left.items, right.items));
+}
+function FromBigInt(left, right) {
+  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports.IsObject(right) ? FromObjectRight(left, right) : type_exports.IsRecord(right) ? FromRecordRight(left, right) : type_exports.IsBigInt(right) ? ExtendsResult.True : ExtendsResult.False;
+}
+function FromBooleanRight(left, right) {
+  return type_exports.IsLiteralBoolean(left) ? ExtendsResult.True : type_exports.IsBoolean(left) ? ExtendsResult.True : ExtendsResult.False;
+}
+function FromBoolean(left, right) {
+  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports.IsObject(right) ? FromObjectRight(left, right) : type_exports.IsRecord(right) ? FromRecordRight(left, right) : type_exports.IsBoolean(right) ? ExtendsResult.True : ExtendsResult.False;
+}
+function FromConstructor(left, right) {
+  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports.IsObject(right) ? FromObjectRight(left, right) : !type_exports.IsConstructor(right) ? ExtendsResult.False : left.parameters.length > right.parameters.length ? ExtendsResult.False : !left.parameters.every((schema, index) => IntoBooleanResult(Visit3(right.parameters[index], schema)) === ExtendsResult.True) ? ExtendsResult.False : IntoBooleanResult(Visit3(left.returns, right.returns));
+}
+function FromDate(left, right) {
+  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports.IsObject(right) ? FromObjectRight(left, right) : type_exports.IsRecord(right) ? FromRecordRight(left, right) : type_exports.IsDate(right) ? ExtendsResult.True : ExtendsResult.False;
+}
+function FromFunction(left, right) {
+  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports.IsObject(right) ? FromObjectRight(left, right) : !type_exports.IsFunction(right) ? ExtendsResult.False : left.parameters.length > right.parameters.length ? ExtendsResult.False : !left.parameters.every((schema, index) => IntoBooleanResult(Visit3(right.parameters[index], schema)) === ExtendsResult.True) ? ExtendsResult.False : IntoBooleanResult(Visit3(left.returns, right.returns));
+}
+function FromIntegerRight(left, right) {
+  return type_exports.IsLiteral(left) && value_exports.IsNumber(left.const) ? ExtendsResult.True : type_exports.IsNumber(left) || type_exports.IsInteger(left) ? ExtendsResult.True : ExtendsResult.False;
+}
+function FromInteger(left, right) {
+  return type_exports.IsInteger(right) || type_exports.IsNumber(right) ? ExtendsResult.True : IsStructuralRight(right) ? StructuralRight(left, right) : type_exports.IsObject(right) ? FromObjectRight(left, right) : type_exports.IsRecord(right) ? FromRecordRight(left, right) : ExtendsResult.False;
+}
+function FromIntersectRight(left, right) {
+  return right.allOf.every((schema) => Visit3(left, schema) === ExtendsResult.True) ? ExtendsResult.True : ExtendsResult.False;
+}
+function FromIntersect4(left, right) {
+  return left.allOf.some((schema) => Visit3(schema, right) === ExtendsResult.True) ? ExtendsResult.True : ExtendsResult.False;
+}
+function FromIterator(left, right) {
+  return IsStructuralRight(right) ? StructuralRight(left, right) : !type_exports.IsIterator(right) ? ExtendsResult.False : IntoBooleanResult(Visit3(left.items, right.items));
+}
+function FromLiteral2(left, right) {
+  return type_exports.IsLiteral(right) && right.const === left.const ? ExtendsResult.True : IsStructuralRight(right) ? StructuralRight(left, right) : type_exports.IsObject(right) ? FromObjectRight(left, right) : type_exports.IsRecord(right) ? FromRecordRight(left, right) : type_exports.IsString(right) ? FromStringRight(left, right) : type_exports.IsNumber(right) ? FromNumberRight(left, right) : type_exports.IsInteger(right) ? FromIntegerRight(left, right) : type_exports.IsBoolean(right) ? FromBooleanRight(left, right) : ExtendsResult.False;
+}
+function FromNeverRight(left, right) {
+  return ExtendsResult.False;
+}
+function FromNever(left, right) {
+  return ExtendsResult.True;
+}
+function UnwrapTNot(schema) {
+  let [current, depth] = [schema, 0];
+  while (true) {
+    if (!type_exports.IsNot(current))
+      break;
+    current = current.not;
+    depth += 1;
+  }
+  return depth % 2 === 0 ? current : Unknown();
+}
+function FromNot(left, right) {
+  return type_exports.IsNot(left) ? Visit3(UnwrapTNot(left), right) : type_exports.IsNot(right) ? Visit3(left, UnwrapTNot(right)) : Throw("Invalid fallthrough for Not");
+}
+function FromNull(left, right) {
+  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports.IsObject(right) ? FromObjectRight(left, right) : type_exports.IsRecord(right) ? FromRecordRight(left, right) : type_exports.IsNull(right) ? ExtendsResult.True : ExtendsResult.False;
+}
+function FromNumberRight(left, right) {
+  return type_exports.IsLiteralNumber(left) ? ExtendsResult.True : type_exports.IsNumber(left) || type_exports.IsInteger(left) ? ExtendsResult.True : ExtendsResult.False;
+}
+function FromNumber(left, right) {
+  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports.IsObject(right) ? FromObjectRight(left, right) : type_exports.IsRecord(right) ? FromRecordRight(left, right) : type_exports.IsInteger(right) || type_exports.IsNumber(right) ? ExtendsResult.True : ExtendsResult.False;
+}
+function IsObjectPropertyCount(schema, count) {
+  return Object.getOwnPropertyNames(schema.properties).length === count;
+}
+function IsObjectStringLike(schema) {
+  return IsObjectArrayLike(schema);
+}
+function IsObjectSymbolLike(schema) {
+  return IsObjectPropertyCount(schema, 0) || IsObjectPropertyCount(schema, 1) && "description" in schema.properties && type_exports.IsUnion(schema.properties.description) && schema.properties.description.anyOf.length === 2 && (type_exports.IsString(schema.properties.description.anyOf[0]) && type_exports.IsUndefined(schema.properties.description.anyOf[1]) || type_exports.IsString(schema.properties.description.anyOf[1]) && type_exports.IsUndefined(schema.properties.description.anyOf[0]));
+}
+function IsObjectNumberLike(schema) {
+  return IsObjectPropertyCount(schema, 0);
+}
+function IsObjectBooleanLike(schema) {
+  return IsObjectPropertyCount(schema, 0);
+}
+function IsObjectBigIntLike(schema) {
+  return IsObjectPropertyCount(schema, 0);
+}
+function IsObjectDateLike(schema) {
+  return IsObjectPropertyCount(schema, 0);
+}
+function IsObjectUint8ArrayLike(schema) {
+  return IsObjectArrayLike(schema);
+}
+function IsObjectFunctionLike(schema) {
+  const length = Number2();
+  return IsObjectPropertyCount(schema, 0) || IsObjectPropertyCount(schema, 1) && "length" in schema.properties && IntoBooleanResult(Visit3(schema.properties["length"], length)) === ExtendsResult.True;
+}
+function IsObjectConstructorLike(schema) {
+  return IsObjectPropertyCount(schema, 0);
+}
+function IsObjectArrayLike(schema) {
+  const length = Number2();
+  return IsObjectPropertyCount(schema, 0) || IsObjectPropertyCount(schema, 1) && "length" in schema.properties && IntoBooleanResult(Visit3(schema.properties["length"], length)) === ExtendsResult.True;
+}
+function IsObjectPromiseLike(schema) {
+  const then = Function([Any()], Any());
+  return IsObjectPropertyCount(schema, 0) || IsObjectPropertyCount(schema, 1) && "then" in schema.properties && IntoBooleanResult(Visit3(schema.properties["then"], then)) === ExtendsResult.True;
+}
+function Property(left, right) {
+  return Visit3(left, right) === ExtendsResult.False ? ExtendsResult.False : type_exports.IsOptional(left) && !type_exports.IsOptional(right) ? ExtendsResult.False : ExtendsResult.True;
+}
+function FromObjectRight(left, right) {
+  return type_exports.IsUnknown(left) ? ExtendsResult.False : type_exports.IsAny(left) ? ExtendsResult.Union : type_exports.IsNever(left) || type_exports.IsLiteralString(left) && IsObjectStringLike(right) || type_exports.IsLiteralNumber(left) && IsObjectNumberLike(right) || type_exports.IsLiteralBoolean(left) && IsObjectBooleanLike(right) || type_exports.IsSymbol(left) && IsObjectSymbolLike(right) || type_exports.IsBigInt(left) && IsObjectBigIntLike(right) || type_exports.IsString(left) && IsObjectStringLike(right) || type_exports.IsSymbol(left) && IsObjectSymbolLike(right) || type_exports.IsNumber(left) && IsObjectNumberLike(right) || type_exports.IsInteger(left) && IsObjectNumberLike(right) || type_exports.IsBoolean(left) && IsObjectBooleanLike(right) || type_exports.IsUint8Array(left) && IsObjectUint8ArrayLike(right) || type_exports.IsDate(left) && IsObjectDateLike(right) || type_exports.IsConstructor(left) && IsObjectConstructorLike(right) || type_exports.IsFunction(left) && IsObjectFunctionLike(right) ? ExtendsResult.True : type_exports.IsRecord(left) && type_exports.IsString(RecordKey(left)) ? (() => {
+    return right[Hint] === "Record" ? ExtendsResult.True : ExtendsResult.False;
+  })() : type_exports.IsRecord(left) && type_exports.IsNumber(RecordKey(left)) ? (() => {
+    return IsObjectPropertyCount(right, 0) ? ExtendsResult.True : ExtendsResult.False;
+  })() : ExtendsResult.False;
+}
+function FromObject(left, right) {
+  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports.IsRecord(right) ? FromRecordRight(left, right) : !type_exports.IsObject(right) ? ExtendsResult.False : (() => {
+    for (const key of Object.getOwnPropertyNames(right.properties)) {
+      if (!(key in left.properties) && !type_exports.IsOptional(right.properties[key])) {
+        return ExtendsResult.False;
+      }
+      if (type_exports.IsOptional(right.properties[key])) {
+        return ExtendsResult.True;
+      }
+      if (Property(left.properties[key], right.properties[key]) === ExtendsResult.False) {
+        return ExtendsResult.False;
+      }
+    }
+    return ExtendsResult.True;
+  })();
+}
+function FromPromise2(left, right) {
+  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports.IsObject(right) && IsObjectPromiseLike(right) ? ExtendsResult.True : !type_exports.IsPromise(right) ? ExtendsResult.False : IntoBooleanResult(Visit3(left.item, right.item));
+}
+function RecordKey(schema) {
+  return PatternNumberExact in schema.patternProperties ? Number2() : PatternStringExact in schema.patternProperties ? String2() : Throw("Unknown record key pattern");
+}
+function RecordValue(schema) {
+  return PatternNumberExact in schema.patternProperties ? schema.patternProperties[PatternNumberExact] : PatternStringExact in schema.patternProperties ? schema.patternProperties[PatternStringExact] : Throw("Unable to get record value schema");
+}
+function FromRecordRight(left, right) {
+  const [Key, Value] = [RecordKey(right), RecordValue(right)];
+  return type_exports.IsLiteralString(left) && type_exports.IsNumber(Key) && IntoBooleanResult(Visit3(left, Value)) === ExtendsResult.True ? ExtendsResult.True : type_exports.IsUint8Array(left) && type_exports.IsNumber(Key) ? Visit3(left, Value) : type_exports.IsString(left) && type_exports.IsNumber(Key) ? Visit3(left, Value) : type_exports.IsArray(left) && type_exports.IsNumber(Key) ? Visit3(left, Value) : type_exports.IsObject(left) ? (() => {
+    for (const key of Object.getOwnPropertyNames(left.properties)) {
+      if (Property(Value, left.properties[key]) === ExtendsResult.False) {
+        return ExtendsResult.False;
+      }
+    }
+    return ExtendsResult.True;
+  })() : ExtendsResult.False;
+}
+function FromRecord(left, right) {
+  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports.IsObject(right) ? FromObjectRight(left, right) : !type_exports.IsRecord(right) ? ExtendsResult.False : Visit3(RecordValue(left), RecordValue(right));
+}
+function FromRegExp(left, right) {
+  const L = type_exports.IsRegExp(left) ? String2() : left;
+  const R = type_exports.IsRegExp(right) ? String2() : right;
+  return Visit3(L, R);
+}
+function FromStringRight(left, right) {
+  return type_exports.IsLiteral(left) && value_exports.IsString(left.const) ? ExtendsResult.True : type_exports.IsString(left) ? ExtendsResult.True : ExtendsResult.False;
+}
+function FromString(left, right) {
+  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports.IsObject(right) ? FromObjectRight(left, right) : type_exports.IsRecord(right) ? FromRecordRight(left, right) : type_exports.IsString(right) ? ExtendsResult.True : ExtendsResult.False;
+}
+function FromSymbol(left, right) {
+  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports.IsObject(right) ? FromObjectRight(left, right) : type_exports.IsRecord(right) ? FromRecordRight(left, right) : type_exports.IsSymbol(right) ? ExtendsResult.True : ExtendsResult.False;
+}
+function FromTemplateLiteral2(left, right) {
+  return type_exports.IsTemplateLiteral(left) ? Visit3(TemplateLiteralToUnion(left), right) : type_exports.IsTemplateLiteral(right) ? Visit3(left, TemplateLiteralToUnion(right)) : Throw("Invalid fallthrough for TemplateLiteral");
+}
+function IsArrayOfTuple(left, right) {
+  return type_exports.IsArray(right) && left.items !== void 0 && left.items.every((schema) => Visit3(schema, right.items) === ExtendsResult.True);
+}
+function FromTupleRight(left, right) {
+  return type_exports.IsNever(left) ? ExtendsResult.True : type_exports.IsUnknown(left) ? ExtendsResult.False : type_exports.IsAny(left) ? ExtendsResult.Union : ExtendsResult.False;
+}
+function FromTuple3(left, right) {
+  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports.IsObject(right) && IsObjectArrayLike(right) ? ExtendsResult.True : type_exports.IsArray(right) && IsArrayOfTuple(left, right) ? ExtendsResult.True : !type_exports.IsTuple(right) ? ExtendsResult.False : value_exports.IsUndefined(left.items) && !value_exports.IsUndefined(right.items) || !value_exports.IsUndefined(left.items) && value_exports.IsUndefined(right.items) ? ExtendsResult.False : value_exports.IsUndefined(left.items) && !value_exports.IsUndefined(right.items) ? ExtendsResult.True : left.items.every((schema, index) => Visit3(schema, right.items[index]) === ExtendsResult.True) ? ExtendsResult.True : ExtendsResult.False;
+}
+function FromUint8Array(left, right) {
+  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports.IsObject(right) ? FromObjectRight(left, right) : type_exports.IsRecord(right) ? FromRecordRight(left, right) : type_exports.IsUint8Array(right) ? ExtendsResult.True : ExtendsResult.False;
+}
+function FromUndefined(left, right) {
+  return IsStructuralRight(right) ? StructuralRight(left, right) : type_exports.IsObject(right) ? FromObjectRight(left, right) : type_exports.IsRecord(right) ? FromRecordRight(left, right) : type_exports.IsVoid(right) ? FromVoidRight(left, right) : type_exports.IsUndefined(right) ? ExtendsResult.True : ExtendsResult.False;
+}
+function FromUnionRight(left, right) {
+  return right.anyOf.some((schema) => Visit3(left, schema) === ExtendsResult.True) ? ExtendsResult.True : ExtendsResult.False;
+}
+function FromUnion6(left, right) {
+  return left.anyOf.every((schema) => Visit3(schema, right) === ExtendsResult.True) ? ExtendsResult.True : ExtendsResult.False;
+}
+function FromUnknownRight(left, right) {
+  return ExtendsResult.True;
+}
+function FromUnknown(left, right) {
+  return type_exports.IsNever(right) ? FromNeverRight(left, right) : type_exports.IsIntersect(right) ? FromIntersectRight(left, right) : type_exports.IsUnion(right) ? FromUnionRight(left, right) : type_exports.IsAny(right) ? FromAnyRight(left, right) : type_exports.IsString(right) ? FromStringRight(left, right) : type_exports.IsNumber(right) ? FromNumberRight(left, right) : type_exports.IsInteger(right) ? FromIntegerRight(left, right) : type_exports.IsBoolean(right) ? FromBooleanRight(left, right) : type_exports.IsArray(right) ? FromArrayRight(left, right) : type_exports.IsTuple(right) ? FromTupleRight(left, right) : type_exports.IsObject(right) ? FromObjectRight(left, right) : type_exports.IsUnknown(right) ? ExtendsResult.True : ExtendsResult.False;
+}
+function FromVoidRight(left, right) {
+  return type_exports.IsUndefined(left) ? ExtendsResult.True : type_exports.IsUndefined(left) ? ExtendsResult.True : ExtendsResult.False;
+}
+function FromVoid(left, right) {
+  return type_exports.IsIntersect(right) ? FromIntersectRight(left, right) : type_exports.IsUnion(right) ? FromUnionRight(left, right) : type_exports.IsUnknown(right) ? FromUnknownRight(left, right) : type_exports.IsAny(right) ? FromAnyRight(left, right) : type_exports.IsObject(right) ? FromObjectRight(left, right) : type_exports.IsVoid(right) ? ExtendsResult.True : ExtendsResult.False;
+}
+function Visit3(left, right) {
+  return (
+    // resolvable
+    type_exports.IsTemplateLiteral(left) || type_exports.IsTemplateLiteral(right) ? FromTemplateLiteral2(left, right) : type_exports.IsRegExp(left) || type_exports.IsRegExp(right) ? FromRegExp(left, right) : type_exports.IsNot(left) || type_exports.IsNot(right) ? FromNot(left, right) : (
+      // standard
+      type_exports.IsAny(left) ? FromAny(left, right) : type_exports.IsArray(left) ? FromArray4(left, right) : type_exports.IsBigInt(left) ? FromBigInt(left, right) : type_exports.IsBoolean(left) ? FromBoolean(left, right) : type_exports.IsAsyncIterator(left) ? FromAsyncIterator(left, right) : type_exports.IsConstructor(left) ? FromConstructor(left, right) : type_exports.IsDate(left) ? FromDate(left, right) : type_exports.IsFunction(left) ? FromFunction(left, right) : type_exports.IsInteger(left) ? FromInteger(left, right) : type_exports.IsIntersect(left) ? FromIntersect4(left, right) : type_exports.IsIterator(left) ? FromIterator(left, right) : type_exports.IsLiteral(left) ? FromLiteral2(left, right) : type_exports.IsNever(left) ? FromNever(left, right) : type_exports.IsNull(left) ? FromNull(left, right) : type_exports.IsNumber(left) ? FromNumber(left, right) : type_exports.IsObject(left) ? FromObject(left, right) : type_exports.IsRecord(left) ? FromRecord(left, right) : type_exports.IsString(left) ? FromString(left, right) : type_exports.IsSymbol(left) ? FromSymbol(left, right) : type_exports.IsTuple(left) ? FromTuple3(left, right) : type_exports.IsPromise(left) ? FromPromise2(left, right) : type_exports.IsUint8Array(left) ? FromUint8Array(left, right) : type_exports.IsUndefined(left) ? FromUndefined(left, right) : type_exports.IsUnion(left) ? FromUnion6(left, right) : type_exports.IsUnknown(left) ? FromUnknown(left, right) : type_exports.IsVoid(left) ? FromVoid(left, right) : Throw(`Unknown left type operand '${left[Kind]}'`)
+    )
+  );
+}
+function ExtendsCheck(left, right) {
+  return Visit3(left, right);
+}
+var ExtendsResolverError, ExtendsResult;
+var init_extends_check = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/extends/extends-check.mjs"() {
+    init_any2();
+    init_function2();
+    init_number2();
+    init_string2();
+    init_unknown2();
+    init_template_literal2();
+    init_patterns2();
+    init_symbols2();
+    init_error2();
+    init_guard3();
+    ExtendsResolverError = class extends TypeBoxError {
+    };
+    (function(ExtendsResult3) {
+      ExtendsResult3[ExtendsResult3["Union"] = 0] = "Union";
+      ExtendsResult3[ExtendsResult3["True"] = 1] = "True";
+      ExtendsResult3[ExtendsResult3["False"] = 2] = "False";
+    })(ExtendsResult || (ExtendsResult = {}));
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-result.mjs
+function FromProperties8(P, Right, True, False, options) {
+  const Acc = {};
+  for (const K2 of globalThis.Object.getOwnPropertyNames(P))
+    Acc[K2] = Extends(P[K2], Right, True, False, Clone(options));
+  return Acc;
+}
+function FromMappedResult6(Left, Right, True, False, options) {
+  return FromProperties8(Left.properties, Right, True, False, options);
+}
+function ExtendsFromMappedResult(Left, Right, True, False, options) {
+  const P = FromMappedResult6(Left, Right, True, False, options);
+  return MappedResult(P);
+}
+var init_extends_from_mapped_result = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-result.mjs"() {
+    init_mapped2();
+    init_extends();
+    init_value2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/extends/extends.mjs
+function ExtendsResolve(left, right, trueType, falseType) {
+  const R = ExtendsCheck(left, right);
+  return R === ExtendsResult.Union ? Union([trueType, falseType]) : R === ExtendsResult.True ? trueType : falseType;
+}
+function Extends(L, R, T, F, options) {
+  return IsMappedResult(L) ? ExtendsFromMappedResult(L, R, T, F, options) : IsMappedKey(L) ? CreateType(ExtendsFromMappedKey(L, R, T, F, options)) : CreateType(ExtendsResolve(L, R, T, F), options);
+}
+var init_extends = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/extends/extends.mjs"() {
+    init_type2();
+    init_union2();
+    init_extends_check();
+    init_extends_from_mapped_key();
+    init_extends_from_mapped_result();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-key.mjs
+function FromPropertyKey(K, U, L, R, options) {
+  return {
+    [K]: Extends(Literal(K), U, L, R, Clone(options))
+  };
+}
+function FromPropertyKeys(K, U, L, R, options) {
+  return K.reduce((Acc, LK) => {
+    return { ...Acc, ...FromPropertyKey(LK, U, L, R, options) };
+  }, {});
+}
+function FromMappedKey2(K, U, L, R, options) {
+  return FromPropertyKeys(K.keys, U, L, R, options);
+}
+function ExtendsFromMappedKey(T, U, L, R, options) {
+  const P = FromMappedKey2(T, U, L, R, options);
+  return MappedResult(P);
+}
+var init_extends_from_mapped_key = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/extends/extends-from-mapped-key.mjs"() {
+    init_mapped2();
+    init_literal2();
+    init_extends();
+    init_value2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/extends/extends-undefined.mjs
+function Intersect2(schema) {
+  return schema.allOf.every((schema2) => ExtendsUndefinedCheck(schema2));
+}
+function Union2(schema) {
+  return schema.anyOf.some((schema2) => ExtendsUndefinedCheck(schema2));
+}
+function Not(schema) {
+  return !ExtendsUndefinedCheck(schema.not);
+}
+function ExtendsUndefinedCheck(schema) {
+  return schema[Kind] === "Intersect" ? Intersect2(schema) : schema[Kind] === "Union" ? Union2(schema) : schema[Kind] === "Not" ? Not(schema) : schema[Kind] === "Undefined" ? true : false;
+}
+var init_extends_undefined = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/extends/extends-undefined.mjs"() {
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/extends/index.mjs
+var init_extends2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/extends/index.mjs"() {
+    init_extends_check();
+    init_extends_from_mapped_key();
+    init_extends_from_mapped_result();
+    init_extends_undefined();
+    init_extends();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-template-literal.mjs
+function ExcludeFromTemplateLiteral(L, R) {
+  return Exclude(TemplateLiteralToUnion(L), R);
+}
+var init_exclude_from_template_literal = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-template-literal.mjs"() {
+    init_exclude();
+    init_template_literal2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/exclude/exclude.mjs
+function ExcludeRest(L, R) {
+  const excluded = L.filter((inner) => ExtendsCheck(inner, R) === ExtendsResult.False);
+  return excluded.length === 1 ? excluded[0] : Union(excluded);
+}
+function Exclude(L, R, options = {}) {
+  if (IsTemplateLiteral(L))
+    return CreateType(ExcludeFromTemplateLiteral(L, R), options);
+  if (IsMappedResult(L))
+    return CreateType(ExcludeFromMappedResult(L, R), options);
+  return CreateType(IsUnion(L) ? ExcludeRest(L.anyOf, R) : ExtendsCheck(L, R) !== ExtendsResult.False ? Never() : L, options);
+}
+var init_exclude = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/exclude/exclude.mjs"() {
+    init_type2();
+    init_union2();
+    init_never2();
+    init_extends2();
+    init_exclude_from_mapped_result();
+    init_exclude_from_template_literal();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-mapped-result.mjs
+function FromProperties9(P, U) {
+  const Acc = {};
+  for (const K2 of globalThis.Object.getOwnPropertyNames(P))
+    Acc[K2] = Exclude(P[K2], U);
+  return Acc;
+}
+function FromMappedResult7(R, T) {
+  return FromProperties9(R.properties, T);
+}
+function ExcludeFromMappedResult(R, T) {
+  const P = FromMappedResult7(R, T);
+  return MappedResult(P);
+}
+var init_exclude_from_mapped_result = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/exclude/exclude-from-mapped-result.mjs"() {
+    init_mapped2();
+    init_exclude();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/exclude/index.mjs
+var init_exclude2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/exclude/index.mjs"() {
+    init_exclude_from_mapped_result();
+    init_exclude_from_template_literal();
+    init_exclude();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-template-literal.mjs
+function ExtractFromTemplateLiteral(L, R) {
+  return Extract(TemplateLiteralToUnion(L), R);
+}
+var init_extract_from_template_literal = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-template-literal.mjs"() {
+    init_extract();
+    init_template_literal2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/extract/extract.mjs
+function ExtractRest(L, R) {
+  const extracted = L.filter((inner) => ExtendsCheck(inner, R) !== ExtendsResult.False);
+  return extracted.length === 1 ? extracted[0] : Union(extracted);
+}
+function Extract(L, R, options) {
+  if (IsTemplateLiteral(L))
+    return CreateType(ExtractFromTemplateLiteral(L, R), options);
+  if (IsMappedResult(L))
+    return CreateType(ExtractFromMappedResult(L, R), options);
+  return CreateType(IsUnion(L) ? ExtractRest(L.anyOf, R) : ExtendsCheck(L, R) !== ExtendsResult.False ? L : Never(), options);
+}
+var init_extract = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/extract/extract.mjs"() {
+    init_type2();
+    init_union2();
+    init_never2();
+    init_extends2();
+    init_extract_from_mapped_result();
+    init_extract_from_template_literal();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-mapped-result.mjs
+function FromProperties10(P, T) {
+  const Acc = {};
+  for (const K2 of globalThis.Object.getOwnPropertyNames(P))
+    Acc[K2] = Extract(P[K2], T);
+  return Acc;
+}
+function FromMappedResult8(R, T) {
+  return FromProperties10(R.properties, T);
+}
+function ExtractFromMappedResult(R, T) {
+  const P = FromMappedResult8(R, T);
+  return MappedResult(P);
+}
+var init_extract_from_mapped_result = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/extract/extract-from-mapped-result.mjs"() {
+    init_mapped2();
+    init_extract();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/extract/index.mjs
+var init_extract2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/extract/index.mjs"() {
+    init_extract_from_mapped_result();
+    init_extract_from_template_literal();
+    init_extract();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/instance-type/instance-type.mjs
+function InstanceType(schema, options) {
+  return IsConstructor(schema) ? CreateType(schema.returns, options) : Never(options);
+}
+var init_instance_type = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/instance-type/instance-type.mjs"() {
+    init_type2();
+    init_never2();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/instance-type/index.mjs
+var init_instance_type2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/instance-type/index.mjs"() {
+    init_instance_type();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/readonly-optional/readonly-optional.mjs
+function ReadonlyOptional(schema) {
+  return Readonly(Optional(schema));
+}
+var init_readonly_optional = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/readonly-optional/readonly-optional.mjs"() {
+    init_readonly2();
+    init_optional2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/readonly-optional/index.mjs
+var init_readonly_optional2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/readonly-optional/index.mjs"() {
+    init_readonly_optional();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/record/record.mjs
+function RecordCreateFromPattern(pattern, T, options) {
+  return CreateType({ [Kind]: "Record", type: "object", patternProperties: { [pattern]: T } }, options);
+}
+function RecordCreateFromKeys(K, T, options) {
+  const result = {};
+  for (const K2 of K)
+    result[K2] = T;
+  return Object2(result, { ...options, [Hint]: "Record" });
+}
+function FromTemplateLiteralKey(K, T, options) {
+  return IsTemplateLiteralFinite(K) ? RecordCreateFromKeys(IndexPropertyKeys(K), T, options) : RecordCreateFromPattern(K.pattern, T, options);
+}
+function FromUnionKey(key, type, options) {
+  return RecordCreateFromKeys(IndexPropertyKeys(Union(key)), type, options);
+}
+function FromLiteralKey(key, type, options) {
+  return RecordCreateFromKeys([key.toString()], type, options);
+}
+function FromRegExpKey(key, type, options) {
+  return RecordCreateFromPattern(key.source, type, options);
+}
+function FromStringKey(key, type, options) {
+  const pattern = IsUndefined(key.pattern) ? PatternStringExact : key.pattern;
+  return RecordCreateFromPattern(pattern, type, options);
+}
+function FromAnyKey(_, type, options) {
+  return RecordCreateFromPattern(PatternStringExact, type, options);
+}
+function FromNeverKey(_key, type, options) {
+  return RecordCreateFromPattern(PatternNeverExact, type, options);
+}
+function FromBooleanKey(_key, type, options) {
+  return Object2({ true: type, false: type }, options);
+}
+function FromIntegerKey(_key, type, options) {
+  return RecordCreateFromPattern(PatternNumberExact, type, options);
+}
+function FromNumberKey(_, type, options) {
+  return RecordCreateFromPattern(PatternNumberExact, type, options);
+}
+function Record(key, type, options = {}) {
+  return IsUnion(key) ? FromUnionKey(key.anyOf, type, options) : IsTemplateLiteral(key) ? FromTemplateLiteralKey(key, type, options) : IsLiteral(key) ? FromLiteralKey(key.const, type, options) : IsBoolean3(key) ? FromBooleanKey(key, type, options) : IsInteger2(key) ? FromIntegerKey(key, type, options) : IsNumber3(key) ? FromNumberKey(key, type, options) : IsRegExp2(key) ? FromRegExpKey(key, type, options) : IsString3(key) ? FromStringKey(key, type, options) : IsAny(key) ? FromAnyKey(key, type, options) : IsNever(key) ? FromNeverKey(key, type, options) : Never(options);
+}
+function RecordPattern(record) {
+  return globalThis.Object.getOwnPropertyNames(record.patternProperties)[0];
+}
+function RecordKey2(type) {
+  const pattern = RecordPattern(type);
+  return pattern === PatternStringExact ? String2() : pattern === PatternNumberExact ? Number2() : String2({ pattern });
+}
+function RecordValue2(type) {
+  return type.patternProperties[RecordPattern(type)];
+}
+var init_record = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/record/record.mjs"() {
+    init_type2();
+    init_symbols2();
+    init_never2();
+    init_number2();
+    init_object2();
+    init_string2();
+    init_union2();
+    init_template_literal2();
+    init_patterns2();
+    init_indexed2();
+    init_value();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/record/index.mjs
+var init_record2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/record/index.mjs"() {
+    init_record();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/instantiate/instantiate.mjs
+function FromConstructor2(args, type) {
+  type.parameters = FromTypes(args, type.parameters);
+  type.returns = FromType(args, type.returns);
+  return type;
+}
+function FromFunction2(args, type) {
+  type.parameters = FromTypes(args, type.parameters);
+  type.returns = FromType(args, type.returns);
+  return type;
+}
+function FromIntersect5(args, type) {
+  type.allOf = FromTypes(args, type.allOf);
+  return type;
+}
+function FromUnion7(args, type) {
+  type.anyOf = FromTypes(args, type.anyOf);
+  return type;
+}
+function FromTuple4(args, type) {
+  if (IsUndefined(type.items))
+    return type;
+  type.items = FromTypes(args, type.items);
+  return type;
+}
+function FromArray5(args, type) {
+  type.items = FromType(args, type.items);
+  return type;
+}
+function FromAsyncIterator2(args, type) {
+  type.items = FromType(args, type.items);
+  return type;
+}
+function FromIterator2(args, type) {
+  type.items = FromType(args, type.items);
+  return type;
+}
+function FromPromise3(args, type) {
+  type.item = FromType(args, type.item);
+  return type;
+}
+function FromObject2(args, type) {
+  const mappedProperties = FromProperties11(args, type.properties);
+  return { ...type, ...Object2(mappedProperties) };
+}
+function FromRecord2(args, type) {
+  const mappedKey = FromType(args, RecordKey2(type));
+  const mappedValue = FromType(args, RecordValue2(type));
+  const result = Record(mappedKey, mappedValue);
+  return { ...type, ...result };
+}
+function FromArgument(args, argument) {
+  return argument.index in args ? args[argument.index] : Unknown();
+}
+function FromProperty2(args, type) {
+  const isReadonly = IsReadonly(type);
+  const isOptional = IsOptional(type);
+  const mapped = FromType(args, type);
+  return isReadonly && isOptional ? ReadonlyOptional(mapped) : isReadonly && !isOptional ? Readonly(mapped) : !isReadonly && isOptional ? Optional(mapped) : mapped;
+}
+function FromProperties11(args, properties) {
+  return globalThis.Object.getOwnPropertyNames(properties).reduce((result, key) => {
+    return { ...result, [key]: FromProperty2(args, properties[key]) };
+  }, {});
+}
+function FromTypes(args, types) {
+  return types.map((type) => FromType(args, type));
+}
+function FromType(args, type) {
+  return IsConstructor(type) ? FromConstructor2(args, type) : IsFunction3(type) ? FromFunction2(args, type) : IsIntersect(type) ? FromIntersect5(args, type) : IsUnion(type) ? FromUnion7(args, type) : IsTuple(type) ? FromTuple4(args, type) : IsArray3(type) ? FromArray5(args, type) : IsAsyncIterator3(type) ? FromAsyncIterator2(args, type) : IsIterator3(type) ? FromIterator2(args, type) : IsPromise2(type) ? FromPromise3(args, type) : IsObject3(type) ? FromObject2(args, type) : IsRecord(type) ? FromRecord2(args, type) : IsArgument(type) ? FromArgument(args, type) : type;
+}
+function Instantiate(type, args) {
+  return FromType(args, CloneType(type));
+}
+var init_instantiate = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/instantiate/instantiate.mjs"() {
+    init_type();
+    init_unknown2();
+    init_readonly_optional2();
+    init_readonly2();
+    init_optional2();
+    init_object2();
+    init_record2();
+    init_value();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/instantiate/index.mjs
+var init_instantiate2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/instantiate/index.mjs"() {
+    init_instantiate();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/integer/integer.mjs
+function Integer(options) {
+  return CreateType({ [Kind]: "Integer", type: "integer" }, options);
+}
+var init_integer = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/integer/integer.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/integer/index.mjs
+var init_integer2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/integer/index.mjs"() {
+    init_integer();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic-from-mapped-key.mjs
+function MappedIntrinsicPropertyKey(K, M, options) {
+  return {
+    [K]: Intrinsic(Literal(K), M, Clone(options))
+  };
+}
+function MappedIntrinsicPropertyKeys(K, M, options) {
+  const result = K.reduce((Acc, L) => {
+    return { ...Acc, ...MappedIntrinsicPropertyKey(L, M, options) };
+  }, {});
+  return result;
+}
+function MappedIntrinsicProperties(T, M, options) {
+  return MappedIntrinsicPropertyKeys(T["keys"], M, options);
+}
+function IntrinsicFromMappedKey(T, M, options) {
+  const P = MappedIntrinsicProperties(T, M, options);
+  return MappedResult(P);
+}
+var init_intrinsic_from_mapped_key = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic-from-mapped-key.mjs"() {
+    init_mapped2();
+    init_intrinsic();
+    init_literal2();
+    init_value2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic.mjs
+function ApplyUncapitalize(value) {
+  const [first, rest] = [value.slice(0, 1), value.slice(1)];
+  return [first.toLowerCase(), rest].join("");
+}
+function ApplyCapitalize(value) {
+  const [first, rest] = [value.slice(0, 1), value.slice(1)];
+  return [first.toUpperCase(), rest].join("");
+}
+function ApplyUppercase(value) {
+  return value.toUpperCase();
+}
+function ApplyLowercase(value) {
+  return value.toLowerCase();
+}
+function FromTemplateLiteral3(schema, mode, options) {
+  const expression = TemplateLiteralParseExact(schema.pattern);
+  const finite = IsTemplateLiteralExpressionFinite(expression);
+  if (!finite)
+    return { ...schema, pattern: FromLiteralValue(schema.pattern, mode) };
+  const strings = [...TemplateLiteralExpressionGenerate(expression)];
+  const literals = strings.map((value) => Literal(value));
+  const mapped = FromRest5(literals, mode);
+  const union = Union(mapped);
+  return TemplateLiteral([union], options);
+}
+function FromLiteralValue(value, mode) {
+  return typeof value === "string" ? mode === "Uncapitalize" ? ApplyUncapitalize(value) : mode === "Capitalize" ? ApplyCapitalize(value) : mode === "Uppercase" ? ApplyUppercase(value) : mode === "Lowercase" ? ApplyLowercase(value) : value : value.toString();
+}
+function FromRest5(T, M) {
+  return T.map((L) => Intrinsic(L, M));
+}
+function Intrinsic(schema, mode, options = {}) {
+  return (
+    // Intrinsic-Mapped-Inference
+    IsMappedKey(schema) ? IntrinsicFromMappedKey(schema, mode, options) : (
+      // Standard-Inference
+      IsTemplateLiteral(schema) ? FromTemplateLiteral3(schema, mode, options) : IsUnion(schema) ? Union(FromRest5(schema.anyOf, mode), options) : IsLiteral(schema) ? Literal(FromLiteralValue(schema.const, mode), options) : (
+        // Default Type
+        CreateType(schema, options)
+      )
+    )
+  );
+}
+var init_intrinsic = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/intrinsic.mjs"() {
+    init_type2();
+    init_template_literal2();
+    init_intrinsic_from_mapped_key();
+    init_literal2();
+    init_union2();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/intrinsic/capitalize.mjs
+function Capitalize(T, options = {}) {
+  return Intrinsic(T, "Capitalize", options);
+}
+var init_capitalize = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/capitalize.mjs"() {
+    init_intrinsic();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/intrinsic/lowercase.mjs
+function Lowercase(T, options = {}) {
+  return Intrinsic(T, "Lowercase", options);
+}
+var init_lowercase = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/lowercase.mjs"() {
+    init_intrinsic();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/intrinsic/uncapitalize.mjs
+function Uncapitalize(T, options = {}) {
+  return Intrinsic(T, "Uncapitalize", options);
+}
+var init_uncapitalize = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/uncapitalize.mjs"() {
+    init_intrinsic();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/intrinsic/uppercase.mjs
+function Uppercase(T, options = {}) {
+  return Intrinsic(T, "Uppercase", options);
+}
+var init_uppercase = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/uppercase.mjs"() {
+    init_intrinsic();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/intrinsic/index.mjs
+var init_intrinsic2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/intrinsic/index.mjs"() {
+    init_capitalize();
+    init_intrinsic_from_mapped_key();
+    init_intrinsic();
+    init_lowercase();
+    init_uncapitalize();
+    init_uppercase();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-result.mjs
+function FromProperties12(properties, propertyKeys, options) {
+  const result = {};
+  for (const K2 of globalThis.Object.getOwnPropertyNames(properties))
+    result[K2] = Omit(properties[K2], propertyKeys, Clone(options));
+  return result;
+}
+function FromMappedResult9(mappedResult, propertyKeys, options) {
+  return FromProperties12(mappedResult.properties, propertyKeys, options);
+}
+function OmitFromMappedResult(mappedResult, propertyKeys, options) {
+  const properties = FromMappedResult9(mappedResult, propertyKeys, options);
+  return MappedResult(properties);
+}
+var init_omit_from_mapped_result = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-result.mjs"() {
+    init_mapped2();
+    init_omit();
+    init_value2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/omit/omit.mjs
+function FromIntersect6(types, propertyKeys) {
+  return types.map((type) => OmitResolve(type, propertyKeys));
+}
+function FromUnion8(types, propertyKeys) {
+  return types.map((type) => OmitResolve(type, propertyKeys));
+}
+function FromProperty3(properties, key) {
+  const { [key]: _, ...R } = properties;
+  return R;
+}
+function FromProperties13(properties, propertyKeys) {
+  return propertyKeys.reduce((T, K2) => FromProperty3(T, K2), properties);
+}
+function FromObject3(type, propertyKeys, properties) {
+  const options = Discard(type, [TransformKind, "$id", "required", "properties"]);
+  const mappedProperties = FromProperties13(properties, propertyKeys);
+  return Object2(mappedProperties, options);
+}
+function UnionFromPropertyKeys(propertyKeys) {
+  const result = propertyKeys.reduce((result2, key) => IsLiteralValue(key) ? [...result2, Literal(key)] : result2, []);
+  return Union(result);
+}
+function OmitResolve(type, propertyKeys) {
+  return IsIntersect(type) ? Intersect(FromIntersect6(type.allOf, propertyKeys)) : IsUnion(type) ? Union(FromUnion8(type.anyOf, propertyKeys)) : IsObject3(type) ? FromObject3(type, propertyKeys, type.properties) : Object2({});
+}
+function Omit(type, key, options) {
+  const typeKey = IsArray(key) ? UnionFromPropertyKeys(key) : key;
+  const propertyKeys = IsSchema(key) ? IndexPropertyKeys(key) : key;
+  const isTypeRef = IsRef(type);
+  const isKeyRef = IsRef(key);
+  return IsMappedResult(type) ? OmitFromMappedResult(type, propertyKeys, options) : IsMappedKey(key) ? OmitFromMappedKey(type, key, options) : isTypeRef && isKeyRef ? Computed("Omit", [type, typeKey], options) : !isTypeRef && isKeyRef ? Computed("Omit", [type, typeKey], options) : isTypeRef && !isKeyRef ? Computed("Omit", [type, typeKey], options) : CreateType({ ...OmitResolve(type, propertyKeys), ...options });
+}
+var init_omit = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/omit/omit.mjs"() {
+    init_type2();
+    init_discard();
+    init_symbols();
+    init_computed2();
+    init_literal2();
+    init_indexed2();
+    init_intersect2();
+    init_union2();
+    init_object2();
+    init_omit_from_mapped_key();
+    init_omit_from_mapped_result();
+    init_kind();
+    init_value();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-key.mjs
+function FromPropertyKey2(type, key, options) {
+  return { [key]: Omit(type, [key], Clone(options)) };
+}
+function FromPropertyKeys2(type, propertyKeys, options) {
+  return propertyKeys.reduce((Acc, LK) => {
+    return { ...Acc, ...FromPropertyKey2(type, LK, options) };
+  }, {});
+}
+function FromMappedKey3(type, mappedKey, options) {
+  return FromPropertyKeys2(type, mappedKey.keys, options);
+}
+function OmitFromMappedKey(type, mappedKey, options) {
+  const properties = FromMappedKey3(type, mappedKey, options);
+  return MappedResult(properties);
+}
+var init_omit_from_mapped_key = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/omit/omit-from-mapped-key.mjs"() {
+    init_mapped2();
+    init_omit();
+    init_value2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/omit/index.mjs
+var init_omit2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/omit/index.mjs"() {
+    init_omit_from_mapped_key();
+    init_omit_from_mapped_result();
+    init_omit();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-result.mjs
+function FromProperties14(properties, propertyKeys, options) {
+  const result = {};
+  for (const K2 of globalThis.Object.getOwnPropertyNames(properties))
+    result[K2] = Pick(properties[K2], propertyKeys, Clone(options));
+  return result;
+}
+function FromMappedResult10(mappedResult, propertyKeys, options) {
+  return FromProperties14(mappedResult.properties, propertyKeys, options);
+}
+function PickFromMappedResult(mappedResult, propertyKeys, options) {
+  const properties = FromMappedResult10(mappedResult, propertyKeys, options);
+  return MappedResult(properties);
+}
+var init_pick_from_mapped_result = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-result.mjs"() {
+    init_mapped2();
+    init_pick();
+    init_value2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/pick/pick.mjs
+function FromIntersect7(types, propertyKeys) {
+  return types.map((type) => PickResolve(type, propertyKeys));
+}
+function FromUnion9(types, propertyKeys) {
+  return types.map((type) => PickResolve(type, propertyKeys));
+}
+function FromProperties15(properties, propertyKeys) {
+  const result = {};
+  for (const K2 of propertyKeys)
+    if (K2 in properties)
+      result[K2] = properties[K2];
+  return result;
+}
+function FromObject4(Type3, keys, properties) {
+  const options = Discard(Type3, [TransformKind, "$id", "required", "properties"]);
+  const mappedProperties = FromProperties15(properties, keys);
+  return Object2(mappedProperties, options);
+}
+function UnionFromPropertyKeys2(propertyKeys) {
+  const result = propertyKeys.reduce((result2, key) => IsLiteralValue(key) ? [...result2, Literal(key)] : result2, []);
+  return Union(result);
+}
+function PickResolve(type, propertyKeys) {
+  return IsIntersect(type) ? Intersect(FromIntersect7(type.allOf, propertyKeys)) : IsUnion(type) ? Union(FromUnion9(type.anyOf, propertyKeys)) : IsObject3(type) ? FromObject4(type, propertyKeys, type.properties) : Object2({});
+}
+function Pick(type, key, options) {
+  const typeKey = IsArray(key) ? UnionFromPropertyKeys2(key) : key;
+  const propertyKeys = IsSchema(key) ? IndexPropertyKeys(key) : key;
+  const isTypeRef = IsRef(type);
+  const isKeyRef = IsRef(key);
+  return IsMappedResult(type) ? PickFromMappedResult(type, propertyKeys, options) : IsMappedKey(key) ? PickFromMappedKey(type, key, options) : isTypeRef && isKeyRef ? Computed("Pick", [type, typeKey], options) : !isTypeRef && isKeyRef ? Computed("Pick", [type, typeKey], options) : isTypeRef && !isKeyRef ? Computed("Pick", [type, typeKey], options) : CreateType({ ...PickResolve(type, propertyKeys), ...options });
+}
+var init_pick = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/pick/pick.mjs"() {
+    init_type2();
+    init_discard();
+    init_computed2();
+    init_intersect2();
+    init_literal2();
+    init_object2();
+    init_union2();
+    init_indexed2();
+    init_symbols();
+    init_kind();
+    init_value();
+    init_pick_from_mapped_key();
+    init_pick_from_mapped_result();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-key.mjs
+function FromPropertyKey3(type, key, options) {
+  return {
+    [key]: Pick(type, [key], Clone(options))
+  };
+}
+function FromPropertyKeys3(type, propertyKeys, options) {
+  return propertyKeys.reduce((result, leftKey) => {
+    return { ...result, ...FromPropertyKey3(type, leftKey, options) };
+  }, {});
+}
+function FromMappedKey4(type, mappedKey, options) {
+  return FromPropertyKeys3(type, mappedKey.keys, options);
+}
+function PickFromMappedKey(type, mappedKey, options) {
+  const properties = FromMappedKey4(type, mappedKey, options);
+  return MappedResult(properties);
+}
+var init_pick_from_mapped_key = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/pick/pick-from-mapped-key.mjs"() {
+    init_mapped2();
+    init_pick();
+    init_value2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/pick/index.mjs
+var init_pick2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/pick/index.mjs"() {
+    init_pick_from_mapped_key();
+    init_pick_from_mapped_result();
+    init_pick();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/partial/partial.mjs
+function FromComputed3(target, parameters) {
+  return Computed("Partial", [Computed(target, parameters)]);
+}
+function FromRef3($ref) {
+  return Computed("Partial", [Ref($ref)]);
+}
+function FromProperties16(properties) {
+  const partialProperties = {};
+  for (const K of globalThis.Object.getOwnPropertyNames(properties))
+    partialProperties[K] = Optional(properties[K]);
+  return partialProperties;
+}
+function FromObject5(type, properties) {
+  const options = Discard(type, [TransformKind, "$id", "required", "properties"]);
+  const mappedProperties = FromProperties16(properties);
+  return Object2(mappedProperties, options);
+}
+function FromRest6(types) {
+  return types.map((type) => PartialResolve(type));
+}
+function PartialResolve(type) {
+  return (
+    // Mappable
+    IsComputed(type) ? FromComputed3(type.target, type.parameters) : IsRef(type) ? FromRef3(type.$ref) : IsIntersect(type) ? Intersect(FromRest6(type.allOf)) : IsUnion(type) ? Union(FromRest6(type.anyOf)) : IsObject3(type) ? FromObject5(type, type.properties) : (
+      // Intrinsic
+      IsBigInt3(type) ? type : IsBoolean3(type) ? type : IsInteger2(type) ? type : IsLiteral(type) ? type : IsNull3(type) ? type : IsNumber3(type) ? type : IsString3(type) ? type : IsSymbol3(type) ? type : IsUndefined3(type) ? type : (
+        // Passthrough
+        Object2({})
+      )
+    )
+  );
+}
+function Partial(type, options) {
+  if (IsMappedResult(type)) {
+    return PartialFromMappedResult(type, options);
+  } else {
+    return CreateType({ ...PartialResolve(type), ...options });
+  }
+}
+var init_partial = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/partial/partial.mjs"() {
+    init_type2();
+    init_computed2();
+    init_optional2();
+    init_object2();
+    init_intersect2();
+    init_union2();
+    init_ref2();
+    init_discard2();
+    init_symbols2();
+    init_partial_from_mapped_result();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/partial/partial-from-mapped-result.mjs
+function FromProperties17(K, options) {
+  const Acc = {};
+  for (const K2 of globalThis.Object.getOwnPropertyNames(K))
+    Acc[K2] = Partial(K[K2], Clone(options));
+  return Acc;
+}
+function FromMappedResult11(R, options) {
+  return FromProperties17(R.properties, options);
+}
+function PartialFromMappedResult(R, options) {
+  const P = FromMappedResult11(R, options);
+  return MappedResult(P);
+}
+var init_partial_from_mapped_result = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/partial/partial-from-mapped-result.mjs"() {
+    init_mapped2();
+    init_partial();
+    init_value2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/partial/index.mjs
+var init_partial2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/partial/index.mjs"() {
+    init_partial_from_mapped_result();
+    init_partial();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/required/required.mjs
+function FromComputed4(target, parameters) {
+  return Computed("Required", [Computed(target, parameters)]);
+}
+function FromRef4($ref) {
+  return Computed("Required", [Ref($ref)]);
+}
+function FromProperties18(properties) {
+  const requiredProperties = {};
+  for (const K of globalThis.Object.getOwnPropertyNames(properties))
+    requiredProperties[K] = Discard(properties[K], [OptionalKind]);
+  return requiredProperties;
+}
+function FromObject6(type, properties) {
+  const options = Discard(type, [TransformKind, "$id", "required", "properties"]);
+  const mappedProperties = FromProperties18(properties);
+  return Object2(mappedProperties, options);
+}
+function FromRest7(types) {
+  return types.map((type) => RequiredResolve(type));
+}
+function RequiredResolve(type) {
+  return (
+    // Mappable
+    IsComputed(type) ? FromComputed4(type.target, type.parameters) : IsRef(type) ? FromRef4(type.$ref) : IsIntersect(type) ? Intersect(FromRest7(type.allOf)) : IsUnion(type) ? Union(FromRest7(type.anyOf)) : IsObject3(type) ? FromObject6(type, type.properties) : (
+      // Intrinsic
+      IsBigInt3(type) ? type : IsBoolean3(type) ? type : IsInteger2(type) ? type : IsLiteral(type) ? type : IsNull3(type) ? type : IsNumber3(type) ? type : IsString3(type) ? type : IsSymbol3(type) ? type : IsUndefined3(type) ? type : (
+        // Passthrough
+        Object2({})
+      )
+    )
+  );
+}
+function Required(type, options) {
+  if (IsMappedResult(type)) {
+    return RequiredFromMappedResult(type, options);
+  } else {
+    return CreateType({ ...RequiredResolve(type), ...options });
+  }
+}
+var init_required = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/required/required.mjs"() {
+    init_type2();
+    init_computed2();
+    init_object2();
+    init_intersect2();
+    init_union2();
+    init_ref2();
+    init_symbols2();
+    init_discard2();
+    init_required_from_mapped_result();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/required/required-from-mapped-result.mjs
+function FromProperties19(P, options) {
+  const Acc = {};
+  for (const K2 of globalThis.Object.getOwnPropertyNames(P))
+    Acc[K2] = Required(P[K2], options);
+  return Acc;
+}
+function FromMappedResult12(R, options) {
+  return FromProperties19(R.properties, options);
+}
+function RequiredFromMappedResult(R, options) {
+  const P = FromMappedResult12(R, options);
+  return MappedResult(P);
+}
+var init_required_from_mapped_result = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/required/required-from-mapped-result.mjs"() {
+    init_mapped2();
+    init_required();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/required/index.mjs
+var init_required2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/required/index.mjs"() {
+    init_required_from_mapped_result();
+    init_required();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/module/compute.mjs
+function DereferenceParameters(moduleProperties, types) {
+  return types.map((type) => {
+    return IsRef(type) ? Dereference(moduleProperties, type.$ref) : FromType2(moduleProperties, type);
+  });
+}
+function Dereference(moduleProperties, ref) {
+  return ref in moduleProperties ? IsRef(moduleProperties[ref]) ? Dereference(moduleProperties, moduleProperties[ref].$ref) : FromType2(moduleProperties, moduleProperties[ref]) : Never();
+}
+function FromAwaited(parameters) {
+  return Awaited(parameters[0]);
+}
+function FromIndex(parameters) {
+  return Index(parameters[0], parameters[1]);
+}
+function FromKeyOf(parameters) {
+  return KeyOf(parameters[0]);
+}
+function FromPartial(parameters) {
+  return Partial(parameters[0]);
+}
+function FromOmit(parameters) {
+  return Omit(parameters[0], parameters[1]);
+}
+function FromPick(parameters) {
+  return Pick(parameters[0], parameters[1]);
+}
+function FromRequired(parameters) {
+  return Required(parameters[0]);
+}
+function FromComputed5(moduleProperties, target, parameters) {
+  const dereferenced = DereferenceParameters(moduleProperties, parameters);
+  return target === "Awaited" ? FromAwaited(dereferenced) : target === "Index" ? FromIndex(dereferenced) : target === "KeyOf" ? FromKeyOf(dereferenced) : target === "Partial" ? FromPartial(dereferenced) : target === "Omit" ? FromOmit(dereferenced) : target === "Pick" ? FromPick(dereferenced) : target === "Required" ? FromRequired(dereferenced) : Never();
+}
+function FromArray6(moduleProperties, type) {
+  return Array2(FromType2(moduleProperties, type));
+}
+function FromAsyncIterator3(moduleProperties, type) {
+  return AsyncIterator(FromType2(moduleProperties, type));
+}
+function FromConstructor3(moduleProperties, parameters, instanceType) {
+  return Constructor(FromTypes2(moduleProperties, parameters), FromType2(moduleProperties, instanceType));
+}
+function FromFunction3(moduleProperties, parameters, returnType) {
+  return Function(FromTypes2(moduleProperties, parameters), FromType2(moduleProperties, returnType));
+}
+function FromIntersect8(moduleProperties, types) {
+  return Intersect(FromTypes2(moduleProperties, types));
+}
+function FromIterator3(moduleProperties, type) {
+  return Iterator(FromType2(moduleProperties, type));
+}
+function FromObject7(moduleProperties, properties) {
+  return Object2(globalThis.Object.keys(properties).reduce((result, key) => {
+    return { ...result, [key]: FromType2(moduleProperties, properties[key]) };
+  }, {}));
+}
+function FromRecord3(moduleProperties, type) {
+  const [value, pattern] = [FromType2(moduleProperties, RecordValue2(type)), RecordPattern(type)];
+  const result = CloneType(type);
+  result.patternProperties[pattern] = value;
+  return result;
+}
+function FromTransform(moduleProperties, transform) {
+  return IsRef(transform) ? { ...Dereference(moduleProperties, transform.$ref), [TransformKind]: transform[TransformKind] } : transform;
+}
+function FromTuple5(moduleProperties, types) {
+  return Tuple(FromTypes2(moduleProperties, types));
+}
+function FromUnion10(moduleProperties, types) {
+  return Union(FromTypes2(moduleProperties, types));
+}
+function FromTypes2(moduleProperties, types) {
+  return types.map((type) => FromType2(moduleProperties, type));
+}
+function FromType2(moduleProperties, type) {
+  return (
+    // Modifiers
+    IsOptional(type) ? CreateType(FromType2(moduleProperties, Discard(type, [OptionalKind])), type) : IsReadonly(type) ? CreateType(FromType2(moduleProperties, Discard(type, [ReadonlyKind])), type) : (
+      // Transform
+      IsTransform(type) ? CreateType(FromTransform(moduleProperties, type), type) : (
+        // Types
+        IsArray3(type) ? CreateType(FromArray6(moduleProperties, type.items), type) : IsAsyncIterator3(type) ? CreateType(FromAsyncIterator3(moduleProperties, type.items), type) : IsComputed(type) ? CreateType(FromComputed5(moduleProperties, type.target, type.parameters)) : IsConstructor(type) ? CreateType(FromConstructor3(moduleProperties, type.parameters, type.returns), type) : IsFunction3(type) ? CreateType(FromFunction3(moduleProperties, type.parameters, type.returns), type) : IsIntersect(type) ? CreateType(FromIntersect8(moduleProperties, type.allOf), type) : IsIterator3(type) ? CreateType(FromIterator3(moduleProperties, type.items), type) : IsObject3(type) ? CreateType(FromObject7(moduleProperties, type.properties), type) : IsRecord(type) ? CreateType(FromRecord3(moduleProperties, type)) : IsTuple(type) ? CreateType(FromTuple5(moduleProperties, type.items || []), type) : IsUnion(type) ? CreateType(FromUnion10(moduleProperties, type.anyOf), type) : type
+      )
+    )
+  );
+}
+function ComputeType(moduleProperties, key) {
+  return key in moduleProperties ? FromType2(moduleProperties, moduleProperties[key]) : Never();
+}
+function ComputeModuleProperties(moduleProperties) {
+  return globalThis.Object.getOwnPropertyNames(moduleProperties).reduce((result, key) => {
+    return { ...result, [key]: ComputeType(moduleProperties, key) };
+  }, {});
+}
+var init_compute = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/module/compute.mjs"() {
+    init_create();
+    init_clone();
+    init_discard2();
+    init_array2();
+    init_awaited2();
+    init_async_iterator2();
+    init_constructor2();
+    init_indexed2();
+    init_function2();
+    init_intersect2();
+    init_iterator2();
+    init_keyof2();
+    init_object2();
+    init_omit2();
+    init_pick2();
+    init_never2();
+    init_partial2();
+    init_record2();
+    init_required2();
+    init_tuple2();
+    init_union2();
+    init_symbols2();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/module/module.mjs
+function Module(properties) {
+  return new TModule(properties);
+}
+var TModule;
+var init_module = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/module/module.mjs"() {
+    init_create();
+    init_symbols2();
+    init_compute();
+    TModule = class {
+      constructor($defs) {
+        const computed = ComputeModuleProperties($defs);
+        const identified = this.WithIdentifiers(computed);
+        this.$defs = identified;
+      }
+      /** `[Json]` Imports a Type by Key. */
+      Import(key, options) {
+        const $defs = { ...this.$defs, [key]: CreateType(this.$defs[key], options) };
+        return CreateType({ [Kind]: "Import", $defs, $ref: key });
+      }
+      // prettier-ignore
+      WithIdentifiers($defs) {
+        return globalThis.Object.getOwnPropertyNames($defs).reduce((result, key) => {
+          return { ...result, [key]: { ...$defs[key], $id: key } };
+        }, {});
+      }
+    };
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/module/index.mjs
+var init_module2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/module/index.mjs"() {
+    init_module();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/not/not.mjs
+function Not2(type, options) {
+  return CreateType({ [Kind]: "Not", not: type }, options);
+}
+var init_not = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/not/not.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/not/index.mjs
+var init_not2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/not/index.mjs"() {
+    init_not();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/parameters/parameters.mjs
+function Parameters(schema, options) {
+  return IsFunction3(schema) ? Tuple(schema.parameters, options) : Never();
+}
+var init_parameters = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/parameters/parameters.mjs"() {
+    init_tuple2();
+    init_never2();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/parameters/index.mjs
+var init_parameters2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/parameters/index.mjs"() {
+    init_parameters();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/recursive/recursive.mjs
+function Recursive(callback, options = {}) {
+  if (IsUndefined(options.$id))
+    options.$id = `T${Ordinal++}`;
+  const thisType = CloneType(callback({ [Kind]: "This", $ref: `${options.$id}` }));
+  thisType.$id = options.$id;
+  return CreateType({ [Hint]: "Recursive", ...thisType }, options);
+}
+var Ordinal;
+var init_recursive = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/recursive/recursive.mjs"() {
+    init_type();
+    init_type2();
+    init_value();
+    init_symbols2();
+    Ordinal = 0;
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/recursive/index.mjs
+var init_recursive2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/recursive/index.mjs"() {
+    init_recursive();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/regexp/regexp.mjs
+function RegExp2(unresolved, options) {
+  const expr = IsString(unresolved) ? new globalThis.RegExp(unresolved) : unresolved;
+  return CreateType({ [Kind]: "RegExp", type: "RegExp", source: expr.source, flags: expr.flags }, options);
+}
+var init_regexp = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/regexp/regexp.mjs"() {
+    init_type2();
+    init_value();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/regexp/index.mjs
+var init_regexp2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/regexp/index.mjs"() {
+    init_regexp();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/rest/rest.mjs
+function RestResolve(T) {
+  return IsIntersect(T) ? T.allOf : IsUnion(T) ? T.anyOf : IsTuple(T) ? T.items ?? [] : [];
+}
+function Rest(T) {
+  return RestResolve(T);
+}
+var init_rest = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/rest/rest.mjs"() {
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/rest/index.mjs
+var init_rest2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/rest/index.mjs"() {
+    init_rest();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/return-type/return-type.mjs
+function ReturnType(schema, options) {
+  return IsFunction3(schema) ? CreateType(schema.returns, options) : Never(options);
+}
+var init_return_type = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/return-type/return-type.mjs"() {
+    init_type2();
+    init_never2();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/return-type/index.mjs
+var init_return_type2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/return-type/index.mjs"() {
+    init_return_type();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/schema/anyschema.mjs
+var init_anyschema = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/schema/anyschema.mjs"() {
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/schema/schema.mjs
+var init_schema = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/schema/schema.mjs"() {
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/schema/index.mjs
+var init_schema2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/schema/index.mjs"() {
+    init_anyschema();
+    init_schema();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/static/static.mjs
+var init_static = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/static/static.mjs"() {
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/static/index.mjs
+var init_static2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/static/index.mjs"() {
+    init_static();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/transform/transform.mjs
+function Transform(schema) {
+  return new TransformDecodeBuilder(schema);
+}
+var TransformDecodeBuilder, TransformEncodeBuilder;
+var init_transform = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/transform/transform.mjs"() {
+    init_symbols2();
+    init_kind();
+    TransformDecodeBuilder = class {
+      constructor(schema) {
+        this.schema = schema;
+      }
+      Decode(decode) {
+        return new TransformEncodeBuilder(this.schema, decode);
+      }
+    };
+    TransformEncodeBuilder = class {
+      constructor(schema, decode) {
+        this.schema = schema;
+        this.decode = decode;
+      }
+      EncodeTransform(encode, schema) {
+        const Encode2 = (value) => schema[TransformKind].Encode(encode(value));
+        const Decode2 = (value) => this.decode(schema[TransformKind].Decode(value));
+        const Codec = { Encode: Encode2, Decode: Decode2 };
+        return { ...schema, [TransformKind]: Codec };
+      }
+      EncodeSchema(encode, schema) {
+        const Codec = { Decode: this.decode, Encode: encode };
+        return { ...schema, [TransformKind]: Codec };
+      }
+      Encode(encode) {
+        return IsTransform(this.schema) ? this.EncodeTransform(encode, this.schema) : this.EncodeSchema(encode, this.schema);
+      }
+    };
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/transform/index.mjs
+var init_transform2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/transform/index.mjs"() {
+    init_transform();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/unsafe/unsafe.mjs
+function Unsafe(options = {}) {
+  return CreateType({ [Kind]: options[Kind] ?? "Unsafe" }, options);
+}
+var init_unsafe = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/unsafe/unsafe.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/unsafe/index.mjs
+var init_unsafe2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/unsafe/index.mjs"() {
+    init_unsafe();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/void/void.mjs
+function Void(options) {
+  return CreateType({ [Kind]: "Void", type: "void" }, options);
+}
+var init_void = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/void/void.mjs"() {
+    init_type2();
+    init_symbols2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/void/index.mjs
+var init_void2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/void/index.mjs"() {
+    init_void();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/type/type.mjs
+var type_exports3 = {};
+__export(type_exports3, {
+  Any: () => Any,
+  Argument: () => Argument,
+  Array: () => Array2,
+  AsyncIterator: () => AsyncIterator,
+  Awaited: () => Awaited,
+  BigInt: () => BigInt2,
+  Boolean: () => Boolean2,
+  Capitalize: () => Capitalize,
+  Composite: () => Composite,
+  Const: () => Const,
+  Constructor: () => Constructor,
+  ConstructorParameters: () => ConstructorParameters,
+  Date: () => Date2,
+  Enum: () => Enum,
+  Exclude: () => Exclude,
+  Extends: () => Extends,
+  Extract: () => Extract,
+  Function: () => Function,
+  Index: () => Index,
+  InstanceType: () => InstanceType,
+  Instantiate: () => Instantiate,
+  Integer: () => Integer,
+  Intersect: () => Intersect,
+  Iterator: () => Iterator,
+  KeyOf: () => KeyOf,
+  Literal: () => Literal,
+  Lowercase: () => Lowercase,
+  Mapped: () => Mapped,
+  Module: () => Module,
+  Never: () => Never,
+  Not: () => Not2,
+  Null: () => Null,
+  Number: () => Number2,
+  Object: () => Object2,
+  Omit: () => Omit,
+  Optional: () => Optional,
+  Parameters: () => Parameters,
+  Partial: () => Partial,
+  Pick: () => Pick,
+  Promise: () => Promise2,
+  Readonly: () => Readonly,
+  ReadonlyOptional: () => ReadonlyOptional,
+  Record: () => Record,
+  Recursive: () => Recursive,
+  Ref: () => Ref,
+  RegExp: () => RegExp2,
+  Required: () => Required,
+  Rest: () => Rest,
+  ReturnType: () => ReturnType,
+  String: () => String2,
+  Symbol: () => Symbol2,
+  TemplateLiteral: () => TemplateLiteral,
+  Transform: () => Transform,
+  Tuple: () => Tuple,
+  Uint8Array: () => Uint8Array2,
+  Uncapitalize: () => Uncapitalize,
+  Undefined: () => Undefined,
+  Union: () => Union,
+  Unknown: () => Unknown,
+  Unsafe: () => Unsafe,
+  Uppercase: () => Uppercase,
+  Void: () => Void
+});
+var init_type5 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/type/type.mjs"() {
+    init_any2();
+    init_argument2();
+    init_array2();
+    init_async_iterator2();
+    init_awaited2();
+    init_bigint2();
+    init_boolean2();
+    init_composite2();
+    init_const2();
+    init_constructor2();
+    init_constructor_parameters2();
+    init_date2();
+    init_enum2();
+    init_exclude2();
+    init_extends2();
+    init_extract2();
+    init_function2();
+    init_indexed2();
+    init_instance_type2();
+    init_instantiate2();
+    init_integer2();
+    init_intersect2();
+    init_intrinsic2();
+    init_iterator2();
+    init_keyof2();
+    init_literal2();
+    init_mapped2();
+    init_module2();
+    init_never2();
+    init_not2();
+    init_null2();
+    init_number2();
+    init_object2();
+    init_omit2();
+    init_optional2();
+    init_parameters2();
+    init_partial2();
+    init_pick2();
+    init_promise2();
+    init_readonly2();
+    init_readonly_optional2();
+    init_record2();
+    init_recursive2();
+    init_ref2();
+    init_regexp2();
+    init_required2();
+    init_rest2();
+    init_return_type2();
+    init_string2();
+    init_symbol2();
+    init_template_literal2();
+    init_transform2();
+    init_tuple2();
+    init_uint8array2();
+    init_undefined2();
+    init_union2();
+    init_unknown2();
+    init_unsafe2();
+    init_void2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/type/type/index.mjs
+var Type;
+var init_type6 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/type/type/index.mjs"() {
+    init_type5();
+    Type = type_exports3;
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/index.mjs
+var init_esm = __esm({
+  "node_modules/@sinclair/typebox/build/esm/index.mjs"() {
+    init_clone();
+    init_create();
+    init_error2();
+    init_guard3();
+    init_helpers2();
+    init_patterns2();
+    init_registry();
+    init_sets();
+    init_symbols2();
+    init_any2();
+    init_array2();
+    init_argument2();
+    init_async_iterator2();
+    init_awaited2();
+    init_bigint2();
+    init_boolean2();
+    init_composite2();
+    init_const2();
+    init_constructor2();
+    init_constructor_parameters2();
+    init_date2();
+    init_enum2();
+    init_exclude2();
+    init_extends2();
+    init_extract2();
+    init_function2();
+    init_indexed2();
+    init_instance_type2();
+    init_instantiate2();
+    init_integer2();
+    init_intersect2();
+    init_iterator2();
+    init_intrinsic2();
+    init_keyof2();
+    init_literal2();
+    init_module2();
+    init_mapped2();
+    init_never2();
+    init_not2();
+    init_null2();
+    init_number2();
+    init_object2();
+    init_omit2();
+    init_optional2();
+    init_parameters2();
+    init_partial2();
+    init_pick2();
+    init_promise2();
+    init_readonly2();
+    init_readonly_optional2();
+    init_record2();
+    init_recursive2();
+    init_ref2();
+    init_regexp2();
+    init_required2();
+    init_rest2();
+    init_return_type2();
+    init_schema2();
+    init_static2();
+    init_string2();
+    init_symbol2();
+    init_template_literal2();
+    init_transform2();
+    init_tuple2();
+    init_uint8array2();
+    init_undefined2();
+    init_union2();
+    init_unknown2();
+    init_unsafe2();
+    init_void2();
+    init_type6();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/system/system.mjs
+var TypeSystemDuplicateTypeKind, TypeSystemDuplicateFormat, TypeSystem;
+var init_system = __esm({
+  "node_modules/@sinclair/typebox/build/esm/system/system.mjs"() {
+    init_registry();
+    init_unsafe2();
+    init_symbols2();
+    init_error2();
+    TypeSystemDuplicateTypeKind = class extends TypeBoxError {
+      constructor(kind) {
+        super(`Duplicate type kind '${kind}' detected`);
+      }
+    };
+    TypeSystemDuplicateFormat = class extends TypeBoxError {
+      constructor(kind) {
+        super(`Duplicate string format '${kind}' detected`);
+      }
+    };
+    (function(TypeSystem2) {
+      function Type3(kind, check) {
+        if (type_exports2.Has(kind))
+          throw new TypeSystemDuplicateTypeKind(kind);
+        type_exports2.Set(kind, check);
+        return (options = {}) => Unsafe({ ...options, [Kind]: kind });
+      }
+      TypeSystem2.Type = Type3;
+      function Format2(format, check) {
+        if (format_exports.Has(format))
+          throw new TypeSystemDuplicateFormat(format);
+        format_exports.Set(format, check);
+        return format;
+      }
+      TypeSystem2.Format = Format2;
+    })(TypeSystem || (TypeSystem = {}));
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/system/index.mjs
+var init_system2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/system/index.mjs"() {
+    init_policy();
+    init_system();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/errors/function.mjs
+function DefaultErrorFunction(error) {
+  switch (error.errorType) {
+    case ValueErrorType.ArrayContains:
+      return "Expected array to contain at least one matching value";
+    case ValueErrorType.ArrayMaxContains:
+      return `Expected array to contain no more than ${error.schema.maxContains} matching values`;
+    case ValueErrorType.ArrayMinContains:
+      return `Expected array to contain at least ${error.schema.minContains} matching values`;
+    case ValueErrorType.ArrayMaxItems:
+      return `Expected array length to be less or equal to ${error.schema.maxItems}`;
+    case ValueErrorType.ArrayMinItems:
+      return `Expected array length to be greater or equal to ${error.schema.minItems}`;
+    case ValueErrorType.ArrayUniqueItems:
+      return "Expected array elements to be unique";
+    case ValueErrorType.Array:
+      return "Expected array";
+    case ValueErrorType.AsyncIterator:
+      return "Expected AsyncIterator";
+    case ValueErrorType.BigIntExclusiveMaximum:
+      return `Expected bigint to be less than ${error.schema.exclusiveMaximum}`;
+    case ValueErrorType.BigIntExclusiveMinimum:
+      return `Expected bigint to be greater than ${error.schema.exclusiveMinimum}`;
+    case ValueErrorType.BigIntMaximum:
+      return `Expected bigint to be less or equal to ${error.schema.maximum}`;
+    case ValueErrorType.BigIntMinimum:
+      return `Expected bigint to be greater or equal to ${error.schema.minimum}`;
+    case ValueErrorType.BigIntMultipleOf:
+      return `Expected bigint to be a multiple of ${error.schema.multipleOf}`;
+    case ValueErrorType.BigInt:
+      return "Expected bigint";
+    case ValueErrorType.Boolean:
+      return "Expected boolean";
+    case ValueErrorType.DateExclusiveMinimumTimestamp:
+      return `Expected Date timestamp to be greater than ${error.schema.exclusiveMinimumTimestamp}`;
+    case ValueErrorType.DateExclusiveMaximumTimestamp:
+      return `Expected Date timestamp to be less than ${error.schema.exclusiveMaximumTimestamp}`;
+    case ValueErrorType.DateMinimumTimestamp:
+      return `Expected Date timestamp to be greater or equal to ${error.schema.minimumTimestamp}`;
+    case ValueErrorType.DateMaximumTimestamp:
+      return `Expected Date timestamp to be less or equal to ${error.schema.maximumTimestamp}`;
+    case ValueErrorType.DateMultipleOfTimestamp:
+      return `Expected Date timestamp to be a multiple of ${error.schema.multipleOfTimestamp}`;
+    case ValueErrorType.Date:
+      return "Expected Date";
+    case ValueErrorType.Function:
+      return "Expected function";
+    case ValueErrorType.IntegerExclusiveMaximum:
+      return `Expected integer to be less than ${error.schema.exclusiveMaximum}`;
+    case ValueErrorType.IntegerExclusiveMinimum:
+      return `Expected integer to be greater than ${error.schema.exclusiveMinimum}`;
+    case ValueErrorType.IntegerMaximum:
+      return `Expected integer to be less or equal to ${error.schema.maximum}`;
+    case ValueErrorType.IntegerMinimum:
+      return `Expected integer to be greater or equal to ${error.schema.minimum}`;
+    case ValueErrorType.IntegerMultipleOf:
+      return `Expected integer to be a multiple of ${error.schema.multipleOf}`;
+    case ValueErrorType.Integer:
+      return "Expected integer";
+    case ValueErrorType.IntersectUnevaluatedProperties:
+      return "Unexpected property";
+    case ValueErrorType.Intersect:
+      return "Expected all values to match";
+    case ValueErrorType.Iterator:
+      return "Expected Iterator";
+    case ValueErrorType.Literal:
+      return `Expected ${typeof error.schema.const === "string" ? `'${error.schema.const}'` : error.schema.const}`;
+    case ValueErrorType.Never:
+      return "Never";
+    case ValueErrorType.Not:
+      return "Value should not match";
+    case ValueErrorType.Null:
+      return "Expected null";
+    case ValueErrorType.NumberExclusiveMaximum:
+      return `Expected number to be less than ${error.schema.exclusiveMaximum}`;
+    case ValueErrorType.NumberExclusiveMinimum:
+      return `Expected number to be greater than ${error.schema.exclusiveMinimum}`;
+    case ValueErrorType.NumberMaximum:
+      return `Expected number to be less or equal to ${error.schema.maximum}`;
+    case ValueErrorType.NumberMinimum:
+      return `Expected number to be greater or equal to ${error.schema.minimum}`;
+    case ValueErrorType.NumberMultipleOf:
+      return `Expected number to be a multiple of ${error.schema.multipleOf}`;
+    case ValueErrorType.Number:
+      return "Expected number";
+    case ValueErrorType.Object:
+      return "Expected object";
+    case ValueErrorType.ObjectAdditionalProperties:
+      return "Unexpected property";
+    case ValueErrorType.ObjectMaxProperties:
+      return `Expected object to have no more than ${error.schema.maxProperties} properties`;
+    case ValueErrorType.ObjectMinProperties:
+      return `Expected object to have at least ${error.schema.minProperties} properties`;
+    case ValueErrorType.ObjectRequiredProperty:
+      return "Expected required property";
+    case ValueErrorType.Promise:
+      return "Expected Promise";
+    case ValueErrorType.RegExp:
+      return "Expected string to match regular expression";
+    case ValueErrorType.StringFormatUnknown:
+      return `Unknown format '${error.schema.format}'`;
+    case ValueErrorType.StringFormat:
+      return `Expected string to match '${error.schema.format}' format`;
+    case ValueErrorType.StringMaxLength:
+      return `Expected string length less or equal to ${error.schema.maxLength}`;
+    case ValueErrorType.StringMinLength:
+      return `Expected string length greater or equal to ${error.schema.minLength}`;
+    case ValueErrorType.StringPattern:
+      return `Expected string to match '${error.schema.pattern}'`;
+    case ValueErrorType.String:
+      return "Expected string";
+    case ValueErrorType.Symbol:
+      return "Expected symbol";
+    case ValueErrorType.TupleLength:
+      return `Expected tuple to have ${error.schema.maxItems || 0} elements`;
+    case ValueErrorType.Tuple:
+      return "Expected tuple";
+    case ValueErrorType.Uint8ArrayMaxByteLength:
+      return `Expected byte length less or equal to ${error.schema.maxByteLength}`;
+    case ValueErrorType.Uint8ArrayMinByteLength:
+      return `Expected byte length greater or equal to ${error.schema.minByteLength}`;
+    case ValueErrorType.Uint8Array:
+      return "Expected Uint8Array";
+    case ValueErrorType.Undefined:
+      return "Expected undefined";
+    case ValueErrorType.Union:
+      return "Expected union value";
+    case ValueErrorType.Void:
+      return "Expected void";
+    case ValueErrorType.Kind:
+      return `Expected kind '${error.schema[Kind]}'`;
+    default:
+      return "Unknown error type";
+  }
+}
+function GetErrorFunction() {
+  return errorFunction;
+}
+var errorFunction;
+var init_function3 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/errors/function.mjs"() {
+    init_symbols2();
+    init_errors();
+    errorFunction = DefaultErrorFunction;
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/deref/deref.mjs
+function Resolve(schema, references) {
+  const target = references.find((target2) => target2.$id === schema.$ref);
+  if (target === void 0)
+    throw new TypeDereferenceError(schema);
+  return Deref(target, references);
+}
+function Pushref(schema, references) {
+  if (!IsString2(schema.$id) || references.some((target) => target.$id === schema.$id))
+    return references;
+  references.push(schema);
+  return references;
+}
+function Deref(schema, references) {
+  return schema[Kind] === "This" || schema[Kind] === "Ref" ? Resolve(schema, references) : schema;
+}
+var TypeDereferenceError;
+var init_deref = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/deref/deref.mjs"() {
+    init_error2();
+    init_symbols2();
+    init_guard();
+    TypeDereferenceError = class extends TypeBoxError {
+      constructor(schema) {
+        super(`Unable to dereference schema with $id '${schema.$ref}'`);
+        this.schema = schema;
+      }
+    };
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/deref/index.mjs
+var init_deref2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/deref/index.mjs"() {
+    init_deref();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/hash/hash.mjs
+function* NumberToBytes(value) {
+  const byteCount = value === 0 ? 1 : Math.ceil(Math.floor(Math.log2(value) + 1) / 8);
+  for (let i = 0; i < byteCount; i++) {
+    yield value >> 8 * (byteCount - 1 - i) & 255;
+  }
+}
+function ArrayType2(value) {
+  FNV1A64(ByteMarker.Array);
+  for (const item of value) {
+    Visit4(item);
+  }
+}
+function BooleanType(value) {
+  FNV1A64(ByteMarker.Boolean);
+  FNV1A64(value ? 1 : 0);
+}
+function BigIntType(value) {
+  FNV1A64(ByteMarker.BigInt);
+  F64In.setBigInt64(0, value);
+  for (const byte of F64Out) {
+    FNV1A64(byte);
+  }
+}
+function DateType2(value) {
+  FNV1A64(ByteMarker.Date);
+  Visit4(value.getTime());
+}
+function NullType(value) {
+  FNV1A64(ByteMarker.Null);
+}
+function NumberType(value) {
+  FNV1A64(ByteMarker.Number);
+  F64In.setFloat64(0, value);
+  for (const byte of F64Out) {
+    FNV1A64(byte);
+  }
+}
+function ObjectType2(value) {
+  FNV1A64(ByteMarker.Object);
+  for (const key of globalThis.Object.getOwnPropertyNames(value).sort()) {
+    Visit4(key);
+    Visit4(value[key]);
+  }
+}
+function StringType(value) {
+  FNV1A64(ByteMarker.String);
+  for (let i = 0; i < value.length; i++) {
+    for (const byte of NumberToBytes(value.charCodeAt(i))) {
+      FNV1A64(byte);
+    }
+  }
+}
+function SymbolType(value) {
+  FNV1A64(ByteMarker.Symbol);
+  Visit4(value.description);
+}
+function Uint8ArrayType2(value) {
+  FNV1A64(ByteMarker.Uint8Array);
+  for (let i = 0; i < value.length; i++) {
+    FNV1A64(value[i]);
+  }
+}
+function UndefinedType(value) {
+  return FNV1A64(ByteMarker.Undefined);
+}
+function Visit4(value) {
+  if (IsArray2(value))
+    return ArrayType2(value);
+  if (IsBoolean2(value))
+    return BooleanType(value);
+  if (IsBigInt2(value))
+    return BigIntType(value);
+  if (IsDate2(value))
+    return DateType2(value);
+  if (IsNull2(value))
+    return NullType(value);
+  if (IsNumber2(value))
+    return NumberType(value);
+  if (IsObject2(value))
+    return ObjectType2(value);
+  if (IsString2(value))
+    return StringType(value);
+  if (IsSymbol2(value))
+    return SymbolType(value);
+  if (IsUint8Array2(value))
+    return Uint8ArrayType2(value);
+  if (IsUndefined2(value))
+    return UndefinedType(value);
+  throw new ValueHashError(value);
+}
+function FNV1A64(byte) {
+  Accumulator = Accumulator ^ Bytes[byte];
+  Accumulator = Accumulator * Prime % Size;
+}
+function Hash(value) {
+  Accumulator = BigInt("14695981039346656037");
+  Visit4(value);
+  return Accumulator;
+}
+var ValueHashError, ByteMarker, Accumulator, Prime, Size, Bytes, F64, F64In, F64Out;
+var init_hash = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/hash/hash.mjs"() {
+    init_guard2();
+    init_error2();
+    ValueHashError = class extends TypeBoxError {
+      constructor(value) {
+        super(`Unable to hash value`);
+        this.value = value;
+      }
+    };
+    (function(ByteMarker2) {
+      ByteMarker2[ByteMarker2["Undefined"] = 0] = "Undefined";
+      ByteMarker2[ByteMarker2["Null"] = 1] = "Null";
+      ByteMarker2[ByteMarker2["Boolean"] = 2] = "Boolean";
+      ByteMarker2[ByteMarker2["Number"] = 3] = "Number";
+      ByteMarker2[ByteMarker2["String"] = 4] = "String";
+      ByteMarker2[ByteMarker2["Object"] = 5] = "Object";
+      ByteMarker2[ByteMarker2["Array"] = 6] = "Array";
+      ByteMarker2[ByteMarker2["Date"] = 7] = "Date";
+      ByteMarker2[ByteMarker2["Uint8Array"] = 8] = "Uint8Array";
+      ByteMarker2[ByteMarker2["Symbol"] = 9] = "Symbol";
+      ByteMarker2[ByteMarker2["BigInt"] = 10] = "BigInt";
+    })(ByteMarker || (ByteMarker = {}));
+    Accumulator = BigInt("14695981039346656037");
+    [Prime, Size] = [BigInt("1099511628211"), BigInt(
+      "18446744073709551616"
+      /* 2 ^ 64 */
+    )];
+    Bytes = Array.from({ length: 256 }).map((_, i) => BigInt(i));
+    F64 = new Float64Array(1);
+    F64In = new DataView(F64.buffer);
+    F64Out = new Uint8Array(F64.buffer);
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/hash/index.mjs
+var init_hash2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/hash/index.mjs"() {
+    init_hash();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/check/check.mjs
+function IsAnyOrUnknown(schema) {
+  return schema[Kind] === "Any" || schema[Kind] === "Unknown";
+}
+function IsDefined(value) {
+  return value !== void 0;
+}
+function FromAny2(schema, references, value) {
+  return true;
+}
+function FromArgument2(schema, references, value) {
+  return true;
+}
+function FromArray7(schema, references, value) {
+  if (!IsArray2(value))
+    return false;
+  if (IsDefined(schema.minItems) && !(value.length >= schema.minItems)) {
+    return false;
+  }
+  if (IsDefined(schema.maxItems) && !(value.length <= schema.maxItems)) {
+    return false;
+  }
+  for (const element of value) {
+    if (!Visit5(schema.items, references, element))
+      return false;
+  }
+  if (schema.uniqueItems === true && !(function() {
+    const set = /* @__PURE__ */ new Set();
+    for (const element of value) {
+      const hashed = Hash(element);
+      if (set.has(hashed)) {
+        return false;
+      } else {
+        set.add(hashed);
+      }
+    }
+    return true;
+  })()) {
+    return false;
+  }
+  if (!(IsDefined(schema.contains) || IsNumber2(schema.minContains) || IsNumber2(schema.maxContains))) {
+    return true;
+  }
+  const containsSchema = IsDefined(schema.contains) ? schema.contains : Never();
+  const containsCount = value.reduce((acc, value2) => Visit5(containsSchema, references, value2) ? acc + 1 : acc, 0);
+  if (containsCount === 0) {
+    return false;
+  }
+  if (IsNumber2(schema.minContains) && containsCount < schema.minContains) {
+    return false;
+  }
+  if (IsNumber2(schema.maxContains) && containsCount > schema.maxContains) {
+    return false;
+  }
+  return true;
+}
+function FromAsyncIterator4(schema, references, value) {
+  return IsAsyncIterator2(value);
+}
+function FromBigInt2(schema, references, value) {
+  if (!IsBigInt2(value))
+    return false;
+  if (IsDefined(schema.exclusiveMaximum) && !(value < schema.exclusiveMaximum)) {
+    return false;
+  }
+  if (IsDefined(schema.exclusiveMinimum) && !(value > schema.exclusiveMinimum)) {
+    return false;
+  }
+  if (IsDefined(schema.maximum) && !(value <= schema.maximum)) {
+    return false;
+  }
+  if (IsDefined(schema.minimum) && !(value >= schema.minimum)) {
+    return false;
+  }
+  if (IsDefined(schema.multipleOf) && !(value % schema.multipleOf === BigInt(0))) {
+    return false;
+  }
+  return true;
+}
+function FromBoolean2(schema, references, value) {
+  return IsBoolean2(value);
+}
+function FromConstructor4(schema, references, value) {
+  return Visit5(schema.returns, references, value.prototype);
+}
+function FromDate2(schema, references, value) {
+  if (!IsDate2(value))
+    return false;
+  if (IsDefined(schema.exclusiveMaximumTimestamp) && !(value.getTime() < schema.exclusiveMaximumTimestamp)) {
+    return false;
+  }
+  if (IsDefined(schema.exclusiveMinimumTimestamp) && !(value.getTime() > schema.exclusiveMinimumTimestamp)) {
+    return false;
+  }
+  if (IsDefined(schema.maximumTimestamp) && !(value.getTime() <= schema.maximumTimestamp)) {
+    return false;
+  }
+  if (IsDefined(schema.minimumTimestamp) && !(value.getTime() >= schema.minimumTimestamp)) {
+    return false;
+  }
+  if (IsDefined(schema.multipleOfTimestamp) && !(value.getTime() % schema.multipleOfTimestamp === 0)) {
+    return false;
+  }
+  return true;
+}
+function FromFunction4(schema, references, value) {
+  return IsFunction2(value);
+}
+function FromImport(schema, references, value) {
+  const definitions = globalThis.Object.values(schema.$defs);
+  const target = schema.$defs[schema.$ref];
+  return Visit5(target, [...references, ...definitions], value);
+}
+function FromInteger2(schema, references, value) {
+  if (!IsInteger(value)) {
+    return false;
+  }
+  if (IsDefined(schema.exclusiveMaximum) && !(value < schema.exclusiveMaximum)) {
+    return false;
+  }
+  if (IsDefined(schema.exclusiveMinimum) && !(value > schema.exclusiveMinimum)) {
+    return false;
+  }
+  if (IsDefined(schema.maximum) && !(value <= schema.maximum)) {
+    return false;
+  }
+  if (IsDefined(schema.minimum) && !(value >= schema.minimum)) {
+    return false;
+  }
+  if (IsDefined(schema.multipleOf) && !(value % schema.multipleOf === 0)) {
+    return false;
+  }
+  return true;
+}
+function FromIntersect9(schema, references, value) {
+  const check1 = schema.allOf.every((schema2) => Visit5(schema2, references, value));
+  if (schema.unevaluatedProperties === false) {
+    const keyPattern = new RegExp(KeyOfPattern(schema));
+    const check2 = Object.getOwnPropertyNames(value).every((key) => keyPattern.test(key));
+    return check1 && check2;
+  } else if (IsSchema(schema.unevaluatedProperties)) {
+    const keyCheck = new RegExp(KeyOfPattern(schema));
+    const check2 = Object.getOwnPropertyNames(value).every((key) => keyCheck.test(key) || Visit5(schema.unevaluatedProperties, references, value[key]));
+    return check1 && check2;
+  } else {
+    return check1;
+  }
+}
+function FromIterator4(schema, references, value) {
+  return IsIterator2(value);
+}
+function FromLiteral3(schema, references, value) {
+  return value === schema.const;
+}
+function FromNever2(schema, references, value) {
+  return false;
+}
+function FromNot2(schema, references, value) {
+  return !Visit5(schema.not, references, value);
+}
+function FromNull2(schema, references, value) {
+  return IsNull2(value);
+}
+function FromNumber2(schema, references, value) {
+  if (!TypeSystemPolicy.IsNumberLike(value))
+    return false;
+  if (IsDefined(schema.exclusiveMaximum) && !(value < schema.exclusiveMaximum)) {
+    return false;
+  }
+  if (IsDefined(schema.exclusiveMinimum) && !(value > schema.exclusiveMinimum)) {
+    return false;
+  }
+  if (IsDefined(schema.minimum) && !(value >= schema.minimum)) {
+    return false;
+  }
+  if (IsDefined(schema.maximum) && !(value <= schema.maximum)) {
+    return false;
+  }
+  if (IsDefined(schema.multipleOf) && !(value % schema.multipleOf === 0)) {
+    return false;
+  }
+  return true;
+}
+function FromObject8(schema, references, value) {
+  if (!TypeSystemPolicy.IsObjectLike(value))
+    return false;
+  if (IsDefined(schema.minProperties) && !(Object.getOwnPropertyNames(value).length >= schema.minProperties)) {
+    return false;
+  }
+  if (IsDefined(schema.maxProperties) && !(Object.getOwnPropertyNames(value).length <= schema.maxProperties)) {
+    return false;
+  }
+  const knownKeys = Object.getOwnPropertyNames(schema.properties);
+  for (const knownKey of knownKeys) {
+    const property = schema.properties[knownKey];
+    if (schema.required && schema.required.includes(knownKey)) {
+      if (!Visit5(property, references, value[knownKey])) {
+        return false;
+      }
+      if ((ExtendsUndefinedCheck(property) || IsAnyOrUnknown(property)) && !(knownKey in value)) {
+        return false;
+      }
+    } else {
+      if (TypeSystemPolicy.IsExactOptionalProperty(value, knownKey) && !Visit5(property, references, value[knownKey])) {
+        return false;
+      }
+    }
+  }
+  if (schema.additionalProperties === false) {
+    const valueKeys = Object.getOwnPropertyNames(value);
+    if (schema.required && schema.required.length === knownKeys.length && valueKeys.length === knownKeys.length) {
+      return true;
+    } else {
+      return valueKeys.every((valueKey) => knownKeys.includes(valueKey));
+    }
+  } else if (typeof schema.additionalProperties === "object") {
+    const valueKeys = Object.getOwnPropertyNames(value);
+    return valueKeys.every((key) => knownKeys.includes(key) || Visit5(schema.additionalProperties, references, value[key]));
+  } else {
+    return true;
+  }
+}
+function FromPromise4(schema, references, value) {
+  return IsPromise(value);
+}
+function FromRecord4(schema, references, value) {
+  if (!TypeSystemPolicy.IsRecordLike(value)) {
+    return false;
+  }
+  if (IsDefined(schema.minProperties) && !(Object.getOwnPropertyNames(value).length >= schema.minProperties)) {
+    return false;
+  }
+  if (IsDefined(schema.maxProperties) && !(Object.getOwnPropertyNames(value).length <= schema.maxProperties)) {
+    return false;
+  }
+  const [patternKey, patternSchema] = Object.entries(schema.patternProperties)[0];
+  const regex = new RegExp(patternKey);
+  const check1 = Object.entries(value).every(([key, value2]) => {
+    return regex.test(key) ? Visit5(patternSchema, references, value2) : true;
+  });
+  const check2 = typeof schema.additionalProperties === "object" ? Object.entries(value).every(([key, value2]) => {
+    return !regex.test(key) ? Visit5(schema.additionalProperties, references, value2) : true;
+  }) : true;
+  const check3 = schema.additionalProperties === false ? Object.getOwnPropertyNames(value).every((key) => {
+    return regex.test(key);
+  }) : true;
+  return check1 && check2 && check3;
+}
+function FromRef5(schema, references, value) {
+  return Visit5(Deref(schema, references), references, value);
+}
+function FromRegExp2(schema, references, value) {
+  const regex = new RegExp(schema.source, schema.flags);
+  if (IsDefined(schema.minLength)) {
+    if (!(value.length >= schema.minLength))
+      return false;
+  }
+  if (IsDefined(schema.maxLength)) {
+    if (!(value.length <= schema.maxLength))
+      return false;
+  }
+  return regex.test(value);
+}
+function FromString2(schema, references, value) {
+  if (!IsString2(value)) {
+    return false;
+  }
+  if (IsDefined(schema.minLength)) {
+    if (!(value.length >= schema.minLength))
+      return false;
+  }
+  if (IsDefined(schema.maxLength)) {
+    if (!(value.length <= schema.maxLength))
+      return false;
+  }
+  if (IsDefined(schema.pattern)) {
+    const regex = new RegExp(schema.pattern);
+    if (!regex.test(value))
+      return false;
+  }
+  if (IsDefined(schema.format)) {
+    if (!format_exports.Has(schema.format))
+      return false;
+    const func = format_exports.Get(schema.format);
+    return func(value);
+  }
+  return true;
+}
+function FromSymbol2(schema, references, value) {
+  return IsSymbol2(value);
+}
+function FromTemplateLiteral4(schema, references, value) {
+  return IsString2(value) && new RegExp(schema.pattern).test(value);
+}
+function FromThis(schema, references, value) {
+  return Visit5(Deref(schema, references), references, value);
+}
+function FromTuple6(schema, references, value) {
+  if (!IsArray2(value)) {
+    return false;
+  }
+  if (schema.items === void 0 && !(value.length === 0)) {
+    return false;
+  }
+  if (!(value.length === schema.maxItems)) {
+    return false;
+  }
+  if (!schema.items) {
+    return true;
+  }
+  for (let i = 0; i < schema.items.length; i++) {
+    if (!Visit5(schema.items[i], references, value[i]))
+      return false;
+  }
+  return true;
+}
+function FromUndefined2(schema, references, value) {
+  return IsUndefined2(value);
+}
+function FromUnion11(schema, references, value) {
+  return schema.anyOf.some((inner) => Visit5(inner, references, value));
+}
+function FromUint8Array2(schema, references, value) {
+  if (!IsUint8Array2(value)) {
+    return false;
+  }
+  if (IsDefined(schema.maxByteLength) && !(value.length <= schema.maxByteLength)) {
+    return false;
+  }
+  if (IsDefined(schema.minByteLength) && !(value.length >= schema.minByteLength)) {
+    return false;
+  }
+  return true;
+}
+function FromUnknown2(schema, references, value) {
+  return true;
+}
+function FromVoid2(schema, references, value) {
+  return TypeSystemPolicy.IsVoidLike(value);
+}
+function FromKind(schema, references, value) {
+  if (!type_exports2.Has(schema[Kind]))
+    return false;
+  const func = type_exports2.Get(schema[Kind]);
+  return func(schema, value);
+}
+function Visit5(schema, references, value) {
+  const references_ = IsDefined(schema.$id) ? Pushref(schema, references) : references;
+  const schema_ = schema;
+  switch (schema_[Kind]) {
+    case "Any":
+      return FromAny2(schema_, references_, value);
+    case "Argument":
+      return FromArgument2(schema_, references_, value);
+    case "Array":
+      return FromArray7(schema_, references_, value);
+    case "AsyncIterator":
+      return FromAsyncIterator4(schema_, references_, value);
+    case "BigInt":
+      return FromBigInt2(schema_, references_, value);
+    case "Boolean":
+      return FromBoolean2(schema_, references_, value);
+    case "Constructor":
+      return FromConstructor4(schema_, references_, value);
+    case "Date":
+      return FromDate2(schema_, references_, value);
+    case "Function":
+      return FromFunction4(schema_, references_, value);
+    case "Import":
+      return FromImport(schema_, references_, value);
+    case "Integer":
+      return FromInteger2(schema_, references_, value);
+    case "Intersect":
+      return FromIntersect9(schema_, references_, value);
+    case "Iterator":
+      return FromIterator4(schema_, references_, value);
+    case "Literal":
+      return FromLiteral3(schema_, references_, value);
+    case "Never":
+      return FromNever2(schema_, references_, value);
+    case "Not":
+      return FromNot2(schema_, references_, value);
+    case "Null":
+      return FromNull2(schema_, references_, value);
+    case "Number":
+      return FromNumber2(schema_, references_, value);
+    case "Object":
+      return FromObject8(schema_, references_, value);
+    case "Promise":
+      return FromPromise4(schema_, references_, value);
+    case "Record":
+      return FromRecord4(schema_, references_, value);
+    case "Ref":
+      return FromRef5(schema_, references_, value);
+    case "RegExp":
+      return FromRegExp2(schema_, references_, value);
+    case "String":
+      return FromString2(schema_, references_, value);
+    case "Symbol":
+      return FromSymbol2(schema_, references_, value);
+    case "TemplateLiteral":
+      return FromTemplateLiteral4(schema_, references_, value);
+    case "This":
+      return FromThis(schema_, references_, value);
+    case "Tuple":
+      return FromTuple6(schema_, references_, value);
+    case "Undefined":
+      return FromUndefined2(schema_, references_, value);
+    case "Union":
+      return FromUnion11(schema_, references_, value);
+    case "Uint8Array":
+      return FromUint8Array2(schema_, references_, value);
+    case "Unknown":
+      return FromUnknown2(schema_, references_, value);
+    case "Void":
+      return FromVoid2(schema_, references_, value);
+    default:
+      if (!type_exports2.Has(schema_[Kind]))
+        throw new ValueCheckUnknownTypeError(schema_);
+      return FromKind(schema_, references_, value);
+  }
+}
+function Check(...args) {
+  return args.length === 3 ? Visit5(args[0], args[1], args[2]) : Visit5(args[0], [], args[1]);
+}
+var ValueCheckUnknownTypeError;
+var init_check = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/check/check.mjs"() {
+    init_system2();
+    init_deref2();
+    init_hash2();
+    init_symbols2();
+    init_keyof2();
+    init_extends2();
+    init_registry();
+    init_error2();
+    init_never2();
+    init_guard2();
+    init_kind();
+    ValueCheckUnknownTypeError = class extends TypeBoxError {
+      constructor(schema) {
+        super(`Unknown type`);
+        this.schema = schema;
+      }
+    };
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/check/index.mjs
+var init_check2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/check/index.mjs"() {
+    init_check();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/errors/errors.mjs
+function EscapeKey(key) {
+  return key.replace(/~/g, "~0").replace(/\//g, "~1");
+}
+function IsDefined2(value) {
+  return value !== void 0;
+}
+function Create(errorType, schema, path4, value, errors = []) {
+  return {
+    type: errorType,
+    schema,
+    path: path4,
+    value,
+    message: GetErrorFunction()({ errorType, path: path4, schema, value, errors }),
+    errors
+  };
+}
+function* FromAny3(schema, references, path4, value) {
+}
+function* FromArgument3(schema, references, path4, value) {
+}
+function* FromArray8(schema, references, path4, value) {
+  if (!IsArray2(value)) {
+    return yield Create(ValueErrorType.Array, schema, path4, value);
+  }
+  if (IsDefined2(schema.minItems) && !(value.length >= schema.minItems)) {
+    yield Create(ValueErrorType.ArrayMinItems, schema, path4, value);
+  }
+  if (IsDefined2(schema.maxItems) && !(value.length <= schema.maxItems)) {
+    yield Create(ValueErrorType.ArrayMaxItems, schema, path4, value);
+  }
+  for (let i = 0; i < value.length; i++) {
+    yield* Visit6(schema.items, references, `${path4}/${i}`, value[i]);
+  }
+  if (schema.uniqueItems === true && !(function() {
+    const set = /* @__PURE__ */ new Set();
+    for (const element of value) {
+      const hashed = Hash(element);
+      if (set.has(hashed)) {
+        return false;
+      } else {
+        set.add(hashed);
+      }
+    }
+    return true;
+  })()) {
+    yield Create(ValueErrorType.ArrayUniqueItems, schema, path4, value);
+  }
+  if (!(IsDefined2(schema.contains) || IsDefined2(schema.minContains) || IsDefined2(schema.maxContains))) {
+    return;
+  }
+  const containsSchema = IsDefined2(schema.contains) ? schema.contains : Never();
+  const containsCount = value.reduce((acc, value2, index) => Visit6(containsSchema, references, `${path4}${index}`, value2).next().done === true ? acc + 1 : acc, 0);
+  if (containsCount === 0) {
+    yield Create(ValueErrorType.ArrayContains, schema, path4, value);
+  }
+  if (IsNumber2(schema.minContains) && containsCount < schema.minContains) {
+    yield Create(ValueErrorType.ArrayMinContains, schema, path4, value);
+  }
+  if (IsNumber2(schema.maxContains) && containsCount > schema.maxContains) {
+    yield Create(ValueErrorType.ArrayMaxContains, schema, path4, value);
+  }
+}
+function* FromAsyncIterator5(schema, references, path4, value) {
+  if (!IsAsyncIterator2(value))
+    yield Create(ValueErrorType.AsyncIterator, schema, path4, value);
+}
+function* FromBigInt3(schema, references, path4, value) {
+  if (!IsBigInt2(value))
+    return yield Create(ValueErrorType.BigInt, schema, path4, value);
+  if (IsDefined2(schema.exclusiveMaximum) && !(value < schema.exclusiveMaximum)) {
+    yield Create(ValueErrorType.BigIntExclusiveMaximum, schema, path4, value);
+  }
+  if (IsDefined2(schema.exclusiveMinimum) && !(value > schema.exclusiveMinimum)) {
+    yield Create(ValueErrorType.BigIntExclusiveMinimum, schema, path4, value);
+  }
+  if (IsDefined2(schema.maximum) && !(value <= schema.maximum)) {
+    yield Create(ValueErrorType.BigIntMaximum, schema, path4, value);
+  }
+  if (IsDefined2(schema.minimum) && !(value >= schema.minimum)) {
+    yield Create(ValueErrorType.BigIntMinimum, schema, path4, value);
+  }
+  if (IsDefined2(schema.multipleOf) && !(value % schema.multipleOf === BigInt(0))) {
+    yield Create(ValueErrorType.BigIntMultipleOf, schema, path4, value);
+  }
+}
+function* FromBoolean3(schema, references, path4, value) {
+  if (!IsBoolean2(value))
+    yield Create(ValueErrorType.Boolean, schema, path4, value);
+}
+function* FromConstructor5(schema, references, path4, value) {
+  yield* Visit6(schema.returns, references, path4, value.prototype);
+}
+function* FromDate3(schema, references, path4, value) {
+  if (!IsDate2(value))
+    return yield Create(ValueErrorType.Date, schema, path4, value);
+  if (IsDefined2(schema.exclusiveMaximumTimestamp) && !(value.getTime() < schema.exclusiveMaximumTimestamp)) {
+    yield Create(ValueErrorType.DateExclusiveMaximumTimestamp, schema, path4, value);
+  }
+  if (IsDefined2(schema.exclusiveMinimumTimestamp) && !(value.getTime() > schema.exclusiveMinimumTimestamp)) {
+    yield Create(ValueErrorType.DateExclusiveMinimumTimestamp, schema, path4, value);
+  }
+  if (IsDefined2(schema.maximumTimestamp) && !(value.getTime() <= schema.maximumTimestamp)) {
+    yield Create(ValueErrorType.DateMaximumTimestamp, schema, path4, value);
+  }
+  if (IsDefined2(schema.minimumTimestamp) && !(value.getTime() >= schema.minimumTimestamp)) {
+    yield Create(ValueErrorType.DateMinimumTimestamp, schema, path4, value);
+  }
+  if (IsDefined2(schema.multipleOfTimestamp) && !(value.getTime() % schema.multipleOfTimestamp === 0)) {
+    yield Create(ValueErrorType.DateMultipleOfTimestamp, schema, path4, value);
+  }
+}
+function* FromFunction5(schema, references, path4, value) {
+  if (!IsFunction2(value))
+    yield Create(ValueErrorType.Function, schema, path4, value);
+}
+function* FromImport2(schema, references, path4, value) {
+  const definitions = globalThis.Object.values(schema.$defs);
+  const target = schema.$defs[schema.$ref];
+  yield* Visit6(target, [...references, ...definitions], path4, value);
+}
+function* FromInteger3(schema, references, path4, value) {
+  if (!IsInteger(value))
+    return yield Create(ValueErrorType.Integer, schema, path4, value);
+  if (IsDefined2(schema.exclusiveMaximum) && !(value < schema.exclusiveMaximum)) {
+    yield Create(ValueErrorType.IntegerExclusiveMaximum, schema, path4, value);
+  }
+  if (IsDefined2(schema.exclusiveMinimum) && !(value > schema.exclusiveMinimum)) {
+    yield Create(ValueErrorType.IntegerExclusiveMinimum, schema, path4, value);
+  }
+  if (IsDefined2(schema.maximum) && !(value <= schema.maximum)) {
+    yield Create(ValueErrorType.IntegerMaximum, schema, path4, value);
+  }
+  if (IsDefined2(schema.minimum) && !(value >= schema.minimum)) {
+    yield Create(ValueErrorType.IntegerMinimum, schema, path4, value);
+  }
+  if (IsDefined2(schema.multipleOf) && !(value % schema.multipleOf === 0)) {
+    yield Create(ValueErrorType.IntegerMultipleOf, schema, path4, value);
+  }
+}
+function* FromIntersect10(schema, references, path4, value) {
+  let hasError = false;
+  for (const inner of schema.allOf) {
+    for (const error of Visit6(inner, references, path4, value)) {
+      hasError = true;
+      yield error;
+    }
+  }
+  if (hasError) {
+    return yield Create(ValueErrorType.Intersect, schema, path4, value);
+  }
+  if (schema.unevaluatedProperties === false) {
+    const keyCheck = new RegExp(KeyOfPattern(schema));
+    for (const valueKey of Object.getOwnPropertyNames(value)) {
+      if (!keyCheck.test(valueKey)) {
+        yield Create(ValueErrorType.IntersectUnevaluatedProperties, schema, `${path4}/${valueKey}`, value);
+      }
+    }
+  }
+  if (typeof schema.unevaluatedProperties === "object") {
+    const keyCheck = new RegExp(KeyOfPattern(schema));
+    for (const valueKey of Object.getOwnPropertyNames(value)) {
+      if (!keyCheck.test(valueKey)) {
+        const next = Visit6(schema.unevaluatedProperties, references, `${path4}/${valueKey}`, value[valueKey]).next();
+        if (!next.done)
+          yield next.value;
+      }
+    }
+  }
+}
+function* FromIterator5(schema, references, path4, value) {
+  if (!IsIterator2(value))
+    yield Create(ValueErrorType.Iterator, schema, path4, value);
+}
+function* FromLiteral4(schema, references, path4, value) {
+  if (!(value === schema.const))
+    yield Create(ValueErrorType.Literal, schema, path4, value);
+}
+function* FromNever3(schema, references, path4, value) {
+  yield Create(ValueErrorType.Never, schema, path4, value);
+}
+function* FromNot3(schema, references, path4, value) {
+  if (Visit6(schema.not, references, path4, value).next().done === true)
+    yield Create(ValueErrorType.Not, schema, path4, value);
+}
+function* FromNull3(schema, references, path4, value) {
+  if (!IsNull2(value))
+    yield Create(ValueErrorType.Null, schema, path4, value);
+}
+function* FromNumber3(schema, references, path4, value) {
+  if (!TypeSystemPolicy.IsNumberLike(value))
+    return yield Create(ValueErrorType.Number, schema, path4, value);
+  if (IsDefined2(schema.exclusiveMaximum) && !(value < schema.exclusiveMaximum)) {
+    yield Create(ValueErrorType.NumberExclusiveMaximum, schema, path4, value);
+  }
+  if (IsDefined2(schema.exclusiveMinimum) && !(value > schema.exclusiveMinimum)) {
+    yield Create(ValueErrorType.NumberExclusiveMinimum, schema, path4, value);
+  }
+  if (IsDefined2(schema.maximum) && !(value <= schema.maximum)) {
+    yield Create(ValueErrorType.NumberMaximum, schema, path4, value);
+  }
+  if (IsDefined2(schema.minimum) && !(value >= schema.minimum)) {
+    yield Create(ValueErrorType.NumberMinimum, schema, path4, value);
+  }
+  if (IsDefined2(schema.multipleOf) && !(value % schema.multipleOf === 0)) {
+    yield Create(ValueErrorType.NumberMultipleOf, schema, path4, value);
+  }
+}
+function* FromObject9(schema, references, path4, value) {
+  if (!TypeSystemPolicy.IsObjectLike(value))
+    return yield Create(ValueErrorType.Object, schema, path4, value);
+  if (IsDefined2(schema.minProperties) && !(Object.getOwnPropertyNames(value).length >= schema.minProperties)) {
+    yield Create(ValueErrorType.ObjectMinProperties, schema, path4, value);
+  }
+  if (IsDefined2(schema.maxProperties) && !(Object.getOwnPropertyNames(value).length <= schema.maxProperties)) {
+    yield Create(ValueErrorType.ObjectMaxProperties, schema, path4, value);
+  }
+  const requiredKeys = Array.isArray(schema.required) ? schema.required : [];
+  const knownKeys = Object.getOwnPropertyNames(schema.properties);
+  const unknownKeys = Object.getOwnPropertyNames(value);
+  for (const requiredKey of requiredKeys) {
+    if (unknownKeys.includes(requiredKey))
+      continue;
+    yield Create(ValueErrorType.ObjectRequiredProperty, schema.properties[requiredKey], `${path4}/${EscapeKey(requiredKey)}`, void 0);
+  }
+  if (schema.additionalProperties === false) {
+    for (const valueKey of unknownKeys) {
+      if (!knownKeys.includes(valueKey)) {
+        yield Create(ValueErrorType.ObjectAdditionalProperties, schema, `${path4}/${EscapeKey(valueKey)}`, value[valueKey]);
+      }
+    }
+  }
+  if (typeof schema.additionalProperties === "object") {
+    for (const valueKey of unknownKeys) {
+      if (knownKeys.includes(valueKey))
+        continue;
+      yield* Visit6(schema.additionalProperties, references, `${path4}/${EscapeKey(valueKey)}`, value[valueKey]);
+    }
+  }
+  for (const knownKey of knownKeys) {
+    const property = schema.properties[knownKey];
+    if (schema.required && schema.required.includes(knownKey)) {
+      yield* Visit6(property, references, `${path4}/${EscapeKey(knownKey)}`, value[knownKey]);
+      if (ExtendsUndefinedCheck(schema) && !(knownKey in value)) {
+        yield Create(ValueErrorType.ObjectRequiredProperty, property, `${path4}/${EscapeKey(knownKey)}`, void 0);
+      }
+    } else {
+      if (TypeSystemPolicy.IsExactOptionalProperty(value, knownKey)) {
+        yield* Visit6(property, references, `${path4}/${EscapeKey(knownKey)}`, value[knownKey]);
+      }
+    }
+  }
+}
+function* FromPromise5(schema, references, path4, value) {
+  if (!IsPromise(value))
+    yield Create(ValueErrorType.Promise, schema, path4, value);
+}
+function* FromRecord5(schema, references, path4, value) {
+  if (!TypeSystemPolicy.IsRecordLike(value))
+    return yield Create(ValueErrorType.Object, schema, path4, value);
+  if (IsDefined2(schema.minProperties) && !(Object.getOwnPropertyNames(value).length >= schema.minProperties)) {
+    yield Create(ValueErrorType.ObjectMinProperties, schema, path4, value);
+  }
+  if (IsDefined2(schema.maxProperties) && !(Object.getOwnPropertyNames(value).length <= schema.maxProperties)) {
+    yield Create(ValueErrorType.ObjectMaxProperties, schema, path4, value);
+  }
+  const [patternKey, patternSchema] = Object.entries(schema.patternProperties)[0];
+  const regex = new RegExp(patternKey);
+  for (const [propertyKey, propertyValue] of Object.entries(value)) {
+    if (regex.test(propertyKey))
+      yield* Visit6(patternSchema, references, `${path4}/${EscapeKey(propertyKey)}`, propertyValue);
+  }
+  if (typeof schema.additionalProperties === "object") {
+    for (const [propertyKey, propertyValue] of Object.entries(value)) {
+      if (!regex.test(propertyKey))
+        yield* Visit6(schema.additionalProperties, references, `${path4}/${EscapeKey(propertyKey)}`, propertyValue);
+    }
+  }
+  if (schema.additionalProperties === false) {
+    for (const [propertyKey, propertyValue] of Object.entries(value)) {
+      if (regex.test(propertyKey))
+        continue;
+      return yield Create(ValueErrorType.ObjectAdditionalProperties, schema, `${path4}/${EscapeKey(propertyKey)}`, propertyValue);
+    }
+  }
+}
+function* FromRef6(schema, references, path4, value) {
+  yield* Visit6(Deref(schema, references), references, path4, value);
+}
+function* FromRegExp3(schema, references, path4, value) {
+  if (!IsString2(value))
+    return yield Create(ValueErrorType.String, schema, path4, value);
+  if (IsDefined2(schema.minLength) && !(value.length >= schema.minLength)) {
+    yield Create(ValueErrorType.StringMinLength, schema, path4, value);
+  }
+  if (IsDefined2(schema.maxLength) && !(value.length <= schema.maxLength)) {
+    yield Create(ValueErrorType.StringMaxLength, schema, path4, value);
+  }
+  const regex = new RegExp(schema.source, schema.flags);
+  if (!regex.test(value)) {
+    return yield Create(ValueErrorType.RegExp, schema, path4, value);
+  }
+}
+function* FromString3(schema, references, path4, value) {
+  if (!IsString2(value))
+    return yield Create(ValueErrorType.String, schema, path4, value);
+  if (IsDefined2(schema.minLength) && !(value.length >= schema.minLength)) {
+    yield Create(ValueErrorType.StringMinLength, schema, path4, value);
+  }
+  if (IsDefined2(schema.maxLength) && !(value.length <= schema.maxLength)) {
+    yield Create(ValueErrorType.StringMaxLength, schema, path4, value);
+  }
+  if (IsString2(schema.pattern)) {
+    const regex = new RegExp(schema.pattern);
+    if (!regex.test(value)) {
+      yield Create(ValueErrorType.StringPattern, schema, path4, value);
+    }
+  }
+  if (IsString2(schema.format)) {
+    if (!format_exports.Has(schema.format)) {
+      yield Create(ValueErrorType.StringFormatUnknown, schema, path4, value);
+    } else {
+      const format = format_exports.Get(schema.format);
+      if (!format(value)) {
+        yield Create(ValueErrorType.StringFormat, schema, path4, value);
+      }
+    }
+  }
+}
+function* FromSymbol3(schema, references, path4, value) {
+  if (!IsSymbol2(value))
+    yield Create(ValueErrorType.Symbol, schema, path4, value);
+}
+function* FromTemplateLiteral5(schema, references, path4, value) {
+  if (!IsString2(value))
+    return yield Create(ValueErrorType.String, schema, path4, value);
+  const regex = new RegExp(schema.pattern);
+  if (!regex.test(value)) {
+    yield Create(ValueErrorType.StringPattern, schema, path4, value);
+  }
+}
+function* FromThis2(schema, references, path4, value) {
+  yield* Visit6(Deref(schema, references), references, path4, value);
+}
+function* FromTuple7(schema, references, path4, value) {
+  if (!IsArray2(value))
+    return yield Create(ValueErrorType.Tuple, schema, path4, value);
+  if (schema.items === void 0 && !(value.length === 0)) {
+    return yield Create(ValueErrorType.TupleLength, schema, path4, value);
+  }
+  if (!(value.length === schema.maxItems)) {
+    return yield Create(ValueErrorType.TupleLength, schema, path4, value);
+  }
+  if (!schema.items) {
+    return;
+  }
+  for (let i = 0; i < schema.items.length; i++) {
+    yield* Visit6(schema.items[i], references, `${path4}/${i}`, value[i]);
+  }
+}
+function* FromUndefined3(schema, references, path4, value) {
+  if (!IsUndefined2(value))
+    yield Create(ValueErrorType.Undefined, schema, path4, value);
+}
+function* FromUnion12(schema, references, path4, value) {
+  if (Check(schema, references, value))
+    return;
+  const errors = schema.anyOf.map((variant) => new ValueErrorIterator(Visit6(variant, references, path4, value)));
+  yield Create(ValueErrorType.Union, schema, path4, value, errors);
+}
+function* FromUint8Array3(schema, references, path4, value) {
+  if (!IsUint8Array2(value))
+    return yield Create(ValueErrorType.Uint8Array, schema, path4, value);
+  if (IsDefined2(schema.maxByteLength) && !(value.length <= schema.maxByteLength)) {
+    yield Create(ValueErrorType.Uint8ArrayMaxByteLength, schema, path4, value);
+  }
+  if (IsDefined2(schema.minByteLength) && !(value.length >= schema.minByteLength)) {
+    yield Create(ValueErrorType.Uint8ArrayMinByteLength, schema, path4, value);
+  }
+}
+function* FromUnknown3(schema, references, path4, value) {
+}
+function* FromVoid3(schema, references, path4, value) {
+  if (!TypeSystemPolicy.IsVoidLike(value))
+    yield Create(ValueErrorType.Void, schema, path4, value);
+}
+function* FromKind2(schema, references, path4, value) {
+  const check = type_exports2.Get(schema[Kind]);
+  if (!check(schema, value))
+    yield Create(ValueErrorType.Kind, schema, path4, value);
+}
+function* Visit6(schema, references, path4, value) {
+  const references_ = IsDefined2(schema.$id) ? [...references, schema] : references;
+  const schema_ = schema;
+  switch (schema_[Kind]) {
+    case "Any":
+      return yield* FromAny3(schema_, references_, path4, value);
+    case "Argument":
+      return yield* FromArgument3(schema_, references_, path4, value);
+    case "Array":
+      return yield* FromArray8(schema_, references_, path4, value);
+    case "AsyncIterator":
+      return yield* FromAsyncIterator5(schema_, references_, path4, value);
+    case "BigInt":
+      return yield* FromBigInt3(schema_, references_, path4, value);
+    case "Boolean":
+      return yield* FromBoolean3(schema_, references_, path4, value);
+    case "Constructor":
+      return yield* FromConstructor5(schema_, references_, path4, value);
+    case "Date":
+      return yield* FromDate3(schema_, references_, path4, value);
+    case "Function":
+      return yield* FromFunction5(schema_, references_, path4, value);
+    case "Import":
+      return yield* FromImport2(schema_, references_, path4, value);
+    case "Integer":
+      return yield* FromInteger3(schema_, references_, path4, value);
+    case "Intersect":
+      return yield* FromIntersect10(schema_, references_, path4, value);
+    case "Iterator":
+      return yield* FromIterator5(schema_, references_, path4, value);
+    case "Literal":
+      return yield* FromLiteral4(schema_, references_, path4, value);
+    case "Never":
+      return yield* FromNever3(schema_, references_, path4, value);
+    case "Not":
+      return yield* FromNot3(schema_, references_, path4, value);
+    case "Null":
+      return yield* FromNull3(schema_, references_, path4, value);
+    case "Number":
+      return yield* FromNumber3(schema_, references_, path4, value);
+    case "Object":
+      return yield* FromObject9(schema_, references_, path4, value);
+    case "Promise":
+      return yield* FromPromise5(schema_, references_, path4, value);
+    case "Record":
+      return yield* FromRecord5(schema_, references_, path4, value);
+    case "Ref":
+      return yield* FromRef6(schema_, references_, path4, value);
+    case "RegExp":
+      return yield* FromRegExp3(schema_, references_, path4, value);
+    case "String":
+      return yield* FromString3(schema_, references_, path4, value);
+    case "Symbol":
+      return yield* FromSymbol3(schema_, references_, path4, value);
+    case "TemplateLiteral":
+      return yield* FromTemplateLiteral5(schema_, references_, path4, value);
+    case "This":
+      return yield* FromThis2(schema_, references_, path4, value);
+    case "Tuple":
+      return yield* FromTuple7(schema_, references_, path4, value);
+    case "Undefined":
+      return yield* FromUndefined3(schema_, references_, path4, value);
+    case "Union":
+      return yield* FromUnion12(schema_, references_, path4, value);
+    case "Uint8Array":
+      return yield* FromUint8Array3(schema_, references_, path4, value);
+    case "Unknown":
+      return yield* FromUnknown3(schema_, references_, path4, value);
+    case "Void":
+      return yield* FromVoid3(schema_, references_, path4, value);
+    default:
+      if (!type_exports2.Has(schema_[Kind]))
+        throw new ValueErrorsUnknownTypeError(schema);
+      return yield* FromKind2(schema_, references_, path4, value);
+  }
+}
+function Errors(...args) {
+  const iterator = args.length === 3 ? Visit6(args[0], args[1], "", args[2]) : Visit6(args[0], [], "", args[1]);
+  return new ValueErrorIterator(iterator);
+}
+var ValueErrorType, ValueErrorsUnknownTypeError, ValueErrorIterator;
+var init_errors = __esm({
+  "node_modules/@sinclair/typebox/build/esm/errors/errors.mjs"() {
+    init_system2();
+    init_keyof2();
+    init_registry();
+    init_extends_undefined();
+    init_function3();
+    init_error2();
+    init_deref2();
+    init_hash2();
+    init_check2();
+    init_symbols2();
+    init_never2();
+    init_guard2();
+    (function(ValueErrorType2) {
+      ValueErrorType2[ValueErrorType2["ArrayContains"] = 0] = "ArrayContains";
+      ValueErrorType2[ValueErrorType2["ArrayMaxContains"] = 1] = "ArrayMaxContains";
+      ValueErrorType2[ValueErrorType2["ArrayMaxItems"] = 2] = "ArrayMaxItems";
+      ValueErrorType2[ValueErrorType2["ArrayMinContains"] = 3] = "ArrayMinContains";
+      ValueErrorType2[ValueErrorType2["ArrayMinItems"] = 4] = "ArrayMinItems";
+      ValueErrorType2[ValueErrorType2["ArrayUniqueItems"] = 5] = "ArrayUniqueItems";
+      ValueErrorType2[ValueErrorType2["Array"] = 6] = "Array";
+      ValueErrorType2[ValueErrorType2["AsyncIterator"] = 7] = "AsyncIterator";
+      ValueErrorType2[ValueErrorType2["BigIntExclusiveMaximum"] = 8] = "BigIntExclusiveMaximum";
+      ValueErrorType2[ValueErrorType2["BigIntExclusiveMinimum"] = 9] = "BigIntExclusiveMinimum";
+      ValueErrorType2[ValueErrorType2["BigIntMaximum"] = 10] = "BigIntMaximum";
+      ValueErrorType2[ValueErrorType2["BigIntMinimum"] = 11] = "BigIntMinimum";
+      ValueErrorType2[ValueErrorType2["BigIntMultipleOf"] = 12] = "BigIntMultipleOf";
+      ValueErrorType2[ValueErrorType2["BigInt"] = 13] = "BigInt";
+      ValueErrorType2[ValueErrorType2["Boolean"] = 14] = "Boolean";
+      ValueErrorType2[ValueErrorType2["DateExclusiveMaximumTimestamp"] = 15] = "DateExclusiveMaximumTimestamp";
+      ValueErrorType2[ValueErrorType2["DateExclusiveMinimumTimestamp"] = 16] = "DateExclusiveMinimumTimestamp";
+      ValueErrorType2[ValueErrorType2["DateMaximumTimestamp"] = 17] = "DateMaximumTimestamp";
+      ValueErrorType2[ValueErrorType2["DateMinimumTimestamp"] = 18] = "DateMinimumTimestamp";
+      ValueErrorType2[ValueErrorType2["DateMultipleOfTimestamp"] = 19] = "DateMultipleOfTimestamp";
+      ValueErrorType2[ValueErrorType2["Date"] = 20] = "Date";
+      ValueErrorType2[ValueErrorType2["Function"] = 21] = "Function";
+      ValueErrorType2[ValueErrorType2["IntegerExclusiveMaximum"] = 22] = "IntegerExclusiveMaximum";
+      ValueErrorType2[ValueErrorType2["IntegerExclusiveMinimum"] = 23] = "IntegerExclusiveMinimum";
+      ValueErrorType2[ValueErrorType2["IntegerMaximum"] = 24] = "IntegerMaximum";
+      ValueErrorType2[ValueErrorType2["IntegerMinimum"] = 25] = "IntegerMinimum";
+      ValueErrorType2[ValueErrorType2["IntegerMultipleOf"] = 26] = "IntegerMultipleOf";
+      ValueErrorType2[ValueErrorType2["Integer"] = 27] = "Integer";
+      ValueErrorType2[ValueErrorType2["IntersectUnevaluatedProperties"] = 28] = "IntersectUnevaluatedProperties";
+      ValueErrorType2[ValueErrorType2["Intersect"] = 29] = "Intersect";
+      ValueErrorType2[ValueErrorType2["Iterator"] = 30] = "Iterator";
+      ValueErrorType2[ValueErrorType2["Kind"] = 31] = "Kind";
+      ValueErrorType2[ValueErrorType2["Literal"] = 32] = "Literal";
+      ValueErrorType2[ValueErrorType2["Never"] = 33] = "Never";
+      ValueErrorType2[ValueErrorType2["Not"] = 34] = "Not";
+      ValueErrorType2[ValueErrorType2["Null"] = 35] = "Null";
+      ValueErrorType2[ValueErrorType2["NumberExclusiveMaximum"] = 36] = "NumberExclusiveMaximum";
+      ValueErrorType2[ValueErrorType2["NumberExclusiveMinimum"] = 37] = "NumberExclusiveMinimum";
+      ValueErrorType2[ValueErrorType2["NumberMaximum"] = 38] = "NumberMaximum";
+      ValueErrorType2[ValueErrorType2["NumberMinimum"] = 39] = "NumberMinimum";
+      ValueErrorType2[ValueErrorType2["NumberMultipleOf"] = 40] = "NumberMultipleOf";
+      ValueErrorType2[ValueErrorType2["Number"] = 41] = "Number";
+      ValueErrorType2[ValueErrorType2["ObjectAdditionalProperties"] = 42] = "ObjectAdditionalProperties";
+      ValueErrorType2[ValueErrorType2["ObjectMaxProperties"] = 43] = "ObjectMaxProperties";
+      ValueErrorType2[ValueErrorType2["ObjectMinProperties"] = 44] = "ObjectMinProperties";
+      ValueErrorType2[ValueErrorType2["ObjectRequiredProperty"] = 45] = "ObjectRequiredProperty";
+      ValueErrorType2[ValueErrorType2["Object"] = 46] = "Object";
+      ValueErrorType2[ValueErrorType2["Promise"] = 47] = "Promise";
+      ValueErrorType2[ValueErrorType2["RegExp"] = 48] = "RegExp";
+      ValueErrorType2[ValueErrorType2["StringFormatUnknown"] = 49] = "StringFormatUnknown";
+      ValueErrorType2[ValueErrorType2["StringFormat"] = 50] = "StringFormat";
+      ValueErrorType2[ValueErrorType2["StringMaxLength"] = 51] = "StringMaxLength";
+      ValueErrorType2[ValueErrorType2["StringMinLength"] = 52] = "StringMinLength";
+      ValueErrorType2[ValueErrorType2["StringPattern"] = 53] = "StringPattern";
+      ValueErrorType2[ValueErrorType2["String"] = 54] = "String";
+      ValueErrorType2[ValueErrorType2["Symbol"] = 55] = "Symbol";
+      ValueErrorType2[ValueErrorType2["TupleLength"] = 56] = "TupleLength";
+      ValueErrorType2[ValueErrorType2["Tuple"] = 57] = "Tuple";
+      ValueErrorType2[ValueErrorType2["Uint8ArrayMaxByteLength"] = 58] = "Uint8ArrayMaxByteLength";
+      ValueErrorType2[ValueErrorType2["Uint8ArrayMinByteLength"] = 59] = "Uint8ArrayMinByteLength";
+      ValueErrorType2[ValueErrorType2["Uint8Array"] = 60] = "Uint8Array";
+      ValueErrorType2[ValueErrorType2["Undefined"] = 61] = "Undefined";
+      ValueErrorType2[ValueErrorType2["Union"] = 62] = "Union";
+      ValueErrorType2[ValueErrorType2["Void"] = 63] = "Void";
+    })(ValueErrorType || (ValueErrorType = {}));
+    ValueErrorsUnknownTypeError = class extends TypeBoxError {
+      constructor(schema) {
+        super("Unknown type");
+        this.schema = schema;
+      }
+    };
+    ValueErrorIterator = class {
+      constructor(iterator) {
+        this.iterator = iterator;
+      }
+      [Symbol.iterator]() {
+        return this.iterator;
+      }
+      /** Returns the first value error or undefined if no errors */
+      First() {
+        const next = this.iterator.next();
+        return next.done ? void 0 : next.value;
+      }
+    };
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/errors/index.mjs
+var init_errors2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/errors/index.mjs"() {
+    init_errors();
+    init_function3();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/assert/assert.mjs
+function AssertValue(schema, references, value) {
+  if (Check(schema, references, value))
+    return;
+  throw new AssertError(Errors(schema, references, value));
+}
+function Assert(...args) {
+  return args.length === 3 ? AssertValue(args[0], args[1], args[2]) : AssertValue(args[0], [], args[1]);
+}
+var __classPrivateFieldSet, __classPrivateFieldGet, _AssertError_instances, _AssertError_iterator, _AssertError_Iterator, AssertError;
+var init_assert = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/assert/assert.mjs"() {
+    init_errors2();
+    init_error();
+    init_check();
+    __classPrivateFieldSet = function(receiver, state4, value, kind, f) {
+      if (kind === "m") throw new TypeError("Private method is not writable");
+      if (kind === "a" && !f) throw new TypeError("Private accessor was defined without a setter");
+      if (typeof state4 === "function" ? receiver !== state4 || !f : !state4.has(receiver)) throw new TypeError("Cannot write private member to an object whose class did not declare it");
+      return kind === "a" ? f.call(receiver, value) : f ? f.value = value : state4.set(receiver, value), value;
+    };
+    __classPrivateFieldGet = function(receiver, state4, kind, f) {
+      if (kind === "a" && !f) throw new TypeError("Private accessor was defined without a getter");
+      if (typeof state4 === "function" ? receiver !== state4 || !f : !state4.has(receiver)) throw new TypeError("Cannot read private member from an object whose class did not declare it");
+      return kind === "m" ? f : kind === "a" ? f.call(receiver) : f ? f.value : state4.get(receiver);
+    };
+    AssertError = class extends TypeBoxError {
+      constructor(iterator) {
+        const error = iterator.First();
+        super(error === void 0 ? "Invalid Value" : error.message);
+        _AssertError_instances.add(this);
+        _AssertError_iterator.set(this, void 0);
+        __classPrivateFieldSet(this, _AssertError_iterator, iterator, "f");
+        this.error = error;
+      }
+      /** Returns an iterator for each error in this value. */
+      Errors() {
+        return new ValueErrorIterator(__classPrivateFieldGet(this, _AssertError_instances, "m", _AssertError_Iterator).call(this));
+      }
+    };
+    _AssertError_iterator = /* @__PURE__ */ new WeakMap(), _AssertError_instances = /* @__PURE__ */ new WeakSet(), _AssertError_Iterator = function* _AssertError_Iterator2() {
+      if (this.error)
+        yield this.error;
+      yield* __classPrivateFieldGet(this, _AssertError_iterator, "f");
+    };
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/assert/index.mjs
+var init_assert2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/assert/index.mjs"() {
+    init_assert();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/clone/clone.mjs
+function FromObject10(value) {
+  const Acc = {};
+  for (const key of Object.getOwnPropertyNames(value)) {
+    Acc[key] = Clone2(value[key]);
+  }
+  for (const key of Object.getOwnPropertySymbols(value)) {
+    Acc[key] = Clone2(value[key]);
+  }
+  return Acc;
+}
+function FromArray9(value) {
+  return value.map((element) => Clone2(element));
+}
+function FromTypedArray(value) {
+  return value.slice();
+}
+function FromMap(value) {
+  return new Map(Clone2([...value.entries()]));
+}
+function FromSet(value) {
+  return new Set(Clone2([...value.entries()]));
+}
+function FromDate4(value) {
+  return new Date(value.toISOString());
+}
+function FromValue2(value) {
+  return value;
+}
+function Clone2(value) {
+  if (IsArray2(value))
+    return FromArray9(value);
+  if (IsDate2(value))
+    return FromDate4(value);
+  if (IsTypedArray(value))
+    return FromTypedArray(value);
+  if (IsMap(value))
+    return FromMap(value);
+  if (IsSet(value))
+    return FromSet(value);
+  if (IsObject2(value))
+    return FromObject10(value);
+  if (IsValueType(value))
+    return FromValue2(value);
+  throw new Error("ValueClone: Unable to clone value");
+}
+var init_clone2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/clone/clone.mjs"() {
+    init_guard2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/clone/index.mjs
+var init_clone3 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/clone/index.mjs"() {
+    init_clone2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/create/create.mjs
+function FromDefault(value) {
+  return IsFunction2(value) ? value() : Clone2(value);
+}
+function FromAny4(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    return {};
+  }
+}
+function FromArgument4(schema, references) {
+  return {};
+}
+function FromArray10(schema, references) {
+  if (schema.uniqueItems === true && !HasPropertyKey2(schema, "default")) {
+    throw new ValueCreateError(schema, "Array with the uniqueItems constraint requires a default value");
+  } else if ("contains" in schema && !HasPropertyKey2(schema, "default")) {
+    throw new ValueCreateError(schema, "Array with the contains constraint requires a default value");
+  } else if ("default" in schema) {
+    return FromDefault(schema.default);
+  } else if (schema.minItems !== void 0) {
+    return Array.from({ length: schema.minItems }).map((item) => {
+      return Visit7(schema.items, references);
+    });
+  } else {
+    return [];
+  }
+}
+function FromAsyncIterator6(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    return (async function* () {
+    })();
+  }
+}
+function FromBigInt4(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    return BigInt(0);
+  }
+}
+function FromBoolean4(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    return false;
+  }
+}
+function FromConstructor6(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    const value = Visit7(schema.returns, references);
+    if (typeof value === "object" && !Array.isArray(value)) {
+      return class {
+        constructor() {
+          for (const [key, val] of Object.entries(value)) {
+            const self = this;
+            self[key] = val;
+          }
+        }
+      };
+    } else {
+      return class {
+      };
+    }
+  }
+}
+function FromDate5(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else if (schema.minimumTimestamp !== void 0) {
+    return new Date(schema.minimumTimestamp);
+  } else {
+    return /* @__PURE__ */ new Date();
+  }
+}
+function FromFunction6(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    return () => Visit7(schema.returns, references);
+  }
+}
+function FromImport3(schema, references) {
+  const definitions = globalThis.Object.values(schema.$defs);
+  const target = schema.$defs[schema.$ref];
+  return Visit7(target, [...references, ...definitions]);
+}
+function FromInteger4(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else if (schema.minimum !== void 0) {
+    return schema.minimum;
+  } else {
+    return 0;
+  }
+}
+function FromIntersect11(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    const value = schema.allOf.reduce((acc, schema2) => {
+      const next = Visit7(schema2, references);
+      return typeof next === "object" ? { ...acc, ...next } : next;
+    }, {});
+    if (!Check(schema, references, value))
+      throw new ValueCreateError(schema, "Intersect produced invalid value. Consider using a default value.");
+    return value;
+  }
+}
+function FromIterator6(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    return (function* () {
+    })();
+  }
+}
+function FromLiteral5(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    return schema.const;
+  }
+}
+function FromNever4(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    throw new ValueCreateError(schema, "Never types cannot be created. Consider using a default value.");
+  }
+}
+function FromNot4(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    throw new ValueCreateError(schema, "Not types must have a default value");
+  }
+}
+function FromNull4(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    return null;
+  }
+}
+function FromNumber4(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else if (schema.minimum !== void 0) {
+    return schema.minimum;
+  } else {
+    return 0;
+  }
+}
+function FromObject11(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    const required2 = new Set(schema.required);
+    const Acc = {};
+    for (const [key, subschema] of Object.entries(schema.properties)) {
+      if (!required2.has(key))
+        continue;
+      Acc[key] = Visit7(subschema, references);
+    }
+    return Acc;
+  }
+}
+function FromPromise6(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    return Promise.resolve(Visit7(schema.item, references));
+  }
+}
+function FromRecord6(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    return {};
+  }
+}
+function FromRef7(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    return Visit7(Deref(schema, references), references);
+  }
+}
+function FromRegExp4(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    throw new ValueCreateError(schema, "RegExp types cannot be created. Consider using a default value.");
+  }
+}
+function FromString4(schema, references) {
+  if (schema.pattern !== void 0) {
+    if (!HasPropertyKey2(schema, "default")) {
+      throw new ValueCreateError(schema, "String types with patterns must specify a default value");
+    } else {
+      return FromDefault(schema.default);
+    }
+  } else if (schema.format !== void 0) {
+    if (!HasPropertyKey2(schema, "default")) {
+      throw new ValueCreateError(schema, "String types with formats must specify a default value");
+    } else {
+      return FromDefault(schema.default);
+    }
+  } else {
+    if (HasPropertyKey2(schema, "default")) {
+      return FromDefault(schema.default);
+    } else if (schema.minLength !== void 0) {
+      return Array.from({ length: schema.minLength }).map(() => " ").join("");
+    } else {
+      return "";
+    }
+  }
+}
+function FromSymbol4(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else if ("value" in schema) {
+    return Symbol.for(schema.value);
+  } else {
+    return /* @__PURE__ */ Symbol();
+  }
+}
+function FromTemplateLiteral6(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  }
+  if (!IsTemplateLiteralFinite(schema))
+    throw new ValueCreateError(schema, "Can only create template literals that produce a finite variants. Consider using a default value.");
+  const generated = TemplateLiteralGenerate(schema);
+  return generated[0];
+}
+function FromThis3(schema, references) {
+  if (recursiveDepth++ > recursiveMaxDepth)
+    throw new ValueCreateError(schema, "Cannot create recursive type as it appears possibly infinite. Consider using a default.");
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    return Visit7(Deref(schema, references), references);
+  }
+}
+function FromTuple8(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  }
+  if (schema.items === void 0) {
+    return [];
+  } else {
+    return Array.from({ length: schema.minItems }).map((_, index) => Visit7(schema.items[index], references));
+  }
+}
+function FromUndefined4(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    return void 0;
+  }
+}
+function FromUnion13(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else if (schema.anyOf.length === 0) {
+    throw new Error("ValueCreate.Union: Cannot create Union with zero variants");
+  } else {
+    return Visit7(schema.anyOf[0], references);
+  }
+}
+function FromUint8Array4(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else if (schema.minByteLength !== void 0) {
+    return new Uint8Array(schema.minByteLength);
+  } else {
+    return new Uint8Array(0);
+  }
+}
+function FromUnknown4(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    return {};
+  }
+}
+function FromVoid4(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    return void 0;
+  }
+}
+function FromKind3(schema, references) {
+  if (HasPropertyKey2(schema, "default")) {
+    return FromDefault(schema.default);
+  } else {
+    throw new Error("User defined types must specify a default value");
+  }
+}
+function Visit7(schema, references) {
+  const references_ = Pushref(schema, references);
+  const schema_ = schema;
+  switch (schema_[Kind]) {
+    case "Any":
+      return FromAny4(schema_, references_);
+    case "Argument":
+      return FromArgument4(schema_, references_);
+    case "Array":
+      return FromArray10(schema_, references_);
+    case "AsyncIterator":
+      return FromAsyncIterator6(schema_, references_);
+    case "BigInt":
+      return FromBigInt4(schema_, references_);
+    case "Boolean":
+      return FromBoolean4(schema_, references_);
+    case "Constructor":
+      return FromConstructor6(schema_, references_);
+    case "Date":
+      return FromDate5(schema_, references_);
+    case "Function":
+      return FromFunction6(schema_, references_);
+    case "Import":
+      return FromImport3(schema_, references_);
+    case "Integer":
+      return FromInteger4(schema_, references_);
+    case "Intersect":
+      return FromIntersect11(schema_, references_);
+    case "Iterator":
+      return FromIterator6(schema_, references_);
+    case "Literal":
+      return FromLiteral5(schema_, references_);
+    case "Never":
+      return FromNever4(schema_, references_);
+    case "Not":
+      return FromNot4(schema_, references_);
+    case "Null":
+      return FromNull4(schema_, references_);
+    case "Number":
+      return FromNumber4(schema_, references_);
+    case "Object":
+      return FromObject11(schema_, references_);
+    case "Promise":
+      return FromPromise6(schema_, references_);
+    case "Record":
+      return FromRecord6(schema_, references_);
+    case "Ref":
+      return FromRef7(schema_, references_);
+    case "RegExp":
+      return FromRegExp4(schema_, references_);
+    case "String":
+      return FromString4(schema_, references_);
+    case "Symbol":
+      return FromSymbol4(schema_, references_);
+    case "TemplateLiteral":
+      return FromTemplateLiteral6(schema_, references_);
+    case "This":
+      return FromThis3(schema_, references_);
+    case "Tuple":
+      return FromTuple8(schema_, references_);
+    case "Undefined":
+      return FromUndefined4(schema_, references_);
+    case "Union":
+      return FromUnion13(schema_, references_);
+    case "Uint8Array":
+      return FromUint8Array4(schema_, references_);
+    case "Unknown":
+      return FromUnknown4(schema_, references_);
+    case "Void":
+      return FromVoid4(schema_, references_);
+    default:
+      if (!type_exports2.Has(schema_[Kind]))
+        throw new ValueCreateError(schema_, "Unknown type");
+      return FromKind3(schema_, references_);
+  }
+}
+function Create2(...args) {
+  recursiveDepth = 0;
+  return args.length === 2 ? Visit7(args[0], args[1]) : Visit7(args[0], []);
+}
+var ValueCreateError, recursiveMaxDepth, recursiveDepth;
+var init_create2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/create/create.mjs"() {
+    init_guard2();
+    init_check2();
+    init_clone3();
+    init_deref2();
+    init_template_literal2();
+    init_registry();
+    init_symbols2();
+    init_error2();
+    init_guard();
+    ValueCreateError = class extends TypeBoxError {
+      constructor(schema, message) {
+        super(message);
+        this.schema = schema;
+      }
+    };
+    recursiveMaxDepth = 512;
+    recursiveDepth = 0;
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/create/index.mjs
+var init_create3 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/create/index.mjs"() {
+    init_create2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/cast/cast.mjs
+function ScoreUnion(schema, references, value) {
+  if (schema[Kind] === "Object" && typeof value === "object" && !IsNull2(value)) {
+    const object = schema;
+    const keys = Object.getOwnPropertyNames(value);
+    const entries = Object.entries(object.properties);
+    return entries.reduce((acc, [key, schema2]) => {
+      const literal = schema2[Kind] === "Literal" && schema2.const === value[key] ? 100 : 0;
+      const checks = Check(schema2, references, value[key]) ? 10 : 0;
+      const exists = keys.includes(key) ? 1 : 0;
+      return acc + (literal + checks + exists);
+    }, 0);
+  } else if (schema[Kind] === "Union") {
+    const schemas = schema.anyOf.map((schema2) => Deref(schema2, references));
+    const scores = schemas.map((schema2) => ScoreUnion(schema2, references, value));
+    return Math.max(...scores);
+  } else {
+    return Check(schema, references, value) ? 1 : 0;
+  }
+}
+function SelectUnion(union, references, value) {
+  const schemas = union.anyOf.map((schema) => Deref(schema, references));
+  let [select, best] = [schemas[0], 0];
+  for (const schema of schemas) {
+    const score = ScoreUnion(schema, references, value);
+    if (score > best) {
+      select = schema;
+      best = score;
+    }
+  }
+  return select;
+}
+function CastUnion(union, references, value) {
+  if ("default" in union) {
+    return typeof value === "function" ? union.default : Clone2(union.default);
+  } else {
+    const schema = SelectUnion(union, references, value);
+    return Cast(schema, references, value);
+  }
+}
+function DefaultClone(schema, references, value) {
+  return Check(schema, references, value) ? Clone2(value) : Create2(schema, references);
+}
+function Default(schema, references, value) {
+  return Check(schema, references, value) ? value : Create2(schema, references);
+}
+function FromArray11(schema, references, value) {
+  if (Check(schema, references, value))
+    return Clone2(value);
+  const created = IsArray2(value) ? Clone2(value) : Create2(schema, references);
+  const minimum = IsNumber2(schema.minItems) && created.length < schema.minItems ? [...created, ...Array.from({ length: schema.minItems - created.length }, () => null)] : created;
+  const maximum = IsNumber2(schema.maxItems) && minimum.length > schema.maxItems ? minimum.slice(0, schema.maxItems) : minimum;
+  const casted = maximum.map((value2) => Visit8(schema.items, references, value2));
+  if (schema.uniqueItems !== true)
+    return casted;
+  const unique = [...new Set(casted)];
+  if (!Check(schema, references, unique))
+    throw new ValueCastError(schema, "Array cast produced invalid data due to uniqueItems constraint");
+  return unique;
+}
+function FromConstructor7(schema, references, value) {
+  if (Check(schema, references, value))
+    return Create2(schema, references);
+  const required2 = new Set(schema.returns.required || []);
+  const result = function() {
+  };
+  for (const [key, property] of Object.entries(schema.returns.properties)) {
+    if (!required2.has(key) && value.prototype[key] === void 0)
+      continue;
+    result.prototype[key] = Visit8(property, references, value.prototype[key]);
+  }
+  return result;
+}
+function FromImport4(schema, references, value) {
+  const definitions = globalThis.Object.values(schema.$defs);
+  const target = schema.$defs[schema.$ref];
+  return Visit8(target, [...references, ...definitions], value);
+}
+function IntersectAssign(correct, value) {
+  if (IsObject2(correct) && !IsObject2(value) || !IsObject2(correct) && IsObject2(value))
+    return correct;
+  if (!IsObject2(correct) || !IsObject2(value))
+    return value;
+  return globalThis.Object.getOwnPropertyNames(correct).reduce((result, key) => {
+    const property = key in value ? IntersectAssign(correct[key], value[key]) : correct[key];
+    return { ...result, [key]: property };
+  }, {});
+}
+function FromIntersect12(schema, references, value) {
+  if (Check(schema, references, value))
+    return value;
+  const correct = Create2(schema, references);
+  const assigned = IntersectAssign(correct, value);
+  return Check(schema, references, assigned) ? assigned : correct;
+}
+function FromNever5(schema, references, value) {
+  throw new ValueCastError(schema, "Never types cannot be cast");
+}
+function FromObject12(schema, references, value) {
+  if (Check(schema, references, value))
+    return value;
+  if (value === null || typeof value !== "object")
+    return Create2(schema, references);
+  const required2 = new Set(schema.required || []);
+  const result = {};
+  for (const [key, property] of Object.entries(schema.properties)) {
+    if (!required2.has(key) && value[key] === void 0)
+      continue;
+    result[key] = Visit8(property, references, value[key]);
+  }
+  if (typeof schema.additionalProperties === "object") {
+    const propertyNames = Object.getOwnPropertyNames(schema.properties);
+    for (const propertyName of Object.getOwnPropertyNames(value)) {
+      if (propertyNames.includes(propertyName))
+        continue;
+      result[propertyName] = Visit8(schema.additionalProperties, references, value[propertyName]);
+    }
+  }
+  return result;
+}
+function FromRecord7(schema, references, value) {
+  if (Check(schema, references, value))
+    return Clone2(value);
+  if (value === null || typeof value !== "object" || Array.isArray(value) || value instanceof Date)
+    return Create2(schema, references);
+  const subschemaPropertyName = Object.getOwnPropertyNames(schema.patternProperties)[0];
+  const subschema = schema.patternProperties[subschemaPropertyName];
+  const result = {};
+  for (const [propKey, propValue] of Object.entries(value)) {
+    result[propKey] = Visit8(subschema, references, propValue);
+  }
+  return result;
+}
+function FromRef8(schema, references, value) {
+  return Visit8(Deref(schema, references), references, value);
+}
+function FromThis4(schema, references, value) {
+  return Visit8(Deref(schema, references), references, value);
+}
+function FromTuple9(schema, references, value) {
+  if (Check(schema, references, value))
+    return Clone2(value);
+  if (!IsArray2(value))
+    return Create2(schema, references);
+  if (schema.items === void 0)
+    return [];
+  return schema.items.map((schema2, index) => Visit8(schema2, references, value[index]));
+}
+function FromUnion14(schema, references, value) {
+  return Check(schema, references, value) ? Clone2(value) : CastUnion(schema, references, value);
+}
+function Visit8(schema, references, value) {
+  const references_ = IsString2(schema.$id) ? Pushref(schema, references) : references;
+  const schema_ = schema;
+  switch (schema[Kind]) {
+    // --------------------------------------------------------------
+    // Structural
+    // --------------------------------------------------------------
+    case "Array":
+      return FromArray11(schema_, references_, value);
+    case "Constructor":
+      return FromConstructor7(schema_, references_, value);
+    case "Import":
+      return FromImport4(schema_, references_, value);
+    case "Intersect":
+      return FromIntersect12(schema_, references_, value);
+    case "Never":
+      return FromNever5(schema_, references_, value);
+    case "Object":
+      return FromObject12(schema_, references_, value);
+    case "Record":
+      return FromRecord7(schema_, references_, value);
+    case "Ref":
+      return FromRef8(schema_, references_, value);
+    case "This":
+      return FromThis4(schema_, references_, value);
+    case "Tuple":
+      return FromTuple9(schema_, references_, value);
+    case "Union":
+      return FromUnion14(schema_, references_, value);
+    // --------------------------------------------------------------
+    // DefaultClone
+    // --------------------------------------------------------------
+    case "Date":
+    case "Symbol":
+    case "Uint8Array":
+      return DefaultClone(schema, references, value);
+    // --------------------------------------------------------------
+    // Default
+    // --------------------------------------------------------------
+    default:
+      return Default(schema_, references_, value);
+  }
+}
+function Cast(...args) {
+  return args.length === 3 ? Visit8(args[0], args[1], args[2]) : Visit8(args[0], [], args[1]);
+}
+var ValueCastError;
+var init_cast = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/cast/cast.mjs"() {
+    init_guard2();
+    init_error2();
+    init_symbols2();
+    init_create3();
+    init_check2();
+    init_clone3();
+    init_deref2();
+    ValueCastError = class extends TypeBoxError {
+      constructor(schema, message) {
+        super(message);
+        this.schema = schema;
+      }
+    };
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/cast/index.mjs
+var init_cast2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/cast/index.mjs"() {
+    init_cast();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/clean/clean.mjs
+function IsCheckable(schema) {
+  return IsKind(schema) && schema[Kind] !== "Unsafe";
+}
+function FromArray12(schema, references, value) {
+  if (!IsArray2(value))
+    return value;
+  return value.map((value2) => Visit9(schema.items, references, value2));
+}
+function FromImport5(schema, references, value) {
+  const definitions = globalThis.Object.values(schema.$defs);
+  const target = schema.$defs[schema.$ref];
+  return Visit9(target, [...references, ...definitions], value);
+}
+function FromIntersect13(schema, references, value) {
+  const unevaluatedProperties = schema.unevaluatedProperties;
+  const intersections = schema.allOf.map((schema2) => Visit9(schema2, references, Clone2(value)));
+  const composite = intersections.reduce((acc, value2) => IsObject2(value2) ? { ...acc, ...value2 } : value2, {});
+  if (!IsObject2(value) || !IsObject2(composite) || !IsKind(unevaluatedProperties))
+    return composite;
+  const knownkeys = KeyOfPropertyKeys(schema);
+  for (const key of Object.getOwnPropertyNames(value)) {
+    if (knownkeys.includes(key))
+      continue;
+    if (Check(unevaluatedProperties, references, value[key])) {
+      composite[key] = Visit9(unevaluatedProperties, references, value[key]);
+    }
+  }
+  return composite;
+}
+function FromObject13(schema, references, value) {
+  if (!IsObject2(value) || IsArray2(value))
+    return value;
+  const additionalProperties = schema.additionalProperties;
+  for (const key of Object.getOwnPropertyNames(value)) {
+    if (HasPropertyKey2(schema.properties, key)) {
+      value[key] = Visit9(schema.properties[key], references, value[key]);
+      continue;
+    }
+    if (IsKind(additionalProperties) && Check(additionalProperties, references, value[key])) {
+      value[key] = Visit9(additionalProperties, references, value[key]);
+      continue;
+    }
+    delete value[key];
+  }
+  return value;
+}
+function FromRecord8(schema, references, value) {
+  if (!IsObject2(value))
+    return value;
+  const additionalProperties = schema.additionalProperties;
+  const propertyKeys = Object.getOwnPropertyNames(value);
+  const [propertyKey, propertySchema] = Object.entries(schema.patternProperties)[0];
+  const propertyKeyTest = new RegExp(propertyKey);
+  for (const key of propertyKeys) {
+    if (propertyKeyTest.test(key)) {
+      value[key] = Visit9(propertySchema, references, value[key]);
+      continue;
+    }
+    if (IsKind(additionalProperties) && Check(additionalProperties, references, value[key])) {
+      value[key] = Visit9(additionalProperties, references, value[key]);
+      continue;
+    }
+    delete value[key];
+  }
+  return value;
+}
+function FromRef9(schema, references, value) {
+  return Visit9(Deref(schema, references), references, value);
+}
+function FromThis5(schema, references, value) {
+  return Visit9(Deref(schema, references), references, value);
+}
+function FromTuple10(schema, references, value) {
+  if (!IsArray2(value))
+    return value;
+  if (IsUndefined2(schema.items))
+    return [];
+  const length = Math.min(value.length, schema.items.length);
+  for (let i = 0; i < length; i++) {
+    value[i] = Visit9(schema.items[i], references, value[i]);
+  }
+  return value.length > length ? value.slice(0, length) : value;
+}
+function FromUnion15(schema, references, value) {
+  for (const inner of schema.anyOf) {
+    if (IsCheckable(inner) && Check(inner, references, value)) {
+      return Visit9(inner, references, value);
+    }
+  }
+  return value;
+}
+function Visit9(schema, references, value) {
+  const references_ = IsString2(schema.$id) ? Pushref(schema, references) : references;
+  const schema_ = schema;
+  switch (schema_[Kind]) {
+    case "Array":
+      return FromArray12(schema_, references_, value);
+    case "Import":
+      return FromImport5(schema_, references_, value);
+    case "Intersect":
+      return FromIntersect13(schema_, references_, value);
+    case "Object":
+      return FromObject13(schema_, references_, value);
+    case "Record":
+      return FromRecord8(schema_, references_, value);
+    case "Ref":
+      return FromRef9(schema_, references_, value);
+    case "This":
+      return FromThis5(schema_, references_, value);
+    case "Tuple":
+      return FromTuple10(schema_, references_, value);
+    case "Union":
+      return FromUnion15(schema_, references_, value);
+    default:
+      return value;
+  }
+}
+function Clean(...args) {
+  return args.length === 3 ? Visit9(args[0], args[1], args[2]) : Visit9(args[0], [], args[1]);
+}
+var init_clean = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/clean/clean.mjs"() {
+    init_keyof2();
+    init_check2();
+    init_clone3();
+    init_deref2();
+    init_symbols2();
+    init_guard2();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/clean/index.mjs
+var init_clean2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/clean/index.mjs"() {
+    init_clean();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/convert/convert.mjs
+function IsStringNumeric(value) {
+  return IsString2(value) && !isNaN(value) && !isNaN(parseFloat(value));
+}
+function IsValueToString(value) {
+  return IsBigInt2(value) || IsBoolean2(value) || IsNumber2(value);
+}
+function IsValueTrue(value) {
+  return value === true || IsNumber2(value) && value === 1 || IsBigInt2(value) && value === BigInt("1") || IsString2(value) && (value.toLowerCase() === "true" || value === "1");
+}
+function IsValueFalse(value) {
+  return value === false || IsNumber2(value) && (value === 0 || Object.is(value, -0)) || IsBigInt2(value) && value === BigInt("0") || IsString2(value) && (value.toLowerCase() === "false" || value === "0" || value === "-0");
+}
+function IsTimeStringWithTimeZone(value) {
+  return IsString2(value) && /^(?:[0-2]\d:[0-5]\d:[0-5]\d|23:59:60)(?:\.\d+)?(?:z|[+-]\d\d(?::?\d\d)?)$/i.test(value);
+}
+function IsTimeStringWithoutTimeZone(value) {
+  return IsString2(value) && /^(?:[0-2]\d:[0-5]\d:[0-5]\d|23:59:60)?$/i.test(value);
+}
+function IsDateTimeStringWithTimeZone(value) {
+  return IsString2(value) && /^\d\d\d\d-[0-1]\d-[0-3]\dt(?:[0-2]\d:[0-5]\d:[0-5]\d|23:59:60)(?:\.\d+)?(?:z|[+-]\d\d(?::?\d\d)?)$/i.test(value);
+}
+function IsDateTimeStringWithoutTimeZone(value) {
+  return IsString2(value) && /^\d\d\d\d-[0-1]\d-[0-3]\dt(?:[0-2]\d:[0-5]\d:[0-5]\d|23:59:60)?$/i.test(value);
+}
+function IsDateString(value) {
+  return IsString2(value) && /^\d\d\d\d-[0-1]\d-[0-3]\d$/i.test(value);
+}
+function TryConvertLiteralString(value, target) {
+  const conversion = TryConvertString(value);
+  return conversion === target ? conversion : value;
+}
+function TryConvertLiteralNumber(value, target) {
+  const conversion = TryConvertNumber(value);
+  return conversion === target ? conversion : value;
+}
+function TryConvertLiteralBoolean(value, target) {
+  const conversion = TryConvertBoolean(value);
+  return conversion === target ? conversion : value;
+}
+function TryConvertLiteral(schema, value) {
+  return IsString2(schema.const) ? TryConvertLiteralString(value, schema.const) : IsNumber2(schema.const) ? TryConvertLiteralNumber(value, schema.const) : IsBoolean2(schema.const) ? TryConvertLiteralBoolean(value, schema.const) : value;
+}
+function TryConvertBoolean(value) {
+  return IsValueTrue(value) ? true : IsValueFalse(value) ? false : value;
+}
+function TryConvertBigInt(value) {
+  const truncateInteger = (value2) => value2.split(".")[0];
+  return IsStringNumeric(value) ? BigInt(truncateInteger(value)) : IsNumber2(value) ? BigInt(Math.trunc(value)) : IsValueFalse(value) ? BigInt(0) : IsValueTrue(value) ? BigInt(1) : value;
+}
+function TryConvertString(value) {
+  return IsSymbol2(value) && value.description !== void 0 ? value.description.toString() : IsValueToString(value) ? value.toString() : value;
+}
+function TryConvertNumber(value) {
+  return IsStringNumeric(value) ? parseFloat(value) : IsValueTrue(value) ? 1 : IsValueFalse(value) ? 0 : value;
+}
+function TryConvertInteger(value) {
+  return IsStringNumeric(value) ? parseInt(value) : IsNumber2(value) ? Math.trunc(value) : IsValueTrue(value) ? 1 : IsValueFalse(value) ? 0 : value;
+}
+function TryConvertNull(value) {
+  return IsString2(value) && value.toLowerCase() === "null" ? null : value;
+}
+function TryConvertUndefined(value) {
+  return IsString2(value) && value === "undefined" ? void 0 : value;
+}
+function TryConvertDate(value) {
+  return IsDate2(value) ? value : IsNumber2(value) ? new Date(value) : IsValueTrue(value) ? /* @__PURE__ */ new Date(1) : IsValueFalse(value) ? /* @__PURE__ */ new Date(0) : IsStringNumeric(value) ? new Date(parseInt(value)) : IsTimeStringWithoutTimeZone(value) ? /* @__PURE__ */ new Date(`1970-01-01T${value}.000Z`) : IsTimeStringWithTimeZone(value) ? /* @__PURE__ */ new Date(`1970-01-01T${value}`) : IsDateTimeStringWithoutTimeZone(value) ? /* @__PURE__ */ new Date(`${value}.000Z`) : IsDateTimeStringWithTimeZone(value) ? new Date(value) : IsDateString(value) ? /* @__PURE__ */ new Date(`${value}T00:00:00.000Z`) : value;
+}
+function Default2(value) {
+  return value;
+}
+function FromArray13(schema, references, value) {
+  const elements = IsArray2(value) ? value : [value];
+  return elements.map((element) => Visit10(schema.items, references, element));
+}
+function FromBigInt5(schema, references, value) {
+  return TryConvertBigInt(value);
+}
+function FromBoolean5(schema, references, value) {
+  return TryConvertBoolean(value);
+}
+function FromDate6(schema, references, value) {
+  return TryConvertDate(value);
+}
+function FromImport6(schema, references, value) {
+  const definitions = globalThis.Object.values(schema.$defs);
+  const target = schema.$defs[schema.$ref];
+  return Visit10(target, [...references, ...definitions], value);
+}
+function FromInteger5(schema, references, value) {
+  return TryConvertInteger(value);
+}
+function FromIntersect14(schema, references, value) {
+  return schema.allOf.reduce((value2, schema2) => Visit10(schema2, references, value2), value);
+}
+function FromLiteral6(schema, references, value) {
+  return TryConvertLiteral(schema, value);
+}
+function FromNull5(schema, references, value) {
+  return TryConvertNull(value);
+}
+function FromNumber5(schema, references, value) {
+  return TryConvertNumber(value);
+}
+function FromObject14(schema, references, value) {
+  if (!IsObject2(value) || IsArray2(value))
+    return value;
+  for (const propertyKey of Object.getOwnPropertyNames(schema.properties)) {
+    if (!HasPropertyKey2(value, propertyKey))
+      continue;
+    value[propertyKey] = Visit10(schema.properties[propertyKey], references, value[propertyKey]);
+  }
+  return value;
+}
+function FromRecord9(schema, references, value) {
+  const isConvertable = IsObject2(value) && !IsArray2(value);
+  if (!isConvertable)
+    return value;
+  const propertyKey = Object.getOwnPropertyNames(schema.patternProperties)[0];
+  const property = schema.patternProperties[propertyKey];
+  for (const [propKey, propValue] of Object.entries(value)) {
+    value[propKey] = Visit10(property, references, propValue);
+  }
+  return value;
+}
+function FromRef10(schema, references, value) {
+  return Visit10(Deref(schema, references), references, value);
+}
+function FromString5(schema, references, value) {
+  return TryConvertString(value);
+}
+function FromSymbol5(schema, references, value) {
+  return IsString2(value) || IsNumber2(value) ? Symbol(value) : value;
+}
+function FromThis6(schema, references, value) {
+  return Visit10(Deref(schema, references), references, value);
+}
+function FromTuple11(schema, references, value) {
+  const isConvertable = IsArray2(value) && !IsUndefined2(schema.items);
+  if (!isConvertable)
+    return value;
+  return value.map((value2, index) => {
+    return index < schema.items.length ? Visit10(schema.items[index], references, value2) : value2;
+  });
+}
+function FromUndefined5(schema, references, value) {
+  return TryConvertUndefined(value);
+}
+function FromUnion16(schema, references, value) {
+  for (const subschema of schema.anyOf) {
+    if (Check(subschema, references, value)) {
+      return value;
+    }
+  }
+  for (const subschema of schema.anyOf) {
+    const converted = Visit10(subschema, references, Clone2(value));
+    if (!Check(subschema, references, converted))
+      continue;
+    return converted;
+  }
+  return value;
+}
+function Visit10(schema, references, value) {
+  const references_ = Pushref(schema, references);
+  const schema_ = schema;
+  switch (schema[Kind]) {
+    case "Array":
+      return FromArray13(schema_, references_, value);
+    case "BigInt":
+      return FromBigInt5(schema_, references_, value);
+    case "Boolean":
+      return FromBoolean5(schema_, references_, value);
+    case "Date":
+      return FromDate6(schema_, references_, value);
+    case "Import":
+      return FromImport6(schema_, references_, value);
+    case "Integer":
+      return FromInteger5(schema_, references_, value);
+    case "Intersect":
+      return FromIntersect14(schema_, references_, value);
+    case "Literal":
+      return FromLiteral6(schema_, references_, value);
+    case "Null":
+      return FromNull5(schema_, references_, value);
+    case "Number":
+      return FromNumber5(schema_, references_, value);
+    case "Object":
+      return FromObject14(schema_, references_, value);
+    case "Record":
+      return FromRecord9(schema_, references_, value);
+    case "Ref":
+      return FromRef10(schema_, references_, value);
+    case "String":
+      return FromString5(schema_, references_, value);
+    case "Symbol":
+      return FromSymbol5(schema_, references_, value);
+    case "This":
+      return FromThis6(schema_, references_, value);
+    case "Tuple":
+      return FromTuple11(schema_, references_, value);
+    case "Undefined":
+      return FromUndefined5(schema_, references_, value);
+    case "Union":
+      return FromUnion16(schema_, references_, value);
+    default:
+      return Default2(value);
+  }
+}
+function Convert(...args) {
+  return args.length === 3 ? Visit10(args[0], args[1], args[2]) : Visit10(args[0], [], args[1]);
+}
+var init_convert = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/convert/convert.mjs"() {
+    init_clone3();
+    init_check2();
+    init_deref2();
+    init_symbols2();
+    init_guard2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/convert/index.mjs
+var init_convert2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/convert/index.mjs"() {
+    init_convert();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/transform/decode.mjs
+function Default3(schema, path4, value) {
+  try {
+    return IsTransform(schema) ? schema[TransformKind].Decode(value) : value;
+  } catch (error) {
+    throw new TransformDecodeError(schema, path4, value, error);
+  }
+}
+function FromArray14(schema, references, path4, value) {
+  return IsArray2(value) ? Default3(schema, path4, value.map((value2, index) => Visit11(schema.items, references, `${path4}/${index}`, value2))) : Default3(schema, path4, value);
+}
+function FromIntersect15(schema, references, path4, value) {
+  if (!IsObject2(value) || IsValueType(value))
+    return Default3(schema, path4, value);
+  const knownEntries = KeyOfPropertyEntries(schema);
+  const knownKeys = knownEntries.map((entry) => entry[0]);
+  const knownProperties = { ...value };
+  for (const [knownKey, knownSchema] of knownEntries)
+    if (knownKey in knownProperties) {
+      knownProperties[knownKey] = Visit11(knownSchema, references, `${path4}/${knownKey}`, knownProperties[knownKey]);
+    }
+  if (!IsTransform(schema.unevaluatedProperties)) {
+    return Default3(schema, path4, knownProperties);
+  }
+  const unknownKeys = Object.getOwnPropertyNames(knownProperties);
+  const unevaluatedProperties = schema.unevaluatedProperties;
+  const unknownProperties = { ...knownProperties };
+  for (const key of unknownKeys)
+    if (!knownKeys.includes(key)) {
+      unknownProperties[key] = Default3(unevaluatedProperties, `${path4}/${key}`, unknownProperties[key]);
+    }
+  return Default3(schema, path4, unknownProperties);
+}
+function FromImport7(schema, references, path4, value) {
+  const additional = globalThis.Object.values(schema.$defs);
+  const target = schema.$defs[schema.$ref];
+  const result = Visit11(target, [...references, ...additional], path4, value);
+  return Default3(schema, path4, result);
+}
+function FromNot5(schema, references, path4, value) {
+  return Default3(schema, path4, Visit11(schema.not, references, path4, value));
+}
+function FromObject15(schema, references, path4, value) {
+  if (!IsObject2(value))
+    return Default3(schema, path4, value);
+  const knownKeys = KeyOfPropertyKeys(schema);
+  const knownProperties = { ...value };
+  for (const key of knownKeys) {
+    if (!HasPropertyKey2(knownProperties, key))
+      continue;
+    if (IsUndefined2(knownProperties[key]) && (!IsUndefined3(schema.properties[key]) || TypeSystemPolicy.IsExactOptionalProperty(knownProperties, key)))
+      continue;
+    knownProperties[key] = Visit11(schema.properties[key], references, `${path4}/${key}`, knownProperties[key]);
+  }
+  if (!IsSchema(schema.additionalProperties)) {
+    return Default3(schema, path4, knownProperties);
+  }
+  const unknownKeys = Object.getOwnPropertyNames(knownProperties);
+  const additionalProperties = schema.additionalProperties;
+  const unknownProperties = { ...knownProperties };
+  for (const key of unknownKeys)
+    if (!knownKeys.includes(key)) {
+      unknownProperties[key] = Default3(additionalProperties, `${path4}/${key}`, unknownProperties[key]);
+    }
+  return Default3(schema, path4, unknownProperties);
+}
+function FromRecord10(schema, references, path4, value) {
+  if (!IsObject2(value))
+    return Default3(schema, path4, value);
+  const pattern = Object.getOwnPropertyNames(schema.patternProperties)[0];
+  const knownKeys = new RegExp(pattern);
+  const knownProperties = { ...value };
+  for (const key of Object.getOwnPropertyNames(value))
+    if (knownKeys.test(key)) {
+      knownProperties[key] = Visit11(schema.patternProperties[pattern], references, `${path4}/${key}`, knownProperties[key]);
+    }
+  if (!IsSchema(schema.additionalProperties)) {
+    return Default3(schema, path4, knownProperties);
+  }
+  const unknownKeys = Object.getOwnPropertyNames(knownProperties);
+  const additionalProperties = schema.additionalProperties;
+  const unknownProperties = { ...knownProperties };
+  for (const key of unknownKeys)
+    if (!knownKeys.test(key)) {
+      unknownProperties[key] = Default3(additionalProperties, `${path4}/${key}`, unknownProperties[key]);
+    }
+  return Default3(schema, path4, unknownProperties);
+}
+function FromRef11(schema, references, path4, value) {
+  const target = Deref(schema, references);
+  return Default3(schema, path4, Visit11(target, references, path4, value));
+}
+function FromThis7(schema, references, path4, value) {
+  const target = Deref(schema, references);
+  return Default3(schema, path4, Visit11(target, references, path4, value));
+}
+function FromTuple12(schema, references, path4, value) {
+  return IsArray2(value) && IsArray2(schema.items) ? Default3(schema, path4, schema.items.map((schema2, index) => Visit11(schema2, references, `${path4}/${index}`, value[index]))) : Default3(schema, path4, value);
+}
+function FromUnion17(schema, references, path4, value) {
+  for (const subschema of schema.anyOf) {
+    if (!Check(subschema, references, value))
+      continue;
+    const decoded = Visit11(subschema, references, path4, value);
+    return Default3(schema, path4, decoded);
+  }
+  return Default3(schema, path4, value);
+}
+function Visit11(schema, references, path4, value) {
+  const references_ = Pushref(schema, references);
+  const schema_ = schema;
+  switch (schema[Kind]) {
+    case "Array":
+      return FromArray14(schema_, references_, path4, value);
+    case "Import":
+      return FromImport7(schema_, references_, path4, value);
+    case "Intersect":
+      return FromIntersect15(schema_, references_, path4, value);
+    case "Not":
+      return FromNot5(schema_, references_, path4, value);
+    case "Object":
+      return FromObject15(schema_, references_, path4, value);
+    case "Record":
+      return FromRecord10(schema_, references_, path4, value);
+    case "Ref":
+      return FromRef11(schema_, references_, path4, value);
+    case "Symbol":
+      return Default3(schema_, path4, value);
+    case "This":
+      return FromThis7(schema_, references_, path4, value);
+    case "Tuple":
+      return FromTuple12(schema_, references_, path4, value);
+    case "Union":
+      return FromUnion17(schema_, references_, path4, value);
+    default:
+      return Default3(schema_, path4, value);
+  }
+}
+function TransformDecode(schema, references, value) {
+  return Visit11(schema, references, "", value);
+}
+var TransformDecodeCheckError, TransformDecodeError;
+var init_decode = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/transform/decode.mjs"() {
+    init_policy();
+    init_symbols2();
+    init_error2();
+    init_keyof2();
+    init_deref2();
+    init_check2();
+    init_guard2();
+    init_kind();
+    TransformDecodeCheckError = class extends TypeBoxError {
+      constructor(schema, value, error) {
+        super(`Unable to decode value as it does not match the expected schema`);
+        this.schema = schema;
+        this.value = value;
+        this.error = error;
+      }
+    };
+    TransformDecodeError = class extends TypeBoxError {
+      constructor(schema, path4, value, error) {
+        super(error instanceof Error ? error.message : "Unknown error");
+        this.schema = schema;
+        this.path = path4;
+        this.value = value;
+        this.error = error;
+      }
+    };
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/transform/encode.mjs
+function Default4(schema, path4, value) {
+  try {
+    return IsTransform(schema) ? schema[TransformKind].Encode(value) : value;
+  } catch (error) {
+    throw new TransformEncodeError(schema, path4, value, error);
+  }
+}
+function FromArray15(schema, references, path4, value) {
+  const defaulted = Default4(schema, path4, value);
+  return IsArray2(defaulted) ? defaulted.map((value2, index) => Visit12(schema.items, references, `${path4}/${index}`, value2)) : defaulted;
+}
+function FromImport8(schema, references, path4, value) {
+  const additional = globalThis.Object.values(schema.$defs);
+  const target = schema.$defs[schema.$ref];
+  const result = Default4(schema, path4, value);
+  return Visit12(target, [...references, ...additional], path4, result);
+}
+function FromIntersect16(schema, references, path4, value) {
+  const defaulted = Default4(schema, path4, value);
+  if (!IsObject2(value) || IsValueType(value))
+    return defaulted;
+  const knownEntries = KeyOfPropertyEntries(schema);
+  const knownKeys = knownEntries.map((entry) => entry[0]);
+  const knownProperties = { ...defaulted };
+  for (const [knownKey, knownSchema] of knownEntries)
+    if (knownKey in knownProperties) {
+      knownProperties[knownKey] = Visit12(knownSchema, references, `${path4}/${knownKey}`, knownProperties[knownKey]);
+    }
+  if (!IsTransform(schema.unevaluatedProperties)) {
+    return knownProperties;
+  }
+  const unknownKeys = Object.getOwnPropertyNames(knownProperties);
+  const unevaluatedProperties = schema.unevaluatedProperties;
+  const properties = { ...knownProperties };
+  for (const key of unknownKeys)
+    if (!knownKeys.includes(key)) {
+      properties[key] = Default4(unevaluatedProperties, `${path4}/${key}`, properties[key]);
+    }
+  return properties;
+}
+function FromNot6(schema, references, path4, value) {
+  return Default4(schema.not, path4, Default4(schema, path4, value));
+}
+function FromObject16(schema, references, path4, value) {
+  const defaulted = Default4(schema, path4, value);
+  if (!IsObject2(defaulted))
+    return defaulted;
+  const knownKeys = KeyOfPropertyKeys(schema);
+  const knownProperties = { ...defaulted };
+  for (const key of knownKeys) {
+    if (!HasPropertyKey2(knownProperties, key))
+      continue;
+    if (IsUndefined2(knownProperties[key]) && (!IsUndefined3(schema.properties[key]) || TypeSystemPolicy.IsExactOptionalProperty(knownProperties, key)))
+      continue;
+    knownProperties[key] = Visit12(schema.properties[key], references, `${path4}/${key}`, knownProperties[key]);
+  }
+  if (!IsSchema(schema.additionalProperties)) {
+    return knownProperties;
+  }
+  const unknownKeys = Object.getOwnPropertyNames(knownProperties);
+  const additionalProperties = schema.additionalProperties;
+  const properties = { ...knownProperties };
+  for (const key of unknownKeys)
+    if (!knownKeys.includes(key)) {
+      properties[key] = Default4(additionalProperties, `${path4}/${key}`, properties[key]);
+    }
+  return properties;
+}
+function FromRecord11(schema, references, path4, value) {
+  const defaulted = Default4(schema, path4, value);
+  if (!IsObject2(value))
+    return defaulted;
+  const pattern = Object.getOwnPropertyNames(schema.patternProperties)[0];
+  const knownKeys = new RegExp(pattern);
+  const knownProperties = { ...defaulted };
+  for (const key of Object.getOwnPropertyNames(value))
+    if (knownKeys.test(key)) {
+      knownProperties[key] = Visit12(schema.patternProperties[pattern], references, `${path4}/${key}`, knownProperties[key]);
+    }
+  if (!IsSchema(schema.additionalProperties)) {
+    return knownProperties;
+  }
+  const unknownKeys = Object.getOwnPropertyNames(knownProperties);
+  const additionalProperties = schema.additionalProperties;
+  const properties = { ...knownProperties };
+  for (const key of unknownKeys)
+    if (!knownKeys.test(key)) {
+      properties[key] = Default4(additionalProperties, `${path4}/${key}`, properties[key]);
+    }
+  return properties;
+}
+function FromRef12(schema, references, path4, value) {
+  const target = Deref(schema, references);
+  const resolved = Visit12(target, references, path4, value);
+  return Default4(schema, path4, resolved);
+}
+function FromThis8(schema, references, path4, value) {
+  const target = Deref(schema, references);
+  const resolved = Visit12(target, references, path4, value);
+  return Default4(schema, path4, resolved);
+}
+function FromTuple13(schema, references, path4, value) {
+  const value1 = Default4(schema, path4, value);
+  return IsArray2(schema.items) ? schema.items.map((schema2, index) => Visit12(schema2, references, `${path4}/${index}`, value1[index])) : [];
+}
+function FromUnion18(schema, references, path4, value) {
+  for (const subschema of schema.anyOf) {
+    if (!Check(subschema, references, value))
+      continue;
+    const value1 = Visit12(subschema, references, path4, value);
+    return Default4(schema, path4, value1);
+  }
+  for (const subschema of schema.anyOf) {
+    const value1 = Visit12(subschema, references, path4, value);
+    if (!Check(schema, references, value1))
+      continue;
+    return Default4(schema, path4, value1);
+  }
+  return Default4(schema, path4, value);
+}
+function Visit12(schema, references, path4, value) {
+  const references_ = Pushref(schema, references);
+  const schema_ = schema;
+  switch (schema[Kind]) {
+    case "Array":
+      return FromArray15(schema_, references_, path4, value);
+    case "Import":
+      return FromImport8(schema_, references_, path4, value);
+    case "Intersect":
+      return FromIntersect16(schema_, references_, path4, value);
+    case "Not":
+      return FromNot6(schema_, references_, path4, value);
+    case "Object":
+      return FromObject16(schema_, references_, path4, value);
+    case "Record":
+      return FromRecord11(schema_, references_, path4, value);
+    case "Ref":
+      return FromRef12(schema_, references_, path4, value);
+    case "This":
+      return FromThis8(schema_, references_, path4, value);
+    case "Tuple":
+      return FromTuple13(schema_, references_, path4, value);
+    case "Union":
+      return FromUnion18(schema_, references_, path4, value);
+    default:
+      return Default4(schema_, path4, value);
+  }
+}
+function TransformEncode(schema, references, value) {
+  return Visit12(schema, references, "", value);
+}
+var TransformEncodeCheckError, TransformEncodeError;
+var init_encode = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/transform/encode.mjs"() {
+    init_policy();
+    init_symbols2();
+    init_error2();
+    init_keyof2();
+    init_deref2();
+    init_check2();
+    init_guard2();
+    init_kind();
+    TransformEncodeCheckError = class extends TypeBoxError {
+      constructor(schema, value, error) {
+        super(`The encoded value does not match the expected schema`);
+        this.schema = schema;
+        this.value = value;
+        this.error = error;
+      }
+    };
+    TransformEncodeError = class extends TypeBoxError {
+      constructor(schema, path4, value, error) {
+        super(`${error instanceof Error ? error.message : "Unknown error"}`);
+        this.schema = schema;
+        this.path = path4;
+        this.value = value;
+        this.error = error;
+      }
+    };
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/transform/has.mjs
+function FromArray16(schema, references) {
+  return IsTransform(schema) || Visit13(schema.items, references);
+}
+function FromAsyncIterator7(schema, references) {
+  return IsTransform(schema) || Visit13(schema.items, references);
+}
+function FromConstructor8(schema, references) {
+  return IsTransform(schema) || Visit13(schema.returns, references) || schema.parameters.some((schema2) => Visit13(schema2, references));
+}
+function FromFunction7(schema, references) {
+  return IsTransform(schema) || Visit13(schema.returns, references) || schema.parameters.some((schema2) => Visit13(schema2, references));
+}
+function FromIntersect17(schema, references) {
+  return IsTransform(schema) || IsTransform(schema.unevaluatedProperties) || schema.allOf.some((schema2) => Visit13(schema2, references));
+}
+function FromImport9(schema, references) {
+  const additional = globalThis.Object.getOwnPropertyNames(schema.$defs).reduce((result, key) => [...result, schema.$defs[key]], []);
+  const target = schema.$defs[schema.$ref];
+  return IsTransform(schema) || Visit13(target, [...additional, ...references]);
+}
+function FromIterator7(schema, references) {
+  return IsTransform(schema) || Visit13(schema.items, references);
+}
+function FromNot7(schema, references) {
+  return IsTransform(schema) || Visit13(schema.not, references);
+}
+function FromObject17(schema, references) {
+  return IsTransform(schema) || Object.values(schema.properties).some((schema2) => Visit13(schema2, references)) || IsSchema(schema.additionalProperties) && Visit13(schema.additionalProperties, references);
+}
+function FromPromise7(schema, references) {
+  return IsTransform(schema) || Visit13(schema.item, references);
+}
+function FromRecord12(schema, references) {
+  const pattern = Object.getOwnPropertyNames(schema.patternProperties)[0];
+  const property = schema.patternProperties[pattern];
+  return IsTransform(schema) || Visit13(property, references) || IsSchema(schema.additionalProperties) && IsTransform(schema.additionalProperties);
+}
+function FromRef13(schema, references) {
+  if (IsTransform(schema))
+    return true;
+  return Visit13(Deref(schema, references), references);
+}
+function FromThis9(schema, references) {
+  if (IsTransform(schema))
+    return true;
+  return Visit13(Deref(schema, references), references);
+}
+function FromTuple14(schema, references) {
+  return IsTransform(schema) || !IsUndefined2(schema.items) && schema.items.some((schema2) => Visit13(schema2, references));
+}
+function FromUnion19(schema, references) {
+  return IsTransform(schema) || schema.anyOf.some((schema2) => Visit13(schema2, references));
+}
+function Visit13(schema, references) {
+  const references_ = Pushref(schema, references);
+  const schema_ = schema;
+  if (schema.$id && visited.has(schema.$id))
+    return false;
+  if (schema.$id)
+    visited.add(schema.$id);
+  switch (schema[Kind]) {
+    case "Array":
+      return FromArray16(schema_, references_);
+    case "AsyncIterator":
+      return FromAsyncIterator7(schema_, references_);
+    case "Constructor":
+      return FromConstructor8(schema_, references_);
+    case "Function":
+      return FromFunction7(schema_, references_);
+    case "Import":
+      return FromImport9(schema_, references_);
+    case "Intersect":
+      return FromIntersect17(schema_, references_);
+    case "Iterator":
+      return FromIterator7(schema_, references_);
+    case "Not":
+      return FromNot7(schema_, references_);
+    case "Object":
+      return FromObject17(schema_, references_);
+    case "Promise":
+      return FromPromise7(schema_, references_);
+    case "Record":
+      return FromRecord12(schema_, references_);
+    case "Ref":
+      return FromRef13(schema_, references_);
+    case "This":
+      return FromThis9(schema_, references_);
+    case "Tuple":
+      return FromTuple14(schema_, references_);
+    case "Union":
+      return FromUnion19(schema_, references_);
+    default:
+      return IsTransform(schema);
+  }
+}
+function HasTransform(schema, references) {
+  visited.clear();
+  return Visit13(schema, references);
+}
+var visited;
+var init_has = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/transform/has.mjs"() {
+    init_deref2();
+    init_symbols2();
+    init_kind();
+    init_guard2();
+    visited = /* @__PURE__ */ new Set();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/transform/index.mjs
+var init_transform3 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/transform/index.mjs"() {
+    init_decode();
+    init_encode();
+    init_has();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/decode/decode.mjs
+function Decode(...args) {
+  const [schema, references, value] = args.length === 3 ? [args[0], args[1], args[2]] : [args[0], [], args[1]];
+  if (!Check(schema, references, value))
+    throw new TransformDecodeCheckError(schema, value, Errors(schema, references, value).First());
+  return HasTransform(schema, references) ? TransformDecode(schema, references, value) : value;
+}
+var init_decode2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/decode/decode.mjs"() {
+    init_transform3();
+    init_check2();
+    init_errors2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/decode/index.mjs
+var init_decode3 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/decode/index.mjs"() {
+    init_decode2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/default/default.mjs
+function ValueOrDefault(schema, value) {
+  const defaultValue = HasPropertyKey2(schema, "default") ? schema.default : void 0;
+  const clone = IsFunction2(defaultValue) ? defaultValue() : Clone2(defaultValue);
+  return IsUndefined2(value) ? clone : IsObject2(value) && IsObject2(clone) ? Object.assign(clone, value) : value;
+}
+function HasDefaultProperty(schema) {
+  return IsKind(schema) && "default" in schema;
+}
+function FromArray17(schema, references, value) {
+  if (IsArray2(value)) {
+    for (let i = 0; i < value.length; i++) {
+      value[i] = Visit14(schema.items, references, value[i]);
+    }
+    return value;
+  }
+  const defaulted = ValueOrDefault(schema, value);
+  if (!IsArray2(defaulted))
+    return defaulted;
+  for (let i = 0; i < defaulted.length; i++) {
+    defaulted[i] = Visit14(schema.items, references, defaulted[i]);
+  }
+  return defaulted;
+}
+function FromDate7(schema, references, value) {
+  return IsDate2(value) ? value : ValueOrDefault(schema, value);
+}
+function FromImport10(schema, references, value) {
+  const definitions = globalThis.Object.values(schema.$defs);
+  const target = schema.$defs[schema.$ref];
+  return Visit14(target, [...references, ...definitions], value);
+}
+function FromIntersect18(schema, references, value) {
+  const defaulted = ValueOrDefault(schema, value);
+  return schema.allOf.reduce((acc, schema2) => {
+    const next = Visit14(schema2, references, defaulted);
+    return IsObject2(next) ? { ...acc, ...next } : next;
+  }, {});
+}
+function FromObject18(schema, references, value) {
+  const defaulted = ValueOrDefault(schema, value);
+  if (!IsObject2(defaulted))
+    return defaulted;
+  const knownPropertyKeys = Object.getOwnPropertyNames(schema.properties);
+  for (const key of knownPropertyKeys) {
+    const propertyValue = Visit14(schema.properties[key], references, defaulted[key]);
+    if (IsUndefined2(propertyValue))
+      continue;
+    defaulted[key] = Visit14(schema.properties[key], references, defaulted[key]);
+  }
+  if (!HasDefaultProperty(schema.additionalProperties))
+    return defaulted;
+  for (const key of Object.getOwnPropertyNames(defaulted)) {
+    if (knownPropertyKeys.includes(key))
+      continue;
+    defaulted[key] = Visit14(schema.additionalProperties, references, defaulted[key]);
+  }
+  return defaulted;
+}
+function FromRecord13(schema, references, value) {
+  const defaulted = ValueOrDefault(schema, value);
+  if (!IsObject2(defaulted))
+    return defaulted;
+  const additionalPropertiesSchema = schema.additionalProperties;
+  const [propertyKeyPattern, propertySchema] = Object.entries(schema.patternProperties)[0];
+  const knownPropertyKey = new RegExp(propertyKeyPattern);
+  for (const key of Object.getOwnPropertyNames(defaulted)) {
+    if (!(knownPropertyKey.test(key) && HasDefaultProperty(propertySchema)))
+      continue;
+    defaulted[key] = Visit14(propertySchema, references, defaulted[key]);
+  }
+  if (!HasDefaultProperty(additionalPropertiesSchema))
+    return defaulted;
+  for (const key of Object.getOwnPropertyNames(defaulted)) {
+    if (knownPropertyKey.test(key))
+      continue;
+    defaulted[key] = Visit14(additionalPropertiesSchema, references, defaulted[key]);
+  }
+  return defaulted;
+}
+function FromRef14(schema, references, value) {
+  return Visit14(Deref(schema, references), references, ValueOrDefault(schema, value));
+}
+function FromThis10(schema, references, value) {
+  return Visit14(Deref(schema, references), references, value);
+}
+function FromTuple15(schema, references, value) {
+  const defaulted = ValueOrDefault(schema, value);
+  if (!IsArray2(defaulted) || IsUndefined2(schema.items))
+    return defaulted;
+  const [items, max] = [schema.items, Math.max(schema.items.length, defaulted.length)];
+  for (let i = 0; i < max; i++) {
+    if (i < items.length)
+      defaulted[i] = Visit14(items[i], references, defaulted[i]);
+  }
+  return defaulted;
+}
+function FromUnion20(schema, references, value) {
+  const defaulted = ValueOrDefault(schema, value);
+  for (const inner of schema.anyOf) {
+    const result = Visit14(inner, references, Clone2(defaulted));
+    if (Check(inner, references, result)) {
+      return result;
+    }
+  }
+  return defaulted;
+}
+function Visit14(schema, references, value) {
+  const references_ = Pushref(schema, references);
+  const schema_ = schema;
+  switch (schema_[Kind]) {
+    case "Array":
+      return FromArray17(schema_, references_, value);
+    case "Date":
+      return FromDate7(schema_, references_, value);
+    case "Import":
+      return FromImport10(schema_, references_, value);
+    case "Intersect":
+      return FromIntersect18(schema_, references_, value);
+    case "Object":
+      return FromObject18(schema_, references_, value);
+    case "Record":
+      return FromRecord13(schema_, references_, value);
+    case "Ref":
+      return FromRef14(schema_, references_, value);
+    case "This":
+      return FromThis10(schema_, references_, value);
+    case "Tuple":
+      return FromTuple15(schema_, references_, value);
+    case "Union":
+      return FromUnion20(schema_, references_, value);
+    default:
+      return ValueOrDefault(schema_, value);
+  }
+}
+function Default5(...args) {
+  return args.length === 3 ? Visit14(args[0], args[1], args[2]) : Visit14(args[0], [], args[1]);
+}
+var init_default = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/default/default.mjs"() {
+    init_check2();
+    init_clone3();
+    init_deref2();
+    init_symbols2();
+    init_guard2();
+    init_kind();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/default/index.mjs
+var init_default2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/default/index.mjs"() {
+    init_default();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/pointer/pointer.mjs
+var pointer_exports = {};
+__export(pointer_exports, {
+  Delete: () => Delete3,
+  Format: () => Format,
+  Get: () => Get3,
+  Has: () => Has3,
+  Set: () => Set4,
+  ValuePointerRootDeleteError: () => ValuePointerRootDeleteError,
+  ValuePointerRootSetError: () => ValuePointerRootSetError
+});
+function Escape2(component) {
+  return component.indexOf("~") === -1 ? component : component.replace(/~1/g, "/").replace(/~0/g, "~");
+}
+function* Format(pointer) {
+  if (pointer === "")
+    return;
+  let [start, end] = [0, 0];
+  for (let i = 0; i < pointer.length; i++) {
+    const char = pointer.charAt(i);
+    if (char === "/") {
+      if (i === 0) {
+        start = i + 1;
+      } else {
+        end = i;
+        yield Escape2(pointer.slice(start, end));
+        start = i + 1;
+      }
+    } else {
+      end = i;
+    }
+  }
+  yield Escape2(pointer.slice(start));
+}
+function Set4(value, pointer, update) {
+  if (pointer === "")
+    throw new ValuePointerRootSetError(value, pointer, update);
+  let [owner, next, key] = [null, value, ""];
+  for (const component of Format(pointer)) {
+    if (next[component] === void 0)
+      next[component] = {};
+    owner = next;
+    next = next[component];
+    key = component;
+  }
+  owner[key] = update;
+}
+function Delete3(value, pointer) {
+  if (pointer === "")
+    throw new ValuePointerRootDeleteError(value, pointer);
+  let [owner, next, key] = [null, value, ""];
+  for (const component of Format(pointer)) {
+    if (next[component] === void 0 || next[component] === null)
+      return;
+    owner = next;
+    next = next[component];
+    key = component;
+  }
+  if (Array.isArray(owner)) {
+    const index = parseInt(key);
+    owner.splice(index, 1);
+  } else {
+    delete owner[key];
+  }
+}
+function Has3(value, pointer) {
+  if (pointer === "")
+    return true;
+  let [owner, next, key] = [null, value, ""];
+  for (const component of Format(pointer)) {
+    if (next[component] === void 0)
+      return false;
+    owner = next;
+    next = next[component];
+    key = component;
+  }
+  return Object.getOwnPropertyNames(owner).includes(key);
+}
+function Get3(value, pointer) {
+  if (pointer === "")
+    return value;
+  let current = value;
+  for (const component of Format(pointer)) {
+    if (current[component] === void 0)
+      return void 0;
+    current = current[component];
+  }
+  return current;
+}
+var ValuePointerRootSetError, ValuePointerRootDeleteError;
+var init_pointer = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/pointer/pointer.mjs"() {
+    init_error2();
+    ValuePointerRootSetError = class extends TypeBoxError {
+      constructor(value, path4, update) {
+        super("Cannot set root value");
+        this.value = value;
+        this.path = path4;
+        this.update = update;
+      }
+    };
+    ValuePointerRootDeleteError = class extends TypeBoxError {
+      constructor(value, path4) {
+        super("Cannot delete root value");
+        this.value = value;
+        this.path = path4;
+      }
+    };
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/pointer/index.mjs
+var init_pointer2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/pointer/index.mjs"() {
+    init_pointer();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/equal/equal.mjs
+function ObjectType3(left, right) {
+  if (!IsObject2(right))
+    return false;
+  const leftKeys = [...Object.keys(left), ...Object.getOwnPropertySymbols(left)];
+  const rightKeys = [...Object.keys(right), ...Object.getOwnPropertySymbols(right)];
+  if (leftKeys.length !== rightKeys.length)
+    return false;
+  return leftKeys.every((key) => Equal(left[key], right[key]));
+}
+function DateType3(left, right) {
+  return IsDate2(right) && left.getTime() === right.getTime();
+}
+function ArrayType3(left, right) {
+  if (!IsArray2(right) || left.length !== right.length)
+    return false;
+  return left.every((value, index) => Equal(value, right[index]));
+}
+function TypedArrayType(left, right) {
+  if (!IsTypedArray(right) || left.length !== right.length || Object.getPrototypeOf(left).constructor.name !== Object.getPrototypeOf(right).constructor.name)
+    return false;
+  return left.every((value, index) => Equal(value, right[index]));
+}
+function ValueType(left, right) {
+  return left === right;
+}
+function Equal(left, right) {
+  if (IsDate2(left))
+    return DateType3(left, right);
+  if (IsTypedArray(left))
+    return TypedArrayType(left, right);
+  if (IsArray2(left))
+    return ArrayType3(left, right);
+  if (IsObject2(left))
+    return ObjectType3(left, right);
+  if (IsValueType(left))
+    return ValueType(left, right);
+  throw new Error("ValueEquals: Unable to compare value");
+}
+var init_equal = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/equal/equal.mjs"() {
+    init_guard2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/delta/delta.mjs
+function CreateUpdate(path4, value) {
+  return { type: "update", path: path4, value };
+}
+function CreateInsert(path4, value) {
+  return { type: "insert", path: path4, value };
+}
+function CreateDelete(path4) {
+  return { type: "delete", path: path4 };
+}
+function AssertDiffable(value) {
+  if (globalThis.Object.getOwnPropertySymbols(value).length > 0)
+    throw new ValueDiffError(value, "Cannot diff objects with symbols");
+}
+function* ObjectType4(path4, current, next) {
+  AssertDiffable(current);
+  AssertDiffable(next);
+  if (!IsStandardObject(next))
+    return yield CreateUpdate(path4, next);
+  const currentKeys = globalThis.Object.getOwnPropertyNames(current);
+  const nextKeys = globalThis.Object.getOwnPropertyNames(next);
+  for (const key of nextKeys) {
+    if (HasPropertyKey2(current, key))
+      continue;
+    yield CreateInsert(`${path4}/${key}`, next[key]);
+  }
+  for (const key of currentKeys) {
+    if (!HasPropertyKey2(next, key))
+      continue;
+    if (Equal(current, next))
+      continue;
+    yield* Visit15(`${path4}/${key}`, current[key], next[key]);
+  }
+  for (const key of currentKeys) {
+    if (HasPropertyKey2(next, key))
+      continue;
+    yield CreateDelete(`${path4}/${key}`);
+  }
+}
+function* ArrayType4(path4, current, next) {
+  if (!IsArray2(next))
+    return yield CreateUpdate(path4, next);
+  for (let i = 0; i < Math.min(current.length, next.length); i++) {
+    yield* Visit15(`${path4}/${i}`, current[i], next[i]);
+  }
+  for (let i = 0; i < next.length; i++) {
+    if (i < current.length)
+      continue;
+    yield CreateInsert(`${path4}/${i}`, next[i]);
+  }
+  for (let i = current.length - 1; i >= 0; i--) {
+    if (i < next.length)
+      continue;
+    yield CreateDelete(`${path4}/${i}`);
+  }
+}
+function* TypedArrayType2(path4, current, next) {
+  if (!IsTypedArray(next) || current.length !== next.length || globalThis.Object.getPrototypeOf(current).constructor.name !== globalThis.Object.getPrototypeOf(next).constructor.name)
+    return yield CreateUpdate(path4, next);
+  for (let i = 0; i < Math.min(current.length, next.length); i++) {
+    yield* Visit15(`${path4}/${i}`, current[i], next[i]);
+  }
+}
+function* ValueType2(path4, current, next) {
+  if (current === next)
+    return;
+  yield CreateUpdate(path4, next);
+}
+function* Visit15(path4, current, next) {
+  if (IsStandardObject(current))
+    return yield* ObjectType4(path4, current, next);
+  if (IsArray2(current))
+    return yield* ArrayType4(path4, current, next);
+  if (IsTypedArray(current))
+    return yield* TypedArrayType2(path4, current, next);
+  if (IsValueType(current))
+    return yield* ValueType2(path4, current, next);
+  throw new ValueDiffError(current, "Unable to diff value");
+}
+function Diff(current, next) {
+  return [...Visit15("", current, next)];
+}
+function IsRootUpdate(edits) {
+  return edits.length > 0 && edits[0].path === "" && edits[0].type === "update";
+}
+function IsIdentity(edits) {
+  return edits.length === 0;
+}
+function Patch(current, edits) {
+  if (IsRootUpdate(edits)) {
+    return Clone2(edits[0].value);
+  }
+  if (IsIdentity(edits)) {
+    return Clone2(current);
+  }
+  const clone = Clone2(current);
+  for (const edit of edits) {
+    switch (edit.type) {
+      case "insert": {
+        pointer_exports.Set(clone, edit.path, edit.value);
+        break;
+      }
+      case "update": {
+        pointer_exports.Set(clone, edit.path, edit.value);
+        break;
+      }
+      case "delete": {
+        pointer_exports.Delete(clone, edit.path);
+        break;
+      }
+    }
+  }
+  return clone;
+}
+var Insert, Update, Delete4, Edit, ValueDiffError;
+var init_delta = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/delta/delta.mjs"() {
+    init_guard2();
+    init_pointer2();
+    init_clone3();
+    init_equal();
+    init_error2();
+    init_literal2();
+    init_object2();
+    init_string2();
+    init_unknown2();
+    init_union2();
+    Insert = Object2({
+      type: Literal("insert"),
+      path: String2(),
+      value: Unknown()
+    });
+    Update = Object2({
+      type: Literal("update"),
+      path: String2(),
+      value: Unknown()
+    });
+    Delete4 = Object2({
+      type: Literal("delete"),
+      path: String2()
+    });
+    Edit = Union([Insert, Update, Delete4]);
+    ValueDiffError = class extends TypeBoxError {
+      constructor(value, message) {
+        super(message);
+        this.value = value;
+      }
+    };
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/delta/index.mjs
+var init_delta2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/delta/index.mjs"() {
+    init_delta();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/encode/encode.mjs
+function Encode(...args) {
+  const [schema, references, value] = args.length === 3 ? [args[0], args[1], args[2]] : [args[0], [], args[1]];
+  const encoded = HasTransform(schema, references) ? TransformEncode(schema, references, value) : value;
+  if (!Check(schema, references, encoded))
+    throw new TransformEncodeCheckError(schema, encoded, Errors(schema, references, encoded).First());
+  return encoded;
+}
+var init_encode2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/encode/encode.mjs"() {
+    init_transform3();
+    init_check2();
+    init_errors2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/encode/index.mjs
+var init_encode3 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/encode/index.mjs"() {
+    init_encode2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/equal/index.mjs
+var init_equal2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/equal/index.mjs"() {
+    init_equal();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/mutate/mutate.mjs
+function IsStandardObject2(value) {
+  return IsObject2(value) && !IsArray2(value);
+}
+function ObjectType5(root, path4, current, next) {
+  if (!IsStandardObject2(current)) {
+    pointer_exports.Set(root, path4, Clone2(next));
+  } else {
+    const currentKeys = Object.getOwnPropertyNames(current);
+    const nextKeys = Object.getOwnPropertyNames(next);
+    for (const currentKey of currentKeys) {
+      if (!nextKeys.includes(currentKey)) {
+        delete current[currentKey];
+      }
+    }
+    for (const nextKey of nextKeys) {
+      if (!currentKeys.includes(nextKey)) {
+        current[nextKey] = null;
+      }
+    }
+    for (const nextKey of nextKeys) {
+      Visit16(root, `${path4}/${nextKey}`, current[nextKey], next[nextKey]);
+    }
+  }
+}
+function ArrayType5(root, path4, current, next) {
+  if (!IsArray2(current)) {
+    pointer_exports.Set(root, path4, Clone2(next));
+  } else {
+    for (let index = 0; index < next.length; index++) {
+      Visit16(root, `${path4}/${index}`, current[index], next[index]);
+    }
+    current.splice(next.length);
+  }
+}
+function TypedArrayType3(root, path4, current, next) {
+  if (IsTypedArray(current) && current.length === next.length) {
+    for (let i = 0; i < current.length; i++) {
+      current[i] = next[i];
+    }
+  } else {
+    pointer_exports.Set(root, path4, Clone2(next));
+  }
+}
+function ValueType3(root, path4, current, next) {
+  if (current === next)
+    return;
+  pointer_exports.Set(root, path4, next);
+}
+function Visit16(root, path4, current, next) {
+  if (IsArray2(next))
+    return ArrayType5(root, path4, current, next);
+  if (IsTypedArray(next))
+    return TypedArrayType3(root, path4, current, next);
+  if (IsStandardObject2(next))
+    return ObjectType5(root, path4, current, next);
+  if (IsValueType(next))
+    return ValueType3(root, path4, current, next);
+}
+function IsNonMutableValue(value) {
+  return IsTypedArray(value) || IsValueType(value);
+}
+function IsMismatchedValue(current, next) {
+  return IsStandardObject2(current) && IsArray2(next) || IsArray2(current) && IsStandardObject2(next);
+}
+function Mutate(current, next) {
+  if (IsNonMutableValue(current) || IsNonMutableValue(next))
+    throw new ValueMutateError("Only object and array types can be mutated at the root level");
+  if (IsMismatchedValue(current, next))
+    throw new ValueMutateError("Cannot assign due type mismatch of assignable values");
+  Visit16(current, "", current, next);
+}
+var ValueMutateError;
+var init_mutate = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/mutate/mutate.mjs"() {
+    init_guard2();
+    init_pointer2();
+    init_clone3();
+    init_error2();
+    ValueMutateError = class extends TypeBoxError {
+      constructor(message) {
+        super(message);
+      }
+    };
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/mutate/index.mjs
+var init_mutate2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/mutate/index.mjs"() {
+    init_mutate();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/parse/parse.mjs
+function ParseValue(operations, type, references, value) {
+  return operations.reduce((value2, operationKey) => {
+    const operation = ParseRegistry.Get(operationKey);
+    if (IsUndefined2(operation))
+      throw new ParseError(`Unable to find Parse operation '${operationKey}'`);
+    return operation(type, references, value2);
+  }, value);
+}
+function Parse(...args) {
+  const [operations, schema, references, value] = args.length === 4 ? [args[0], args[1], args[2], args[3]] : args.length === 3 ? IsArray2(args[0]) ? [args[0], args[1], [], args[2]] : [ParseDefault, args[0], args[1], args[2]] : args.length === 2 ? [ParseDefault, args[0], [], args[1]] : (() => {
+    throw new ParseError("Invalid Arguments");
+  })();
+  return ParseValue(operations, schema, references, value);
+}
+var ParseError, ParseRegistry, ParseDefault;
+var init_parse2 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/parse/parse.mjs"() {
+    init_error2();
+    init_transform3();
+    init_assert2();
+    init_cast2();
+    init_clean2();
+    init_clone3();
+    init_convert2();
+    init_default2();
+    init_guard2();
+    ParseError = class extends TypeBoxError {
+      constructor(message) {
+        super(message);
+      }
+    };
+    (function(ParseRegistry2) {
+      const registry2 = /* @__PURE__ */ new Map([
+        ["Assert", (type, references, value) => {
+          Assert(type, references, value);
+          return value;
+        }],
+        ["Cast", (type, references, value) => Cast(type, references, value)],
+        ["Clean", (type, references, value) => Clean(type, references, value)],
+        ["Clone", (_type, _references, value) => Clone2(value)],
+        ["Convert", (type, references, value) => Convert(type, references, value)],
+        ["Decode", (type, references, value) => HasTransform(type, references) ? TransformDecode(type, references, value) : value],
+        ["Default", (type, references, value) => Default5(type, references, value)],
+        ["Encode", (type, references, value) => HasTransform(type, references) ? TransformEncode(type, references, value) : value]
+      ]);
+      function Delete5(key) {
+        registry2.delete(key);
+      }
+      ParseRegistry2.Delete = Delete5;
+      function Set5(key, callback) {
+        registry2.set(key, callback);
+      }
+      ParseRegistry2.Set = Set5;
+      function Get4(key) {
+        return registry2.get(key);
+      }
+      ParseRegistry2.Get = Get4;
+    })(ParseRegistry || (ParseRegistry = {}));
+    ParseDefault = [
+      "Clone",
+      "Clean",
+      "Default",
+      "Convert",
+      "Assert",
+      "Decode"
+    ];
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/parse/index.mjs
+var init_parse3 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/parse/index.mjs"() {
+    init_parse2();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/value/value.mjs
+var value_exports2 = {};
+__export(value_exports2, {
+  Assert: () => Assert,
+  Cast: () => Cast,
+  Check: () => Check,
+  Clean: () => Clean,
+  Clone: () => Clone2,
+  Convert: () => Convert,
+  Create: () => Create2,
+  Decode: () => Decode,
+  Default: () => Default5,
+  Diff: () => Diff,
+  Edit: () => Edit,
+  Encode: () => Encode,
+  Equal: () => Equal,
+  Errors: () => Errors,
+  Hash: () => Hash,
+  Mutate: () => Mutate,
+  Parse: () => Parse,
+  Patch: () => Patch,
+  ValueErrorIterator: () => ValueErrorIterator
+});
+var init_value3 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/value/value.mjs"() {
+    init_errors2();
+    init_assert2();
+    init_cast2();
+    init_check2();
+    init_clean2();
+    init_clone3();
+    init_convert2();
+    init_create3();
+    init_decode3();
+    init_default2();
+    init_delta2();
+    init_encode3();
+    init_equal2();
+    init_hash2();
+    init_mutate2();
+    init_parse3();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/value/index.mjs
+var init_value4 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/value/index.mjs"() {
+    init_value3();
+  }
+});
+
+// node_modules/@sinclair/typebox/build/esm/value/index.mjs
+var init_value5 = __esm({
+  "node_modules/@sinclair/typebox/build/esm/value/index.mjs"() {
+    init_guard2();
+    init_assert2();
+    init_cast2();
+    init_check2();
+    init_clean2();
+    init_clone3();
+    init_convert2();
+    init_create3();
+    init_decode3();
+    init_default2();
+    init_delta2();
+    init_encode3();
+    init_equal2();
+    init_hash2();
+    init_mutate2();
+    init_parse3();
+    init_pointer2();
+    init_transform3();
+    init_value4();
   }
 });
 
@@ -19016,7 +17940,7 @@ var moa_router_exports = {};
 __export(moa_router_exports, {
   routeMoA: () => routeMoA
 });
-import { v4 as uuid17 } from "uuid";
+import { v4 as uuid15 } from "uuid";
 async function classifyQuery2(query, provider) {
   try {
     const result = await chatLLM({
@@ -19063,7 +17987,7 @@ function selectAgents(domains, maxAgents) {
 }
 async function dispatchAgents(query, agents) {
   const chainDef = {
-    name: `moa-${uuid17().slice(0, 8)}`,
+    name: `moa-${uuid15().slice(0, 8)}`,
     mode: "parallel",
     steps: agents.map((a) => ({
       agent_id: a.agent_id,
@@ -19118,7 +18042,7 @@ async function routeMoA(request) {
   const t0 = Date.now();
   const provider = request.provider ?? "deepseek";
   const maxAgents = request.max_agents ?? 3;
-  const taskId = `moa-${uuid17()}`;
+  const taskId = `moa-${uuid15()}`;
   const board = createBlackboard(taskId);
   const classification = await classifyQuery2(request.query, provider);
   await board.write("observations", {
@@ -19376,7 +18300,7 @@ __export(skill_forge_exports, {
   loadForgedTools: () => loadForgedTools,
   verifyForgedTool: () => verifyForgedTool
 });
-import { v4 as uuid18 } from "uuid";
+import { v4 as uuid16 } from "uuid";
 function getForgedTools() {
   return [...FORGED_TOOLS.values()];
 }
@@ -19463,7 +18387,7 @@ Handler type: ${handlerType}` }
   }
   const namespace = name.split("_")[0] || "custom";
   const spec2 = {
-    id: uuid18(),
+    id: uuid16(),
     name,
     namespace,
     description,
@@ -19478,7 +18402,7 @@ Handler type: ${handlerType}` }
   const redis2 = getRedis();
   if (redis2) {
     try {
-      await redis2.set(`${REDIS_PREFIX7}${name}`, JSON.stringify(spec2), "EX", 86400 * 30);
+      await redis2.set(`${REDIS_PREFIX5}${name}`, JSON.stringify(spec2), "EX", 86400 * 30);
     } catch {
     }
   }
@@ -19499,7 +18423,7 @@ async function verifyForgedTool(name) {
       const result = await callMcpTool({
         toolName: spec2.handler_config.backend_tool,
         args: {},
-        callId: uuid18(),
+        callId: uuid16(),
         timeoutMs: 1e4
       });
       testResult = result.status === "success" ? "Backend tool reachable" : `Backend error: ${result.error_message}`;
@@ -19508,7 +18432,7 @@ async function verifyForgedTool(name) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: "RETURN 1 AS test" },
-        callId: uuid18(),
+        callId: uuid16(),
         timeoutMs: 5e3
       });
       testResult = result.status === "success" ? "Cypher engine reachable" : `Cypher error: ${result.error_message}`;
@@ -19521,7 +18445,7 @@ async function verifyForgedTool(name) {
     const redis2 = getRedis();
     if (redis2) {
       try {
-        await redis2.set(`${REDIS_PREFIX7}${name}`, JSON.stringify(spec2), "EX", 86400 * 30);
+        await redis2.set(`${REDIS_PREFIX5}${name}`, JSON.stringify(spec2), "EX", 86400 * 30);
       } catch {
       }
     }
@@ -19540,7 +18464,7 @@ async function executeForgedTool(name, args) {
         const result = await callMcpTool({
           toolName: spec2.handler_config.backend_tool,
           args,
-          callId: uuid18(),
+          callId: uuid16(),
           timeoutMs: 3e4
         });
         return result.status === "success" ? JSON.stringify(result.result, null, 2).slice(0, 1e3) : `Error: ${result.error_message}`;
@@ -19550,7 +18474,7 @@ async function executeForgedTool(name, args) {
         const result = await callMcpTool({
           toolName: "graph.read_cypher",
           args: { query: spec2.handler_config.cypher_template, params: args },
-          callId: uuid18(),
+          callId: uuid16(),
           timeoutMs: 15e3
         });
         return result.status === "success" ? JSON.stringify(result.result, null, 2).slice(0, 1e3) : `Error: ${result.error_message}`;
@@ -19579,7 +18503,7 @@ async function loadForgedTools() {
   const redis2 = getRedis();
   if (!redis2) return 0;
   try {
-    const keys = await redis2.keys(`${REDIS_PREFIX7}*`);
+    const keys = await redis2.keys(`${REDIS_PREFIX5}*`);
     let loaded = 0;
     for (const key of keys) {
       const raw = await redis2.get(key);
@@ -19595,7 +18519,7 @@ async function loadForgedTools() {
     return 0;
   }
 }
-var FORGED_TOOLS, REDIS_PREFIX7;
+var FORGED_TOOLS, REDIS_PREFIX5;
 var init_skill_forge = __esm({
   "src/llm/skill-forge.ts"() {
     "use strict";
@@ -19604,7 +18528,7 @@ var init_skill_forge = __esm({
     init_redis();
     init_logger();
     FORGED_TOOLS = /* @__PURE__ */ new Map();
-    REDIS_PREFIX7 = "forge:";
+    REDIS_PREFIX5 = "forge:";
   }
 });
 
@@ -19621,13 +18545,13 @@ __export(engagement_engine_exports, {
   matchPrecedents: () => matchPrecedents,
   recordOutcome: () => recordOutcome
 });
-import { v4 as uuid19 } from "uuid";
+import { v4 as uuid17 } from "uuid";
 async function saveEngagement(e) {
   engagementCache.set(e.$id, e);
   const redis2 = getRedis();
   if (redis2) {
     try {
-      await redis2.set(`${REDIS_PREFIX8}${e.$id}`, JSON.stringify(e), "EX", TTL_SECONDS4);
+      await redis2.set(`${REDIS_PREFIX6}${e.$id}`, JSON.stringify(e), "EX", TTL_SECONDS4);
       await redis2.zadd(REDIS_INDEX3, Date.now(), e.$id);
     } catch (err) {
       logger.warn({ error: String(err) }, "Engagement: Redis save failed");
@@ -19640,7 +18564,7 @@ async function getEngagement(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX8}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX6}${id}`);
     if (!raw) return null;
     const e = JSON.parse(raw);
     engagementCache.set(id, e);
@@ -19698,7 +18622,7 @@ MERGE (eng)-[:USES_METHODOLOGY]->(m)`,
         },
         _force: true
       },
-      callId: uuid19(),
+      callId: uuid17(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -19734,7 +18658,7 @@ SET eng.status = 'completed'`,
         },
         _force: true
       },
-      callId: uuid19(),
+      callId: uuid17(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -19757,7 +18681,7 @@ async function indexEngagementForPrecedent(e) {
         orgId: "default",
         _force: true
       },
-      callId: uuid19(),
+      callId: uuid17(),
       timeoutMs: 15e3
     });
   } catch (err) {
@@ -19767,7 +18691,7 @@ async function indexEngagementForPrecedent(e) {
 async function createEngagement(req) {
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const e = {
-    $id: `eng-${uuid19()}`,
+    $id: `eng-${uuid17()}`,
     $schema: "https://widgetdc.io/schemas/engagement/v1",
     client: req.client.slice(0, 120),
     domain: req.domain.slice(0, 60),
@@ -19847,7 +18771,7 @@ ORDER BY
 LIMIT ${Math.floor(limit)}`,
         params: { domain: req.domain }
       },
-      callId: uuid19(),
+      callId: uuid17(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return [];
@@ -19896,7 +18820,7 @@ async function queryKgRag(query, maxEvidence = 10) {
     const result = await callMcpTool({
       toolName: "kg_rag.query",
       args: { question: query, max_evidence: maxEvidence },
-      callId: uuid19(),
+      callId: uuid17(),
       timeoutMs: 45e3
     });
     if (result.status !== "success") return { answer: "", sources: [] };
@@ -19925,7 +18849,7 @@ async function foldContext(text, query, maxTokens = 1500) {
         max_tokens: maxTokens,
         domain: "consulting"
       },
-      callId: uuid19(),
+      callId: uuid17(),
       timeoutMs: 2e4
     });
     if (result.status !== "success") return null;
@@ -19960,7 +18884,7 @@ async function proposeViaConsensus(engagementId, req, planSummary) {
           budget_dkk: req.budget_dkk ?? 0
         }
       },
-      callId: uuid19(),
+      callId: uuid17(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return { proposalId: null, quorum: 0 };
@@ -19986,7 +18910,7 @@ async function voteOnConsensus(proposalId, decision, confidence, reasoning) {
         confidence: Math.min(1, Math.max(0, confidence)),
         reasoning: reasoning.slice(0, 500)
       },
-      callId: uuid19(),
+      callId: uuid17(),
       timeoutMs: 1e4
     });
     if (result.status !== "success") return false;
@@ -20007,7 +18931,7 @@ async function planViaRlmMission(engagementId, req, maxSteps = 3) {
         maxSteps,
         maxDepth: 2
       },
-      callId: uuid19(),
+      callId: uuid17(),
       timeoutMs: 2e4
     });
     if (startResult.status !== "success") return { missionId: null, insights: [], stepsExecuted: 0 };
@@ -20021,7 +18945,7 @@ async function planViaRlmMission(engagementId, req, maxSteps = 3) {
       const stepResult = await callMcpTool({
         toolName: "rlm.execute_step",
         args: { missionId },
-        callId: uuid19(),
+        callId: uuid17(),
         timeoutMs: 6e4
       });
       if (stepResult.status !== "success") break;
@@ -20099,7 +19023,7 @@ async function enforceConsensusGate(engagementId, req) {
 }
 async function generatePlan(req) {
   const t0 = Date.now();
-  const engagementId = req.engagement_id ?? `eng-${uuid19()}`;
+  const engagementId = req.engagement_id ?? `eng-${uuid17()}`;
   enforceInputSanityGate(req);
   const highStakes = isHighStakesPlan(req);
   const complex = req.duration_weeks > GATE_DURATION_WEEKS;
@@ -20281,7 +19205,7 @@ Return ONLY JSON matching the schema, no prose.`;
       const r = await callMcpTool({
         toolName: "llm.generate",
         args: { prompt: mercuryPrompt },
-        callId: uuid19(),
+        callId: uuid17(),
         timeoutMs: 3e4
       });
       if (r.status === "success") {
@@ -20414,7 +19338,7 @@ async function recordOutcome(req) {
   const redis2 = getRedis();
   if (redis2) {
     try {
-      await redis2.set(`${REDIS_PREFIX8}outcome:${req.engagement_id}`, JSON.stringify(outcome), "EX", TTL_SECONDS4);
+      await redis2.set(`${REDIS_PREFIX6}outcome:${req.engagement_id}`, JSON.stringify(outcome), "EX", TTL_SECONDS4);
     } catch {
     }
   }
@@ -20449,7 +19373,7 @@ async function getOutcome(engagementId) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX8}outcome:${engagementId}`);
+    const raw = await redis2.get(`${REDIS_PREFIX6}outcome:${engagementId}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -20465,7 +19389,7 @@ async function getPlan2(engagementId) {
     return null;
   }
 }
-var REDIS_PREFIX8, REDIS_INDEX3, REDIS_PLAN_PREFIX, TTL_SECONDS4, engagementCache, STALE_PRECEDENT_DAYS, GATE_BUDGET_DKK, GATE_TEAM_SIZE, GATE_DURATION_WEEKS, GATE_REQUIRE_CONSENSUS, GATE_CONSENSUS_TIMEOUT_MS, GATE_MAX_BUDGET_DKK, GATE_MAX_TEAM_SIZE, GATE_MAX_DURATION_WEEKS, GATE_MIN_OBJECTIVE_LEN, PlanGateRejection;
+var REDIS_PREFIX6, REDIS_INDEX3, REDIS_PLAN_PREFIX, TTL_SECONDS4, engagementCache, STALE_PRECEDENT_DAYS, GATE_BUDGET_DKK, GATE_TEAM_SIZE, GATE_DURATION_WEEKS, GATE_REQUIRE_CONSENSUS, GATE_CONSENSUS_TIMEOUT_MS, GATE_MAX_BUDGET_DKK, GATE_MAX_TEAM_SIZE, GATE_MAX_DURATION_WEEKS, GATE_MIN_OBJECTIVE_LEN, PlanGateRejection;
 var init_engagement_engine = __esm({
   "src/engagement/engagement-engine.ts"() {
     "use strict";
@@ -20475,7 +19399,7 @@ var init_engagement_engine = __esm({
     init_redis();
     init_logger();
     init_adaptive_rag();
-    REDIS_PREFIX8 = "orchestrator:engagement:";
+    REDIS_PREFIX6 = "orchestrator:engagement:";
     REDIS_INDEX3 = "orchestrator:engagements:index";
     REDIS_PLAN_PREFIX = "orchestrator:engagement:plan:";
     TTL_SECONDS4 = 60 * 60 * 24 * 30;
@@ -20514,7 +19438,7 @@ __export(working_memory_exports, {
   retrieveMemory: () => retrieveMemory,
   storeMemory: () => storeMemory
 });
-async function storeMemory(agentId, key, value, ttlSeconds = DEFAULT_TTL2) {
+async function storeMemory(agentId, key, value, ttlSeconds = DEFAULT_TTL) {
   const redis2 = getRedis();
   const redisKey = `${PREFIX}${agentId}:${key}`;
   const entry = {
@@ -20579,14 +19503,14 @@ async function clearAgentMemory(agentId) {
     return 0;
   }
 }
-var PREFIX, DEFAULT_TTL2;
+var PREFIX, DEFAULT_TTL;
 var init_working_memory = __esm({
   "src/memory/working-memory.ts"() {
     "use strict";
     init_redis();
     init_logger();
     PREFIX = "wm:";
-    DEFAULT_TTL2 = 86400;
+    DEFAULT_TTL = 86400;
   }
 });
 
@@ -20601,7 +19525,7 @@ __export(memory_consolidator_exports, {
   searchMemories: () => searchMemories,
   storeMemoryLongTerm: () => storeMemoryLongTerm
 });
-async function mcpCall2(tool, payload) {
+async function mcpCall(tool, payload) {
   const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
     method: "POST",
     headers: {
@@ -20618,7 +19542,7 @@ async function fetchAgentMemories(agentId, opts = {}) {
   const limit = opts.limit ?? 2e3;
   const tiers = opts.tier ? Array.isArray(opts.tier) ? opts.tier : [opts.tier] : null;
   const tierFilter = tiers ? `AND m.tier IN $tiers` : "";
-  const result = await mcpCall2("graph.read_cypher", {
+  const result = await mcpCall("graph.read_cypher", {
     query: `MATCH (m:AgentMemory {agentId: $agentId})
             WHERE true ${tierFilter}
             RETURN m.elementId AS elementId, m.agentId AS agentId, m.key AS key,
@@ -20703,7 +19627,7 @@ async function consolidateAgent(agentId, opts = {}) {
   });
   for (const m of expiryCandidates) {
     try {
-      await mcpCall2("graph.write_cypher", {
+      await mcpCall("graph.write_cypher", {
         query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key}) DETACH DELETE m`,
         params: { agentId, key: m.key }
       });
@@ -20738,7 +19662,7 @@ async function consolidateAgent(agentId, opts = {}) {
       }, "Memory consolidation truncated merged value");
     }
     try {
-      await mcpCall2("graph.write_cypher", {
+      await mcpCall("graph.write_cypher", {
         query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key})
                 SET m.value = $value, m.tags = $tags, m.updatedAt = datetime(),
                     m.consolidatedFrom = $victimCount, m.consolidatedAt = datetime(),
@@ -20753,7 +19677,7 @@ async function consolidateAgent(agentId, opts = {}) {
         }
       });
       for (const victim of group.victims) {
-        await mcpCall2("graph.write_cypher", {
+        await mcpCall("graph.write_cypher", {
           query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key}) DETACH DELETE m`,
           params: { agentId, key: victim.key }
         });
@@ -20777,7 +19701,7 @@ async function consolidateAgent(agentId, opts = {}) {
       const tier = m.tier ?? TYPE_TO_TIER[m.type] ?? "short";
       if (!TIER_CONSOLIDATABLE[tier]) continue;
       try {
-        await mcpCall2("graph.write_cypher", {
+        await mcpCall("graph.write_cypher", {
           query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key}) DETACH DELETE m`,
           params: { agentId, key: m.key }
         });
@@ -20790,7 +19714,7 @@ async function consolidateAgent(agentId, opts = {}) {
   for (const m of needsTier) {
     const inferredTier = TYPE_TO_TIER[m.type] ?? "short";
     try {
-      await mcpCall2("graph.write_cypher", {
+      await mcpCall("graph.write_cypher", {
         query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key}) SET m.tier = $tier`,
         params: { agentId, key: m.key, tier: inferredTier }
       });
@@ -20817,7 +19741,7 @@ async function consolidateAgent(agentId, opts = {}) {
   return report;
 }
 async function consolidateAll() {
-  const result = await mcpCall2("graph.read_cypher", {
+  const result = await mcpCall("graph.read_cypher", {
     query: `MATCH (m:AgentMemory) RETURN DISTINCT m.agentId AS agentId ORDER BY m.agentId`,
     params: {}
   });
@@ -20855,7 +19779,7 @@ async function searchMemories(opts) {
     params.tags = tags;
   }
   const where = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
-  const result = await mcpCall2("graph.read_cypher", {
+  const result = await mcpCall("graph.read_cypher", {
     query: `MATCH (m:AgentMemory) ${where}
             RETURN m.elementId AS elementId, m.agentId AS agentId, m.key AS key,
                    m.value AS value, m.type AS type, m.tier AS tier, m.tags AS tags,
@@ -20904,7 +19828,7 @@ async function searchMemories(opts) {
 async function storeMemoryLongTerm(opts) {
   const { agentId, key, value, type = "insight", tags = [], scope } = opts;
   const allTags = [.../* @__PURE__ */ new Set([...tags, ...scope ? [`scope:${scope}`] : []])];
-  await mcpCall2("graph.write_cypher", {
+  await mcpCall("graph.write_cypher", {
     query: `MERGE (m:AgentMemory {agentId: $agentId, key: $key})
             SET m.value = $value, m.type = $type, m.tags = $tags,
                 m.scope = $scope, m.updatedAt = datetime(),
@@ -21550,7 +20474,7 @@ function promptId() {
 function knowledgeId() {
   return `knowledge-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
-async function mcpCall3(tool, payload) {
+async function mcpCall2(tool, payload) {
   const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
     method: "POST",
     headers: {
@@ -21586,7 +20510,7 @@ async function addPrompt(prompt) {
     }
   }
   try {
-    await mcpCall3("graph.write_cypher", {
+    await mcpCall2("graph.write_cypher", {
       query: `MERGE (p:Prompt {id: $id})
               SET p.title = $title, p.category = $category, p.content = $content,
                   p.tags = $tags, p.quality_score = $quality_score,
@@ -21738,7 +20662,7 @@ async function ingestKnowledge(doc) {
     }
   }
   try {
-    await mcpCall3("graph.write_cypher", {
+    await mcpCall2("graph.write_cypher", {
       query: `MERGE (k:KnowledgeDocument {id: $id})
               SET k.title = $title, k.content = $content, k.source_type = $source_type,
                   k.source_path = $source_path, k.language = $language, k.tags = $tags,
@@ -22273,7 +21197,7 @@ __export(engagement_cost_tracker_exports, {
   persistCostReport: () => persistCostReport,
   recordEngagementCost: () => recordEngagementCost
 });
-async function mcpCall4(tool, payload) {
+async function mcpCall3(tool, payload) {
   const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
     method: "POST",
     headers: {
@@ -22422,7 +21346,7 @@ async function listEngagements2() {
 }
 async function persistCostReport(report) {
   try {
-    await mcpCall4("graph.write_cypher", {
+    await mcpCall3("graph.write_cypher", {
       query: `MERGE (c:CostReport {report_id: $report_id})
               SET c.engagement_id = $engagement_id, c.total_cost_dkk = $total_cost_dkk,
                   c.total_tokens = $total_tokens, c.total_requests = $total_requests,
@@ -22525,7 +21449,7 @@ __export(agent_drift_monitor_exports, {
   handleDriftReport: () => handleDriftReport,
   snapshotBaseline: () => snapshotBaseline
 });
-async function mcpCall5(tool, payload) {
+async function mcpCall4(tool, payload) {
   const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
     method: "POST",
     headers: {
@@ -22657,7 +21581,7 @@ async function checkAgentDrift(cfg = DEFAULT_CONFIG) {
           `- Infrastructure changes (network, compute)`,
           `- Configuration drift`
         ].join("\n");
-        const result = await mcpCall5("linear.save_issue", {
+        const result = await mcpCall4("linear.save_issue", {
           title,
           description,
           team: "Linear-clauskraft",
@@ -23002,6 +21926,502 @@ var init_multi_agent_pr_reviewer = __esm({
   }
 });
 
+// src/swarm/pheromone-layer.ts
+var pheromone_layer_exports = {};
+__export(pheromone_layer_exports, {
+  amplify: () => amplify,
+  deposit: () => deposit,
+  getHeatmap: () => getHeatmap,
+  getPheromoneState: () => getPheromoneState,
+  getTrailSummary: () => getTrailSummary,
+  initPheromoneLayer: () => initPheromoneLayer,
+  onAnomaly: () => onAnomaly,
+  onChainStepFailure: () => onChainStepFailure,
+  onChainStepSuccess: () => onChainStepSuccess,
+  onExternalSignal: () => onExternalSignal,
+  onInventorTrial: () => onInventorTrial,
+  persistToGraph: () => persistToGraph2,
+  reinforce: () => reinforce,
+  runDecayCycle: () => runDecayCycle,
+  runPheromoneCron: () => runPheromoneCron,
+  sense: () => sense
+});
+import { v4 as uuid18 } from "uuid";
+async function deposit(agentId, type, domain, strength, label, metrics2 = {}, tags = [], ttlSeconds = DEFAULT_TTL2) {
+  const pheromone = {
+    id: `ph-${uuid18().slice(0, 12)}`,
+    type,
+    agentId,
+    domain,
+    strength: Math.max(0, Math.min(1, strength)),
+    label,
+    metrics: metrics2,
+    tags: [...tags, type, domain],
+    depositedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    ttlSeconds,
+    reinforcements: 0
+  };
+  const redis2 = getRedis();
+  if (redis2) {
+    const key = `${REDIS_PREFIX7}${pheromone.id}`;
+    await redis2.set(key, JSON.stringify(pheromone), "EX", ttlSeconds);
+    await redis2.zadd(REDIS_INDEX_KEY, pheromone.strength, pheromone.id);
+    await redis2.zadd(`${REDIS_PREFIX7}domain:${domain}`, pheromone.strength, pheromone.id);
+    await redis2.zadd(`${REDIS_PREFIX7}type:${type}`, pheromone.strength, pheromone.id);
+  }
+  state.totalDeposits++;
+  state.activePheromones++;
+  if (type !== "amplification") {
+    tryActiveAmplification(domain).catch(() => {
+    });
+  }
+  broadcastSSE("pheromone", {
+    event: "deposit",
+    pheromone: { id: pheromone.id, type, domain, strength: pheromone.strength, agentId }
+  });
+  logger.debug(
+    { id: pheromone.id, type, domain, strength: pheromone.strength, agentId },
+    "Pheromone deposited"
+  );
+  return pheromone;
+}
+async function sense(query) {
+  const redis2 = getRedis();
+  if (!redis2) return [];
+  const limit = query.limit ?? 20;
+  const minStrength = query.minStrength ?? 0.1;
+  let candidateIds;
+  if (query.domain) {
+    candidateIds = await redis2.zrevrangebyscore(
+      `${REDIS_PREFIX7}domain:${query.domain}`,
+      "+inf",
+      String(minStrength),
+      "LIMIT",
+      "0",
+      String(limit * 2)
+    );
+  } else if (query.type) {
+    candidateIds = await redis2.zrevrangebyscore(
+      `${REDIS_PREFIX7}type:${query.type}`,
+      "+inf",
+      String(minStrength),
+      "LIMIT",
+      "0",
+      String(limit * 2)
+    );
+  } else {
+    candidateIds = await redis2.zrevrangebyscore(
+      REDIS_INDEX_KEY,
+      "+inf",
+      String(minStrength),
+      "LIMIT",
+      "0",
+      String(limit * 2)
+    );
+  }
+  if (candidateIds.length === 0) return [];
+  const pipeline = redis2.pipeline();
+  for (const id of candidateIds) {
+    pipeline.get(`${REDIS_PREFIX7}${id}`);
+  }
+  const results = await pipeline.exec();
+  if (!results) return [];
+  const pheromones = [];
+  for (const [err, raw] of results) {
+    if (err || !raw) continue;
+    try {
+      const p = JSON.parse(raw);
+      if (query.tags && query.tags.length > 0) {
+        if (!query.tags.some((t) => p.tags.includes(t))) continue;
+      }
+      if (query.type && !query.domain && p.type !== query.type) continue;
+      pheromones.push(p);
+    } catch {
+    }
+  }
+  return pheromones.slice(0, limit);
+}
+async function reinforce(pheromoneId, boostFactor = 0.2) {
+  const redis2 = getRedis();
+  if (!redis2) return false;
+  const key = `${REDIS_PREFIX7}${pheromoneId}`;
+  const raw = await redis2.get(key);
+  if (!raw) return false;
+  try {
+    const p = JSON.parse(raw);
+    p.strength = Math.min(1, p.strength + boostFactor);
+    p.reinforcements++;
+    const newTtl = Math.min(p.ttlSeconds * 1.5, 86400);
+    p.ttlSeconds = newTtl;
+    await redis2.set(key, JSON.stringify(p), "EX", Math.round(newTtl));
+    await redis2.zadd(REDIS_INDEX_KEY, p.strength, pheromoneId);
+    if (p.type === "trail" || p.type === "attraction") {
+      await redis2.zadd(`${REDIS_PREFIX7}domain:${p.domain}`, p.strength, pheromoneId);
+    }
+    state.totalAmplifications++;
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function runDecayCycle() {
+  const redis2 = getRedis();
+  if (!redis2) return { decayed: 0, evaporated: 0 };
+  const LOCK_KEY = `${REDIS_PREFIX7}decay-lock`;
+  const locked = await redis2.set(LOCK_KEY, "1", "EX", 60, "NX");
+  if (!locked) return { decayed: 0, evaporated: 0 };
+  try {
+    const allIds = await redis2.zrangebyscore(REDIS_INDEX_KEY, "0", "+inf");
+    let decayed = 0;
+    let evaporated = 0;
+    for (const id of allIds) {
+      const key = `${REDIS_PREFIX7}${id}`;
+      const raw = await redis2.get(key);
+      if (!raw) {
+        await redis2.zrem(REDIS_INDEX_KEY, id);
+        evaporated++;
+        continue;
+      }
+      try {
+        const p = JSON.parse(raw);
+        p.strength *= DECAY_FACTOR;
+        if (p.strength < 0.05) {
+          await redis2.del(key);
+          await redis2.zrem(REDIS_INDEX_KEY, id);
+          await redis2.zrem(`${REDIS_PREFIX7}domain:${p.domain}`, id);
+          await redis2.zrem(`${REDIS_PREFIX7}type:${p.type}`, id);
+          evaporated++;
+        } else {
+          await redis2.set(key, JSON.stringify(p), "KEEPTTL");
+          await redis2.zadd(REDIS_INDEX_KEY, p.strength, id);
+          decayed++;
+        }
+      } catch {
+        await redis2.zrem(REDIS_INDEX_KEY, id);
+        evaporated++;
+      }
+    }
+    state.totalDecays++;
+    state.activePheromones = Math.max(0, state.activePheromones - evaporated);
+    state.lastDecayAt = (/* @__PURE__ */ new Date()).toISOString();
+    logger.info({ decayed, evaporated, remaining: state.activePheromones }, "Pheromone decay cycle");
+    return { decayed, evaporated };
+  } finally {
+    await redis2.del(LOCK_KEY).catch(() => {
+    });
+  }
+}
+async function amplify(domain, contributingPheromones, label) {
+  if (contributingPheromones.length < 2) return null;
+  const strengths = contributingPheromones.map((p) => p.strength);
+  const geoMean = Math.pow(strengths.reduce((a, b) => a * b, 1), 1 / strengths.length);
+  const compoundStrength = Math.min(1, geoMean * AMPLIFICATION_MULTIPLIER);
+  const allTags = [...new Set(contributingPheromones.flatMap((p) => p.tags))];
+  const allMetrics = {};
+  for (const p of contributingPheromones) {
+    for (const [k, v] of Object.entries(p.metrics)) {
+      allMetrics[`${p.type}_${k}`] = v;
+    }
+  }
+  allMetrics.contributing_count = contributingPheromones.length;
+  allMetrics.compound_strength = compoundStrength;
+  const amplified = await deposit(
+    "flywheel-coordinator",
+    "amplification",
+    domain,
+    compoundStrength,
+    label,
+    allMetrics,
+    [...allTags, "cross-pillar", "compound"],
+    7200
+    // 2h TTL for compound signals
+  );
+  for (const p of contributingPheromones) {
+    await reinforce(p.id, 0.1);
+  }
+  return amplified;
+}
+async function tryActiveAmplification(domain) {
+  const existing = await sense({ domain, limit: 20, minStrength: 0.3 });
+  const types = new Set(existing.map((p) => p.type));
+  if (types.size >= 2 && !types.has("amplification")) {
+    const byType = /* @__PURE__ */ new Map();
+    for (const p of existing) {
+      const current = byType.get(p.type);
+      if (!current || p.strength > current.strength) byType.set(p.type, p);
+    }
+    const contributors = [...byType.values()];
+    if (contributors.length >= 2) {
+      await amplify(domain, contributors, `Cross-pillar: ${[...types].join("+")} on ${domain}`);
+    }
+  }
+}
+async function persistToGraph2() {
+  const strong = await sense({ minStrength: PERSIST_THRESHOLD, limit: 50 });
+  let persisted = 0;
+  for (const p of strong) {
+    try {
+      await callMcpTool({
+        toolName: "memory_store",
+        args: {
+          agent_id: "pheromone-layer",
+          key: `trail:${p.domain}:${p.id}`,
+          value: JSON.stringify({
+            type: p.type,
+            domain: p.domain,
+            strength: p.strength,
+            label: p.label,
+            metrics: p.metrics,
+            reinforcements: p.reinforcements,
+            agentId: p.agentId
+          }),
+          metadata: {
+            pheromone_type: p.type,
+            domain: p.domain,
+            strength: p.strength,
+            reinforcements: p.reinforcements
+          }
+        },
+        callId: `ph-persist-${p.id}`
+      });
+      try {
+        const verify2 = await callMcpTool({
+          toolName: "memory_retrieve",
+          args: { agent_id: "pheromone-layer", key: `trail:${p.domain}:${p.id}` },
+          callId: `ph-verify-${p.id}`
+        });
+        if (verify2) persisted++;
+        else logger.warn({ id: p.id }, "Pheromone persist verification failed");
+      } catch {
+        logger.warn({ id: p.id }, "Pheromone persist verification error");
+      }
+    } catch {
+    }
+  }
+  state.lastPersistAt = (/* @__PURE__ */ new Date()).toISOString();
+  logger.info({ persisted, total: strong.length }, "Pheromone trails persisted to memory");
+  return persisted;
+}
+async function getTrailSummary(domain) {
+  const trails = await sense({ domain, limit: 50 });
+  if (trails.length === 0) return null;
+  const totalStrength = trails.reduce((sum, p) => sum + p.strength, 0);
+  const avgStrength = totalStrength / trails.length;
+  const typeCounts = /* @__PURE__ */ new Map();
+  for (const p of trails) {
+    typeCounts.set(p.type, (typeCounts.get(p.type) ?? 0) + p.strength);
+  }
+  const strongestType = [...typeCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "trail";
+  const agentStrength = /* @__PURE__ */ new Map();
+  for (const p of trails) {
+    agentStrength.set(p.agentId, (agentStrength.get(p.agentId) ?? 0) + p.strength);
+  }
+  const topContributors = [...agentStrength.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([id]) => id);
+  return {
+    trailId: `trail:${domain}`,
+    domain,
+    totalStrength,
+    pheromoneCount: trails.length,
+    avgStrength,
+    topContributors,
+    strongestType
+  };
+}
+async function getHeatmap() {
+  const redis2 = getRedis();
+  if (!redis2) return [];
+  const domains = [];
+  let cursor = "0";
+  do {
+    const [next, found] = await redis2.scan(cursor, "MATCH", `${REDIS_PREFIX7}domain:*`, "COUNT", "50");
+    cursor = next;
+    for (const k of found) domains.push(k.replace(`${REDIS_PREFIX7}domain:`, ""));
+  } while (cursor !== "0" && domains.length < 50);
+  const summaries = [];
+  for (const domain of domains.slice(0, 20)) {
+    const summary = await getTrailSummary(domain);
+    if (summary) summaries.push(summary);
+  }
+  return summaries.sort((a, b) => b.totalStrength - a.totalStrength);
+}
+async function onChainStepSuccess(agentId, toolName2, durationMs, chainMode) {
+  await deposit(
+    agentId,
+    "trail",
+    `chain:${toolName2}`,
+    Math.min(1, 0.5 + 1e3 / Math.max(durationMs, 100) * 0.5),
+    // faster = stronger
+    `${agentId} succeeded at ${toolName2} in ${durationMs}ms`,
+    { duration_ms: durationMs },
+    [chainMode, toolName2],
+    3600
+    // 1h TTL
+  );
+}
+async function onChainStepFailure(agentId, toolName2, error) {
+  await deposit(
+    agentId,
+    "repellent",
+    `chain:${toolName2}`,
+    0.7,
+    `${agentId} failed at ${toolName2}: ${error.slice(0, 100)}`,
+    { failure: 1 },
+    ["error", toolName2],
+    1800
+    // 30min TTL (failures fade faster)
+  );
+}
+async function onInventorTrial(nodeId, score, experiment, island) {
+  if (score >= 0.7) {
+    await deposit(
+      "inventor",
+      "attraction",
+      `inventor:${experiment}`,
+      score,
+      `Inventor trial ${nodeId} scored ${(score * 100).toFixed(1)}% on island ${island}`,
+      { score, island },
+      ["inventor", experiment, `island-${island}`],
+      7200
+      // 2h for good trials
+    );
+  } else if (score < 0.3) {
+    await deposit(
+      "inventor",
+      "repellent",
+      `inventor:${experiment}`,
+      0.3 + (0.3 - score),
+      // worse score = stronger repellent
+      `Inventor trial ${nodeId} scored poorly: ${(score * 100).toFixed(1)}%`,
+      { score, island },
+      ["inventor", experiment, `island-${island}`],
+      900
+      // 15min for bad trials
+    );
+  }
+}
+async function onAnomaly(type, valence, source, severity) {
+  const pType = valence === "positive" ? "attraction" : "repellent";
+  const strength = severity === "critical" ? 0.9 : severity === "warning" ? 0.6 : 0.3;
+  const ttl = valence === "positive" ? 7200 : 1800;
+  await deposit(
+    "anomaly-watcher",
+    pType,
+    `anomaly:${type}`,
+    strength,
+    `Anomaly ${type} (${valence}) from ${source} [${severity}]`,
+    {},
+    [valence, severity, source, type],
+    ttl
+  );
+}
+async function onExternalSignal(source, domain, label, strength, metrics2 = {}) {
+  await deposit(
+    source,
+    "external",
+    `external:${domain}`,
+    strength,
+    label,
+    metrics2,
+    ["external", source, domain],
+    14400
+    // 4h for external signals
+  );
+}
+function getPheromoneState() {
+  return { ...state };
+}
+async function persistPheromoneState() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const count = await redis2.zcard(REDIS_INDEX_KEY);
+    state.activePheromones = count;
+    await redis2.set(REDIS_STATE_KEY, JSON.stringify(state));
+  } catch {
+  }
+}
+async function loadPheromoneState() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const raw = await redis2.get(REDIS_STATE_KEY);
+    if (raw) {
+      state = { ...state, ...JSON.parse(raw) };
+      logger.info(
+        { totalDeposits: state.totalDeposits, activePheromones: state.activePheromones },
+        "Pheromone layer: restored state from Redis"
+      );
+    }
+  } catch {
+  }
+}
+async function runPheromoneCron() {
+  const { decayed, evaporated } = await runDecayCycle();
+  const persisted = await persistToGraph2();
+  let amplified = 0;
+  try {
+    const heatmap = await getHeatmap();
+    for (const trail of heatmap) {
+      if (trail.pheromoneCount >= 3 && trail.avgStrength >= 0.5) {
+        const pheromonesInDomain = await sense({ domain: trail.domain, minStrength: 0.4, limit: 5 });
+        const uniqueTypes = new Set(pheromonesInDomain.map((p) => p.type));
+        if (uniqueTypes.size >= 2) {
+          await amplify(
+            trail.domain,
+            pheromonesInDomain,
+            `Cross-pillar convergence in ${trail.domain}: ${[...uniqueTypes].join("+")}`
+          );
+          amplified++;
+        }
+      }
+    }
+  } catch {
+  }
+  await persistPheromoneState();
+  broadcastSSE("pheromone", {
+    event: "cron_complete",
+    decayed,
+    evaporated,
+    persisted,
+    amplified,
+    activePheromones: state.activePheromones
+  });
+  return { decayed, evaporated, persisted, amplified };
+}
+async function initPheromoneLayer() {
+  await loadPheromoneState();
+  logger.info(
+    { totalDeposits: state.totalDeposits, activePheromones: state.activePheromones },
+    "Pheromone layer initialized"
+  );
+}
+var REDIS_PREFIX7, REDIS_STATE_KEY, REDIS_INDEX_KEY, DEFAULT_TTL2, PERSIST_THRESHOLD, AMPLIFICATION_MULTIPLIER, DECAY_FACTOR, state;
+var init_pheromone_layer = __esm({
+  "src/swarm/pheromone-layer.ts"() {
+    "use strict";
+    init_redis();
+    init_mcp_caller();
+    init_logger();
+    init_sse();
+    REDIS_PREFIX7 = "pheromone:";
+    REDIS_STATE_KEY = "pheromone:state";
+    REDIS_INDEX_KEY = "pheromone:index";
+    DEFAULT_TTL2 = 3600;
+    PERSIST_THRESHOLD = 0.7;
+    AMPLIFICATION_MULTIPLIER = 1.5;
+    DECAY_FACTOR = 0.85;
+    state = {
+      totalDeposits: 0,
+      totalDecays: 0,
+      totalAmplifications: 0,
+      activePheromones: 0,
+      trailCount: 0,
+      lastDecayAt: null,
+      lastPersistAt: null
+    };
+  }
+});
+
 // src/rag/adaptive-rag-router.ts
 var adaptive_rag_router_exports = {};
 __export(adaptive_rag_router_exports, {
@@ -23010,7 +22430,7 @@ __export(adaptive_rag_router_exports, {
   handleRAGRoute: () => handleRAGRoute,
   syncSkillCorpus: () => syncSkillCorpus
 });
-async function mcpCall6(tool, payload) {
+async function mcpCall5(tool, payload) {
   try {
     const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
       method: "POST",
@@ -23029,7 +22449,7 @@ async function mcpCall6(tool, payload) {
   }
 }
 async function writeClaim(agentId, scope, vprop, description) {
-  await mcpCall6("graph.write_cypher", {
+  await mcpCall5("graph.write_cypher", {
     query: `MERGE (m:AgentMemory {agentId: $agentId, key: $key})
             SET m.value = $value, m.type = 'claim', m.vprop = $vprop,
                 m.expiresAt = datetime() + duration('PT1H'),
@@ -23038,7 +22458,7 @@ async function writeClaim(agentId, scope, vprop, description) {
   });
 }
 async function writeClosure(agentId, scope, vprop, outcome, summary) {
-  await mcpCall6("graph.write_cypher", {
+  await mcpCall5("graph.write_cypher", {
     query: `MERGE (m:AgentMemory {agentId: $agentId, key: $key})
             SET m.value = $value, m.type = 'closure', m.vprop = $vprop,
                 m.outcome = $outcome, m.updatedAt = datetime()`,
@@ -23159,7 +22579,7 @@ async function handleRAGRoute(request) {
     if (!query) {
       return agentFailure(request, "No query provided. Include query in context.query");
     }
-    mcpCall6("audit.lessons", { agentId: "rag-router" }).catch(() => {
+    mcpCall5("audit.lessons", { agentId: "rag-router" }).catch(() => {
     });
     let decision = classifyStrategy(query);
     try {
@@ -23221,7 +22641,7 @@ async function handleCorpusSync(request) {
   const scope = `corpus-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 13)}`;
   try {
     await writeClaim("corpus-sync", scope, "V6", "Nightly skill corpus sync");
-    mcpCall6("audit.lessons", { agentId: "corpus-sync" }).catch(() => {
+    mcpCall5("audit.lessons", { agentId: "corpus-sync" }).catch(() => {
     });
     const result = await syncSkillCorpus();
     try {
@@ -24321,7 +23741,7 @@ __export(competitive_crawler_exports, {
   COMPETITOR_TARGETS: () => COMPETITOR_TARGETS,
   runCompetitiveCrawl: () => runCompetitiveCrawl
 });
-import { v4 as uuid20 } from "uuid";
+import { v4 as uuid19 } from "uuid";
 async function fetchPageText(url) {
   const res = await fetch(url, {
     headers: {
@@ -24366,7 +23786,7 @@ async function extractCapabilities(target) {
         const cap = line.replace(/^[\s\-\*]+/, "").trim();
         if (cap.length > 10 && cap.length < 200) {
           capabilities.push({
-            $id: `capability:${target.slug}:${uuid20().slice(0, 8)}`,
+            $id: `capability:${target.slug}:${uuid19().slice(0, 8)}`,
             competitor: target.name,
             capability: cap,
             category: categorizeCapability(cap),
@@ -24416,7 +23836,7 @@ async function persistCapabilities(capabilities) {
             extracted_at: cap.extracted_at
           }
         },
-        callId: uuid20(),
+        callId: uuid19(),
         timeoutMs: 1e4
       });
       persisted++;
@@ -24440,7 +23860,7 @@ async function analyzeGaps(capabilities) {
     const result = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: "MATCH (t:Tool) RETURN t.name AS name LIMIT 200" },
-      callId: uuid20(),
+      callId: uuid19(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -24576,10 +23996,10 @@ __export(loose_ends_exports, {
   looseEndsRouter: () => looseEndsRouter,
   runLooseEndScan: () => runLooseEndScan
 });
-import { Router as Router2 } from "express";
-import { v4 as uuid21 } from "uuid";
+import { Router } from "express";
+import { v4 as uuid20 } from "uuid";
 async function runLooseEndScan() {
-  const scanId = uuid21();
+  const scanId = uuid20();
   const t0 = Date.now();
   const findings = [];
   logger.info({ scan_id: scanId }, "Loose-end scan started");
@@ -24589,7 +24009,7 @@ async function runLooseEndScan() {
         const result = await callMcpTool({
           toolName: "graph.read_cypher",
           args: { query: dq.cypher },
-          callId: uuid21(),
+          callId: uuid20(),
           timeoutMs: 15e3
         });
         if (result.status !== "success") return [];
@@ -24650,7 +24070,7 @@ SET s.scanned_at = datetime(), s.duration_ms = $duration,
           total: summary.total
         }
       },
-      callId: uuid21(),
+      callId: uuid20(),
       timeoutMs: 1e4
     });
   } catch {
@@ -24675,7 +24095,7 @@ var init_loose_ends = __esm({
     init_logger();
     init_mcp_caller();
     init_sse();
-    looseEndsRouter = Router2();
+    looseEndsRouter = Router();
     REDIS_KEY3 = "orchestrator:loose-ends:latest";
     REDIS_HISTORY = "orchestrator:loose-ends:history";
     DETECTION_QUERIES = [
@@ -24688,7 +24108,7 @@ AND NOT (b)<-[:COMPOSED_OF]-(:Assembly)
 RETURN b.id AS id, b.name AS name, b.domain AS domain, labels(b)[0] AS type
 LIMIT 25`,
         buildFinding: (records) => records.map((r) => ({
-          id: `orphan-${r.id ?? uuid21().slice(0, 8)}`,
+          id: `orphan-${r.id ?? uuid20().slice(0, 8)}`,
           severity: "warning",
           category: "orphan_block",
           title: `Orphan block: ${r.name ?? r.id}`,
@@ -24706,7 +24126,7 @@ AND NOT (a)<-[:BASED_ON]-(:Decision)
 RETURN a.id AS id, a.name AS name, a.composite AS score
 LIMIT 15`,
         buildFinding: (records) => records.map((r) => ({
-          id: `dangling-asm-${r.id ?? uuid21().slice(0, 8)}`,
+          id: `dangling-asm-${r.id ?? uuid20().slice(0, 8)}`,
           severity: "warning",
           category: "dangling_assembly",
           title: `Accepted assembly without decision: ${r.name ?? r.id}`,
@@ -24724,7 +24144,7 @@ AND NOT (d)-[:DERIVES_FROM]->()
 RETURN d.id AS id, d.title AS title, d.certified_at AS certified_at
 LIMIT 10`,
         buildFinding: (records) => records.map((r) => ({
-          id: `no-lineage-${r.id ?? uuid21().slice(0, 8)}`,
+          id: `no-lineage-${r.id ?? uuid20().slice(0, 8)}`,
           severity: "critical",
           category: "missing_lineage",
           title: `Decision without lineage: ${r.title ?? r.id}`,
@@ -24742,7 +24162,7 @@ AND NOT (n)-[]-()
 RETURN n.id AS id, labels(n)[0] AS type, n.domain AS domain, n.insight AS title
 LIMIT 20`,
         buildFinding: (records) => records.map((r) => ({
-          id: `disconnected-${r.id ?? uuid21().slice(0, 8)}`,
+          id: `disconnected-${r.id ?? uuid20().slice(0, 8)}`,
           severity: "info",
           category: "disconnected_node",
           title: `Disconnected ${r.type}: ${(r.title ?? r.id ?? "").toString().slice(0, 60)}`,
@@ -24760,7 +24180,7 @@ AND d.created_at < datetime() - duration('P7D')
 RETURN d.id AS id, d.title AS title, d.created_at AS created_at
 LIMIT 10`,
         buildFinding: (records) => records.map((r) => ({
-          id: `stale-decision-${r.id ?? uuid21().slice(0, 8)}`,
+          id: `stale-decision-${r.id ?? uuid20().slice(0, 8)}`,
           severity: "warning",
           category: "unresolved_decision",
           title: `Stale draft decision: ${r.title ?? r.id}`,
@@ -24835,13 +24255,13 @@ __export(decisions_exports, {
   loadDecision: () => loadDecision,
   storeDecision: () => storeDecision
 });
-import { Router as Router3 } from "express";
-import { v4 as uuid22 } from "uuid";
+import { Router as Router2 } from "express";
+import { v4 as uuid21 } from "uuid";
 async function storeDecision(decision) {
   const redis2 = getRedis();
   if (!redis2) return false;
   try {
-    await redis2.set(`${REDIS_PREFIX9}${decision.$id}`, JSON.stringify(decision), "EX", TTL_SECONDS5);
+    await redis2.set(`${REDIS_PREFIX8}${decision.$id}`, JSON.stringify(decision), "EX", TTL_SECONDS5);
     await redis2.sadd(REDIS_INDEX4, decision.$id);
     return true;
   } catch (err) {
@@ -24853,7 +24273,7 @@ async function loadDecision(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX9}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX8}${id}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -24885,7 +24305,7 @@ RETURN a.id AS asm_id, a.name AS asm_name, a.created_at AS asm_ts,
 ORDER BY b.name`,
         params: { assemblyId }
       },
-      callId: uuid22(),
+      callId: uuid21(),
       timeoutMs: 15e3
     });
     if (result.status === "success") {
@@ -24932,7 +24352,7 @@ ORDER BY b.name`,
   }
   return lineage;
 }
-var decisionsRouter, REDIS_PREFIX9, REDIS_INDEX4, TTL_SECONDS5;
+var decisionsRouter, REDIS_PREFIX8, REDIS_INDEX4, TTL_SECONDS5;
 var init_decisions = __esm({
   "src/routes/decisions.ts"() {
     "use strict";
@@ -24941,8 +24361,8 @@ var init_decisions = __esm({
     init_mcp_caller();
     init_cognitive_proxy();
     init_sse();
-    decisionsRouter = Router3();
-    REDIS_PREFIX9 = "orchestrator:decision:";
+    decisionsRouter = Router2();
+    REDIS_PREFIX8 = "orchestrator:decision:";
     REDIS_INDEX4 = "orchestrator:decisions:index";
     TTL_SECONDS5 = 7776e3;
     decisionsRouter.post("/certify", async (req, res) => {
@@ -24957,7 +24377,7 @@ var init_decisions = __esm({
       const assemblyId = String(body.assembly_id);
       const title = String(body.title);
       const now = (/* @__PURE__ */ new Date()).toISOString();
-      const decisionId = `widgetdc:decision:${uuid22()}`;
+      const decisionId = `widgetdc:decision:${uuid21()}`;
       const lineageChain = await buildLineageChain(assemblyId);
       let rationale = String(body.rationale ?? "");
       let summary = String(body.summary ?? "");
@@ -25060,7 +24480,7 @@ CREATE (d)-[:CERTIFIED_BY_EVIDENCE]->(e)`,
               // Cap for query size
             }
           },
-          callId: uuid22(),
+          callId: uuid21(),
           timeoutMs: 15e3
         });
       } catch (err) {
@@ -25094,7 +24514,7 @@ CREATE (d)-[:CERTIFIED_BY_EVIDENCE]->(e)`,
       try {
         const pipeline = redis2.pipeline();
         for (const id of allIds) {
-          pipeline.get(`${REDIS_PREFIX9}${id}`);
+          pipeline.get(`${REDIS_PREFIX8}${id}`);
         }
         const results = await pipeline.exec();
         if (results) {
@@ -25169,7 +24589,7 @@ __export(artifacts_exports, {
   loadArtifact: () => loadArtifact,
   storeArtifact: () => storeArtifact
 });
-import { Router as Router4 } from "express";
+import { Router as Router3 } from "express";
 import { randomUUID } from "crypto";
 async function storeArtifact(artifact) {
   const redis2 = getRedis();
@@ -25364,7 +24784,7 @@ var init_artifacts = __esm({
     "use strict";
     init_redis();
     init_logger();
-    artifactRouter = Router4();
+    artifactRouter = Router3();
     ARTIFACT_PREFIX = "orchestrator:artifact:";
     ARTIFACT_INDEX = "orchestrator:artifacts:index";
     TTL_SECONDS6 = 2592e3;
@@ -25508,7 +24928,7 @@ __export(drill_exports, {
   loadDrillContext: () => loadDrillContext,
   saveDrillContext: () => saveDrillContext
 });
-import { Router as Router5 } from "express";
+import { Router as Router4 } from "express";
 import { randomUUID as randomUUID2 } from "crypto";
 async function callMcp(tool, payload) {
   const controller = new AbortController();
@@ -25653,7 +25073,7 @@ var init_drill = __esm({
     init_redis();
     init_config();
     init_logger();
-    drillRouter = Router5();
+    drillRouter = Router4();
     DRILL_PREFIX = "orchestrator:drill:";
     SESSION_TTL = 3600;
     MCP_TIMEOUT_MS = 12e3;
@@ -25869,7 +25289,7 @@ __export(hyperagent_autonomous_exports, {
   runAutonomousCycle: () => runAutonomousCycle,
   setPhase: () => setPhase
 });
-import { v4 as uuid23 } from "uuid";
+import { v4 as uuid22 } from "uuid";
 function stream(event, data) {
   const payload = {
     ...data,
@@ -26269,7 +25689,7 @@ async function runAutonomousCycle(phase, maxTargets) {
       }
     }
   }
-  const cycleId = `auto-${uuid23().slice(0, 8)}`;
+  const cycleId = `auto-${uuid22().slice(0, 8)}`;
   const effectivePhase = phase ?? currentPhase;
   const batchSize = maxTargets ?? CYCLE_BATCH_SIZE[effectivePhase];
   const profileId = PHASE_POLICY[effectivePhase];
@@ -27077,7 +26497,7 @@ __export(inventor_loop_exports, {
   runInventor: () => runInventor,
   stopInventor: () => stopInventor
 });
-import { v4 as uuid24 } from "uuid";
+import { v4 as uuid23 } from "uuid";
 function stream2(event, data) {
   broadcastSSE("inventor", { event, ...data, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
 }
@@ -27438,7 +26858,7 @@ Provide:
     return `Score: ${result.score.toFixed(3)}. ${result.success ? "Passed" : "Failed"}. ${result.error || ""}`;
   }
 }
-async function loadState2(experimentName) {
+async function loadState(experimentName) {
   const redis2 = getRedis();
   if (!redis2) return false;
   try {
@@ -27489,7 +26909,7 @@ async function runStep(config2) {
     cognitionItems,
     config2
   );
-  const nodeId = `inv-${uuid24().slice(0, 8)}`;
+  const nodeId = `inv-${uuid23().slice(0, 8)}`;
   const parentId = parentNodes.length > 0 ? parentNodes[0].id : null;
   const node = {
     id: nodeId,
@@ -27729,7 +27149,7 @@ async function runInventor(config2, resume = false) {
     islands: config2.sampling.islands
   });
   if (resume) {
-    const loaded = await loadState2(config2.experimentName);
+    const loaded = await loadState(config2.experimentName);
     if (loaded) {
       logger.info(
         { experiment: config2.experimentName, nodes: nodes.size, step: currentStep2 },
@@ -27750,7 +27170,7 @@ async function runInventor(config2, resume = false) {
   });
   if (config2.initialArtifact && nodes.size === 0) {
     const seedNode = {
-      id: `inv-seed-${uuid24().slice(0, 8)}`,
+      id: `inv-seed-${uuid23().slice(0, 8)}`,
       parentId: null,
       artifact: config2.initialArtifact,
       taskDescription: config2.taskDescription,
@@ -27900,7 +27320,7 @@ async function getExperimentHistory(limit = 20) {
     return [];
   }
 }
-var isRunning3, currentConfig, currentStep2, bestScore, bestNodeId, startedAt, lastStepAt, lastError, sampler, abortRequested, nodes, REDIS_PREFIX10, nodeKey, stateKey, samplerKey, historyKey;
+var isRunning3, currentConfig, currentStep2, bestScore, bestNodeId, startedAt, lastStepAt, lastError, sampler, abortRequested, nodes, REDIS_PREFIX9, nodeKey, stateKey, samplerKey, historyKey;
 var init_inventor_loop = __esm({
   "src/intelligence/inventor-loop.ts"() {
     "use strict";
@@ -27925,11 +27345,11 @@ var init_inventor_loop = __esm({
     sampler = null;
     abortRequested = false;
     nodes = /* @__PURE__ */ new Map();
-    REDIS_PREFIX10 = "inventor:";
-    nodeKey = (expName) => `${REDIS_PREFIX10}${expName}:nodes`;
-    stateKey = (expName) => `${REDIS_PREFIX10}${expName}:state`;
-    samplerKey = (expName) => `${REDIS_PREFIX10}${expName}:sampler`;
-    historyKey = () => `${REDIS_PREFIX10}history`;
+    REDIS_PREFIX9 = "inventor:";
+    nodeKey = (expName) => `${REDIS_PREFIX9}${expName}:nodes`;
+    stateKey = (expName) => `${REDIS_PREFIX9}${expName}:state`;
+    samplerKey = (expName) => `${REDIS_PREFIX9}${expName}:sampler`;
+    historyKey = () => `${REDIS_PREFIX9}history`;
   }
 });
 
@@ -28597,7 +28017,7 @@ async function detectAnomalies(health) {
     });
   }
   if (health.rateLimitState.current_delay_ms === 0 && health.rateLimitState.hits_in_window === 0) {
-    const stormPattern = state3.patterns.find((p) => p.type === "rate_limit_storm");
+    const stormPattern = state2.patterns.find((p) => p.type === "rate_limit_storm");
     if (stormPattern && stormPattern.count > 0) {
       const lastStorm = new Date(stormPattern.lastSeen).getTime();
       const timeSinceStorm = Date.now() - lastStorm;
@@ -28699,17 +28119,17 @@ async function detectAnomalies(health) {
 async function learnFromAnomalies(anomalies) {
   if (anomalies.length === 0) return;
   for (const a of anomalies) {
-    let pattern = state3.patterns.find((p) => p.type === a.type);
+    let pattern = state2.patterns.find((p) => p.type === a.type);
     if (!pattern) {
       pattern = { type: a.type, count: 0, lastSeen: a.detectedAt, avgDurationMs: 0, knownFix: null };
-      state3.patterns.push(pattern);
+      state2.patterns.push(pattern);
     }
     pattern.count++;
     pattern.lastSeen = a.detectedAt;
   }
-  if (state3.patterns.length > MAX_PATTERNS) {
-    state3.patterns.sort((a, b) => b.count - a.count);
-    state3.patterns = state3.patterns.slice(0, MAX_PATTERNS);
+  if (state2.patterns.length > MAX_PATTERNS) {
+    state2.patterns.sort((a, b) => b.count - a.count);
+    state2.patterns = state2.patterns.slice(0, MAX_PATTERNS);
   }
   for (const a of anomalies) {
     onAnomaly(a.type, a.valence, a.source, a.severity).catch(() => {
@@ -28807,7 +28227,7 @@ You analyze BOTH negative anomalies (to fix) AND positive anomalies (to amplify 
 ${negativesSection}${positivesSection}
 
 HISTORICAL PATTERNS:
-${state3.patterns.filter((p) => p.count > 1).map((p) => `- ${p.type}: occurred ${p.count} times, last seen ${p.lastSeen}${p.knownFix ? `, fix: ${p.knownFix}` : ""}`).join("\n") || "(no prior patterns)"}
+${state2.patterns.filter((p) => p.count > 1).map((p) => `- ${p.type}: occurred ${p.count} times, last seen ${p.lastSeen}${p.knownFix ? `, fix: ${p.knownFix}` : ""}`).join("\n") || "(no prior patterns)"}
 
 PRIOR LEARNINGS:
 ${priorInsights || "(no prior insights)"}
@@ -28838,7 +28258,7 @@ FINAL: One-liner insight to remember for next time` : ""}`,
             metadata: {
               types: anomalies.map((a) => a.type),
               valences: [...new Set(anomalies.map((a) => a.valence))],
-              scan: state3.totalScans
+              scan: state2.totalScans
             }
           },
           callId: `anomaly-rem-store-${Date.now()}`
@@ -28854,30 +28274,30 @@ FINAL: One-liner insight to remember for next time` : ""}`,
 }
 async function runAnomalyScan() {
   const t0 = Date.now();
-  state3.totalScans++;
-  state3.lastScanAt = (/* @__PURE__ */ new Date()).toISOString();
-  broadcastSSE("anomaly-watcher", { event: "scan_start", scan: state3.totalScans });
+  state2.totalScans++;
+  state2.lastScanAt = (/* @__PURE__ */ new Date()).toISOString();
+  broadcastSSE("anomaly-watcher", { event: "scan_start", scan: state2.totalScans });
   const health = await probeHealth();
   const anomalies = await detectAnomalies(health);
   const activeTypes = new Set(anomalies.map((a) => a.type));
-  state3.activeAnomalies = state3.activeAnomalies.filter((a) => {
+  state2.activeAnomalies = state2.activeAnomalies.filter((a) => {
     if (!activeTypes.has(a.type) && !a.resolvedAt) {
       a.resolvedAt = (/* @__PURE__ */ new Date()).toISOString();
-      state3.anomaliesResolved++;
+      state2.anomaliesResolved++;
       logger.info({ type: a.type, source: a.source }, "Anomaly resolved");
       return false;
     }
     return true;
   });
   if (anomalies.length > 0) {
-    state3.anomaliesDetected += anomalies.length;
+    state2.anomaliesDetected += anomalies.length;
     for (const a of anomalies) {
-      if (!state3.activeAnomalies.find((x) => x.type === a.type)) {
-        state3.activeAnomalies.push(a);
+      if (!state2.activeAnomalies.find((x) => x.type === a.type)) {
+        state2.activeAnomalies.push(a);
       }
     }
-    if (state3.activeAnomalies.length > MAX_ACTIVE_ANOMALIES) {
-      state3.activeAnomalies = state3.activeAnomalies.slice(-MAX_ACTIVE_ANOMALIES);
+    if (state2.activeAnomalies.length > MAX_ACTIVE_ANOMALIES) {
+      state2.activeAnomalies = state2.activeAnomalies.slice(-MAX_ACTIVE_ANOMALIES);
     }
     await learnFromAnomalies(anomalies);
     const analysis = await reasonAboutAnomalies(anomalies);
@@ -28903,40 +28323,40 @@ async function runAnomalyScan() {
     }
     broadcastSSE("anomaly-watcher", {
       event: "scan_complete",
-      scan: state3.totalScans,
+      scan: state2.totalScans,
       anomalies: anomalies.length,
       critical: critCount,
       positive: positiveCount,
       duration_ms: Date.now() - t0
     });
     logger.info({
-      scan: state3.totalScans,
+      scan: state2.totalScans,
       anomalies: anomalies.length,
       critical: critCount,
       duration_ms: Date.now() - t0
     }, "Anomaly scan complete");
-    await persistState2();
-    return { anomalies, health, analysis, patterns: state3.patterns };
+    await persistState();
+    return { anomalies, health, analysis, patterns: state2.patterns };
   }
   broadcastSSE("anomaly-watcher", {
     event: "scan_complete",
-    scan: state3.totalScans,
+    scan: state2.totalScans,
     anomalies: 0,
     critical: 0,
     duration_ms: Date.now() - t0
   });
-  await persistState2();
-  return { anomalies: [], health, analysis: "", patterns: state3.patterns };
+  await persistState();
+  return { anomalies: [], health, analysis: "", patterns: state2.patterns };
 }
-async function persistState2() {
+async function persistState() {
   const redis2 = getRedis();
   if (!redis2) return;
   try {
-    await redis2.set(REDIS_KEY4, JSON.stringify({ ...state3, _schemaVersion: 1 }), "EX", 86400);
+    await redis2.set(REDIS_KEY4, JSON.stringify({ ...state2, _schemaVersion: 1 }), "EX", 86400);
   } catch {
   }
 }
-async function loadState3() {
+async function loadState2() {
   const redis2 = getRedis();
   if (!redis2) return;
   try {
@@ -28947,9 +28367,9 @@ async function loadState3() {
         logger.warn("Anomaly-watcher: schema version mismatch, using defaults");
         return;
       }
-      state3 = { ...state3, ...loaded };
+      state2 = { ...state2, ...loaded };
       logger.info(
-        { totalScans: state3.totalScans, patterns: state3.patterns.length },
+        { totalScans: state2.totalScans, patterns: state2.patterns.length },
         "Anomaly-watcher: restored state from Redis"
       );
     }
@@ -28957,30 +28377,30 @@ async function loadState3() {
   }
 }
 function getWatcherState() {
-  return { ...state3 };
+  return { ...state2 };
 }
 function getActiveAnomalies() {
-  return [...state3.activeAnomalies];
+  return [...state2.activeAnomalies];
 }
 function getAnomalyPatterns() {
-  return [...state3.patterns];
+  return [...state2.patterns];
 }
 async function initAnomalyWatcher() {
-  await loadState3();
-  if (state3.patterns.length === 0) {
-    state3.patterns = [...KNOWN_FAILURE_PATTERNS];
-    await persistState2();
+  await loadState2();
+  if (state2.patterns.length === 0) {
+    state2.patterns = [...KNOWN_FAILURE_PATTERNS];
+    await persistState();
     logger.info(
-      { seeded: state3.patterns.length },
+      { seeded: state2.patterns.length },
       "Anomaly-watcher: seeded known failure patterns from production history"
     );
   }
   logger.info(
-    { totalScans: state3.totalScans, patterns: state3.patterns.length },
+    { totalScans: state2.totalScans, patterns: state2.patterns.length },
     "Anomaly-watcher initialized"
   );
 }
-var REDIS_KEY4, MAX_ACTIVE_ANOMALIES, MAX_PATTERNS, state3, KNOWN_FAILURE_PATTERNS;
+var REDIS_KEY4, MAX_ACTIVE_ANOMALIES, MAX_PATTERNS, state2, KNOWN_FAILURE_PATTERNS;
 var init_anomaly_watcher = __esm({
   "src/swarm/anomaly-watcher.ts"() {
     "use strict";
@@ -28996,7 +28416,7 @@ var init_anomaly_watcher = __esm({
     REDIS_KEY4 = "anomaly-watcher:state";
     MAX_ACTIVE_ANOMALIES = 50;
     MAX_PATTERNS = 100;
-    state3 = {
+    state2 = {
       lastScanAt: null,
       totalScans: 0,
       anomaliesDetected: 0,
@@ -29081,7 +28501,7 @@ __export(tool_executor_exports, {
   executeToolUnified: () => executeToolUnified,
   getTokenSavings: () => getTokenSavings
 });
-import { v4 as uuid25 } from "uuid";
+import { v4 as uuid24 } from "uuid";
 async function enforceHyperAgentGate(toolName2, opts) {
   const toolDef = getTool(toolName2);
   if (!toolDef) return null;
@@ -29107,7 +28527,7 @@ function getTokenSavings() {
 async function saveFullToolOutput(content, toolName2) {
   const redis2 = getRedis();
   if (!redis2) return null;
-  const id = uuid25();
+  const id = uuid24();
   try {
     const payload = JSON.stringify({
       $id: `tool-output-${id}`,
@@ -29225,7 +28645,7 @@ function buildToolFallback(toolName2, error) {
   }
 }
 async function executeToolUnified(toolName2, args, opts) {
-  const callId = opts?.call_id ?? uuid25();
+  const callId = opts?.call_id ?? uuid24();
   const t0 = Date.now();
   let deprecation_notice;
   const toolDef = getTool(toolName2);
@@ -29317,7 +28737,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher, params: args.params ?? {} },
-        callId: uuid25(),
+        callId: uuid24(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
@@ -29338,7 +28758,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher },
-        callId: uuid25(),
+        callId: uuid24(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Task query failed: ${result.error_message}`;
@@ -29356,7 +28776,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: toolName2,
         args: mcpArgs ?? {},
-        callId: uuid25(),
+        callId: uuid24(),
         timeoutMs: 3e4
       });
       if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
@@ -29364,8 +28784,8 @@ ${result.merged_context}`;
     }
     case "get_platform_health": {
       const [backendHealth, graphHealth] = await Promise.allSettled([
-        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid25(), timeoutMs: 1e4 }),
-        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid25(), timeoutMs: 1e4 })
+        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid24(), timeoutMs: 1e4 }),
+        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid24(), timeoutMs: 1e4 })
       ]);
       const parts = [];
       if (backendHealth.status === "fulfilled" && backendHealth.value.status === "success") {
@@ -29381,7 +28801,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: args.query },
-        callId: uuid25(),
+        callId: uuid24(),
         timeoutMs: 2e4
       });
       if (result.status !== "success") return `Document search failed: ${result.error_message}`;
@@ -29399,7 +28819,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issues",
         args: payload,
-        callId: uuid25(),
+        callId: uuid24(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
@@ -29415,7 +28835,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issue_get",
         args: { identifier },
-        callId: uuid25(),
+        callId: uuid24(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
@@ -29426,7 +28846,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.labels",
         args: { limit },
-        callId: uuid25(),
+        callId: uuid24(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Linear labels fetch failed: ${result.error_message}`;
@@ -29440,7 +28860,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.save_issue",
         args: body,
-        callId: uuid25(),
+        callId: uuid24(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear save issue failed: ${result.error_message}`;
@@ -29452,7 +28872,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.get_issue",
         args: { id },
-        callId: uuid25(),
+        callId: uuid24(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Linear get issue failed: ${result.error_message}`;
@@ -30677,7 +30097,7 @@ ${formatted}`;
             max_tokens: budget,
             domain
           },
-          callId: uuid25(),
+          callId: uuid24(),
           timeoutMs: 25e3
         });
         if (result.status !== "success") return `Folding failed: ${result.error_message}`;
@@ -30759,7 +30179,7 @@ ${summary}`;
         const lineage = await buildLineageChain2(assemblyId);
         const now = (/* @__PURE__ */ new Date()).toISOString();
         const decision = {
-          $id: `widgetdc:decision:${uuid25()}`,
+          $id: `widgetdc:decision:${uuid24()}`,
           $schema: "https://widgetdc.io/schemas/decision/v1",
           title,
           description: typeof args.description === "string" ? args.description : "",
@@ -30842,7 +30262,7 @@ ${lines.join("\n")}`;
         const { saveDrillContext: saveDrillContext2, fetchDrillChildren: fetchDrillChildren2 } = await Promise.resolve().then(() => (init_drill(), drill_exports));
         const domain = String(args.domain ?? "");
         if (!domain) return "Error: domain required";
-        const sessionId = uuid25();
+        const sessionId = uuid24();
         const ctx = {
           stack: [],
           current_level: "domain",
@@ -31078,7 +30498,7 @@ ${lines.join("\n")}`;
     case "peer_eval_evaluate": {
       const { hookIntoExecution: hookIntoExecution2 } = await Promise.resolve().then(() => (init_peer_eval(), peer_eval_exports));
       const agentId = args.agent_id;
-      const taskId = args.task_id ?? uuid25();
+      const taskId = args.task_id ?? uuid24();
       const taskType = args.task_type ?? "manual-eval";
       const success = args.success ?? true;
       const latencyMs = typeof args.latency_ms === "number" ? args.latency_ms : 1e3;
@@ -31624,7 +31044,7 @@ ${lines.join("\n")}`;
       if (!["read_only", "staged_write", "production_write"].includes(scope)) {
         throw new Error("scope must be read_only, staged_write, or production_write");
       }
-      const sessionId = `gov-${uuid25().slice(0, 8)}`;
+      const sessionId = `gov-${uuid24().slice(0, 8)}`;
       const plan = await createPlan2(description, sessionId, scope, {
         targetServices: targetService ? [targetService] : [],
         successMetrics: `Plan approved and executed under ${scope} profile`,
@@ -31687,7 +31107,7 @@ ${lines.join("\n")}`;
       const scoreMap = { success: 90, partial: 60, failed: 20 };
       const score = scoreMap[outcome] ?? 50;
       const plan = getPlan3(planId);
-      const kpi = await evaluatePlan2(`eval-${uuid25().slice(0, 8)}`, planId, score, "governance");
+      const kpi = await evaluatePlan2(`eval-${uuid24().slice(0, 8)}`, planId, score, "governance");
       return JSON.stringify({
         plan_id: planId,
         outcome,
@@ -32454,6 +31874,683 @@ var init_mcp_caller = __esm({
   }
 });
 
+// src/swarm/peer-eval.ts
+var peer_eval_exports = {};
+__export(peer_eval_exports, {
+  getAllFleetLearnings: () => getAllFleetLearnings,
+  getFleetLearning: () => getFleetLearning,
+  getPeerEvalState: () => getPeerEvalState,
+  getRecentEvals: () => getRecentEvals,
+  getWhatWorks: () => getWhatWorks,
+  hookIntoExecution: () => hookIntoExecution,
+  initPeerEval: () => initPeerEval,
+  isFleetReliable: () => isFleetReliable,
+  runFleetAnalysis: () => runFleetAnalysis
+});
+import { v4 as uuid25 } from "uuid";
+async function hookIntoExecution(agentId, taskId, context) {
+  const t0 = Date.now();
+  const qualityScore = context.metrics?.quality_score ?? (context.success ? 0.7 : 0.2);
+  const latencyMs = context.metrics?.latency_ms ?? 1e3;
+  const latencyPenalty = latencyMs > 1e4 ? 0.1 : 0;
+  const selfScore = Math.max(0, Math.min(1, qualityScore - latencyPenalty));
+  let novelty = 0.5;
+  try {
+    const existingTrails = await sense({
+      domain: `chain:${context.taskType}`,
+      type: "trail",
+      minStrength: 0.3,
+      limit: 5
+    });
+    novelty = existingTrails.length === 0 ? 1 : existingTrails.length < 3 ? 0.7 : existingTrails.length < 10 ? 0.4 : 0.2;
+  } catch {
+  }
+  const evalReport = {
+    id: `eval-${uuid25().slice(0, 12)}`,
+    agentId,
+    taskId,
+    taskType: context.taskType,
+    chainId: context.chainId ?? null,
+    selfScore,
+    confidence: context.success ? 0.8 : 0.5,
+    metrics: {
+      cost_usd: context.metrics?.cost_usd ?? 0,
+      latency_ms: latencyMs,
+      quality_score: qualityScore,
+      token_count: context.metrics?.token_count
+    },
+    insights: context.insights ?? [],
+    novelty,
+    upstreamAgentId: context.upstreamAgentId ?? null,
+    upstreamQuality: context.upstreamQuality ?? null,
+    success: context.success,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  if (context.success) {
+    await onChainStepSuccess(agentId, context.taskType, latencyMs, "evaluated");
+  } else {
+    await onChainStepFailure(agentId, context.taskType, "Task failed");
+  }
+  try {
+    await callMcpTool({
+      toolName: "memory_store",
+      args: {
+        agent_id: "peer-eval",
+        key: `eval:${agentId}:${taskId}`,
+        value: JSON.stringify({
+          selfScore: evalReport.selfScore,
+          taskType: evalReport.taskType,
+          success: evalReport.success,
+          metrics: evalReport.metrics,
+          insights: evalReport.insights,
+          novelty: evalReport.novelty
+        }),
+        metadata: {
+          agent_id: agentId,
+          task_type: context.taskType,
+          score: evalReport.selfScore,
+          novelty: evalReport.novelty,
+          success: evalReport.success
+        }
+      },
+      callId: `peereval-mem-${evalReport.id}`
+    });
+  } catch {
+  }
+  try {
+    await callMcpTool({
+      toolName: "adaptive_rag_reward",
+      args: {
+        query: context.taskType,
+        reward: evalReport.selfScore,
+        metadata: {
+          source: "peer-eval",
+          agent_id: agentId,
+          novelty: evalReport.novelty
+        }
+      },
+      callId: `peereval-rag-${evalReport.id}`
+    });
+  } catch {
+  }
+  updateFleetLearning(evalReport);
+  if (evalReport.selfScore >= BROADCAST_THRESHOLD && evalReport.novelty >= NOVELTY_THRESHOLD) {
+    await broadcastBestPractice(evalReport);
+  }
+  const redis2 = getRedis();
+  if (redis2) {
+    await redis2.zadd(`${REDIS_PREFIX10}recent`, Date.now(), JSON.stringify(evalReport));
+    await redis2.zremrangebyrank(`${REDIS_PREFIX10}recent`, 0, -201);
+  }
+  state3.totalEvals++;
+  state3.lastEvalAt = (/* @__PURE__ */ new Date()).toISOString();
+  await persistState2();
+  broadcastSSE("peer-eval", {
+    event: "eval_complete",
+    evalId: evalReport.id,
+    agentId,
+    taskType: context.taskType,
+    selfScore: evalReport.selfScore,
+    novelty: evalReport.novelty,
+    success: evalReport.success,
+    duration_ms: Date.now() - t0
+  });
+  logger.debug({
+    evalId: evalReport.id,
+    agentId,
+    taskType: context.taskType,
+    score: evalReport.selfScore,
+    novelty: evalReport.novelty
+  }, "PeerEval: evaluation complete");
+  return evalReport;
+}
+function updateFleetLearning(eval_) {
+  let learning = state3.fleetLearnings.get(eval_.taskType);
+  if (!learning) {
+    learning = {
+      taskType: eval_.taskType,
+      totalEvals: 0,
+      avgScore: 0,
+      avgCost: 0,
+      avgLatency: 0,
+      bestAgent: null,
+      bestScore: 0,
+      bestPractices: [],
+      lastUpdated: (/* @__PURE__ */ new Date()).toISOString(),
+      reliable: false
+    };
+    state3.fleetLearnings.set(eval_.taskType, learning);
+  }
+  const alpha = 0.1;
+  learning.totalEvals++;
+  learning.avgScore = learning.avgScore * (1 - alpha) + eval_.selfScore * alpha;
+  learning.avgCost = learning.avgCost * (1 - alpha) + eval_.metrics.cost_usd * alpha;
+  learning.avgLatency = learning.avgLatency * (1 - alpha) + eval_.metrics.latency_ms * alpha;
+  learning.lastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+  if (eval_.selfScore > learning.bestScore) {
+    learning.bestScore = eval_.selfScore;
+    learning.bestAgent = eval_.agentId;
+  }
+  learning.reliable = learning.totalEvals >= 20;
+}
+async function broadcastBestPractice(eval_) {
+  const insightText = eval_.insights.length > 0 ? eval_.insights.join("; ") : `Agent ${eval_.agentId} scored ${(eval_.selfScore * 100).toFixed(1)}% on ${eval_.taskType} (novelty: ${(eval_.novelty * 100).toFixed(0)}%)`;
+  const bp = {
+    id: `bp-${uuid25().slice(0, 8)}`,
+    agentId: eval_.agentId,
+    taskType: eval_.taskType,
+    score: eval_.selfScore,
+    novelty: eval_.novelty,
+    insight: insightText,
+    discoveredAt: (/* @__PURE__ */ new Date()).toISOString(),
+    reinforcements: 0
+  };
+  const learning = state3.fleetLearnings.get(eval_.taskType);
+  if (learning) {
+    learning.bestPractices.push(bp);
+    if (learning.bestPractices.length > MAX_BEST_PRACTICES) {
+      learning.bestPractices.sort((a, b) => b.score - a.score);
+      learning.bestPractices = learning.bestPractices.slice(0, MAX_BEST_PRACTICES);
+    }
+  }
+  await deposit(
+    eval_.agentId,
+    "attraction",
+    `best-practice:${eval_.taskType}`,
+    Math.min(1, eval_.selfScore * 1.2),
+    `Best practice: ${insightText.slice(0, 200)}`,
+    { score: eval_.selfScore, novelty: eval_.novelty },
+    ["best-practice", eval_.taskType, eval_.agentId],
+    14400
+    // 4h TTL for best practices
+  );
+  broadcastMessage({
+    from: "PeerEval",
+    to: "All",
+    source: "orchestrator",
+    type: "Message",
+    message: `New best practice from ${eval_.agentId}: ${insightText.slice(0, 200)}`
+  });
+  state3.totalBestPracticesShared++;
+  logger.info({
+    bpId: bp.id,
+    agentId: eval_.agentId,
+    taskType: eval_.taskType,
+    score: eval_.selfScore,
+    novelty: eval_.novelty
+  }, "PeerEval: best practice broadcast");
+}
+function getFleetLearning(taskType) {
+  const learning = state3.fleetLearnings.get(taskType);
+  if (!learning) return null;
+  return {
+    ...learning,
+    bestPractices: [...learning.bestPractices]
+  };
+}
+function isFleetReliable(taskType) {
+  const learning = state3.fleetLearnings.get(taskType);
+  return learning?.reliable ?? false;
+}
+function getAllFleetLearnings() {
+  return [...state3.fleetLearnings.values()].map((l) => ({
+    ...l,
+    bestPractices: [...l.bestPractices]
+  }));
+}
+async function getWhatWorks(taskType) {
+  const learning = state3.fleetLearnings.get(taskType);
+  const trails = await sense({ domain: `chain:${taskType}`, type: "attraction", limit: 10 });
+  const topStrategies = trails.filter((p) => p.strength >= 0.5).sort((a, b) => b.strength - a.strength).slice(0, 5).map((p) => p.label);
+  const totalPheromoneStrength = trails.reduce((sum, p) => sum + p.strength, 0);
+  return {
+    bestAgent: learning?.bestAgent ?? null,
+    avgEfficiency: learning ? learning.avgScore / Math.max(learning.avgCost, 0.01) : 0,
+    topStrategies,
+    pheromoneStrength: totalPheromoneStrength
+  };
+}
+async function getRecentEvals(limit = 20) {
+  const redis2 = getRedis();
+  if (!redis2) return [];
+  const raw = await redis2.zrevrange(`${REDIS_PREFIX10}recent`, 0, limit - 1);
+  return raw.map((r) => {
+    try {
+      return JSON.parse(r);
+    } catch {
+      return null;
+    }
+  }).filter((e) => e !== null);
+}
+async function runFleetAnalysis() {
+  if (!isRlmAvailable()) return "RLM unavailable";
+  const learnings = getAllFleetLearnings();
+  if (learnings.length === 0) return "No fleet learnings yet";
+  try {
+    const result = await callCognitiveRaw("reason", {
+      prompt: `You are the Fleet Intelligence Analyst for WidgeTDC.
+
+FLEET LEARNING SUMMARY (${learnings.length} task types tracked):
+${learnings.map((l) => `- ${l.taskType}: ${l.totalEvals} evals, avg score ${l.avgScore.toFixed(2)}, avg cost $${l.avgCost.toFixed(2)}, best agent: ${l.bestAgent || "none"} (${l.bestScore.toFixed(2)}), ${l.bestPractices.length} best practices`).join("\n")}
+
+TOP BEST PRACTICES:
+${learnings.flatMap((l) => l.bestPractices).sort((a, b) => b.score - a.score).slice(0, 10).map((bp) => `- [${bp.taskType}] ${bp.agentId}: ${bp.insight.slice(0, 150)} (score: ${bp.score.toFixed(2)}, novelty: ${bp.novelty.toFixed(2)})`).join("\n") || "(none yet)"}
+
+Analyze:
+1. FLEET HEALTH: Which task types are well-served? Which are underperforming?
+2. COST EFFICIENCY: Where is cost/quality ratio best? Worst?
+3. LEARNING VELOCITY: Which areas are improving fastest?
+4. STRATEGIC RECOMMENDATIONS: What should we double down on? What should we deprecate?
+5. PHEROMONE STRATEGY: Which trails should be reinforced? Which should decay faster?`,
+      agent_id: "peer-eval",
+      depth: 2
+    }, 2e4);
+    const analysis = result ? String(result.answer ?? result.result ?? "") : "RLM cognitive analysis returned no results (check RLM health and fleet data volume)";
+    if (!analysis || analysis.length === 0) {
+      return "Fleet analysis produced empty output (insufficient data or RLM unavailable)";
+    }
+    if (analysis.length > 50) {
+      try {
+        await callMcpTool({
+          toolName: "memory_store",
+          args: {
+            agent_id: "peer-eval",
+            key: `fleet-analysis:${Date.now()}`,
+            value: analysis.slice(0, 2e3),
+            metadata: {
+              task_types: learnings.map((l) => l.taskType),
+              total_evals: learnings.reduce((s, l) => s + l.totalEvals, 0)
+            }
+          },
+          callId: `fleet-analysis-${Date.now()}`
+        });
+      } catch {
+      }
+    }
+    return analysis;
+  } catch (err) {
+    logger.warn({ error: String(err) }, "PeerEval: fleet analysis failed");
+    return `Fleet analysis failed: ${err}`;
+  }
+}
+function getPeerEvalState() {
+  return {
+    totalEvals: state3.totalEvals,
+    totalPeerReviews: state3.totalPeerReviews,
+    totalBestPracticesShared: state3.totalBestPracticesShared,
+    taskTypesTracked: state3.fleetLearnings.size,
+    lastEvalAt: state3.lastEvalAt
+  };
+}
+async function persistState2() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const serializable = {
+      ...state3,
+      fleetLearnings: Object.fromEntries(state3.fleetLearnings)
+    };
+    await redis2.set(REDIS_STATE_KEY2, JSON.stringify(serializable));
+  } catch {
+  }
+}
+async function loadState3() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const raw = await redis2.get(REDIS_STATE_KEY2);
+    if (raw) {
+      const loaded = JSON.parse(raw);
+      state3 = {
+        ...state3,
+        ...loaded,
+        fleetLearnings: new Map(Object.entries(loaded.fleetLearnings ?? {}))
+      };
+      logger.info(
+        { totalEvals: state3.totalEvals, taskTypes: state3.fleetLearnings.size },
+        "PeerEval: restored state from Redis"
+      );
+    } else {
+      await rebuildStateFromRecentEvals(redis2);
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, "PeerEval: failed to load state from Redis, starting fresh");
+  }
+}
+async function rebuildStateFromRecentEvals(redis2) {
+  try {
+    const recentRaw = await redis2.zrange(`${REDIS_PREFIX10}recent`, "-inf", "+inf", "BYSCORE");
+    if (recentRaw && recentRaw.length > 0) {
+      let rebuilt = 0;
+      for (const raw of recentRaw) {
+        try {
+          const eval_ = JSON.parse(raw);
+          updateFleetLearning(eval_);
+          state3.totalEvals++;
+          state3.lastEvalAt = eval_.createdAt;
+          if (eval_.selfScore >= BROADCAST_THRESHOLD && eval_.novelty >= NOVELTY_THRESHOLD) {
+            state3.totalBestPracticesShared++;
+          }
+          rebuilt++;
+        } catch {
+        }
+      }
+      logger.info(
+        { rebuilt, totalEvals: state3.totalEvals, taskTypes: state3.fleetLearnings.size },
+        "PeerEval: rebuilt state from recent evals in Redis"
+      );
+      await persistState2();
+    }
+  } catch {
+  }
+}
+async function initPeerEval() {
+  await loadState3();
+  logger.info(
+    { totalEvals: state3.totalEvals, taskTypes: state3.fleetLearnings.size },
+    "PeerEval engine initialized"
+  );
+}
+var REDIS_PREFIX10, REDIS_STATE_KEY2, MAX_BEST_PRACTICES, NOVELTY_THRESHOLD, BROADCAST_THRESHOLD, state3;
+var init_peer_eval = __esm({
+  "src/swarm/peer-eval.ts"() {
+    "use strict";
+    init_redis();
+    init_mcp_caller();
+    init_cognitive_proxy();
+    init_sse();
+    init_chat_broadcaster();
+    init_logger();
+    init_pheromone_layer();
+    REDIS_PREFIX10 = "peer-eval:";
+    REDIS_STATE_KEY2 = "peer-eval:state";
+    MAX_BEST_PRACTICES = 50;
+    NOVELTY_THRESHOLD = 0.6;
+    BROADCAST_THRESHOLD = 0.75;
+    state3 = {
+      totalEvals: 0,
+      totalPeerReviews: 0,
+      totalBestPracticesShared: 0,
+      fleetLearnings: /* @__PURE__ */ new Map(),
+      lastEvalAt: null
+    };
+  }
+});
+
+// src/swarm/a2a-learning-hook.ts
+var a2a_learning_hook_exports = {};
+__export(a2a_learning_hook_exports, {
+  a2aLearningHook: () => a2aLearningHook,
+  extractA2ALearningSignal: () => extractA2ALearningSignal
+});
+function parseExplicitTag(text) {
+  const m = /\[eval\s+([^\]]+)\]/.exec(text);
+  if (!m) return null;
+  const out = {};
+  for (const pair of m[1].trim().split(/\s+/)) {
+    const eq = pair.indexOf("=");
+    if (eq <= 0) continue;
+    out[pair.slice(0, eq)] = pair.slice(eq + 1).replace(/^["']|["']$/g, "");
+  }
+  return out;
+}
+function extractA2ALearningSignal(msg) {
+  const fromLower = String(msg.from ?? "").toLowerCase();
+  if (!msg.from || fromLower === "orchestrator" || fromLower === "system" || fromLower === "cron") {
+    return null;
+  }
+  const text = String(msg.message ?? "").trim();
+  if (!text) return null;
+  const explicit = parseExplicitTag(text);
+  if (explicit?.["taskType"] && explicit["score"]) {
+    const score = parseFloat(explicit["score"]);
+    if (!Number.isFinite(score) || score < 0 || score > 1) return null;
+    return {
+      agentId: msg.from,
+      taskType: explicit["taskType"],
+      score,
+      latency_ms: parseInt(explicit["latency_ms"] ?? "0", 10) || 0,
+      cost: parseFloat(explicit["cost_usd"] ?? explicit["cost"] ?? "0") || 0,
+      success: score >= 0.5,
+      timestamp: msg.timestamp ?? (/* @__PURE__ */ new Date()).toISOString(),
+      source: "explicit"
+    };
+  }
+  const msgType = String(msg.type ?? "");
+  if (!TASK_REPORT_TYPES.has(msgType)) return null;
+  const positive = POSITIVE_PATTERN.test(text);
+  const negative = NEGATIVE_PATTERN.test(text);
+  if (!positive && !negative) return null;
+  const isPositive = positive && !negative;
+  return {
+    agentId: msg.from,
+    taskType: `a2a-${msgType.toLowerCase()}`,
+    score: isPositive ? 0.7 : 0.3,
+    latency_ms: 0,
+    cost: 0,
+    success: isPositive,
+    timestamp: msg.timestamp ?? (/* @__PURE__ */ new Date()).toISOString(),
+    source: isPositive ? "implicit-positive" : "implicit-negative"
+  };
+}
+function a2aLearningHook(msg) {
+  const signal = extractA2ALearningSignal(msg);
+  if (!signal) return;
+  Promise.all([
+    Promise.resolve().then(() => (init_peer_eval(), peer_eval_exports)).then(
+      ({ hookIntoExecution: hookIntoExecution2 }) => hookIntoExecution2(signal.agentId, `a2a-${msg.id ?? Date.now()}`, {
+        taskType: signal.taskType,
+        success: signal.success,
+        metrics: {
+          latency_ms: signal.latency_ms,
+          quality_score: signal.score,
+          cost_usd: signal.cost
+        },
+        insights: [`A2A signal source: ${signal.source}`]
+      })
+    ),
+    Promise.resolve().then(() => (init_fleet_pheromone_bridge(), fleet_pheromone_bridge_exports)).then(
+      ({ fleetPheromoneHook: fleetPheromoneHook2 }) => fleetPheromoneHook2(signal.taskType, signal.agentId, signal.score, signal.latency_ms, signal.cost)
+    )
+  ]).then(() => {
+    logger.info(
+      { agentId: signal.agentId, taskType: signal.taskType, score: signal.score, source: signal.source },
+      "A2A learning signal recorded"
+    );
+  }).catch((err) => {
+    logger.warn({ err: String(err), agentId: signal.agentId }, "A2A learning hook failed (non-critical)");
+  });
+}
+var POSITIVE_PATTERN, NEGATIVE_PATTERN, TASK_REPORT_TYPES;
+var init_a2a_learning_hook = __esm({
+  "src/swarm/a2a-learning-hook.ts"() {
+    "use strict";
+    init_logger();
+    POSITIVE_PATTERN = /\u2705|shipped|passed|merged|completed|delivered|deployed|fixed|verified|works|success/i;
+    NEGATIVE_PATTERN = /\u274c|failed|blocked|crashed|broken|timeout|rejected|aborted|error\b/i;
+    TASK_REPORT_TYPES = /* @__PURE__ */ new Set(["TaskComplete", "StatusReport", "OutcomeReport"]);
+  }
+});
+
+// src/chat-broadcaster.ts
+import { WebSocketServer, WebSocket } from "ws";
+function initWebSocket(server2) {
+  wss = new WebSocketServer({ server: server2, path: "/ws" });
+  wss.on("connection", (ws, req) => {
+    const url = new URL(req.url ?? "/", `http://localhost`);
+    const agentId = url.searchParams.get("agent_id") ?? "unknown";
+    if (config.orchestratorApiKey) {
+      const token = url.searchParams.get("api_key") ?? (req.headers["authorization"]?.startsWith("Bearer ") ? req.headers["authorization"].slice(7) : "") ?? "";
+      if (token !== config.orchestratorApiKey) {
+        logger.warn({ agent_id: agentId }, "WebSocket auth rejected");
+        ws.close(4401, "Unauthorized");
+        return;
+      }
+    }
+    const conn = { ws, agentId, connectedAt: /* @__PURE__ */ new Date(), lastPingAt: /* @__PURE__ */ new Date() };
+    connections.set(agentId, conn);
+    logger.info({ agent_id: agentId, total_connections: connections.size }, "WebSocket connected");
+    broadcastMessage({
+      from: "System",
+      to: "All",
+      source: "system",
+      type: "Message",
+      message: `\u{1F7E2} ${agentId} connected to Orchestrator`,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    ws.on("message", (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        handleIncomingMessage(agentId, msg);
+      } catch (err) {
+        logger.warn({ agent_id: agentId, err: String(err) }, "Invalid WS message");
+      }
+    });
+    ws.on("close", () => {
+      connections.delete(agentId);
+      logger.info({ agent_id: agentId, total_connections: connections.size }, "WebSocket disconnected");
+      broadcastMessage({
+        from: "System",
+        to: "All",
+        source: "system",
+        type: "Message",
+        message: `\u{1F534} ${agentId} disconnected from Orchestrator`,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    });
+    ws.on("error", (err) => {
+      logger.error({ agent_id: agentId, err: err.message }, "WebSocket error");
+    });
+  });
+  setInterval(() => {
+    const now = Date.now();
+    for (const [agentId, conn] of connections.entries()) {
+      if (conn.ws.readyState === WebSocket.OPEN) {
+        conn.ws.ping();
+        conn.lastPingAt = /* @__PURE__ */ new Date();
+      } else if (now - conn.lastPingAt.getTime() > config.wsHeartbeatMs * 3) {
+        logger.warn({ agent_id: agentId }, "Stale WS connection removed");
+        connections.delete(agentId);
+      }
+    }
+  }, config.wsHeartbeatMs);
+  logger.info({ path: "/ws" }, "WebSocket server ready");
+}
+function handleIncomingMessage(fromAgentId, msg) {
+  logger.debug({ from: msg.from, to: msg.to, type: msg.type }, "WS message received");
+  if (msg.to === "All") {
+    broadcastMessage(msg);
+  } else {
+    const target = connections.get(msg.to);
+    const storedMsg = {
+      id: msg.id || msgId(),
+      from: msg.from,
+      to: msg.to,
+      source: msg.source,
+      type: msg.type,
+      message: msg.message,
+      timestamp: msg.timestamp || (/* @__PURE__ */ new Date()).toISOString(),
+      thread_id: msg.thread_id,
+      parent_id: msg.parent_id,
+      metadata: msg.metadata
+    };
+    const payload = JSON.stringify({ type: "message", data: storedMsg });
+    if (target?.ws.readyState === WebSocket.OPEN) {
+      target.ws.send(payload);
+      const sender = connections.get(fromAgentId);
+      if (sender?.ws.readyState === WebSocket.OPEN && fromAgentId !== msg.to) {
+        sender.ws.send(payload);
+      }
+      storeMessage(storedMsg).catch(() => {
+      });
+      broadcastSSE("message", storedMsg);
+    } else {
+      storeMessage(storedMsg).catch(() => {
+      });
+      const sender = connections.get(fromAgentId);
+      if (sender?.ws.readyState === WebSocket.OPEN) {
+        sender.ws.send(payload);
+        sender.ws.send(JSON.stringify({
+          type: "message",
+          data: {
+            id: msgId(),
+            from: "System",
+            to: fromAgentId,
+            source: "system",
+            type: "Alert",
+            message: `${msg.to} is offline. Message saved.`,
+            timestamp: (/* @__PURE__ */ new Date()).toISOString()
+          }
+        }));
+      }
+      logger.info({ from: msg.from, to: msg.to }, "DM stored for offline agent (not broadcast)");
+    }
+  }
+}
+function broadcastMessage(msg) {
+  const storedMsg = {
+    id: msg.id || msgId(),
+    from: msg.from,
+    to: msg.to,
+    source: msg.source,
+    type: msg.type,
+    message: msg.message,
+    timestamp: msg.timestamp || (/* @__PURE__ */ new Date()).toISOString(),
+    thread_id: msg.thread_id,
+    parent_id: msg.parent_id,
+    files: msg.files,
+    metadata: msg.metadata
+  };
+  storeMessage(storedMsg).catch(() => {
+  });
+  Promise.resolve().then(() => (init_a2a_learning_hook(), a2a_learning_hook_exports)).then(({ a2aLearningHook: a2aLearningHook2 }) => a2aLearningHook2(storedMsg)).catch(() => {
+  });
+  broadcastSSE("message", { ...msg, id: storedMsg.id });
+  const payload = JSON.stringify({ type: "message", data: { ...msg, id: storedMsg.id } });
+  let sent = 0;
+  for (const [, conn] of connections.entries()) {
+    if (conn.ws.readyState === WebSocket.OPEN) {
+      conn.ws.send(payload);
+      sent++;
+    }
+  }
+  logger.debug({ to: msg.to, type: msg.type, recipients: sent }, "Message broadcast");
+}
+function broadcastToolResult(callId, result, agentId) {
+  broadcastMessage({
+    from: "Orchestrator",
+    to: agentId,
+    source: "orchestrator",
+    type: "ToolResult",
+    message: `Tool call ${callId} completed`,
+    call_id: callId,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  });
+}
+function getConnectionStats() {
+  return {
+    total: connections.size,
+    agents: Array.from(connections.entries()).map(([id, c]) => ({
+      agent_id: id,
+      connected_at: c.connectedAt.toISOString(),
+      last_ping: c.lastPingAt.toISOString(),
+      state: c.ws.readyState === WebSocket.OPEN ? "open" : "closing"
+    }))
+  };
+}
+var connections, wss;
+var init_chat_broadcaster = __esm({
+  "src/chat-broadcaster.ts"() {
+    "use strict";
+    init_logger();
+    init_config();
+    init_sse();
+    init_chat_store();
+    connections = /* @__PURE__ */ new Map();
+    wss = null;
+  }
+});
+
 // src/startup-validator.ts
 var startup_validator_exports = {};
 __export(startup_validator_exports, {
@@ -32534,10 +32631,10 @@ import { fileURLToPath as fileURLToPath3 } from "url";
 // src/routes/agents.ts
 init_agent_registry();
 init_slack();
-import { Router } from "express";
+import { Router as Router5 } from "express";
 
 // node_modules/@sinclair/typebox/build/esm/compiler/compiler.mjs
-init_transform();
+init_transform3();
 init_errors2();
 init_system2();
 init_error2();
@@ -32710,17 +32807,17 @@ var TypeCompiler;
   function* FromArray24(schema, references, value) {
     yield `Array.isArray(${value})`;
     const [parameter, accumulator] = [CreateParameter("value", "any"), CreateParameter("acc", "number")];
-    if (IsNumber(schema.maxItems))
+    if (IsNumber2(schema.maxItems))
       yield `${value}.length <= ${schema.maxItems}`;
-    if (IsNumber(schema.minItems))
+    if (IsNumber2(schema.minItems))
       yield `${value}.length >= ${schema.minItems}`;
     const elementExpression = CreateExpression(schema.items, references, "value");
     yield `((array) => { for(const ${parameter} of array) if(!(${elementExpression})) { return false }; return true; })(${value})`;
-    if (IsSchema2(schema.contains) || IsNumber(schema.minContains) || IsNumber(schema.maxContains)) {
+    if (IsSchema2(schema.contains) || IsNumber2(schema.minContains) || IsNumber2(schema.maxContains)) {
       const containsSchema = IsSchema2(schema.contains) ? schema.contains : Never();
       const checkExpression = CreateExpression(containsSchema, references, "value");
-      const checkMinContains = IsNumber(schema.minContains) ? [`(count >= ${schema.minContains})`] : [];
-      const checkMaxContains = IsNumber(schema.maxContains) ? [`(count <= ${schema.maxContains})`] : [];
+      const checkMinContains = IsNumber2(schema.minContains) ? [`(count >= ${schema.minContains})`] : [];
+      const checkMaxContains = IsNumber2(schema.maxContains) ? [`(count <= ${schema.maxContains})`] : [];
       const checkCount = `const count = value.reduce((${accumulator}, ${parameter}) => ${checkExpression} ? acc + 1 : acc, 0)`;
       const check = [`(count > 0)`, ...checkMinContains, ...checkMaxContains].join(" && ");
       yield `((${parameter}) => { ${checkCount}; return ${check}})(${value})`;
@@ -32736,15 +32833,15 @@ var TypeCompiler;
   }
   function* FromBigInt7(schema, references, value) {
     yield `(typeof ${value} === 'bigint')`;
-    if (IsBigInt(schema.exclusiveMaximum))
+    if (IsBigInt2(schema.exclusiveMaximum))
       yield `${value} < BigInt(${schema.exclusiveMaximum})`;
-    if (IsBigInt(schema.exclusiveMinimum))
+    if (IsBigInt2(schema.exclusiveMinimum))
       yield `${value} > BigInt(${schema.exclusiveMinimum})`;
-    if (IsBigInt(schema.maximum))
+    if (IsBigInt2(schema.maximum))
       yield `${value} <= BigInt(${schema.maximum})`;
-    if (IsBigInt(schema.minimum))
+    if (IsBigInt2(schema.minimum))
       yield `${value} >= BigInt(${schema.minimum})`;
-    if (IsBigInt(schema.multipleOf))
+    if (IsBigInt2(schema.multipleOf))
       yield `(${value} % BigInt(${schema.multipleOf})) === 0`;
   }
   function* FromBoolean7(schema, references, value) {
@@ -32755,15 +32852,15 @@ var TypeCompiler;
   }
   function* FromDate9(schema, references, value) {
     yield `(${value} instanceof Date) && Number.isFinite(${value}.getTime())`;
-    if (IsNumber(schema.exclusiveMaximumTimestamp))
+    if (IsNumber2(schema.exclusiveMaximumTimestamp))
       yield `${value}.getTime() < ${schema.exclusiveMaximumTimestamp}`;
-    if (IsNumber(schema.exclusiveMinimumTimestamp))
+    if (IsNumber2(schema.exclusiveMinimumTimestamp))
       yield `${value}.getTime() > ${schema.exclusiveMinimumTimestamp}`;
-    if (IsNumber(schema.maximumTimestamp))
+    if (IsNumber2(schema.maximumTimestamp))
       yield `${value}.getTime() <= ${schema.maximumTimestamp}`;
-    if (IsNumber(schema.minimumTimestamp))
+    if (IsNumber2(schema.minimumTimestamp))
       yield `${value}.getTime() >= ${schema.minimumTimestamp}`;
-    if (IsNumber(schema.multipleOfTimestamp))
+    if (IsNumber2(schema.multipleOfTimestamp))
       yield `(${value}.getTime() % ${schema.multipleOfTimestamp}) === 0`;
   }
   function* FromFunction11(schema, references, value) {
@@ -32777,15 +32874,15 @@ var TypeCompiler;
   }
   function* FromInteger7(schema, references, value) {
     yield `Number.isInteger(${value})`;
-    if (IsNumber(schema.exclusiveMaximum))
+    if (IsNumber2(schema.exclusiveMaximum))
       yield `${value} < ${schema.exclusiveMaximum}`;
-    if (IsNumber(schema.exclusiveMinimum))
+    if (IsNumber2(schema.exclusiveMinimum))
       yield `${value} > ${schema.exclusiveMinimum}`;
-    if (IsNumber(schema.maximum))
+    if (IsNumber2(schema.maximum))
       yield `${value} <= ${schema.maximum}`;
-    if (IsNumber(schema.minimum))
+    if (IsNumber2(schema.minimum))
       yield `${value} >= ${schema.minimum}`;
-    if (IsNumber(schema.multipleOf))
+    if (IsNumber2(schema.multipleOf))
       yield `(${value} % ${schema.multipleOf}) === 0`;
   }
   function* FromIntersect27(schema, references, value) {
@@ -32824,22 +32921,22 @@ var TypeCompiler;
   }
   function* FromNumber7(schema, references, value) {
     yield Policy.IsNumberLike(value);
-    if (IsNumber(schema.exclusiveMaximum))
+    if (IsNumber2(schema.exclusiveMaximum))
       yield `${value} < ${schema.exclusiveMaximum}`;
-    if (IsNumber(schema.exclusiveMinimum))
+    if (IsNumber2(schema.exclusiveMinimum))
       yield `${value} > ${schema.exclusiveMinimum}`;
-    if (IsNumber(schema.maximum))
+    if (IsNumber2(schema.maximum))
       yield `${value} <= ${schema.maximum}`;
-    if (IsNumber(schema.minimum))
+    if (IsNumber2(schema.minimum))
       yield `${value} >= ${schema.minimum}`;
-    if (IsNumber(schema.multipleOf))
+    if (IsNumber2(schema.multipleOf))
       yield `(${value} % ${schema.multipleOf}) === 0`;
   }
   function* FromObject26(schema, references, value) {
     yield Policy.IsObjectLike(value);
-    if (IsNumber(schema.minProperties))
+    if (IsNumber2(schema.minProperties))
       yield `Object.getOwnPropertyNames(${value}).length >= ${schema.minProperties}`;
-    if (IsNumber(schema.maxProperties))
+    if (IsNumber2(schema.maxProperties))
       yield `Object.getOwnPropertyNames(${value}).length <= ${schema.maxProperties}`;
     const knownKeys = Object.getOwnPropertyNames(schema.properties);
     for (const knownKey of knownKeys) {
@@ -32873,9 +32970,9 @@ var TypeCompiler;
   }
   function* FromRecord17(schema, references, value) {
     yield Policy.IsRecordLike(value);
-    if (IsNumber(schema.minProperties))
+    if (IsNumber2(schema.minProperties))
       yield `Object.getOwnPropertyNames(${value}).length >= ${schema.minProperties}`;
-    if (IsNumber(schema.maxProperties))
+    if (IsNumber2(schema.maxProperties))
       yield `Object.getOwnPropertyNames(${value}).length <= ${schema.maxProperties}`;
     const [patternKey, patternSchema] = Object.entries(schema.patternProperties)[0];
     const variable = CreateVariable(`${new RegExp(patternKey)}`);
@@ -32893,17 +32990,17 @@ var TypeCompiler;
   function* FromRegExp6(schema, references, value) {
     const variable = CreateVariable(`${new RegExp(schema.source, schema.flags)};`);
     yield `(typeof ${value} === 'string')`;
-    if (IsNumber(schema.maxLength))
+    if (IsNumber2(schema.maxLength))
       yield `${value}.length <= ${schema.maxLength}`;
-    if (IsNumber(schema.minLength))
+    if (IsNumber2(schema.minLength))
       yield `${value}.length >= ${schema.minLength}`;
     yield `${variable}.test(${value})`;
   }
   function* FromString7(schema, references, value) {
     yield `(typeof ${value} === 'string')`;
-    if (IsNumber(schema.maxLength))
+    if (IsNumber2(schema.maxLength))
       yield `${value}.length <= ${schema.maxLength}`;
-    if (IsNumber(schema.minLength))
+    if (IsNumber2(schema.minLength))
       yield `${value}.length >= ${schema.minLength}`;
     if (schema.pattern !== void 0) {
       const variable = CreateVariable(`${new RegExp(schema.pattern)};`);
@@ -32943,9 +33040,9 @@ var TypeCompiler;
   }
   function* FromUint8Array6(schema, references, value) {
     yield `${value} instanceof Uint8Array`;
-    if (IsNumber(schema.maxByteLength))
+    if (IsNumber2(schema.maxByteLength))
       yield `(${value}.length <= ${schema.maxByteLength})`;
-    if (IsNumber(schema.minByteLength))
+    if (IsNumber2(schema.minByteLength))
       yield `(${value}.length >= ${schema.minByteLength})`;
   }
   function* FromUnknown6(schema, references, value) {
@@ -32960,9 +33057,9 @@ var TypeCompiler;
     yield `kind('${schema[Kind]}', ${instance}, ${value})`;
   }
   function* Visit20(schema, references, value, useHoisting = true) {
-    const references_ = IsString(schema.$id) ? [...references, schema] : references;
+    const references_ = IsString2(schema.$id) ? [...references, schema] : references;
     const schema_ = schema;
-    if (useHoisting && IsString(schema.$id)) {
+    if (useHoisting && IsString2(schema.$id)) {
       const functionName = CreateFunctionName(schema.$id);
       if (state4.functions.has(functionName)) {
         return yield `${functionName}(${value})`;
@@ -33041,7 +33138,7 @@ var TypeCompiler;
       case "Void":
         return yield* FromVoid6(schema_, references_, value);
       default:
-        if (!type_exports.Has(schema_[Kind]))
+        if (!type_exports2.Has(schema_[Kind]))
           throw new TypeCompilerUnknownTypeError(schema);
         return yield* FromKind4(schema_, references_, value);
     }
@@ -33088,14 +33185,14 @@ var TypeCompiler;
     const returns = CreateReturns("boolean");
     const functions = [...state4.functions.values()];
     const variables = [...state4.variables.values()];
-    const checkFunction = IsString(schema.$id) ? `return function check(${parameter})${returns} {
+    const checkFunction = IsString2(schema.$id) ? `return function check(${parameter})${returns} {
   return ${CreateFunctionName(schema.$id)}(value)
 }` : `return ${functionCode}`;
     return [...variables, ...functions, checkFunction].join("\n");
   }
   function Code(...args) {
     const defaults = { language: "javascript" };
-    const [schema, references, options] = args.length === 2 && IsArray(args[1]) ? [args[0], args[1], defaults] : args.length === 2 && !IsArray(args[1]) ? [args[0], [], args[1]] : args.length === 3 ? [args[0], args[1], args[2]] : args.length === 1 ? [args[0], [], defaults] : [null, [], defaults];
+    const [schema, references, options] = args.length === 2 && IsArray2(args[1]) ? [args[0], args[1], defaults] : args.length === 2 && !IsArray2(args[1]) ? [args[0], [], args[1]] : args.length === 3 ? [args[0], args[1], args[2]] : args.length === 1 ? [args[0], [], defaults] : [null, [], defaults];
     state4.language = options.language;
     state4.variables.clear();
     state4.functions.clear();
@@ -33113,9 +33210,9 @@ var TypeCompiler;
     const compiledFunction = globalThis.Function("kind", "format", "hash", generatedCode);
     const instances = new Map(state4.instances);
     function typeRegistryFunction(kind, instance, value) {
-      if (!type_exports.Has(kind) || !instances.has(instance))
+      if (!type_exports2.Has(kind) || !instances.has(instance))
         return false;
-      const checkFunc = type_exports.Get(kind);
+      const checkFunc = type_exports2.Get(kind);
       const schema2 = instances.get(instance);
       return checkFunc(schema2, value);
     }
@@ -37123,8 +37220,8 @@ function cleanToSchema(schema, data) {
 // src/routes/agents.ts
 init_config();
 init_logger();
-var agentsRouter = Router();
-async function mcpCall(tool, payload) {
+var agentsRouter = Router5();
+async function mcpCall6(tool, payload) {
   try {
     const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
       method: "POST",
@@ -37163,7 +37260,7 @@ agentsRouter.post("/register", async (req, res) => {
     handshake.display_name,
     handshake.allowed_tool_namespaces
   );
-  mcpCall("graph.write_cypher", {
+  mcpCall6("graph.write_cypher", {
     query: `MERGE (a:Agent {agentId: $aid}) SET a.displayName = $name, a.status = $status, a.capabilities = $caps, a.namespaces = $ns, a.registeredAt = datetime(), a.lastSeenAt = datetime()`,
     params: {
       aid: handshake.agent_id,
@@ -37225,7 +37322,7 @@ agentsRouter.post("/:id/heartbeat", async (req, res) => {
   AgentRegistry.heartbeat(id);
   const a2aChannel = req.body?.a2aChannel;
   if (a2aChannel) {
-    mcpCall("graph.write_cypher", {
+    mcpCall6("graph.write_cypher", {
       query: `MERGE (a:Agent {agentId: $aid}) SET a.lastA2ABroadcast = $broadcast, a.a2AChannel = $channel, a.lastSeenAt = datetime()`,
       params: {
         aid: id,
@@ -37235,7 +37332,7 @@ agentsRouter.post("/:id/heartbeat", async (req, res) => {
     }).catch(() => {
     });
   } else {
-    mcpCall("graph.write_cypher", {
+    mcpCall6("graph.write_cypher", {
       query: `MERGE (a:Agent {agentId: $aid}) SET a.lastSeenAt = datetime()`,
       params: { aid: id }
     }).catch(() => {
@@ -37245,7 +37342,7 @@ agentsRouter.post("/:id/heartbeat", async (req, res) => {
 });
 agentsRouter.get("/a2a", async (_req, res) => {
   try {
-    const result = await mcpCall("graph.read_cypher", {
+    const result = await mcpCall6("graph.read_cypher", {
       query: `MATCH (a:Agent) WHERE a.a2AChannel IS NOT NULL OR a.lastA2ABroadcast IS NOT NULL RETURN a.agentId AS agent, a.a2AChannel AS channel, a.lastA2ABroadcast AS broadcast, a.status AS status, a.displayName AS name ORDER BY a.lastSeenAt DESC`,
       params: {}
     });

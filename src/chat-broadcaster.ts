@@ -180,6 +180,13 @@ export function broadcastMessage(msg: AgentMessage): void {
   }
   storeMessage(storedMsg).catch(() => {})
 
+  // D2: A2A Learning Hook — extract learning signal from message, fire-and-forget.
+  // Only fires for explicit [eval ...] tags or TaskComplete/StatusReport types with
+  // sentiment. Chitchat is ignored.
+  import('./swarm/a2a-learning-hook.js')
+    .then(({ a2aLearningHook }) => a2aLearningHook(storedMsg as any))
+    .catch(() => { /* non-critical */ })
+
   // Push to SSE clients for dashboard real-time updates
   broadcastSSE('message', { ...msg, id: storedMsg.id })
 
