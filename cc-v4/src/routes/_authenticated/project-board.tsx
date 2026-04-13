@@ -9,6 +9,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { apiGet, apiPost, normalizeError } from '@/lib/api-client'
+import { EngagementScopeBanner } from '@/components/shared/EngagementScopeBanner'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -252,6 +253,11 @@ function ProjectBoardPage() {
 
   return (
     <div className="flex flex-col gap-6 p-8">
+      <EngagementScopeBanner
+        current="/project-board"
+        description="Execution Board is operating within the active engagement, so issues can be treated as downstream actions from the same consulting mission."
+      />
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
