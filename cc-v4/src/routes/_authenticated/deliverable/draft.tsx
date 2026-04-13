@@ -6,6 +6,7 @@ import { apiGet } from '@/lib/api-client'
 import { dispatch, type ParsedAgentResponse } from '@/lib/agent-client'
 import { buildCanvasPayload, buildVisualizationProperties } from '@/lib/visualization-contract'
 import { CitationList } from '@/components/shared/CitationList'
+import { EngagementScopeBanner } from '@/components/shared/EngagementScopeBanner'
 import { JobProgress } from '@/components/shared/JobProgress'
 import { AgentResponseCard } from '@/components/shared/AgentResponseCard'
 import { SendCanvasToObsidianButton } from '@/components/shared/SendCanvasToObsidianButton'
@@ -257,6 +258,11 @@ function DeliverableDraftPage() {
 
   return (
     <div className="flex flex-col gap-6 p-8">
+      <EngagementScopeBanner
+        current="/deliverable/draft"
+        description="Deliverable Studio is running inside the active engagement scope. Use it to turn the current mission into a client-facing artifact without losing context."
+      />
+
       <section className="grid gap-4 lg:grid-cols-[1.3fr_0.9fr]">
         <Card className="border-border/80">
           <CardHeader>

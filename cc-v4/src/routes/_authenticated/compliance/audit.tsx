@@ -7,6 +7,7 @@ import { buildCanvasPayload, buildVisualizationProperties } from '@/lib/visualiz
 import { useJobStore } from '@/stores/jobs'
 import { useSessionStore } from '@/stores/session'
 import { AgentResponseCard } from '@/components/shared/AgentResponseCard'
+import { EngagementScopeBanner } from '@/components/shared/EngagementScopeBanner'
 import { JobProgress } from '@/components/shared/JobProgress'
 import { SendCanvasToObsidianButton } from '@/components/shared/SendCanvasToObsidianButton'
 import { SendToObsidianButton } from '@/components/shared/SendToObsidianButton'
@@ -254,6 +255,11 @@ function ComplianceAuditPage() {
 
   return (
     <div className="flex flex-col gap-6 p-8">
+      <EngagementScopeBanner
+        current="/compliance/audit"
+        description="Compliance Audit is attached to the active engagement, so any note or canvas you materialize can inherit the same client and engagement lineage."
+      />
+
       <section className="grid gap-4 lg:grid-cols-[1.35fr_0.95fr]">
         <Card className="border-border/80">
           <CardHeader>

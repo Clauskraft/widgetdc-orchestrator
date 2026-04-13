@@ -10,6 +10,7 @@ import {
   resolveVisualizationContractFromProperties,
 } from '@/lib/visualization-contract'
 import { AgentResponseCard } from '@/components/shared/AgentResponseCard'
+import { EngagementScopeBanner } from '@/components/shared/EngagementScopeBanner'
 import { JobProgress } from '@/components/shared/JobProgress'
 import { SendCanvasToObsidianButton } from '@/components/shared/SendCanvasToObsidianButton'
 import { SendToObsidianButton } from '@/components/shared/SendToObsidianButton'
@@ -546,8 +547,13 @@ function ObsidianPage() {
   }
 
   return (
-    <div className="flex flex-col gap-6 p-8">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-6 p-8">
+        <EngagementScopeBanner
+          current="/obsidian"
+          description="Obsidian is the deep-work side of the active engagement. Notes, canvases, lineage, and roundtrips should keep the same engagement scope intact."
+        />
+
+        <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Obsidian Vault</h1>
           <p className="text-muted-foreground mt-1">Browse and search your knowledge base</p>
