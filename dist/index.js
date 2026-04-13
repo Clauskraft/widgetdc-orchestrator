@@ -17655,25 +17655,40 @@ Output ONLY the section content in markdown (no title header \u2014 it will be a
       prompt: sectionPrompt,
       context: { section: plan.title, type, evidence_count: ev?.results.length ?? 0 },
       agent_id: "deliverable-writer"
-    }, 3e4);
+    }, 6e4);
     let content;
     if (typeof result === "string") {
       content = result.trim();
     } else if (result && typeof result === "object") {
       const obj = result;
-      const extracted = obj.content ?? obj.text ?? obj.output ?? obj.summary ?? obj.recommendation ?? obj.result;
-      content = typeof extracted === "string" ? extracted.trim() : JSON.stringify(obj, null, 2).trim();
+      const top = obj.content ?? obj.text ?? obj.output ?? obj.summary ?? obj.recommendation;
+      if (typeof top === "string") {
+        content = top.trim();
+      } else if (obj.analysis && typeof obj.analysis === "object") {
+        const a = obj.analysis;
+        const general = typeof a.general === "string" ? a.general : "";
+        const insights = Array.isArray(obj.insights) ? obj.insights : [];
+        const recs = Array.isArray(obj.recommendations) ? obj.recommendations : [];
+        const parts = [];
+        if (general) parts.push(general);
+        if (insights.length) parts.push("\n**Key insights:**\n" + insights.map((i) => `- ${i}`).join("\n"));
+        if (recs.length) parts.push("\n**Recommendations:**\n" + recs.map((r) => `- ${r}`).join("\n"));
+        content = parts.join("\n\n").trim();
+      } else {
+        content = JSON.stringify(obj, null, 2).trim();
+      }
     } else {
       content = String(result ?? "").trim();
     }
     content = content.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, "").replace(/^\s*(Jeg (t\u00e6nker|skal)|I'm thinking|Let me think|Thinking:|Reasoning:)[^\n]*\n+/gi, "").trim();
     const RELEVANCE_KEYWORDS2 = /compliance|audit|regulator|gdpr|ai[\s-]?act|nis2|dora|oscal|article\s\d+|annex|control|pii|governance|risk|assessment|financial|transaction|kyc|aml/i;
     const relevantResults = hasEvidence ? ev.results.filter((r) => RELEVANCE_KEYWORDS2.test(r.content) && r.score > 0.3) : [];
+    const sanitizeCitation = (s) => s.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/^\s*(Jeg (t\u00e6nker|skal)|I'm thinking|Let me think|Thinking:|Reasoning:)[^.]*\.\s*/gi, "").trim();
     const citations = relevantResults.map((r) => ({
       source: r.source,
-      title: r.content.slice(0, 80).replace(/\s+/g, " "),
+      title: sanitizeCitation(r.content).slice(0, 80).replace(/\s+/g, " "),
       relevance: r.score
-    }));
+    })).filter((c) => c.title.length > 10);
     const avgScore = hasEvidence ? ev.results.reduce((s, r) => s + r.score, 0) / ev.results.length : 0;
     const confidence = avgScore >= 0.7 ? "high" : avgScore >= 0.4 ? "medium" : "low";
     return {

@@ -402,17 +402,33 @@ Output ONLY the section content in markdown (no title header — it will be adde
         prompt: sectionPrompt,
         context: { section: plan.title, type, evidence_count: ev?.results.length ?? 0 },
         agent_id: 'deliverable-writer',
-      }, 30000)
+      }, 60000)  // P1 fix F11: RLM analyze needs >30s for multi-section deliverables
 
-      // P0 fix F5: RLM can return object/structured response — extract content
-      // field before stringification. String({...}) produces "[object Object]".
+      // P0 fix F5 (v2): RLM returns nested {analysis:{general}, insights[], recommendations[]}
+      // Navigate nested structure; compose markdown if structured analyze response.
       let content: string
       if (typeof result === 'string') {
         content = result.trim()
       } else if (result && typeof result === 'object') {
         const obj = result as Record<string, unknown>
-        const extracted = obj.content ?? obj.text ?? obj.output ?? obj.summary ?? obj.recommendation ?? obj.result
-        content = typeof extracted === 'string' ? extracted.trim() : JSON.stringify(obj, null, 2).trim()
+        // Try top-level string fields first
+        const top = obj.content ?? obj.text ?? obj.output ?? obj.summary ?? obj.recommendation
+        if (typeof top === 'string') {
+          content = top.trim()
+        } else if (obj.analysis && typeof obj.analysis === 'object') {
+          // RLM analyze response shape: compose markdown from structured fields
+          const a = obj.analysis as Record<string, unknown>
+          const general = typeof a.general === 'string' ? a.general : ''
+          const insights = Array.isArray(obj.insights) ? obj.insights as string[] : []
+          const recs = Array.isArray(obj.recommendations) ? obj.recommendations as string[] : []
+          const parts: string[] = []
+          if (general) parts.push(general)
+          if (insights.length) parts.push('\n**Key insights:**\n' + insights.map(i => `- ${i}`).join('\n'))
+          if (recs.length) parts.push('\n**Recommendations:**\n' + recs.map(r => `- ${r}`).join('\n'))
+          content = parts.join('\n\n').trim()
+        } else {
+          content = JSON.stringify(obj, null, 2).trim()
+        }
       } else {
         content = String(result ?? '').trim()
       }
@@ -429,11 +445,18 @@ Output ONLY the section content in markdown (no title header — it will be adde
       const relevantResults = hasEvidence
         ? ev.results.filter(r => RELEVANCE_KEYWORDS.test(r.content) && r.score > 0.3)
         : []
-      const citations: Citation[] = relevantResults.map(r => ({
-        source: r.source,
-        title: r.content.slice(0, 80).replace(/\s+/g, ' '),
-        relevance: r.score,
-      }))
+      // P0 fix F10 (v2): also strip RLM reasoning leakage from citation titles
+      const sanitizeCitation = (s: string) => s
+        .replace(/<think>[\s\S]*?<\/think>/gi, '')
+        .replace(/^\s*(Jeg (t\u00e6nker|skal)|I'm thinking|Let me think|Thinking:|Reasoning:)[^.]*\.\s*/gi, '')
+        .trim()
+      const citations: Citation[] = relevantResults
+        .map(r => ({
+          source: r.source,
+          title: sanitizeCitation(r.content).slice(0, 80).replace(/\s+/g, ' '),
+          relevance: r.score,
+        }))
+        .filter(c => c.title.length > 10)
 
       // Confidence based on evidence quality
       const avgScore = hasEvidence
