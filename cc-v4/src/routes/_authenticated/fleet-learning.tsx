@@ -18,13 +18,13 @@ interface FleetEntry {
   taskType: string
   totalEvals: number
   avgScore: number
-  avgCost: number
+  avgCost?: number
   avgLatency: number
-  bestAgent: string
+  bestAgent?: string
   bestScore: number
-  bestPractices: string[]
+  bestPracticeCount?: number
   lastUpdated: string
-  reliable: boolean
+  reliable?: boolean
 }
 
 function FleetLearningPage() {
@@ -34,35 +34,41 @@ function FleetLearningPage() {
     refetchInterval: 15000,
   })
 
-  const { data: fleet, isLoading: fleetLoading } = useQuery<FleetEntry[]>({
+  const { data: fleet, isLoading: fleetLoading, error: fleetError } = useQuery<FleetEntry[]>({
     queryKey: ['peer-eval-fleet'],
-    queryFn: () => apiGet('/api/peer-eval/fleet').then(r => r.data ?? []),
+    queryFn: () => {
+      const r = apiGet('/api/peer-eval/fleet')
+      // API returns {success, data: [], count} — unwrap safely
+      const arr = r?.data
+      return Array.isArray(arr) ? arr : []
+    },
     refetchInterval: 15000,
   })
 
-  if (statusError) {
+  if (statusError || fleetError) {
     return (
       <div className="p-8">
         <Alert variant="destructive">
-          <AlertDescription>Failed to load fleet learning data.</AlertDescription>
+          <AlertDescription>
+            Failed to load fleet learning data. {statusError?.message || fleetError?.message}
+          </AlertDescription>
         </Alert>
       </div>
     )
   }
 
-  // Compute aggregates from fleet data
-  const fleetData = fleet ?? []
-  const uniqueAgents = [...new Set(fleetData.map(f => f.bestAgent))]
+  // Guard: always arrays
+  const fleetData: FleetEntry[] = Array.isArray(fleet) ? fleet : []
+  const uniqueAgents = [...new Set(fleetData.map(f => f.bestAgent).filter(Boolean))]
   const avgScoreOverall = fleetData.length > 0
-    ? fleetData.reduce((s, f) => s + f.avgScore, 0) / fleetData.length
+    ? fleetData.reduce((s, f) => s + (f.avgScore ?? 0), 0) / fleetData.length
     : 0
-  const reliableCount = fleetData.filter(f => f.reliable).length
 
   return (
     <div className="flex flex-col gap-6 p-8">
       <div>
         <h1 className="text-3xl font-bold tracking-tight">Fleet Learning</h1>
-        <p className="text-muted-foreground mt-1">PeerEval fleet intelligence — EMA-weighted scores across 19-agent swarm</p>
+        <p className="text-muted-foreground mt-1">PeerEval fleet intelligence — EMA-weighted scores across agent swarm</p>
       </div>
 
       {/* KPI Cards */}
@@ -97,7 +103,7 @@ function FleetLearningPage() {
               </CardHeader>
               <CardContent>
                 <div className="text-2xl font-bold">{(avgScoreOverall * 100).toFixed(1)}%</div>
-                <p className="text-xs text-muted-foreground">{reliableCount} reliable / {fleetData.length} total</p>
+                <p className="text-xs text-muted-foreground">{fleetData.length} task types tracked</p>
               </CardContent>
             </Card>
             <Card>
@@ -126,8 +132,8 @@ function FleetLearningPage() {
             </div>
           ) : fleetData.length > 0 ? (
             <div className="space-y-3">
-              {fleetData
-                .sort((a, b) => b.avgScore - a.avgScore)
+              {[...fleetData]
+                .sort((a, b) => (b.avgScore ?? 0) - (a.avgScore ?? 0))
                 .map((entry) => (
                 <div key={entry.taskType} className="flex items-center justify-between border-b pb-2 last:border-0">
                   <div className="flex-1">
@@ -136,14 +142,14 @@ function FleetLearningPage() {
                       {entry.reliable && <Badge variant="outline" className="text-green-700 text-xs">reliable</Badge>}
                     </div>
                     <div className="text-xs text-muted-foreground mt-0.5">
-                      Best: <span className="font-medium">{entry.bestAgent}</span> ·
-                      {entry.totalEvals} evals ·
-                      {entry.avgLatency.toFixed(0)}ms avg
+                      {entry.bestAgent && <>Best: <span className="font-medium">{entry.bestAgent}</span> · </>}
+                      {entry.totalEvals ?? 0} evals ·
+                      {((entry.avgLatency ?? 0)).toFixed(0)}ms avg
                     </div>
                   </div>
                   <div className="text-right ml-4">
-                    <div className="font-mono text-sm font-medium">{(entry.avgScore * 100).toFixed(1)}%</div>
-                    <div className="text-xs text-muted-foreground">best: {(entry.bestScore * 100).toFixed(0)}%</div>
+                    <div className="font-mono text-sm font-medium">{((entry.avgScore ?? 0) * 100).toFixed(1)}%</div>
+                    <div className="text-xs text-muted-foreground">best: {((entry.bestScore ?? 0) * 100).toFixed(0)}%</div>
                   </div>
                 </div>
               ))}
@@ -163,18 +169,9 @@ function FleetLearningPage() {
           <CardDescription>Shared across the fleet ({status?.totalBestPracticesShared ?? 0} total)</CardDescription>
         </CardHeader>
         <CardContent>
-          {fleetData.some(f => f.bestPractices.length > 0) ? (
-            <div className="space-y-2 text-sm">
-              {fleetData
-                .filter(f => f.bestPractices.length > 0)
-                .flatMap(f => f.bestPractices.map(bp => ({ taskType: f.taskType, practice: bp })))
-                .map((item, i) => (
-                  <div key={i} className="flex gap-2">
-                    <Badge variant="secondary" className="text-xs shrink-0">{item.taskType}</Badge>
-                    <span>{item.practice}</span>
-                  </div>
-                ))
-              }
+          {(status?.totalBestPracticesShared ?? 0) > 0 ? (
+            <div className="text-sm text-muted-foreground">
+              {status?.totalBestPracticesShared} best practices shared across {status?.taskTypesTracked ?? 0} task types.
             </div>
           ) : (
             <div className="text-sm text-muted-foreground text-center py-4">
