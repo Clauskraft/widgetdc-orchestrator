@@ -10521,6 +10521,12 @@ var init_adaptive_rag = __esm({
 
 // src/memory/dual-rag.ts
 import { v4 as uuid3 } from "uuid";
+function isDomainRelevant(text, query) {
+  const q = query.toLowerCase();
+  if (RELEVANCE_KEYWORDS.some((kw) => q.includes(kw.toLowerCase()))) return true;
+  const t = text.toLowerCase();
+  return RELEVANCE_KEYWORDS.some((kw) => t.includes(kw.toLowerCase()));
+}
 function classifyQuery(query) {
   const q = query.toLowerCase();
   if (/\b(?:how many|count|list all|list the|total|statistics|stats)\b/.test(q)) {
@@ -10688,6 +10694,15 @@ async function dualChannelRAG(query, options) {
     }
     return true;
   });
+  let domainFiltered = 0;
+  allResults = allResults.filter((r) => {
+    if (!isDomainRelevant(r.content, query)) {
+      domainFiltered++;
+      logger.debug({ source: r.source, preview: r.content.slice(0, 80) }, "Filtered irrelevant result");
+      return false;
+    }
+    return true;
+  });
   allResults.sort((a, b) => {
     if (a.source === "graphrag" && a.metadata?.type === "synthesis") return -1;
     if (b.source === "graphrag" && b.metadata?.type === "synthesis") return 1;
@@ -10720,7 +10735,8 @@ async function dualChannelRAG(query, options) {
     duration_ms: durationMs,
     route_strategy: complexity,
     channels_used: channelsUsed,
-    pollution_filtered: pollutionFiltered
+    pollution_filtered: pollutionFiltered,
+    domain_filtered: domainFiltered
   };
   const avgScore = topResults.length > 0 ? topResults.reduce((s, r) => s + r.score, 0) / topResults.length : 0;
   hookQualitySignal(query, complexity, channelsUsed, topResults.length, avgScore).catch(() => {
@@ -10780,15 +10796,43 @@ RETURN label,
        labels(m)[0] AS connected_to
 LIMIT 15`;
 }
+var RELEVANCE_KEYWORDS;
 var init_dual_rag = __esm({
   "src/memory/dual-rag.ts"() {
     "use strict";
     init_mcp_caller();
     init_logger();
-    init_write_gate();
     init_hierarchical_intelligence();
     init_compound_hooks();
     init_adaptive_rag();
+    init_write_gate();
+    RELEVANCE_KEYWORDS = [
+      "compliance",
+      "regulation",
+      "GDPR",
+      "NIS2",
+      "DORA",
+      "CSRD",
+      "AI Act",
+      "security",
+      "risk",
+      "audit",
+      "governance",
+      "privacy",
+      "data protection",
+      "framework",
+      "standard",
+      "policy",
+      "control",
+      "requirement",
+      "enforcement",
+      "mapping",
+      "assessment",
+      "gap",
+      "remediation",
+      "article",
+      "directive"
+    ];
   }
 });
 
@@ -12731,10 +12775,11 @@ var init_tool_registry = __esm({
       defineTool({
         name: "memory_search",
         namespace: "memory",
-        description: "Search long-term AgentMemory nodes in Neo4j with structured filters (agentId, type, tags) and optional text query. Returns results scored by relevance (recency \xD7 importance). Phantom Week 2 Track B.",
+        description: "Search long-term AgentMemory nodes in Neo4j with structured filters (agentId, type, tier, tags) and optional text query. Returns results scored by CoALA tier-aware relevance. Phantom Week 2B + W8.5 CoALA taxonomy.",
         input: z.object({
           agent_id: z.string().optional().describe("Filter by agent ID"),
           type: z.string().optional().describe("Filter by memory type (e.g., insight, closure, lesson, claim)"),
+          tier: z.union([z.enum(["working", "short", "episodic", "semantic", "procedural"]), z.array(z.enum(["working", "short", "episodic", "semantic", "procedural"]))]).optional().describe("CoALA tier filter (W8.5)"),
           tags: z.array(z.string()).optional().describe("Filter by tags (matches ANY tag)"),
           query: z.string().optional().describe("Text query for relevance scoring"),
           limit: z.number().optional().describe("Max results (default 50)")
@@ -12745,9 +12790,10 @@ var init_tool_registry = __esm({
       defineTool({
         name: "memory_consolidate",
         namespace: "memory",
-        description: "Run memory consolidation for an agent (or all agents). Merges duplicate AgentMemory nodes by semantic similarity (Jaccard \u22650.6), expires nodes >30 days old, enforces <1000 nodes/agent budget. Phantom Week 2 Track B.",
+        description: "Run CoALA tier-aware memory consolidation. Merges duplicates (Jaccard \u22650.6), expires nodes per tier TTL, enforces <1000 nodes/agent. Never expires semantic/procedural tiers. Phantom Week 2B + W8.5.",
         input: z.object({
-          agent_id: z.string().optional().describe("Agent to consolidate (omit for all agents)")
+          agent_id: z.string().optional().describe("Agent to consolidate (omit for all agents)"),
+          tier: z.union([z.enum(["working", "short", "episodic", "semantic", "procedural"]), z.array(z.enum(["working", "short", "episodic", "semantic", "procedural"]))]).optional().describe("CoALA tier filter (W8.5)")
         }),
         timeoutMs: 12e4,
         outputDescription: "ConsolidationReport with merged/expired/pruned counts"
@@ -12968,6 +13014,57 @@ var init_tool_registry = __esm({
         input: z.object({}),
         timeoutMs: 6e4,
         outputDescription: "Sync results: ingested count, skipped count, errors"
+      }),
+      // ─── value-props.* — OSINT DD + DSPy + Bi-temporal (Week 9, V8-V10) ──
+      defineTool({
+        name: "due_diligence",
+        namespace: "value-props",
+        description: 'OSINT-backed pre-engagement due diligence. Runs domain scan + MITRE ATLAS AI risk assessment. V8: "Upload target \u2192 f\xE5 DD rapport med risk score p\xE5 2 min".',
+        input: z.object({
+          target: z.string().describe("Target company/domain to investigate")
+        }),
+        timeoutMs: 3e4,
+        outputDescription: "Due diligence report: risk score, OSINT findings, MITRE ATLAS techniques"
+      }),
+      defineTool({
+        name: "prompt_ab_test",
+        namespace: "value-props",
+        description: 'MIPROv2-lite prompt A/B testing. Submits challenger prompt with quality score \u2192 automatically selects champion. V9: "DSPy-style prompt optimization".',
+        input: z.object({
+          task_type: z.string().describe('Task type (e.g., "code-review", "summarization")'),
+          prompt: z.string().describe("Challenger prompt to test"),
+          score: z.number().describe("Quality score 0-1 for this prompt variant")
+        }),
+        timeoutMs: 1e4,
+        outputDescription: "A/B test result: champion ID, scores, improvement percentage"
+      }),
+      defineTool({
+        name: "fact_assert",
+        namespace: "value-props",
+        description: 'Assert a bi-temporal fact with valid_from/valid_to timeline. Supersedes existing valid facts for same subject+predicate. V10: "Bi-temporal fact graph (Graphiti pattern)".',
+        input: z.object({
+          subject: z.string().describe('Fact subject (e.g., "agent:omega-sentinel")'),
+          predicate: z.string().describe('Fact predicate (e.g., "has_capability")'),
+          object: z.string().describe('Fact object (e.g., "threat-hunting")'),
+          valid_from: z.string().optional().describe("When fact became true (ISO datetime, default: now)"),
+          confidence: z.number().optional().describe("Confidence 0-1 (default: 0.8)"),
+          source: z.string().optional().describe('Fact source (default: "manual")')
+        }),
+        timeoutMs: 15e3,
+        outputDescription: "Bi-temporal fact with id, asserted_at, valid_from, superseded_by"
+      }),
+      defineTool({
+        name: "fact_query",
+        namespace: "value-props",
+        description: 'Query bi-temporal facts with optional temporal filters (as_of). Returns facts valid at specified time. V10: "What was true on date X?"',
+        input: z.object({
+          subject: z.string().optional().describe("Filter by fact subject"),
+          predicate: z.string().optional().describe("Filter by fact predicate"),
+          as_of: z.string().optional().describe("What was true at this time? (ISO datetime)"),
+          limit: z.number().optional().describe("Max results (default 50)")
+        }),
+        timeoutMs: 1e4,
+        outputDescription: "Array of bi-temporal facts matching filters"
       }),
       defineTool({
         name: "failure_harvest",
@@ -17559,12 +17656,24 @@ Output ONLY the section content in markdown (no title header \u2014 it will be a
       context: { section: plan.title, type, evidence_count: ev?.results.length ?? 0 },
       agent_id: "deliverable-writer"
     }, 3e4);
-    const content = String(result ?? "").trim();
-    const citations = hasEvidence ? ev.results.map((r) => ({
+    let content;
+    if (typeof result === "string") {
+      content = result.trim();
+    } else if (result && typeof result === "object") {
+      const obj = result;
+      const extracted = obj.content ?? obj.text ?? obj.output ?? obj.summary ?? obj.recommendation ?? obj.result;
+      content = typeof extracted === "string" ? extracted.trim() : JSON.stringify(obj, null, 2).trim();
+    } else {
+      content = String(result ?? "").trim();
+    }
+    content = content.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, "").replace(/^\s*(Jeg (t\u00e6nker|skal)|I'm thinking|Let me think|Thinking:|Reasoning:)[^\n]*\n+/gi, "").trim();
+    const RELEVANCE_KEYWORDS2 = /compliance|audit|regulator|gdpr|ai[\s-]?act|nis2|dora|oscal|article\s\d+|annex|control|pii|governance|risk|assessment|financial|transaction|kyc|aml/i;
+    const relevantResults = hasEvidence ? ev.results.filter((r) => RELEVANCE_KEYWORDS2.test(r.content) && r.score > 0.3) : [];
+    const citations = relevantResults.map((r) => ({
       source: r.source,
-      title: r.content.slice(0, 80),
+      title: r.content.slice(0, 80).replace(/\s+/g, " "),
       relevance: r.score
-    })) : [];
+    }));
     const avgScore = hasEvidence ? ev.results.reduce((s, r) => s + r.score, 0) / ev.results.length : 0;
     const confidence = avgScore >= 0.7 ? "high" : avgScore >= 0.4 ? "medium" : "low";
     return {
@@ -20450,15 +20559,19 @@ async function mcpCall2(tool, payload) {
   const data = await res.json().catch(() => null);
   return data?.result ?? data;
 }
-async function fetchAgentMemories(agentId, limit = 2e3) {
+async function fetchAgentMemories(agentId, opts = {}) {
+  const limit = opts.limit ?? 2e3;
+  const tiers = opts.tier ? Array.isArray(opts.tier) ? opts.tier : [opts.tier] : null;
+  const tierFilter = tiers ? `AND m.tier IN $tiers` : "";
   const result = await mcpCall2("graph.read_cypher", {
     query: `MATCH (m:AgentMemory {agentId: $agentId})
+            WHERE true ${tierFilter}
             RETURN m.elementId AS elementId, m.agentId AS agentId, m.key AS key,
-                   m.value AS value, m.type AS type, m.tags AS tags,
+                   m.value AS value, m.type AS type, m.tier AS tier, m.tags AS tags,
                    toString(m.createdAt) AS createdAt, toString(m.updatedAt) AS updatedAt
             ORDER BY m.updatedAt DESC
             LIMIT $limit`,
-    params: { agentId, limit }
+    params: { agentId, limit, tiers }
   });
   const results = result?.results ?? (Array.isArray(result) ? result : []);
   return results.map((r) => ({
@@ -20467,6 +20580,7 @@ async function fetchAgentMemories(agentId, limit = 2e3) {
     key: String(r.key ?? ""),
     value: String(r.value ?? ""),
     type: String(r.type ?? "unknown"),
+    tier: r.tier ?? void 0,
     tags: Array.isArray(r.tags) ? r.tags : void 0,
     createdAt: String(r.createdAt ?? ""),
     updatedAt: String(r.updatedAt ?? "")
@@ -20485,12 +20599,15 @@ function jaccardSimilarity(a, b) {
   }
   return intersection / (setA.size + setB.size - intersection);
 }
-function computeRelevance(updatedAt, type, similarityToBest = 1) {
+function computeRelevance(updatedAt, type, tier, similarityToBest = 1) {
+  const resolvedTier = tier ?? TYPE_TO_TIER[type] ?? "short";
+  const tierWeight = TIER_WEIGHTS[resolvedTier] ?? 1;
   const ageMs = Date.now() - new Date(updatedAt).getTime();
   const ageDays = Math.max(0, ageMs / (1e3 * 60 * 60 * 24));
-  const recency = Math.exp(-ageDays / 30);
+  const ttlDays = TIER_TTL_DAYS[resolvedTier] ?? 30;
+  const recency = Math.exp(-ageDays / ttlDays);
   const importance = IMPORTANCE_WEIGHTS[type] ?? IMPORTANCE_WEIGHTS.default;
-  return Math.round(recency * importance * similarityToBest * 1e3) / 1e3;
+  return Math.round(recency * importance * tierWeight * similarityToBest * 1e3) / 1e3;
 }
 function findDuplicates(memories) {
   const groups = [];
@@ -20514,32 +20631,43 @@ function findDuplicates(memories) {
   }
   return groups;
 }
-async function consolidateAgent(agentId) {
+async function consolidateAgent(agentId, opts = {}) {
   const t0 = Date.now();
-  const memories = await fetchAgentMemories(agentId);
+  const memories = await fetchAgentMemories(agentId, { tier: opts.tier });
   const beforeCount = memories.length;
   let merged = 0;
   let expired = 0;
   let pruned = 0;
-  const cutoff = new Date(Date.now() - TTL_DAYS * 24 * 60 * 60 * 1e3).toISOString();
-  const expiryCandidates = memories.filter(
-    (m) => m.updatedAt < cutoff && m.type !== "closure" && m.type !== "lesson"
-  );
+  const now = Date.now();
+  const expiryCandidates = memories.filter((m) => {
+    const tier = m.tier ?? TYPE_TO_TIER[m.type] ?? "short";
+    if (!TIER_CONSOLIDATABLE[tier]) return false;
+    const ttlMs = TIER_TTL_DAYS[tier] * 24 * 60 * 60 * 1e3;
+    const ageMs = now - new Date(m.updatedAt).getTime();
+    return ageMs > ttlMs;
+  });
   for (const m of expiryCandidates) {
-    await mcpCall2("graph.write_cypher", {
-      query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key}) WHERE m.updatedAt < datetime($cutoff) DETACH DELETE m`,
-      params: { agentId, key: m.key, cutoff }
-    });
-    expired++;
+    try {
+      await mcpCall2("graph.write_cypher", {
+        query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key}) DETACH DELETE m`,
+        params: { agentId, key: m.key }
+      });
+      expired++;
+    } catch {
+    }
   }
-  const active = memories.filter((m) => !expiryCandidates.includes(m));
+  const active = memories.filter((m) => {
+    if (expiryCandidates.includes(m)) return false;
+    const tier = m.tier ?? TYPE_TO_TIER[m.type] ?? "short";
+    return TIER_CONSOLIDATABLE[tier];
+  });
   const groups = findDuplicates(active);
   for (const group of groups) {
     const mergedValue = group.victims.map((v) => v.value).join("\n---\n");
-    const mergedTags = [.../* @__PURE__ */ new Set([
+    const mergedTags = Array.from(/* @__PURE__ */ new Set([
       ...group.survivor.tags ?? [],
       ...group.victims.flatMap((v) => v.tags ?? [])
-    ])];
+    ]));
     const MAX_MERGED_VALUE = 4e3;
     let finalValue = mergedValue;
     let truncated = false;
@@ -20554,50 +20682,67 @@ async function consolidateAgent(agentId) {
         victims: group.victims.length
       }, "Memory consolidation truncated merged value");
     }
-    await mcpCall2("graph.write_cypher", {
-      query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key})
-              SET m.value = $value, m.tags = $tags, m.updatedAt = datetime(),
-                  m.consolidatedFrom = $victimCount, m.consolidatedAt = datetime(),
-                  m.consolidationTruncated = $truncated`,
-      params: {
-        agentId,
-        key: group.survivor.key,
-        value: finalValue,
-        tags: mergedTags,
-        victimCount: group.victims.length,
-        truncated
-      }
-    });
-    for (const victim of group.victims) {
+    try {
       await mcpCall2("graph.write_cypher", {
-        query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key}) DETACH DELETE m`,
-        params: { agentId, key: victim.key }
+        query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key})
+                SET m.value = $value, m.tags = $tags, m.updatedAt = datetime(),
+                    m.consolidatedFrom = $victimCount, m.consolidatedAt = datetime(),
+                    m.consolidationTruncated = $truncated`,
+        params: {
+          agentId,
+          key: group.survivor.key,
+          value: finalValue,
+          tags: mergedTags,
+          victimCount: group.victims.length,
+          truncated
+        }
       });
+      for (const victim of group.victims) {
+        await mcpCall2("graph.write_cypher", {
+          query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key}) DETACH DELETE m`,
+          params: { agentId, key: victim.key }
+        });
+      }
+      merged += group.victims.length;
+    } catch {
     }
-    merged += group.victims.length;
   }
   const remaining = await fetchAgentMemories(agentId);
   if (remaining.length > MAX_MEMORIES_PER_AGENT) {
-    const scored = remaining.map((m) => ({
-      ...m,
-      relevance: computeRelevance(m.updatedAt, m.type)
-    }));
+    const scored = remaining.map((m) => {
+      const tier = m.tier ?? TYPE_TO_TIER[m.type] ?? "short";
+      return {
+        ...m,
+        relevance: computeRelevance(m.updatedAt, m.type, tier)
+      };
+    });
     scored.sort((a, b) => a.relevance - b.relevance);
     const toPrune = scored.slice(0, scored.length - MAX_MEMORIES_PER_AGENT);
     for (const m of toPrune) {
-      await mcpCall2("graph.write_cypher", {
-        query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key}) DETACH DELETE m`,
-        params: { agentId, key: m.key }
-      });
-      pruned++;
+      const tier = m.tier ?? TYPE_TO_TIER[m.type] ?? "short";
+      if (!TIER_CONSOLIDATABLE[tier]) continue;
+      try {
+        await mcpCall2("graph.write_cypher", {
+          query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key}) DETACH DELETE m`,
+          params: { agentId, key: m.key }
+        });
+        pruned++;
+      } catch {
+      }
     }
   }
-  const countResult = await mcpCall2("graph.read_cypher", {
-    query: `MATCH (m:AgentMemory {agentId: $agentId}) RETURN count(m) AS total`,
-    params: { agentId }
-  });
-  const countRows = countResult?.results ?? [];
-  const afterCount = Number(countRows[0]?.total ?? 0);
+  const needsTier = memories.filter((m) => !m.tier);
+  for (const m of needsTier) {
+    const inferredTier = TYPE_TO_TIER[m.type] ?? "short";
+    try {
+      await mcpCall2("graph.write_cypher", {
+        query: `MATCH (m:AgentMemory {agentId: $agentId, key: $key}) SET m.tier = $tier`,
+        params: { agentId, key: m.key, tier: inferredTier }
+      });
+    } catch {
+    }
+  }
+  const afterCount = (await fetchAgentMemories(agentId, { limit: 10 })).length;
   const durationMs = Date.now() - t0;
   const report = {
     agentId,
@@ -20607,8 +20752,9 @@ async function consolidateAgent(agentId) {
     expired,
     pruned,
     relevanceThreshold: computeRelevance(
-      new Date(Date.now() - TTL_DAYS * 24 * 60 * 60 * 1e3).toISOString(),
-      "default"
+      new Date(Date.now() - 30 * 24 * 60 * 60 * 1e3).toISOString(),
+      "default",
+      "episodic"
     ),
     durationMs
   };
@@ -20633,7 +20779,8 @@ async function consolidateAll() {
   return reports;
 }
 async function searchMemories(opts) {
-  const { agentId, type, tags, query, limit = 50, minRelevance = 0 } = opts;
+  const { agentId, type, tier, tags, query, limit = 50, minRelevance = 0 } = opts;
+  const tiers = tier ? Array.isArray(tier) ? tier : [tier] : null;
   let whereClauses = [];
   let params = {};
   if (agentId) {
@@ -20644,6 +20791,10 @@ async function searchMemories(opts) {
     whereClauses.push("m.type = $type");
     params.type = type;
   }
+  if (tiers && tiers.length > 0) {
+    whereClauses.push("m.tier IN $tiers");
+    params.tiers = tiers;
+  }
   if (tags && tags.length > 0) {
     whereClauses.push("ANY(t IN m.tags WHERE t IN $tags)");
     params.tags = tags;
@@ -20652,12 +20803,11 @@ async function searchMemories(opts) {
   const result = await mcpCall2("graph.read_cypher", {
     query: `MATCH (m:AgentMemory) ${where}
             RETURN m.elementId AS elementId, m.agentId AS agentId, m.key AS key,
-                   m.value AS value, m.type AS type, m.tags AS tags,
+                   m.value AS value, m.type AS type, m.tier AS tier, m.tags AS tags,
                    toString(m.createdAt) AS createdAt, toString(m.updatedAt) AS updatedAt
             ORDER BY m.updatedAt DESC
             LIMIT $limit`,
     params: { ...params, limit: limit * 3 }
-    // Fetch extra for relevance filtering
   });
   const results = result?.results ?? (Array.isArray(result) ? result : []);
   const memories = results.map((r) => ({
@@ -20666,20 +20816,25 @@ async function searchMemories(opts) {
     key: String(r.key ?? ""),
     value: String(r.value ?? ""),
     type: String(r.type ?? "unknown"),
+    tier: r.tier ?? void 0,
     tags: Array.isArray(r.tags) ? r.tags : void 0,
     createdAt: String(r.createdAt ?? ""),
     updatedAt: String(r.updatedAt ?? "")
   }));
-  let scored = memories.map((m) => ({
-    elementId: m.elementId,
-    agentId: m.agentId,
-    key: m.key,
-    value: m.value,
-    type: m.type,
-    tags: m.tags,
-    relevance: computeRelevance(m.updatedAt, m.type),
-    createdAt: m.createdAt
-  }));
+  let scored = memories.map((m) => {
+    const resolvedTier = m.tier ?? TYPE_TO_TIER[m.type] ?? "short";
+    return {
+      elementId: m.elementId,
+      agentId: m.agentId,
+      key: m.key,
+      value: m.value,
+      type: m.type,
+      tier: m.tier,
+      tags: m.tags,
+      relevance: computeRelevance(m.updatedAt, m.type, resolvedTier),
+      createdAt: m.createdAt
+    };
+  });
   if (query) {
     scored = scored.map((s) => {
       const textSim = jaccardSimilarity(query, s.value);
@@ -20712,12 +20867,19 @@ async function storeMemoryLongTerm(opts) {
   logger.info({ agentId, key, type, tags: allTags.length }, "Long-term memory stored");
   return { stored: true, key };
 }
-var IMPORTANCE_WEIGHTS, SIMILARITY_THRESHOLD, MAX_MEMORIES_PER_AGENT, TTL_DAYS;
+var TIER_WEIGHTS, IMPORTANCE_WEIGHTS, TYPE_TO_TIER, TIER_TTL_DAYS, TIER_CONSOLIDATABLE, SIMILARITY_THRESHOLD, MAX_MEMORIES_PER_AGENT;
 var init_memory_consolidator = __esm({
   "src/memory/memory-consolidator.ts"() {
     "use strict";
     init_logger();
     init_config();
+    TIER_WEIGHTS = {
+      working: 0.1,
+      short: 0.5,
+      episodic: 1,
+      semantic: 1.2,
+      procedural: 1.1
+    };
     IMPORTANCE_WEIGHTS = {
       closure: 1,
       lesson: 0.9,
@@ -20727,9 +20889,48 @@ var init_memory_consolidator = __esm({
       a2a_message: 0.4,
       default: 0.5
     };
+    TYPE_TO_TIER = {
+      heartbeat: "working",
+      a2a_message: "working",
+      claim: "short",
+      wip: "short",
+      closure: "episodic",
+      broadcast: "episodic",
+      teaching: "semantic",
+      intelligence: "semantic",
+      insight: "semantic",
+      fact: "semantic",
+      lesson: "semantic",
+      skill: "procedural",
+      prompt: "procedural",
+      procedure: "procedural"
+    };
+    TIER_TTL_DAYS = {
+      working: 1 / 288,
+      // 5 minutes
+      short: 1,
+      // 24 hours
+      episodic: 30,
+      // 30 days
+      semantic: 3650,
+      // ~10 years (effectively persistent)
+      procedural: 3650
+      // ~10 years (effectively persistent)
+    };
+    TIER_CONSOLIDATABLE = {
+      working: false,
+      // never consolidated
+      short: true,
+      // consolidated daily
+      episodic: true,
+      // consolidated weekly
+      semantic: false,
+      // never expired, merge via similarity only
+      procedural: false
+      // never expired, promoted via V9 quality loop
+    };
     SIMILARITY_THRESHOLD = 0.6;
     MAX_MEMORIES_PER_AGENT = 1e3;
-    TTL_DAYS = 30;
   }
 });
 
@@ -21726,6 +21927,7 @@ var init_agent_interface = __esm({
 var ai_act_auditor_exports = {};
 __export(ai_act_auditor_exports, {
   handleComplianceAudit: () => handleComplianceAudit,
+  persistComplianceReport: () => persistComplianceReport,
   runAudit: () => runAudit
 });
 function runAudit(stack) {
@@ -21783,6 +21985,7 @@ async function handleComplianceAudit(request) {
       return agentFailure(request, "Stack must be a non-empty array of StackItem objects");
     }
     const report = runAudit(stack);
+    await persistComplianceReport(report);
     const lines = [
       `# EU AI Act Annex III Compliance Audit`,
       ``,
@@ -21821,6 +22024,49 @@ async function handleComplianceAudit(request) {
     return agentSuccess(request, lines.join("\n"), { input: 0, output: lines.length * 10 });
   } catch (err) {
     return agentFailure(request, err instanceof Error ? err.message : String(err));
+  }
+}
+async function persistComplianceReport(report) {
+  try {
+    const { config: config2 } = await Promise.resolve().then(() => (init_config(), config_exports));
+    await fetch(`${config2.backendUrl}/api/mcp/route`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...config2.backendApiKey ? { "Authorization": `Bearer ${config2.backendApiKey}` } : {}
+      },
+      body: JSON.stringify({
+        tool: "graph.write_cypher",
+        payload: {
+          query: `MERGE (cr:ComplianceReport {audit_id: $audit_id})
+                  SET cr.framework = $framework,
+                      cr.score = $score,
+                      cr.critical_gaps = $critical_gaps,
+                      cr.high_gaps = $high_gaps,
+                      cr.medium_gaps = $medium_gaps,
+                      cr.low_gaps = $low_gaps,
+                      cr.total_gaps = $total_gaps,
+                      cr.components_audited = $components_audited,
+                      cr.generated_at = datetime($generated_at),
+                      cr.persisted_at = datetime()`,
+          params: {
+            audit_id: report.audit_id,
+            framework: "EU AI Act Annex III",
+            score: report.compliance_score,
+            critical_gaps: report.critical_gaps,
+            high_gaps: report.high_gaps,
+            medium_gaps: report.medium_gaps,
+            low_gaps: report.low_gaps,
+            total_gaps: report.total_gaps,
+            components_audited: report.stack_items_count,
+            generated_at: report.audited_at
+          }
+        }
+      }),
+      signal: AbortSignal.timeout(15e3)
+    }).catch(() => {
+    });
+  } catch {
   }
 }
 var ANNEX_III_REQUIREMENTS;
@@ -22981,6 +23227,377 @@ var init_adaptive_rag_router = __esm({
         tags: ["prompt-engineering", "patterns", "techniques"]
       }
     ];
+  }
+});
+
+// src/value-props/v8-v10-value-props.ts
+var v8_v10_value_props_exports = {};
+__export(v8_v10_value_props_exports, {
+  assertFact: () => assertFact,
+  getABTestHistory: () => getABTestHistory,
+  getChampion: () => getChampion,
+  handleDueDiligence: () => handleDueDiligence,
+  handleFactAssertion: () => handleFactAssertion,
+  handleFactQuery: () => handleFactQuery,
+  handlePromptABTest: () => handlePromptABTest,
+  queryFacts: () => queryFacts,
+  runABTest: () => runABTest,
+  runDueDiligence: () => runDueDiligence
+});
+async function runDueDiligence(target) {
+  const findings = [];
+  let riskScore = 0;
+  const redis2 = getRedis();
+  if (redis2 && isRedisEnabled()) {
+    try {
+      const osintKey = `orchestrator:osint:domains:${target}`;
+      const osintData = await redis2.get(osintKey);
+      if (osintData) {
+        const parsed = JSON.parse(osintData);
+        if (parsed.dmarc && !parsed.dmarc.includes("p=reject")) {
+          findings.push({
+            category: "email-security",
+            finding: `DMARC policy is not 'reject' for ${target}`,
+            severity: "high"
+          });
+          riskScore += 20;
+        }
+        if (parsed.ct && parsed.ct.cert_count > 50) {
+          findings.push({
+            category: "certificate-transparency",
+            finding: `${parsed.ct.cert_count} certificates found \u2014 large attack surface`,
+            severity: "medium"
+          });
+          riskScore += 10;
+        }
+      } else {
+        findings.push({
+          category: "osint-coverage",
+          finding: `No OSINT data for ${target} \u2014 may indicate low digital presence`,
+          severity: "low"
+        });
+      }
+    } catch {
+      findings.push({ category: "osint-error", finding: "Failed to retrieve OSINT data", severity: "medium" });
+      riskScore += 15;
+    }
+  }
+  const applicableTechniques = MITRE_ATLAS_AI_TECHNIQUES.filter((t) => {
+    const aiRelevant = /\b(ai|ml|machine.learning|nlp|computer.vision|chatbot)\b/i.test(target);
+    return aiRelevant || t.relevance > 0.85;
+  }).map((t) => ({ ...t }));
+  if (applicableTechniques.length > 0) {
+    findings.push({
+      category: "ai-risk",
+      finding: `${applicableTechniques.length} MITRE ATLAS techniques applicable to target`,
+      severity: applicableTechniques.some((t) => t.relevance > 0.9) ? "high" : "medium"
+    });
+    riskScore += applicableTechniques.length * 5;
+  }
+  riskScore = Math.min(100, riskScore);
+  const recommendation = riskScore > 60 ? `HIGH RISK (${riskScore}/100): Recommend enhanced due diligence before engagement` : riskScore > 30 ? `MODERATE RISK (${riskScore}/100): Standard due diligence with AI-specific controls` : `LOW RISK (${riskScore}/100): Standard engagement acceptable`;
+  return {
+    target,
+    scan_id: `dd-${Date.now().toString(36)}`,
+    generated_at: (/* @__PURE__ */ new Date()).toISOString(),
+    osint_findings: findings,
+    mitre_techniques: applicableTechniques,
+    risk_score: riskScore,
+    recommendation
+  };
+}
+async function runABTest(taskType, challengerPrompt, challengerScore) {
+  const redis2 = getRedis();
+  let champion = null;
+  if (redis2 && isRedisEnabled()) {
+    try {
+      const champKey = `${REDIS_AB_PREFIX}${taskType}:champion`;
+      const raw = await redis2.get(champKey);
+      if (raw) champion = JSON.parse(raw);
+    } catch {
+    }
+  }
+  let newChampion;
+  let improvementPct = 0;
+  if (!champion || challengerScore > champion.quality_score) {
+    improvementPct = champion ? Math.round((challengerScore - champion.quality_score) / champion.quality_score * 100) : 0;
+    newChampion = {
+      id: `variant-${Date.now().toString(36)}`,
+      prompt: challengerPrompt,
+      task_type: taskType,
+      quality_score: challengerScore,
+      usage_count: 0,
+      created_at: (/* @__PURE__ */ new Date()).toISOString(),
+      is_champion: true
+    };
+  } else {
+    newChampion = champion;
+    improvementPct = 0;
+  }
+  if (redis2 && isRedisEnabled()) {
+    try {
+      const champKey = `${REDIS_AB_PREFIX}${taskType}:champion`;
+      await redis2.set(champKey, JSON.stringify(newChampion), "EX", 365 * 24 * 3600);
+      await redis2.sadd(REDIS_AB_INDEX, taskType);
+      const historyKey2 = `${REDIS_AB_PREFIX}${taskType}:history`;
+      await redis2.lpush(historyKey2, JSON.stringify({
+        challenger_score: challengerScore,
+        champion_score: champion?.quality_score ?? 0,
+        winner: newChampion.id,
+        improvement_pct: improvementPct,
+        tested_at: (/* @__PURE__ */ new Date()).toISOString()
+      }));
+      await redis2.ltrim(historyKey2, 0, 49);
+    } catch (err) {
+      logger.warn({ err: String(err) }, "Failed to persist A/B test results");
+    }
+  }
+  return {
+    test_id: `ab-${Date.now().toString(36)}`,
+    task_type: taskType,
+    variants_tested: 2,
+    champion_id: newChampion.id,
+    champion_score: newChampion.quality_score,
+    improvement_pct: improvementPct,
+    recommendation: improvementPct > 0 ? `New champion selected with ${improvementPct}% improvement` : `Current champion retained (score: ${newChampion.quality_score.toFixed(3)})`
+  };
+}
+async function getChampion(taskType) {
+  const redis2 = getRedis();
+  if (!redis2 || !isRedisEnabled()) return null;
+  try {
+    const champKey = `${REDIS_AB_PREFIX}${taskType}:champion`;
+    const raw = await redis2.get(champKey);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+async function getABTestHistory(taskType) {
+  const redis2 = getRedis();
+  if (!redis2 || !isRedisEnabled()) return [];
+  try {
+    const historyKey2 = `${REDIS_AB_PREFIX}${taskType}:history`;
+    const raw = await redis2.lrange(historyKey2, 0, -1);
+    return raw.map((r) => JSON.parse(r));
+  } catch {
+    return [];
+  }
+}
+async function assertFact(fact) {
+  const id = `fact-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const newFact = {
+    id,
+    asserted_at: now,
+    superseded_by: null,
+    ...fact
+  };
+  const redis2 = getRedis();
+  if (redis2 && isRedisEnabled()) {
+    try {
+      const existingFacts = await findActiveFacts(fact.subject, fact.predicate);
+      for (const existing of existingFacts) {
+        existing.valid_to = now;
+        existing.superseded_by = id;
+        await redis2.set(`${REDIS_FACT_PREFIX}${existing.id}`, JSON.stringify(existing));
+      }
+      await redis2.set(`${REDIS_FACT_PREFIX}${id}`, JSON.stringify(newFact));
+      await redis2.sadd(REDIS_FACT_INDEX, id);
+    } catch (err) {
+      logger.warn({ err: String(err) }, "Failed to persist bi-temporal fact");
+    }
+  }
+  try {
+    const { config: config2 } = await Promise.resolve().then(() => (init_config(), config_exports));
+    await fetch(`${config2.backendUrl}/api/mcp/route`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...config2.backendApiKey ? { "Authorization": `Bearer ${config2.backendApiKey}` } : {}
+      },
+      body: JSON.stringify({
+        tool: "graph.write_cypher",
+        payload: {
+          query: `MERGE (f:Fact {id: $id})
+                  SET f.subject = $subject, f.predicate = $predicate, f.object = $object,
+                      f.asserted_at = datetime($asserted_at),
+                      f.valid_from = datetime($valid_from),
+                      f.valid_to = CASE WHEN $valid_to IS NOT NULL THEN datetime($valid_to) ELSE NULL END,
+                      f.superseded_by = $superseded_by,
+                      f.confidence = $confidence, f.source = $source`,
+          params: {
+            id,
+            subject: fact.subject,
+            predicate: fact.predicate,
+            object: fact.object,
+            asserted_at: now,
+            valid_from: fact.valid_from,
+            valid_to: fact.valid_to,
+            superseded_by: null,
+            confidence: fact.confidence,
+            source: fact.source
+          }
+        }
+      }),
+      signal: AbortSignal.timeout(15e3)
+    }).catch(() => {
+    });
+  } catch {
+  }
+  return newFact;
+}
+async function findActiveFacts(subject, predicate) {
+  const redis2 = getRedis();
+  if (!redis2 || !isRedisEnabled()) return [];
+  try {
+    const ids = await redis2.smembers(REDIS_FACT_INDEX);
+    const facts = [];
+    for (const id of ids.slice(0, 200)) {
+      const raw = await redis2.get(`${REDIS_FACT_PREFIX}${id}`);
+      if (raw) {
+        const fact = JSON.parse(raw);
+        if (fact.subject === subject && fact.predicate === predicate && fact.valid_to === null) {
+          facts.push(fact);
+        }
+      }
+    }
+    return facts;
+  } catch {
+    return [];
+  }
+}
+async function queryFacts(opts) {
+  const redis2 = getRedis();
+  if (!redis2 || !isRedisEnabled()) return [];
+  try {
+    const ids = await redis2.smembers(REDIS_FACT_INDEX);
+    const facts = [];
+    for (const id of ids.slice(0, 500)) {
+      const raw = await redis2.get(`${REDIS_FACT_PREFIX}${id}`);
+      if (raw) {
+        const fact = JSON.parse(raw);
+        if (opts.subject && fact.subject !== opts.subject) continue;
+        if (opts.predicate && fact.predicate !== opts.predicate) continue;
+        if (opts.as_of) {
+          if (fact.valid_from > opts.as_of) continue;
+          if (fact.valid_to && fact.valid_to < opts.as_of) continue;
+        }
+        facts.push(fact);
+      }
+    }
+    return facts.slice(0, opts.limit ?? 50);
+  } catch {
+    return [];
+  }
+}
+async function handleDueDiligence(request) {
+  try {
+    const target = typeof request.context?.target === "string" ? request.context.target : null;
+    if (!target) return agentFailure(request, "No target provided. Include target in context.target");
+    const report = await runDueDiligence(target);
+    const lines = [
+      `# Due Diligence Report: ${report.target}`,
+      ``,
+      `**Scan ID:** ${report.scan_id}`,
+      `**Generated:** ${report.generated_at}`,
+      `**Risk Score:** ${report.risk_score}/100`,
+      ``,
+      `## Recommendation`,
+      report.recommendation,
+      ``
+    ];
+    if (report.osint_findings.length > 0) {
+      lines.push(`## OSINT Findings`);
+      lines.push(``);
+      for (const f of report.osint_findings) {
+        lines.push(`- [${f.severity.toUpperCase()}] ${f.category}: ${f.finding}`);
+      }
+      lines.push(``);
+    }
+    if (report.mitre_techniques.length > 0) {
+      lines.push(`## MITRE ATLAS AI Techniques`);
+      lines.push(``);
+      for (const t of report.mitre_techniques) {
+        lines.push(`- ${t.id}: ${t.name} (relevance: ${(t.relevance * 100).toFixed(0)}%)`);
+      }
+    }
+    return agentSuccess(request, lines.join("\n"), { input: 0, output: lines.length * 10 });
+  } catch (err) {
+    return agentFailure(request, err instanceof Error ? err.message : String(err));
+  }
+}
+async function handlePromptABTest(request) {
+  try {
+    const taskType = typeof request.context?.task_type === "string" ? request.context.task_type : null;
+    const prompt = typeof request.context?.prompt === "string" ? request.context.prompt : null;
+    const score = typeof request.context?.score === "number" ? request.context.score : null;
+    if (!taskType || !prompt || score === null) {
+      return agentFailure(request, "task_type, prompt, and score required in context");
+    }
+    const result = await runABTest(taskType, prompt, score);
+    return agentSuccess(request, JSON.stringify(result, null, 2), { input: 0, output: 200 });
+  } catch (err) {
+    return agentFailure(request, err instanceof Error ? err.message : String(err));
+  }
+}
+async function handleFactAssertion(request) {
+  try {
+    const subject = typeof request.context?.subject === "string" ? request.context.subject : null;
+    const predicate = typeof request.context?.predicate === "string" ? request.context.predicate : null;
+    const object = typeof request.context?.object === "string" ? request.context.object : null;
+    const validFrom = typeof request.context?.valid_from === "string" ? request.context.valid_from : (/* @__PURE__ */ new Date()).toISOString();
+    const confidence = typeof request.context?.confidence === "number" ? request.context.confidence : 0.8;
+    const source = typeof request.context?.source === "string" ? request.context.source : "manual";
+    if (!subject || !predicate || !object) {
+      return agentFailure(request, "subject, predicate, and object required in context");
+    }
+    const fact = await assertFact({
+      subject,
+      predicate,
+      object,
+      valid_from: validFrom,
+      valid_to: null,
+      confidence,
+      source
+    });
+    return agentSuccess(request, JSON.stringify(fact, null, 2), { input: 0, output: 150 });
+  } catch (err) {
+    return agentFailure(request, err instanceof Error ? err.message : String(err));
+  }
+}
+async function handleFactQuery(request) {
+  try {
+    const subject = typeof request.context?.subject === "string" ? request.context.subject : void 0;
+    const predicate = typeof request.context?.predicate === "string" ? request.context.predicate : void 0;
+    const asOf = typeof request.context?.as_of === "string" ? request.context.as_of : void 0;
+    const limit = typeof request.context?.limit === "number" ? request.context.limit : 50;
+    const facts = await queryFacts({ subject, predicate, as_of: asOf, limit });
+    return agentSuccess(request, JSON.stringify({ count: facts.length, facts }, null, 2), { input: 0, output: facts.length * 100 });
+  } catch (err) {
+    return agentFailure(request, err instanceof Error ? err.message : String(err));
+  }
+}
+var MITRE_ATLAS_AI_TECHNIQUES, REDIS_AB_PREFIX, REDIS_AB_INDEX, REDIS_FACT_PREFIX, REDIS_FACT_INDEX;
+var init_v8_v10_value_props = __esm({
+  "src/value-props/v8-v10-value-props.ts"() {
+    "use strict";
+    init_redis();
+    init_logger();
+    init_agent_interface();
+    MITRE_ATLAS_AI_TECHNIQUES = [
+      { id: "AML.TA0001", name: "ML Model Access", relevance: 0.9 },
+      { id: "AML.TA0002", name: "ML Attack Development", relevance: 0.95 },
+      { id: "AML.TA0003", name: "ML Supply Chain", relevance: 0.8 },
+      { id: "AML.TA0004", name: "Data Poisoning", relevance: 0.85 },
+      { id: "AML.TA0005", name: "Model Evasion", relevance: 0.8 },
+      { id: "AML.TA0006", name: "Model Inversion", relevance: 0.75 },
+      { id: "AML.TA0007", name: "Model Extraction", relevance: 0.7 }
+    ];
+    REDIS_AB_PREFIX = "ab-test:";
+    REDIS_AB_INDEX = "ab-tests:index";
+    REDIS_FACT_PREFIX = "fact:";
+    REDIS_FACT_INDEX = "facts:index";
   }
 });
 
@@ -27225,16 +27842,18 @@ ${entries.map((e) => `- ${e.key}`).join("\n")}`;
     case "memory_search": {
       try {
         const { searchMemories: searchMemories2 } = await Promise.resolve().then(() => (init_memory_consolidator(), memory_consolidator_exports));
+        const tierArg = typeof args.tier === "string" ? args.tier : Array.isArray(args.tier) ? args.tier : void 0;
         const results = await searchMemories2({
           agentId: typeof args.agent_id === "string" ? args.agent_id : void 0,
           type: typeof args.type === "string" ? args.type : void 0,
+          tier: tierArg,
           tags: Array.isArray(args.tags) ? args.tags : void 0,
           query: typeof args.query === "string" ? args.query : void 0,
           limit: typeof args.limit === "number" ? Math.min(args.limit, 100) : 50
         });
         if (results.length === 0) return `No memories found matching filters`;
         const formatted = results.map(
-          (r) => `[relevance=${r.relevance.toFixed(2)}] (${r.type}) ${r.agentId}/${r.key}: ${(r.value || "").slice(0, 200)}`
+          (r) => `[relevance=${r.relevance.toFixed(2)}] (${r.type}${r.tier ? "/" + r.tier : ""}) ${r.agentId}/${r.key}: ${(r.value || "").slice(0, 200)}`
         ).join("\n");
         return `${results.length} memories found:
 ---
@@ -27609,6 +28228,93 @@ ${formatted}`;
         return response.output;
       } catch (err) {
         return `Corpus sync failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    // ─── value-props.* — OSINT DD + DSPy + Bi-temporal (Week 9, V8-V10) ──
+    case "due_diligence": {
+      try {
+        const { handleDueDiligence: handleDueDiligence2 } = await Promise.resolve().then(() => (init_v8_v10_value_props(), v8_v10_value_props_exports));
+        const target = typeof args.target === "string" ? args.target : "";
+        if (!target) return "Error: target required";
+        const request = {
+          request_id: `dd-${Date.now().toString(36)}`,
+          agent_id: "orchestrator",
+          task: `Due diligence on ${target}`,
+          capabilities: ["osint", "risk-assessment"],
+          context: { target },
+          priority: "high"
+        };
+        const response = await handleDueDiligence2(request);
+        return response.output;
+      } catch (err) {
+        return `Due diligence failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "prompt_ab_test": {
+      try {
+        const { handlePromptABTest: handlePromptABTest2 } = await Promise.resolve().then(() => (init_v8_v10_value_props(), v8_v10_value_props_exports));
+        const request = {
+          request_id: `ab-${Date.now().toString(36)}`,
+          agent_id: "orchestrator",
+          task: "Prompt A/B test",
+          capabilities: ["prompt-optimization"],
+          context: {
+            task_type: args.task_type,
+            prompt: args.prompt,
+            score: args.score
+          },
+          priority: "normal"
+        };
+        const response = await handlePromptABTest2(request);
+        return response.output;
+      } catch (err) {
+        return `Prompt A/B test failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "fact_assert": {
+      try {
+        const { handleFactAssertion: handleFactAssertion2 } = await Promise.resolve().then(() => (init_v8_v10_value_props(), v8_v10_value_props_exports));
+        const request = {
+          request_id: `fact-${Date.now().toString(36)}`,
+          agent_id: "orchestrator",
+          task: "Assert bi-temporal fact",
+          capabilities: ["knowledge-management"],
+          context: {
+            subject: args.subject,
+            predicate: args.predicate,
+            object: args.object,
+            valid_from: args.valid_from,
+            confidence: args.confidence,
+            source: args.source
+          },
+          priority: "normal"
+        };
+        const response = await handleFactAssertion2(request);
+        return response.output;
+      } catch (err) {
+        return `Fact assertion failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "fact_query": {
+      try {
+        const { handleFactQuery: handleFactQuery2 } = await Promise.resolve().then(() => (init_v8_v10_value_props(), v8_v10_value_props_exports));
+        const request = {
+          request_id: `fact-q-${Date.now().toString(36)}`,
+          agent_id: "orchestrator",
+          task: "Query bi-temporal facts",
+          capabilities: ["knowledge-management"],
+          context: {
+            subject: args.subject,
+            predicate: args.predicate,
+            as_of: args.as_of,
+            limit: args.limit
+          },
+          priority: "normal"
+        };
+        const response = await handleFactQuery2(request);
+        return response.output;
+      } catch (err) {
+        return `Fact query failed: ${err instanceof Error ? err.message : String(err)}`;
       }
     }
     case "failure_harvest": {
@@ -29335,6 +30041,11 @@ var init_mcp_caller = __esm({
       // Value-Props (Phantom Week 8)
       "rag_route",
       "skill_corpus_sync",
+      // Value-Props (Phantom Week 9)
+      "due_diligence",
+      "prompt_ab_test",
+      "fact_assert",
+      "fact_query",
       // Model routing
       "model_providers",
       "model_route",
@@ -41295,21 +42006,67 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
       break;
     }
     if (!finalContent && toolRounds > 0) {
-      loopMessages.push({
-        role: "user",
-        content: "Baseret p\xE5 alle tool-resultater ovenfor, generer nu dit fulde svar. Inklud\xE9r konkrete data, tal og referencer. Svar p\xE5 dansk i consulting-kvalitet med overskrifter og struktur."
+      const sanitizedMessages = loopMessages.map((m) => {
+        if (m.role === "tool" && typeof m.content === "string") {
+          let clean = m.content.replace(/\[object Object\]/g, "[structured data]");
+          clean = clean.replace(/```json[\s\S]*?```/g, "[JSON data omitted]");
+          return { ...m, content: clean };
+        }
+        return m;
       });
-      logger.info({ toolRounds, messageCount: loopMessages.length }, "Forcing text synthesis after tool rounds");
+      const assistant2 = ASSISTANT_MAP.get(model);
+      const domainContext = assistant2 ? `You are ${assistant2.displayName}. ` : "";
+      const isCompliance = model === "compliance-auditor";
+      const synthesisPrompt = isCompliance ? `${domainContext}Based on all tool results above, generate a COMPLIANCE AUDIT REPORT in the following structure:
+
+# [Framework Name] Compliance Audit
+
+## Executive Summary
+- Overall compliance status (Compliant / Partial / Non-compliant)
+- Risk score (0-100)
+- Key findings (max 5 bullet points)
+
+## Gap Analysis
+For each gap found:
+- **Article/Requirement**: [reference]
+- **Status**: [Compliant/Partial/Non-compliant]
+- **Evidence**: [specific finding from tool results]
+- **Recommendation**: [actionable remediation]
+
+## Deadlines & Priority
+- Critical items (must fix immediately)
+- High priority (fix within 30 days)
+- Medium priority (fix within 90 days)
+
+## Conclusion
+Brief summary with next steps.
+
+RULES:
+- Use ONLY data from the tool results above \u2014 do NOT hallucinate
+- Cite specific sources as [Source: tool-name]
+- Do NOT include raw JSON, reasoning paths, or internal tool output
+- Reply in Danish with consulting-grade precision
+- If tool results contain "[structured data]" or "[JSON data omitted]", summarize what you know from the rest` : `${domainContext}Baseret p\xE5 alle tool-resultater ovenfor, generer nu dit fulde svar. Inklud\xE9r konkrete data, tal og referencer. Svar p\xE5 dansk i consulting-kvalitet med overskrifter og struktur. Do NOT include raw JSON or internal reasoning \u2014 only the final structured answer.`;
+      sanitizedMessages.push({
+        role: "user",
+        content: synthesisPrompt
+      });
+      logger.info({ toolRounds, messageCount: sanitizedMessages.length }, "Forcing structured synthesis after tool rounds");
       const summaryResult = await chatLLM({
         provider,
-        messages: loopMessages,
+        messages: sanitizedMessages,
         model: providerModel,
-        temperature: temperature ?? 0.7,
+        temperature: temperature ?? 0.3,
+        // Lower temp for structured output
         max_tokens: max_tokens ?? 4096
         // No tools — force text response
       });
-      finalContent = summaryResult.content;
-      logger.info({ contentLength: finalContent?.length ?? 0, hasContent: !!finalContent }, "Synthesis result");
+      let cleanedOutput = summaryResult.content || "";
+      cleanedOutput = cleanedOutput.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+      cleanedOutput = cleanedOutput.replace(/##?\s*(?:Reasoning|Thought Process|Thinking|Analysis|Step[- ]by[- ]Step)[\s\S]*?(?=##|$)/gi, "").trim();
+      cleanedOutput = cleanedOutput.replace(/\[object Object\]/g, "");
+      finalContent = cleanedOutput;
+      logger.info({ contentLength: finalContent?.length ?? 0, hasContent: !!finalContent, cleaned: cleanedOutput.length < (summaryResult.content?.length ?? 0) }, "Structured synthesis complete");
       if (summaryResult.usage) {
         totalUsage.prompt_tokens += summaryResult.usage.prompt_tokens;
         totalUsage.completion_tokens += summaryResult.usage.completion_tokens;

@@ -404,14 +404,36 @@ Output ONLY the section content in markdown (no title header — it will be adde
         agent_id: 'deliverable-writer',
       }, 30000)
 
-      const content = String(result ?? '').trim()
-      const citations: Citation[] = hasEvidence
-        ? ev.results.map(r => ({
-            source: r.source,
-            title: r.content.slice(0, 80),
-            relevance: r.score,
-          }))
+      // P0 fix F5: RLM can return object/structured response — extract content
+      // field before stringification. String({...}) produces "[object Object]".
+      let content: string
+      if (typeof result === 'string') {
+        content = result.trim()
+      } else if (result && typeof result === 'object') {
+        const obj = result as Record<string, unknown>
+        const extracted = obj.content ?? obj.text ?? obj.output ?? obj.summary ?? obj.recommendation ?? obj.result
+        content = typeof extracted === 'string' ? extracted.trim() : JSON.stringify(obj, null, 2).trim()
+      } else {
+        content = String(result ?? '').trim()
+      }
+
+      // P0 fix F10: strip RLM reasoning chain leakage (<think> blocks + thinking prefixes)
+      content = content
+        .replace(/<think>[\s\S]*?<\/think>/gi, '')
+        .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
+        .replace(/^\s*(Jeg (t\u00e6nker|skal)|I'm thinking|Let me think|Thinking:|Reasoning:)[^\n]*\n+/gi, '')
+        .trim()
+
+      // P0 fix F6: domain-relevance filter on citations. Drop unrelated evidence.
+      const RELEVANCE_KEYWORDS = /compliance|audit|regulator|gdpr|ai[\s-]?act|nis2|dora|oscal|article\s\d+|annex|control|pii|governance|risk|assessment|financial|transaction|kyc|aml/i
+      const relevantResults = hasEvidence
+        ? ev.results.filter(r => RELEVANCE_KEYWORDS.test(r.content) && r.score > 0.3)
         : []
+      const citations: Citation[] = relevantResults.map(r => ({
+        source: r.source,
+        title: r.content.slice(0, 80).replace(/\s+/g, ' '),
+        relevance: r.score,
+      }))
 
       // Confidence based on evidence quality
       const avgScore = hasEvidence
