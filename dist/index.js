@@ -10520,6 +10520,10 @@ var init_adaptive_rag = __esm({
 });
 
 // src/memory/dual-rag.ts
+var dual_rag_exports = {};
+__export(dual_rag_exports, {
+  dualChannelRAG: () => dualChannelRAG
+});
 import { v4 as uuid3 } from "uuid";
 function isDomainRelevant(text, query) {
   const q = query.toLowerCase();
@@ -23130,11 +23134,16 @@ async function handleRAGRoute(request) {
       }
     } catch {
     }
-    const { queryAdaptiveRAG } = await import("./adaptive-rag.js");
-    const results = await queryAdaptiveRAG(query, {
-      channels: decision.channels,
-      limit: typeof request.context.limit === "number" ? request.context.limit : 10
+    const { dualChannelRAG: dualChannelRAG2 } = await Promise.resolve().then(() => (init_dual_rag(), dual_rag_exports));
+    const forceChannels = decision.channels.filter(
+      (c) => c === "graphrag" || c === "srag" || c === "cypher"
+    );
+    const maxResults = typeof request.context.limit === "number" ? request.context.limit : 10;
+    const dualResponse = await dualChannelRAG2(query, {
+      forceChannels: forceChannels.length > 0 ? forceChannels : void 0,
+      maxResults
     });
+    const results = dualResponse.results;
     try {
       await deposit({
         agentId: "rag-router",

@@ -15,7 +15,7 @@
 import { logger } from '../logger.js'
 import type { AgentRequest, AgentResponse } from '@widgetdc/contracts/agent'
 import { agentSuccess, agentFailure } from '../agent/agent-interface.js'
-import { getAdaptiveWeights } from './adaptive-rag.js'
+import { getAdaptiveWeights } from '../memory/adaptive-rag.js'
 import { deposit as pheromoneDeposit, sense as pheromoneSense } from '../swarm/pheromone-layer.js'
 import { config } from '../config.js'
 
@@ -282,12 +282,17 @@ export async function handleRAGRoute(request: AgentRequest): Promise<AgentRespon
       }
     } catch { /* pheromone miss — keep classifier pick */ }
 
-    // Execute via existing adaptive_rag_query with chosen channels
-    const { queryAdaptiveRAG } = await import('./adaptive-rag.js')
-    const results = await queryAdaptiveRAG(query, {
-      channels: decision.channels,
-      limit: typeof request.context.limit === 'number' ? request.context.limit : 10,
+    // Execute via dual-rag with chosen channels (filter to channels dualChannelRAG supports)
+    const { dualChannelRAG } = await import('../memory/dual-rag.js')
+    const forceChannels = decision.channels.filter(
+      (c): c is 'graphrag' | 'srag' | 'cypher' => c === 'graphrag' || c === 'srag' || c === 'cypher'
+    )
+    const maxResults = typeof request.context.limit === 'number' ? request.context.limit : 10
+    const dualResponse = await dualChannelRAG(query, {
+      forceChannels: forceChannels.length > 0 ? forceChannels : undefined,
+      maxResults,
     })
+    const results = dualResponse.results
 
     // ADOPTION_LAYER_v4 §2.1 post-outcome pheromone deposit (SUCCESS → attraction)
     try {

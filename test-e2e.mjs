@@ -1237,10 +1237,13 @@ await test('118p. POST /api/tools/deliverable_draft responds', async () => {
   assert(r.status !== 404, `deliverable_draft not deployed (404)`)
 })
 
-// ── 118q. rag_route — exists ──
-await test('118q. POST /api/tools/rag_route responds', async () => {
+// ── 118q. rag_route — LIN-768: must load dynamic imports without MODULE_NOT_FOUND ──
+await test('118q. POST /api/tools/rag_route responds without module-load error', async () => {
   const r = await api('/api/tools/rag_route', { method: 'POST', body: JSON.stringify({ query: 'How to improve agent performance?' }) })
   assert(r.status !== 404, `rag_route not deployed (404)`)
+  const body = JSON.stringify(r.body || {})
+  assert(!body.includes('Cannot find module') && !body.includes('MODULE_NOT_FOUND'),
+    `rag_route dynamic import broken (LIN-768 regression): ${body.slice(0, 200)}`)
 })
 
 // ── 118r. skill_corpus_sync — exists ──
