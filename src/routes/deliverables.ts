@@ -63,6 +63,8 @@ deliverablesRouter.post('/generate', async (req: Request, res: Response) => {
   const rawMaxSections = body.max_sections
   const maxSections = (typeof rawMaxSections === 'number' && Number.isInteger(rawMaxSections))
     ? rawMaxSections : undefined
+  const engagementId = typeof body.engagement_id === 'string' ? body.engagement_id : undefined
+  const derivedFromPath = typeof body.derived_from_path === 'string' ? body.derived_from_path : undefined
 
   // Validation
   if (!prompt || typeof prompt !== 'string' || prompt.length < 10) {
@@ -94,6 +96,8 @@ deliverablesRouter.post('/generate', async (req: Request, res: Response) => {
     type: type as DeliverableType,
     format: format as DeliverableFormat,
     max_sections: maxSections,
+    engagement_id: engagementId,
+    derived_from_path: derivedFromPath,
   }
 
   logger.info({ prompt: prompt.slice(0, 80), type, format }, 'Deliverable generation requested')
@@ -112,6 +116,7 @@ deliverablesRouter.post('/generate', async (req: Request, res: Response) => {
         total_citations: deliverable.metadata.total_citations,
         avg_confidence: deliverable.metadata.avg_confidence,
         generation_ms: deliverable.metadata.generation_ms,
+        engagement_id: deliverable.engagement_id,
         url: `/api/deliverables/${encodeURIComponent(deliverable.$id)}`,
         markdown_url: `/api/deliverables/${encodeURIComponent(deliverable.$id)}/markdown`,
       },

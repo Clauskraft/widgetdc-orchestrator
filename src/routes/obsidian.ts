@@ -12,6 +12,7 @@
 import { Router } from 'express'
 import { config } from '../config.js'
 import { logger } from '../logger.js'
+import { recordObsidianArtifactLineage } from '../engagement/engagement-lineage.js'
 
 export const obsidianRouter = Router()
 
@@ -626,6 +627,19 @@ obsidianRouter.post('/materialize', async (req, res) => {
 
   try {
     const result = await writeNote(path, content, 'replace')
+    const engagementId = typeof properties.engagement_id === 'string' ? properties.engagement_id : null
+    if (engagementId) {
+      await recordObsidianArtifactLineage({
+        engagementId,
+        path,
+        title: body.title,
+        kind: body.kind,
+        generatedAt: String(properties.generated_at),
+        sourceTool: typeof properties.source_tool === 'string' ? properties.source_tool : 'obsidian.materialize',
+        refinedFrom: typeof properties.refined_from === 'string' ? properties.refined_from : undefined,
+        sourceDeliverableId: typeof properties.source_deliverable_id === 'string' ? properties.source_deliverable_id : undefined,
+      })
+    }
     res.json({
       success: true,
       kind: body.kind,
@@ -663,6 +677,19 @@ obsidianRouter.post('/canvas', async (req, res) => {
 
   try {
     const result = await writeNote(path, content, 'replace')
+    const engagementId = typeof properties.engagement_id === 'string' ? properties.engagement_id : null
+    if (engagementId) {
+      await recordObsidianArtifactLineage({
+        engagementId,
+        path,
+        title: body.title,
+        kind: body.kind,
+        generatedAt: String(properties.generated_at),
+        sourceTool: typeof properties.source_tool === 'string' ? properties.source_tool : 'obsidian.canvas',
+        refinedFrom: typeof properties.refined_from === 'string' ? properties.refined_from : undefined,
+        sourceDeliverableId: typeof properties.source_deliverable_id === 'string' ? properties.source_deliverable_id : undefined,
+      })
+    }
     res.json({
       success: true,
       kind: body.kind,

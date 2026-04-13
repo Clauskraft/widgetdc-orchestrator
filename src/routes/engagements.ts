@@ -30,6 +30,7 @@ import {
   type RecordOutcomeRequest,
   type OutcomeGrade,
 } from '../engagement/engagement-engine.js'
+import { listArtifactsForEngagement, listDeliverablesForEngagement } from '../engagement/engagement-lineage.js'
 import { logger } from '../logger.js'
 
 export const engagementsRouter = Router()
@@ -244,6 +245,43 @@ engagementsRouter.get('/:id', async (req: Request, res: Response) => {
     return
   }
   res.json({ success: true, data: engagement })
+})
+
+engagementsRouter.get('/:id/context', async (req: Request, res: Response) => {
+  const id = decodeURIComponent(req.params.id)
+  const engagement = await getEngagement(id)
+  if (!engagement) {
+    res.status(404).json({
+      success: false,
+      error: { code: 'NOT_FOUND', message: 'Engagement not found', status_code: 404 },
+    })
+    return
+  }
+
+  try {
+    const [plan, outcome, deliverables, artifacts] = await Promise.all([
+      getPlan(id),
+      getOutcome(id),
+      listDeliverablesForEngagement(id, 8),
+      listArtifactsForEngagement(id, 8),
+    ])
+
+    res.json({
+      success: true,
+      data: {
+        engagement,
+        plan,
+        outcome,
+        deliverables,
+        artifacts,
+      },
+    })
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: { code: 'CONTEXT_FAILED', message: err instanceof Error ? err.message : String(err), status_code: 500 },
+    })
+  }
 })
 
 // ─── GET /:id/plan — Retrieve stored plan ───────────────────────────────────

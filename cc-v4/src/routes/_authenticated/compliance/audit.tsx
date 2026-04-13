@@ -153,6 +153,7 @@ function ComplianceAuditPage() {
   const [isSubmitting, setIsSubmitting] = useState(false)
 
   const setActiveClient = useSessionStore((state) => state.setActiveClient)
+  const engagementId = useSessionStore((state) => state.engagementId)
   const upsertJob = useJobStore((state) => state.upsertJob)
   const removeJob = useJobStore((state) => state.removeJob)
   const jobs = useJobStore((state) => state.jobs)
@@ -404,12 +405,23 @@ function ComplianceAuditPage() {
                       folder="WidgeTDC/Compliance Audits"
                       contentMarkdown={response.output}
                       properties={buildVisualizationProperties({ kind: 'compliance_audit' }, {
+                        engagement_id: engagementId ?? null,
                         client: clientName || 'Unknown',
                         source_tool: 'compliance_gap_audit',
                         status: response.status,
                       })}
                     />
-                    {canvasPayload && <SendCanvasToObsidianButton payload={canvasPayload} />}
+                    {canvasPayload && (
+                      <SendCanvasToObsidianButton
+                        payload={{
+                          ...canvasPayload,
+                          properties: {
+                            ...canvasPayload.properties,
+                            engagement_id: engagementId ?? '',
+                          },
+                        }}
+                      />
+                    )}
                   </div>
                 </CardContent>
               </Card>
