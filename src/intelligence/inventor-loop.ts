@@ -177,7 +177,38 @@ async function runResearcher(
     `[${c.source}] ${c.title}\n  ${c.content.slice(0, 200)}`
   ).join('\n\n')
 
-  const prompt = `You are the Researcher agent in an evolutionary AI system.
+  // P0 FIX: Circle packing specific prompt — output numerical coordinates
+  const isCirclePacking = /circle\s*pack|26\s*circles|maximise\s+sum\s+of\s+radii|maximize\s+sum\s+of\s*radii/i.test(task)
+
+  const basePrompt = isCirclePacking
+    ? `You are a circle packing optimization researcher.
+
+TASK: ${task}
+
+PARENT SOLUTIONS (sampled via ${config.sampling.algorithm}):
+${parentContext || '(no parents yet — generate an initial solution)'}
+
+RELEVANT KNOWLEDGE:
+${cognitionContext || '(no prior knowledge available)'}
+
+Generate a NEW circle packing configuration that improves on the best parent.
+
+OUTPUT FORMAT — EXACT JSON (no other text, no markdown):
+{
+  "motivation": "1-2 sentences on what changed and why it improves",
+  "artifact": "[(x1, y1, r1), (x2, y2, r2), ...]"
+}
+
+CIRCLE PACKING RULES:
+- 26 circles total, each as (x, y, r) where x,y = center, r = radius
+- All circles must fit in unit square: x-r>=0, x+r<=1, y-r>=0, y+r<=1
+- No overlap: for all i≠j, sqrt((xi-xj)²+(yi-yj)²) >= ri+rj
+- Objective: maximize sum of all radii
+- SOTA sum_radii ≈ 2.635
+- Use hexagonal close-packing as baseline (row spacing = r*sqrt(3))
+- Vary radii: larger circles at corners/edges, smaller in center
+- Output ONLY the JSON with the list of 26 (x,y,r) tuples`
+    : `You are the Researcher agent in an evolutionary AI system.
 
 TASK: ${task}
 
@@ -214,7 +245,7 @@ RULES:
       provider: 'deepseek',
       messages: [
         { role: 'system', content: 'You are a JSON-only API for an evolutionary AI system. Respond with ONLY valid JSON. No markdown code blocks, no explanation text, no extra commentary. The response must parse as valid JSON.' },
-        { role: 'user', content: prompt },
+        { role: 'user', content: base_prompt },
       ],
       model: 'deepseek-chat',
       max_tokens: 4000,
@@ -270,9 +301,55 @@ async function runEngineer(
   const t0 = Date.now()
 
   try {
-    // Use judge_response (PRISM scorer: 0-10 per dimension + aggregate).
-    // critique_refine is a generate→critique→revise pipeline, NOT a scorer —
-    // it has no numeric score field; old code defaulted to 50/100=0.5 for every solution.
+    // P0 FIX: Detect circle packing tasks and use deterministic evaluator
+    const isCirclePacking = /circle\s*pack|26\s*circles|maximise\s+sum\s+of\s+radii|maximize\s+sum\s+of\s*radii/i.test(config.taskDescription)
+
+    if (isCirclePacking) {
+      // Use deterministic mathematical evaluator — NO LLM
+      const { parseCircles, evaluatePacking, circlesToArtifact, hexagonalInitialSolution } = await import('./circle-packing-evaluator.js')
+
+      // If artifact is just text description (from LLM), generate initial solution
+      const circles = parseCircles(node.artifact)
+
+      if (circles.length === 0) {
+        // No valid circles parsed — generate initial hexagonal solution
+        const initial = hexagonalInitialSolution(26, 0.06)
+        node.artifact = circlesToArtifact(initial)
+        const eval_ = evaluatePacking(initial)
+        return {
+          nodeId: node.id,
+          success: eval_.feasible,
+          score: eval_.score,
+          metrics: {
+            sum_radii: eval_.sum_radii,
+            violations: eval_.violations,
+            feasible: eval_.feasible,
+            sota_gap: (2.635 - eval_.sum_radii).toFixed(4),
+          },
+          output: eval_.details,
+          durationMs: Date.now() - t0,
+          tokensUsed: 0,
+        }
+      }
+
+      const eval_ = evaluatePacking(circles)
+      return {
+        nodeId: node.id,
+        success: eval_.feasible,
+        score: eval_.score,
+        metrics: {
+          sum_radii: eval_.sum_radii,
+          violations: eval_.violations,
+          feasible: eval_.feasible,
+          sota_gap: (2.635 - eval_.sum_radii).toFixed(4),
+        },
+        output: eval_.details,
+        durationMs: Date.now() - t0,
+        tokensUsed: 0,
+      }
+    }
+
+    // Non-circle-packing tasks: use LLM-based judge_response (existing behavior)
     const result = await callMcpTool({
       toolName: 'judge_response',
       args: {
