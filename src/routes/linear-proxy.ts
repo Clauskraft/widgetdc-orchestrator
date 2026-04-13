@@ -27,6 +27,19 @@ async function callBackendMcp(toolName: string, payload: Record<string, unknown>
   return res.json()
 }
 
+function normalizeLinearState(raw: unknown): string {
+  const value = typeof raw === 'string'
+    ? raw.trim().toLowerCase()
+    : typeof raw === 'object' && raw !== null && 'name' in raw
+      ? String((raw as { name?: unknown }).name ?? '').trim().toLowerCase()
+      : ''
+
+  if (value === 'started' || value === 'in progress' || value === 'in_progress') return 'In Progress'
+  if (value === 'todo' || value === 'unstarted') return 'Todo'
+  if (value === 'completed' || value === 'done' || value === 'canceled' || value === 'cancelled') return 'Completed'
+  return 'Backlog'
+}
+
 /**
  * GET /api/linear/issues?limit=100&state=...
  */
@@ -41,10 +54,10 @@ linearProxyRouter.get('/issues', async (req: Request, res: Response) => {
     const data = await callBackendMcp('linear.issues', payload)
     const result = data?.result ?? data
     const rawIssues = result?.issues ?? result?.nodes ?? result ?? []
-    // Normalize: ensure state is a string, not an object
+    // Normalize: backend Linear wrappers are inconsistent about state/status shape.
     const issues = rawIssues.map((issue: any) => ({
       ...issue,
-      state: issue.state?.name ?? issue.state ?? 'Backlog',
+      state: normalizeLinearState(issue.status ?? issue.state),
     }))
     res.json(Array.isArray(issues) ? issues : [])
   } catch (err) {
@@ -99,7 +112,7 @@ linearProxyRouter.post('/issues', async (req: Request, res: Response) => {
       priority: body.priority,
       assignee: body.assignee,
       labels: body.labels,
-      state: body.state,
+      state: normalizeLinearState(body.state),
       estimate: body.estimate,
     })
     res.json(data?.result ?? data)
@@ -122,7 +135,7 @@ linearProxyRouter.post('/issues/:id', async (req: Request, res: Response) => {
       priority: body.priority,
       assignee: body.assignee,
       labels: body.labels,
-      state: body.state,
+      state: normalizeLinearState(body.state),
       estimate: body.estimate,
     })
     res.json(data?.result ?? data)

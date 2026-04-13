@@ -50786,6 +50786,13 @@ async function callBackendMcp2(toolName2, payload) {
   if (!res.ok) throw new Error(`Backend MCP ${toolName2}: ${res.status}`);
   return res.json();
 }
+function normalizeLinearState(raw) {
+  const value = typeof raw === "string" ? raw.trim().toLowerCase() : typeof raw === "object" && raw !== null && "name" in raw ? String(raw.name ?? "").trim().toLowerCase() : "";
+  if (value === "started" || value === "in progress" || value === "in_progress") return "In Progress";
+  if (value === "todo" || value === "unstarted") return "Todo";
+  if (value === "completed" || value === "done" || value === "canceled" || value === "cancelled") return "Completed";
+  return "Backlog";
+}
 linearProxyRouter.get("/issues", async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 100, 250);
@@ -50797,7 +50804,7 @@ linearProxyRouter.get("/issues", async (req, res) => {
     const rawIssues = result?.issues ?? result?.nodes ?? result ?? [];
     const issues = rawIssues.map((issue) => ({
       ...issue,
-      state: issue.state?.name ?? issue.state ?? "Backlog"
+      state: normalizeLinearState(issue.status ?? issue.state)
     }));
     res.json(Array.isArray(issues) ? issues : []);
   } catch (err) {
@@ -50840,7 +50847,7 @@ linearProxyRouter.post("/issues", async (req, res) => {
       priority: body.priority,
       assignee: body.assignee,
       labels: body.labels,
-      state: body.state,
+      state: normalizeLinearState(body.state),
       estimate: body.estimate
     });
     res.json(data?.result ?? data);
@@ -50859,7 +50866,7 @@ linearProxyRouter.post("/issues/:id", async (req, res) => {
       priority: body.priority,
       assignee: body.assignee,
       labels: body.labels,
-      state: body.state,
+      state: normalizeLinearState(body.state),
       estimate: body.estimate
     });
     res.json(data?.result ?? data);

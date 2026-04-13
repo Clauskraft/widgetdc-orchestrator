@@ -69,6 +69,11 @@ interface CreateIssuePayload {
   estimate?: number
 }
 
+interface ActionFeedback {
+  kind: 'success' | 'error'
+  message: string
+}
+
 // ─── Priority helpers ────────────────────────────────────────────────────────
 
 const PRIORITY_LABELS: Record<number, { label: string; color: string; bg: string }> = {
@@ -86,6 +91,38 @@ const STATE_COLUMNS = [
   { key: 'completed', label: 'Done', color: 'bg-green-500' },
 ] as const
 
+type BoardState = typeof STATE_COLUMNS[number]['key']
+
+function formatStateLabel(state: string): string {
+  return state === 'in progress'
+    ? 'In Progress'
+    : state.charAt(0).toUpperCase() + state.slice(1)
+}
+
+function normalizeBoardState(state: string | null | undefined): BoardState {
+  const value = state?.trim().toLowerCase()
+  if (value === 'todo' || value === 'unstarted') return 'todo'
+  if (value === 'started' || value === 'in_progress' || value === 'in progress') return 'in progress'
+  if (value === 'completed' || value === 'done' || value === 'canceled' || value === 'cancelled') return 'completed'
+  return 'backlog'
+}
+
+function toLinearStatePayload(state: string): 'Backlog' | 'Todo' | 'In Progress' | 'Completed' {
+  const normalized = normalizeBoardState(state)
+  if (normalized === 'todo') return 'Todo'
+  if (normalized === 'in progress') return 'In Progress'
+  if (normalized === 'completed') return 'Completed'
+  return 'Backlog'
+}
+
+function applyIssueState(issues: LinearIssue[] | undefined, id: string, state: string): LinearIssue[] {
+  if (!issues) return []
+  const updatedAt = new Date().toISOString()
+  return issues.map(issue => issue.id === id
+    ? { ...issue, state: toLinearStatePayload(state), updatedAt }
+    : issue)
+}
+
 // ─── Page ────────────────────────────────────────────────────────────────────
 
 function ProjectBoardPage() {
@@ -96,6 +133,7 @@ function ProjectBoardPage() {
   const [filterStatus, setFilterStatus] = useState<string>('all')
   const [filterAssignee, setFilterAssignee] = useState<string>('all')
   const [apiError, setApiError] = useState<ApiErrorInfo | null>(null)
+  const [actionFeedback, setActionFeedback] = useState<ActionFeedback | null>(null)
 
   // Fetch issues from Linear via orchestrator MCP proxy
   const { data: issues, isLoading: loadingIssues, error: issuesError, refetch: refetchIssues } = useQuery<LinearIssue[]>({
@@ -127,8 +165,8 @@ function ProjectBoardPage() {
 
   // Filter issues
   const filteredIssues = issues?.filter(issue => {
-    const state = issue.state?.toLowerCase() ?? 'backlog'
-    if (filterStatus !== 'all' && state !== filterStatus.toLowerCase()) return false
+    const state = normalizeBoardState(issue.state)
+    if (filterStatus !== 'all' && state !== normalizeBoardState(filterStatus)) return false
     if (filterAssignee !== 'all') {
       const assigneeName = issue.assignee?.name || 'Unassigned'
       if (assigneeName.toLowerCase() !== filterAssignee.toLowerCase()) return false
@@ -138,7 +176,7 @@ function ProjectBoardPage() {
 
   // Group by status
   const grouped = filteredIssues.reduce<Record<string, LinearIssue[]>>((acc, issue) => {
-    const state = issue.state?.toLowerCase() ?? 'backlog'
+    const state = normalizeBoardState(issue.state)
     if (!acc[state]) acc[state] = []
     acc[state].push(issue)
     return acc
@@ -166,9 +204,39 @@ function ProjectBoardPage() {
 
   // Quick state change
   const quickStateMutation = useMutation({
-    mutationFn: ({ id, state }: { id: string; state: string }) =>
-      apiPost(`/api/linear/issues/${id}`, { state }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['linear-issues'] }),
+    mutationFn: ({ id, state }: { id: string; state: string; identifier?: string }) =>
+      apiPost(`/api/linear/issues/${id}`, { state: toLinearStatePayload(state) }),
+    onMutate: async ({ id, state }) => {
+      setApiError(null)
+      setActionFeedback(null)
+      await queryClient.cancelQueries({ queryKey: ['linear-issues'] })
+      const previousIssues = queryClient.getQueryData<LinearIssue[]>(['linear-issues'])
+      queryClient.setQueryData<LinearIssue[]>(['linear-issues'], current => applyIssueState(current, id, state))
+      setSelectedIssue(current => current?.id === id ? { ...current, state: toLinearStatePayload(state), updatedAt: new Date().toISOString() } : current)
+      return { previousIssues }
+    },
+    onError: (error, variables, context) => {
+      if (context?.previousIssues) {
+        queryClient.setQueryData(['linear-issues'], context.previousIssues)
+        const previousSelected = context.previousIssues.find(issue => issue.id === variables.id)
+        if (previousSelected) {
+          setSelectedIssue(current => current?.id === variables.id ? previousSelected : current)
+        }
+      }
+      const err = normalizeError(error)
+      setApiError(err)
+      setActionFeedback({
+        kind: 'error',
+        message: `Could not move ${variables.identifier ?? 'issue'} to ${formatStateLabel(normalizeBoardState(variables.state))}.`,
+      })
+    },
+    onSuccess: (_data, variables) => {
+      setActionFeedback({
+        kind: 'success',
+        message: `${variables.identifier ?? 'Issue'} moved to ${formatStateLabel(normalizeBoardState(variables.state))}.`,
+      })
+      queryClient.invalidateQueries({ queryKey: ['linear-issues'] })
+    },
   })
 
   // Unique assignees
@@ -178,8 +246,8 @@ function ProjectBoardPage() {
 
   // Stats
   const totalIssues = issues?.length ?? 0
-  const inProgress = issues?.filter(i => i.state?.toLowerCase() === 'in progress').length ?? 0
-  const completed = issues?.filter(i => i.state?.toLowerCase() === 'completed').length ?? 0
+  const inProgress = issues?.filter(i => normalizeBoardState(i.state) === 'in progress').length ?? 0
+  const completed = issues?.filter(i => normalizeBoardState(i.state) === 'completed').length ?? 0
   const urgent = issues?.filter(i => i.priority === 1).length ?? 0
 
   return (
@@ -228,6 +296,16 @@ function ProjectBoardPage() {
             {apiError.status === 403 && ' — You do not have permission to access Linear.'}
             {apiError.status === 429 && ' — Rate limited. Please wait a moment.'}
           </AlertDescription>
+        </Alert>
+      )}
+
+      {actionFeedback && (
+        <Alert variant={actionFeedback.kind === 'error' ? 'destructive' : 'default'}>
+          {actionFeedback.kind === 'error'
+            ? <AlertCircle className="h-4 w-4" />
+            : <CheckCircle2 className="h-4 w-4" />}
+          <AlertTitle>{actionFeedback.kind === 'error' ? 'Action failed' : 'Board updated'}</AlertTitle>
+          <AlertDescription>{actionFeedback.message}</AlertDescription>
         </Alert>
       )}
 
@@ -302,7 +380,8 @@ function ProjectBoardPage() {
                       issue={issue}
                       onEdit={() => setEditIssue(issue)}
                       onSelect={() => setSelectedIssue(issue)}
-                      onStateChange={(state) => quickStateMutation.mutate({ id: issue.id, state })}
+                      onStateChange={(state) => quickStateMutation.mutate({ id: issue.id, state, identifier: issue.identifier })}
+                      isMutating={quickStateMutation.isPending && quickStateMutation.variables?.id === issue.id}
                     />
                   ))
                 )}
@@ -327,15 +406,15 @@ function ProjectBoardPage() {
         <IssueDialog
           open={!!editIssue}
           onOpenChange={() => setEditIssue(null)}
-          title={`Edit ${editIssue.identifier}`}
-          initialData={{
-            title: editIssue.title,
-            description: editIssue.description ?? '',
-            priority: editIssue.priority ?? 3,
-            state: editIssue.state?.toLowerCase() ?? 'backlog',
-          }}
-          onSubmit={(payload) => updateMutation.mutate({ id: editIssue.id, ...payload })}
-          isSubmitting={updateMutation.isPending}
+            title={`Edit ${editIssue.identifier}`}
+            initialData={{
+              title: editIssue.title,
+              description: editIssue.description ?? '',
+              priority: editIssue.priority ?? 3,
+              state: normalizeBoardState(editIssue.state),
+            }}
+            onSubmit={(payload) => updateMutation.mutate({ id: editIssue.id, ...payload })}
+            isSubmitting={updateMutation.isPending}
           labels={labels}
         />
       )}
@@ -394,20 +473,43 @@ function ProjectBoardPage() {
               <Button variant="outline" size="sm" onClick={() => { setEditIssue(selectedIssue); setSelectedIssue(null) }}>
                 <Edit2 className="w-3 h-3 mr-1" /> Edit
               </Button>
-              {selectedIssue.state?.toLowerCase() !== 'in progress' && (
-                <Button variant="outline" size="sm" onClick={() => quickStateMutation.mutate({ id: selectedIssue.id, state: 'In Progress' })}>
-                  <Play className="w-3 h-3 mr-1" /> Start
+              {normalizeBoardState(selectedIssue.state) === 'backlog' && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={quickStateMutation.isPending}
+                  onClick={() => quickStateMutation.mutate({ id: selectedIssue.id, state: 'todo', identifier: selectedIssue.identifier })}
+                >
+                  <ChevronRight className="w-3 h-3 mr-1" />
+                  {quickStateMutation.isPending && quickStateMutation.variables?.id === selectedIssue.id ? 'Queuing…' : 'Queue'}
                 </Button>
               )}
-              {selectedIssue.state?.toLowerCase() !== 'completed' && (
-                <Button variant="outline" size="sm" onClick={() => quickStateMutation.mutate({ id: selectedIssue.id, state: 'Completed' })}>
-                  <CheckCircle2 className="w-3 h-3 mr-1" /> Complete
+              {normalizeBoardState(selectedIssue.state) !== 'in progress' && (
+                <Button
+                  variant="default"
+                  size="sm"
+                  disabled={quickStateMutation.isPending}
+                  onClick={() => quickStateMutation.mutate({ id: selectedIssue.id, state: 'in progress', identifier: selectedIssue.identifier })}
+                >
+                  <Play className="w-3 h-3 mr-1" />
+                  {quickStateMutation.isPending && quickStateMutation.variables?.id === selectedIssue.id ? 'Starting…' : 'Start work'}
+                </Button>
+              )}
+              {normalizeBoardState(selectedIssue.state) !== 'completed' && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={quickStateMutation.isPending}
+                  onClick={() => quickStateMutation.mutate({ id: selectedIssue.id, state: 'completed', identifier: selectedIssue.identifier })}
+                >
+                  <CheckCircle2 className="w-3 h-3 mr-1" />
+                  {quickStateMutation.isPending && quickStateMutation.variables?.id === selectedIssue.id ? 'Completing…' : 'Complete'}
                 </Button>
               )}
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => window.open(`https://linear.app/widgetdc/issue/${selectedIssue.identifier.split('-')[1]}`, '_blank')}
+                onClick={() => window.open(`https://linear.app/widgetdc/issue/${selectedIssue.identifier}`, '_blank')}
               >
                 <ExternalLink className="w-3 h-3 mr-1" /> Open in Linear
               </Button>
@@ -450,17 +552,19 @@ function IssueCard({
   onEdit,
   onSelect,
   onStateChange,
+  isMutating,
 }: {
   issue: LinearIssue
   onEdit: () => void
   onSelect: () => void
   onStateChange: (state: string) => void
+  isMutating: boolean
 }) {
   const priorityConfig = issue.priority !== null && issue.priority !== undefined
     ? PRIORITY_LABELS[issue.priority]
     : null
 
-  const stateLower = issue.state?.toLowerCase() ?? 'backlog'
+  const stateLower = normalizeBoardState(issue.state)
   const nextStates = stateLower === 'backlog'
     ? ['todo', 'in progress']
     : stateLower === 'todo'
@@ -480,6 +584,17 @@ function IssueCard({
           <div className="text-xs text-muted-foreground font-mono">{issue.identifier}</div>
         </div>
         <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          {stateLower !== 'in progress' && stateLower !== 'completed' && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onStateChange('in progress') }}
+              className="inline-flex items-center gap-1 rounded bg-primary px-2 py-1 text-[10px] font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+              disabled={isMutating}
+              title="Start work"
+            >
+              <Play className="w-3 h-3" />
+              {isMutating ? 'Starting…' : 'Start'}
+            </button>
+          )}
           <button onClick={(e) => { e.stopPropagation(); onEdit() }} className="p-1 hover:bg-muted rounded" title="Edit">
             <Edit2 className="w-3 h-3" />
           </button>
@@ -493,6 +608,9 @@ function IssueCard({
       )}
 
       <div className="flex flex-wrap gap-1 mt-2">
+        <span className="px-1.5 py-0.5 rounded text-[10px] bg-muted text-muted-foreground">
+          {formatStateLabel(stateLower)}
+        </span>
         {priorityConfig && (
           <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${priorityConfig.bg} ${priorityConfig.color}`}>
             P{issue.priority}
@@ -515,15 +633,16 @@ function IssueCard({
 
       {/* Quick state transitions */}
       {nextStates.length > 0 && (
-        <div className="flex gap-1 mt-2 pt-2 border-t">
+        <div className="flex flex-wrap gap-1 mt-2 pt-2 border-t">
           {nextStates.map(state => (
             <button
               key={state}
+              disabled={isMutating}
               onClick={(e) => { e.stopPropagation(); onStateChange(state) }}
-              className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground px-2 py-0.5 rounded bg-muted/50 hover:bg-muted transition-colors"
+              className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground px-2 py-1 rounded bg-muted/50 hover:bg-muted transition-colors disabled:opacity-50"
             >
-              <ChevronRight className="w-3 h-3" />
-              {state === 'in progress' ? 'Start' : state === 'completed' ? 'Done' : state}
+              {state === 'in progress' ? <Play className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+              {isMutating ? 'Updating…' : state === 'in progress' ? 'Start work' : state === 'completed' ? 'Done' : formatStateLabel(state)}
             </button>
           ))}
         </div>
@@ -548,7 +667,7 @@ function IssueDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
   title: string
-  initialData?: { title?: string; description?: string; priority?: number; state?: string }
+  initialData?: { title?: string; description?: string; priority?: number; state?: string; team?: string }
   onSubmit: (payload: CreateIssuePayload) => void
   isSubmitting: boolean
   labels?: LinearLabel[]
@@ -557,16 +676,19 @@ function IssueDialog({
   const [formDescription, setFormDescription] = useState(initialData?.description ?? '')
   const [formPriority, setFormPriority] = useState(initialData?.priority ?? 3)
   const [formState, setFormState] = useState(initialData?.state ?? 'backlog')
+  const [formTeam, setFormTeam] = useState(initialData?.team ?? '')
   const [formAssignee, setFormAssignee] = useState('')
   const [formLabels, setFormLabels] = useState<string[]>([])
+  const isCreateMode = !initialData
 
   const handleSubmit = () => {
-    if (!formTitle.trim()) return
+    if (!formTitle.trim() || (isCreateMode && !formTeam.trim())) return
     onSubmit({
       title: formTitle.trim(),
       description: formDescription.trim() || undefined,
+      team: formTeam.trim() || undefined,
       priority: formPriority,
-      state: formState.charAt(0).toUpperCase() + formState.slice(1),
+      state: toLinearStatePayload(formState),
       assignee: formAssignee || undefined,
       labels: formLabels.length > 0 ? formLabels : undefined,
     })
@@ -632,6 +754,18 @@ function IssueDialog({
           </div>
 
           <div>
+            <label className="text-sm font-medium">Linear team</label>
+            <Input
+              value={formTeam}
+              onChange={e => setFormTeam(e.target.value)}
+              placeholder="e.g., WidgeTDC or team ID"
+            />
+            <p className="mt-1 text-xs text-muted-foreground">
+              Required when creating a new issue.
+            </p>
+          </div>
+
+          <div>
             <label className="text-sm font-medium">Assignee (agent name)</label>
             <Input
               value={formAssignee}
@@ -668,7 +802,7 @@ function IssueDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isSubmitting}>
             Cancel
           </Button>
-          <Button onClick={handleSubmit} disabled={isSubmitting || !formTitle.trim()}>
+          <Button onClick={handleSubmit} disabled={isSubmitting || !formTitle.trim() || (isCreateMode && !formTeam.trim())}>
             {isSubmitting ? 'Saving...' : initialData ? 'Update Issue' : 'Create Issue'}
           </Button>
         </DialogFooter>
