@@ -45041,6 +45041,43 @@ init_adoption_telemetry();
 import { Router as Router27 } from "express";
 import { v4 as uuid35 } from "uuid";
 var toolGatewayRouter = Router27();
+function respondLegacyToolResult(res, result) {
+  const httpStatus = result.status === "success" ? 200 : result.status === "timeout" ? 504 : 500;
+  res.status(httpStatus).json({
+    call_id: result.call_id,
+    status: result.status,
+    result: result.result,
+    error_message: result.error_message ?? null,
+    duration_ms: result.duration_ms,
+    completed_at: result.completed_at
+  });
+}
+toolGatewayRouter.post("/call", async (req, res) => {
+  const toolName2 = typeof req.body?.tool_name === "string" ? req.body.tool_name : null;
+  const callId = typeof req.body?.call_id === "string" ? req.body.call_id : uuid35();
+  const args = req.body?.arguments && typeof req.body.arguments === "object" ? req.body.arguments : {};
+  if (!toolName2) {
+    res.status(400).json({
+      call_id: callId,
+      status: "error",
+      result: null,
+      error_message: "Legacy /api/tools/call requires tool_name",
+      duration_ms: 0,
+      completed_at: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    return;
+  }
+  logger.warn({ tool: toolName2, call_id: callId }, "Deprecated /api/tools/call shim used");
+  const result = await executeToolUnified(toolName2, args, {
+    call_id: callId,
+    source_protocol: "legacy-rest",
+    fold: req.query.fold !== "false"
+  });
+  if (result.status === "success") {
+    recordToolCall(toolName2);
+  }
+  respondLegacyToolResult(res, result);
+});
 toolGatewayRouter.post("/:name", async (req, res) => {
   const { name } = req.params;
   const tool = getTool(name);

@@ -20,6 +20,11 @@ export interface DispatchOptions {
 
 export type ParsedAgentResponse<T> = AgentResponse & { parsed?: T }
 
+interface ToolGatewayEnvelope {
+  success: boolean
+  data: OrchestratorToolResult
+}
+
 function makeId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
@@ -128,7 +133,11 @@ function toAgentResponse<T>(request: AgentRequest, toolResult: OrchestratorToolR
 export async function dispatch<T = unknown>(opts: DispatchOptions): Promise<ParsedAgentResponse<T>> {
   const request = buildRequest(opts)
   const call = buildToolCall(request)
-  const toolResult = await apiPost<OrchestratorToolResult>('/api/tools/call', call)
+  const gatewayResult = await apiPost<ToolGatewayEnvelope>(`/api/tools/${call.tool_name}`, {
+    call_id: call.call_id,
+    ...call.arguments,
+  })
+  const toolResult = gatewayResult.data
   const response = toAgentResponse<T>(request, toolResult)
   useTelemetryStore.getState().updateFromResponse(response.tokens_used, response.cost_dkk)
   return response

@@ -18,6 +18,61 @@ import { v4 as uuid } from 'uuid'
 
 export const toolGatewayRouter = Router()
 
+function respondLegacyToolResult(res: Response, result: Awaited<ReturnType<typeof executeToolUnified>>) {
+  const httpStatus = result.status === 'success' ? 200
+    : result.status === 'timeout' ? 504
+    : 500
+
+  res.status(httpStatus).json({
+    call_id: result.call_id,
+    status: result.status,
+    result: result.result,
+    error_message: result.error_message ?? null,
+    duration_ms: result.duration_ms,
+    completed_at: result.completed_at,
+  })
+}
+
+/**
+ * POST /api/tools/call — backward-compatible shim for legacy cc-v4 clients.
+ *
+ * Accepts the old OrchestratorToolCall envelope and forwards to the canonical
+ * /api/tools/:name gateway. Keep this until all clients have migrated.
+ */
+toolGatewayRouter.post('/call', async (req: Request, res: Response) => {
+  const toolName = typeof req.body?.tool_name === 'string' ? req.body.tool_name : null
+  const callId = typeof req.body?.call_id === 'string' ? req.body.call_id : uuid()
+  const args = req.body?.arguments && typeof req.body.arguments === 'object'
+    ? req.body.arguments as Record<string, unknown>
+    : {}
+
+  if (!toolName) {
+    res.status(400).json({
+      call_id: callId,
+      status: 'error',
+      result: null,
+      error_message: 'Legacy /api/tools/call requires tool_name',
+      duration_ms: 0,
+      completed_at: new Date().toISOString(),
+    })
+    return
+  }
+
+  logger.warn({ tool: toolName, call_id: callId }, 'Deprecated /api/tools/call shim used')
+
+  const result = await executeToolUnified(toolName, args, {
+    call_id: callId,
+    source_protocol: 'legacy-rest',
+    fold: req.query.fold !== 'false',
+  })
+
+  if (result.status === 'success') {
+    recordToolCall(toolName)
+  }
+
+  respondLegacyToolResult(res, result)
+})
+
 /**
  * POST /api/tools/:name — Execute an orchestrator tool by name.
  *
