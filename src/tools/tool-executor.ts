@@ -1859,39 +1859,37 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     case 'fleet_pheromone_backfill': {
       try {
         const { processFleetBatchForPheromones } = await import('../swarm/fleet-pheromone-bridge.js')
-        // Fetch recent evals from Redis
-        const redis = getRedis()
-        if (!redis) return 'Error: Redis required for fleet pheromone backfill'
+        const { getAllFleetLearnings } = await import('../swarm/peer-eval.js')
 
-        // Get all fleet evals from the peer-eval list
-        const raw = await redis.lrange('peer-eval:all', 0, (args.max_evals as number) ?? 499)
-        const evals = raw.map(r => {
-          try {
-            const parsed = JSON.parse(r)
-            return {
-              taskType: parsed.taskType ?? 'unknown',
-              agentId: parsed.agentId ?? 'unknown',
-              score: parsed.metrics?.quality_score ?? 0.5,
-              latency_ms: parsed.metrics?.latency_ms ?? 0,
-              cost: parsed.metrics?.cost_usd ?? 0,
-              success: parsed.success ?? true,
-              timestamp: parsed.timestamp ?? new Date().toISOString(),
-            }
-          } catch {
-            return null
-          }
-        }).filter(Boolean) as Array<{ taskType: string; agentId: string; score: number; latency_ms: number; cost: number; success: boolean; timestamp: string }>
-
+        // Use fleet-aggregate (one signal per task type), not raw evals.
+        // FleetLearning lives in-memory + Redis-hydrated; this is the canonical
+        // source the dashboard queries via /api/peer-eval/fleet.
+        const learnings = getAllFleetLearnings()
         const minScore = typeof args.min_score === 'number' ? args.min_score : 0
-        const filtered = evals.filter(e => e.score >= minScore)
-        const result = await processFleetBatchForPheromones(filtered)
+        const minEvals = typeof args.min_evals === 'number' ? args.min_evals : 1
+
+        const evals = learnings
+          .filter(l => l.totalEvals >= minEvals && l.avgScore >= minScore)
+          .map(l => ({
+            taskType: l.taskType,
+            agentId: l.bestAgent ?? 'fleet-aggregate',
+            score: l.avgScore,
+            latency_ms: Math.round(l.avgLatency ?? 0),
+            cost: l.avgCost ?? 0,
+            success: l.avgScore >= 0.5,
+            timestamp: l.lastUpdated ?? new Date().toISOString(),
+          }))
+
+        const limited = typeof args.max_evals === 'number' ? evals.slice(0, args.max_evals) : evals
+        const result = await processFleetBatchForPheromones(limited)
 
         return JSON.stringify({
-          total_evals_available: evals.length,
-          total_evals_processed: result.total,
+          total_task_types_available: learnings.length,
+          total_task_types_processed: result.total,
           pheromones_deposited: result.deposited,
           errors: result.errors,
-          filter: { min_score: minScore },
+          filter: { min_score: minScore, min_evals: minEvals },
+          source: 'fleet-aggregate (getAllFleetLearnings)',
         }, null, 2)
       } catch (err) {
         return `Fleet pheromone backfill failed: ${err instanceof Error ? err.message : String(err)}`
