@@ -245,7 +245,7 @@ RULES:
       provider: 'deepseek',
       messages: [
         { role: 'system', content: 'You are a JSON-only API for an evolutionary AI system. Respond with ONLY valid JSON. No markdown code blocks, no explanation text, no extra commentary. The response must parse as valid JSON.' },
-        { role: 'user', content: base_prompt },
+        { role: 'user', content: basePrompt },
       ],
       model: 'deepseek-chat',
       max_tokens: 4000,
