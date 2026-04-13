@@ -13070,6 +13070,31 @@ var init_tool_registry = __esm({
         timeoutMs: 1e4,
         outputDescription: "Array of bi-temporal facts matching filters"
       }),
+      // ─── LIN-774: Internal Capability Matching ──────────────────────────
+      defineTool({
+        name: "capability_match",
+        namespace: "agents",
+        description: "LIN-774: Match task requirements against available capabilities from MCP tools, agents, patterns, and services. Returns ranked matches with confidence scores. Use to find the right tool/agent/pattern/service for a task.",
+        input: z.object({
+          required_capabilities: z.array(z.string()).describe('List of required capabilities (e.g., ["optimization", "graph", "compliance"])'),
+          min_confidence: z.number().optional().describe("Minimum confidence threshold 0-1 (default: 0.3)"),
+          max_results: z.number().optional().describe("Max results to return (default: 20)")
+        }),
+        timeoutMs: 1e4,
+        outputDescription: "Ranked list of CapabilityMatch objects from all sources (mcp_tool, agent, pattern, service)"
+      }),
+      // ─── Fleet Learning D1: Fleet-Pheromone Bridge ─────────────────────
+      defineTool({
+        name: "fleet_pheromone_backfill",
+        namespace: "fleet-learning",
+        description: "D1: Backfill historical fleet evaluation data into pheromone deposits. Converts past 2,705+ evals into ATTRACTION/ALERT/TRAIL pheromones. Use once to seed the pheromone system with fleet intelligence.",
+        input: z.object({
+          max_evals: z.number().optional().describe("Max evals to process (default: 500)"),
+          min_score: z.number().optional().describe("Only process evals with score >= this (default: 0)")
+        }),
+        timeoutMs: 12e4,
+        outputDescription: "Backfill results: total evals processed, pheromones deposited, errors"
+      }),
       defineTool({
         name: "failure_harvest",
         namespace: "intelligence",
@@ -23254,6 +23279,468 @@ var init_adaptive_rag_router = __esm({
   }
 });
 
+// src/agents/capability-matcher.ts
+var capability_matcher_exports = {};
+__export(capability_matcher_exports, {
+  findBestAgent: () => findBestAgent,
+  findBestTool: () => findBestTool,
+  queryCapabilities: () => queryCapabilities
+});
+function extractToolCapabilities(tool) {
+  const capabilities = /* @__PURE__ */ new Set();
+  const name = tool.function.name.toLowerCase();
+  const desc = tool.function.description.toLowerCase();
+  const combined = `${name} ${desc}`;
+  if (tool.namespace) capabilities.add(`namespace:${tool.namespace}`);
+  const keywordMap = {
+    "search": ["search", "retrieval"],
+    "graph": ["graph", "cypher", "neo4j"],
+    "rag": ["retrieval", "augmented-generation"],
+    "reason": ["reasoning", "analysis"],
+    "linear": ["project-management", "issue-tracking"],
+    "memory": ["memory", "persistence"],
+    "compliance": ["compliance", "audit", "regulatory"],
+    "deliverable": ["document-generation", "consulting"],
+    "inventor": ["evolution", "optimization", "experiment"],
+    "benchmark": ["evaluation", "measurement"],
+    "prompt": ["prompt-management"],
+    "fact": ["fact-storage", "knowledge-representation"],
+    "rag_route": ["retrieval-routing", "adaptive-rag"],
+    "skill": ["knowledge-acquisition"],
+    "due_diligence": ["osint", "risk-assessment"],
+    "ab_test": ["experimentation", "optimization"],
+    "drift": ["monitoring", "anomaly-detection"],
+    "cost": ["cost-tracking", "attribution"],
+    "health": ["monitoring", "observability"],
+    "metrics": ["metrics", "observability"],
+    "log": ["logging", "observability"],
+    "agent": ["agent-coordination"],
+    "chat": ["a2a-communication"],
+    "model": ["model-routing", "llm-management"],
+    "workflow": ["workflow-management"],
+    "governance": ["governance", "policy"],
+    "deployment": ["deployment", "infrastructure"],
+    "hyperagent": ["autonomous-execution"],
+    "pheromone": ["stigmergy", "swarm-intelligence"],
+    "peer_eval": ["peer-review", "fleet-learning"],
+    "flywheel": ["continuous-improvement"],
+    "anomaly": ["anomaly-detection", "monitoring"]
+  };
+  for (const [keyword, caps] of Object.entries(keywordMap)) {
+    if (combined.includes(keyword)) {
+      for (const cap of caps) capabilities.add(cap);
+    }
+  }
+  if (tool.timeoutMs && tool.timeoutMs > 6e4) capabilities.add("long-running");
+  if (tool.timeoutMs && tool.timeoutMs < 1e4) capabilities.add("fast-response");
+  return Array.from(capabilities);
+}
+function extractAgentCapabilities(agentId) {
+  const agent = AgentRegistry.get(agentId);
+  if (!agent) return [];
+  const capabilities = new Set(agent.handshake?.capabilities ?? []);
+  if (agent.allowed_tool_namespaces) {
+    for (const ns of agent.allowed_tool_namespaces) {
+      capabilities.add(`namespace:${ns}`);
+    }
+  }
+  return Array.from(capabilities);
+}
+function computeConfidence(required2, available) {
+  if (required2.length === 0) return 1;
+  const matched = required2.filter((r) => available.some(
+    (a) => a.toLowerCase() === r.toLowerCase() || a.toLowerCase().includes(r.toLowerCase()) || r.toLowerCase().includes(a.toLowerCase())
+  ));
+  return matched.length / required2.length;
+}
+async function queryCapabilities(query) {
+  const { required_capabilities, min_confidence = 0.3, max_results = 20 } = query;
+  const matches = [];
+  const { ORCHESTRATOR_TOOLS: ORCHESTRATOR_TOOLS3 } = await Promise.resolve().then(() => (init_tool_registry(), tool_registry_exports));
+  for (const tool of ORCHESTRATOR_TOOLS3) {
+    const caps = extractToolCapabilities(tool);
+    const confidence = computeConfidence(required_capabilities, caps);
+    if (confidence >= min_confidence) {
+      const matched = required_capabilities.filter((r) => caps.some(
+        (a) => a.toLowerCase() === r.toLowerCase() || a.toLowerCase().includes(r.toLowerCase())
+      ));
+      matches.push({
+        source: "mcp_tool",
+        id: tool.function.name,
+        name: tool.function.name,
+        capabilities: caps,
+        matched_capabilities: matched,
+        confidence,
+        metadata: { namespace: tool.namespace, timeout_ms: tool.timeoutMs }
+      });
+    }
+  }
+  const agents = AgentRegistry.list();
+  for (const agent of agents) {
+    const caps = extractAgentCapabilities(agent.agent_id);
+    const confidence = computeConfidence(required_capabilities, caps);
+    if (confidence >= min_confidence) {
+      const matched = required_capabilities.filter((r) => caps.some(
+        (a) => a.toLowerCase() === r.toLowerCase() || a.toLowerCase().includes(r.toLowerCase())
+      ));
+      matches.push({
+        source: "agent",
+        id: agent.agent_id,
+        name: agent.handshake?.display_name ?? agent.agent_id,
+        capabilities: caps,
+        matched_capabilities: matched,
+        confidence,
+        metadata: { status: agent.status, last_seen: agent.last_seen }
+      });
+    }
+  }
+  for (const pattern of KNOWN_PATTERNS) {
+    const confidence = computeConfidence(required_capabilities, pattern.capabilities);
+    if (confidence >= min_confidence) {
+      const matched = required_capabilities.filter((r) => pattern.capabilities.some(
+        (a) => a.toLowerCase() === r.toLowerCase() || a.toLowerCase().includes(r.toLowerCase())
+      ));
+      matches.push({
+        source: "pattern",
+        id: pattern.id,
+        name: pattern.name,
+        capabilities: pattern.capabilities,
+        matched_capabilities: matched,
+        confidence,
+        metadata: pattern.metadata
+      });
+    }
+  }
+  for (const service of KNOWN_SERVICES) {
+    const confidence = computeConfidence(required_capabilities, service.capabilities);
+    if (confidence >= min_confidence) {
+      const matched = required_capabilities.filter((r) => service.capabilities.some(
+        (a) => a.toLowerCase() === r.toLowerCase() || a.toLowerCase().includes(r.toLowerCase())
+      ));
+      matches.push({
+        source: "service",
+        id: service.id,
+        name: service.name,
+        capabilities: service.capabilities,
+        matched_capabilities: matched,
+        confidence,
+        metadata: service.metadata
+      });
+    }
+  }
+  matches.sort((a, b) => b.confidence - a.confidence);
+  return matches.slice(0, max_results);
+}
+async function findBestTool(required_capabilities) {
+  const matches = await queryCapabilities({
+    required_capabilities,
+    min_confidence: 0.1,
+    max_results: 1
+  });
+  return matches.find((m) => m.source === "mcp_tool") ?? null;
+}
+async function findBestAgent(required_capabilities) {
+  const matches = await queryCapabilities({
+    required_capabilities,
+    min_confidence: 0.1,
+    max_results: 1
+  });
+  return matches.find((m) => m.source === "agent") ?? null;
+}
+var KNOWN_PATTERNS, KNOWN_SERVICES;
+var init_capability_matcher = __esm({
+  "src/agents/capability-matcher.ts"() {
+    "use strict";
+    init_agent_registry();
+    KNOWN_PATTERNS = [
+      {
+        id: "hexagonal-packing",
+        name: "Hexagonal Circle Packing",
+        capabilities: ["optimization", "mathematical", "geometric", "circle-packing"],
+        metadata: { domain: "mathematics", complexity: "high", sota: 2.635 }
+      },
+      {
+        id: "differential-evolution",
+        name: "Differential Evolution Optimizer",
+        capabilities: ["optimization", "evolutionary", "continuous", "gradient-free"],
+        metadata: { domain: "optimization", complexity: "medium", population_based: true }
+      },
+      {
+        id: "ucb1-sampling",
+        name: "Upper Confidence Bound Sampling",
+        capabilities: ["sampling", "exploration-exploitation", "multi-armed-bandit"],
+        metadata: { domain: "statistics", complexity: "medium", theoretical_regret_bound: "O(sqrt(n))" }
+      },
+      {
+        id: "rlm-reasoning",
+        name: "RLM Deep Reasoning",
+        capabilities: ["reasoning", "analysis", "planning", "multi-hop"],
+        metadata: { domain: "cognitive", complexity: "high", max_depth: 3 }
+      },
+      {
+        id: "graphrag-tri-channel",
+        name: "Tri-Channel Graph RAG",
+        capabilities: ["retrieval", "graphrag", "srag", "cypher", "multi-hop"],
+        metadata: { domain: "knowledge-retrieval", complexity: "high", channels: 3 }
+      },
+      {
+        id: "context-folding",
+        name: "Context Folding Pipeline",
+        capabilities: ["compression", "summarization", "context-management"],
+        metadata: { domain: "cognitive", complexity: "medium", max_tokens_in: 8e3, max_tokens_out: 500 }
+      },
+      {
+        id: "pheromone-routing",
+        name: "Pheromone-Based Routing",
+        capabilities: ["stigmergy", "adaptive-routing", "swarm-intelligence"],
+        metadata: { domain: "coordination", complexity: "high", decay_rate: 0.8 }
+      },
+      {
+        id: "compliance-audit",
+        name: "EU Compliance Audit Pipeline",
+        capabilities: ["compliance", "audit", "regulatory", "GDPR", "NIS2", "DORA", "AI-Act"],
+        metadata: { domain: "legal", complexity: "high", frameworks: 12 }
+      },
+      {
+        id: "deliverable-factory",
+        name: "Lego Factory Deliverable Generation",
+        capabilities: ["document-generation", "consulting", "structured-output"],
+        metadata: { domain: "consulting", complexity: "medium", max_length: 8e3 }
+      },
+      {
+        id: "inventor-evolution",
+        name: "ASI-Evolve Inventor Loop",
+        capabilities: ["evolution", "optimization", "closed-loop", "research", "experiment"],
+        metadata: { domain: "meta-optimization", complexity: "very-high", max_steps: 25 }
+      }
+    ];
+    KNOWN_SERVICES = [
+      {
+        id: "widgetdc-orchestrator",
+        name: "Orchestrator Service",
+        capabilities: ["tool-routing", "chain-execution", "inventor", "benchmark", "agent-coordination"],
+        metadata: { url: "https://orchestrator-production-c27e.up.railway.app", tools: 165 }
+      },
+      {
+        id: "widgetdc-backend",
+        name: "Backend MCP Service",
+        capabilities: ["graph-queries", "srag", "linear-integration", "audit", "memory"],
+        metadata: { url: "https://backend-production-d3da.up.railway.app", mcp_tools: 449 }
+      },
+      {
+        id: "widgetdc-rlm-engine",
+        name: "RLM Reasoning Engine",
+        capabilities: ["reasoning", "analysis", "planning", "folding", "learning"],
+        metadata: { url: "https://rlm-engine-production.up.railway.app", depth: 3 }
+      },
+      {
+        id: "widgetdc-neo4j",
+        name: "Neo4j Knowledge Graph",
+        capabilities: ["graph-storage", "cypher-queries", "vector-search", "relationship-traversal"],
+        metadata: { nodes: "1M+", relationships: "3.8M+", labels: 100 }
+      },
+      {
+        id: "widgetdc-redis",
+        name: "Redis Cache & State",
+        capabilities: ["caching", "state-persistence", "rate-limiting", "pub-sub"],
+        metadata: { ttl_max: "30d", max_memory: "256MB" }
+      }
+    ];
+  }
+});
+
+// src/swarm/fleet-pheromone-bridge.ts
+var fleet_pheromone_bridge_exports = {};
+__export(fleet_pheromone_bridge_exports, {
+  fleetPheromoneHook: () => fleetPheromoneHook,
+  processFleetBatchForPheromones: () => processFleetBatchForPheromones,
+  processFleetEvalForPheromones: () => processFleetEvalForPheromones
+});
+function taskTypeToDomain(taskType) {
+  const domainMap = {
+    "graph.stats": "graph-ops",
+    "graph.health": "graph-ops",
+    "graph.read_cypher": "graph-ops",
+    "graph.write_cypher": "graph-ops",
+    "srag.query": "knowledge-retrieval",
+    "kg_rag.query": "knowledge-retrieval",
+    "search_knowledge": "knowledge-retrieval",
+    "reason_deeply": "reasoning",
+    "analyze": "reasoning",
+    "plan": "reasoning",
+    "context_fold": "context-management",
+    "memory_store": "memory-ops",
+    "memory_retrieve": "memory-ops",
+    "memory_search": "memory-ops",
+    "memory_consolidate": "memory-ops",
+    "inventor_run": "evolution",
+    "inventor_status": "evolution",
+    "benchmark_run": "evaluation",
+    "peer_eval_evaluate": "fleet-learning",
+    "peer_eval_fleet": "fleet-learning",
+    "capability_match": "capability-matching",
+    "compliance_gap_audit": "compliance",
+    "due_diligence": "osint",
+    "deliverable_draft": "document-generation",
+    "rag_route": "retrieval-routing",
+    "prompt_ab_test": "prompt-optimization",
+    "fact_assert": "fact-storage",
+    "fact_query": "fact-storage",
+    "agent_drift_report": "monitoring",
+    "tool_metrics": "monitoring",
+    "runtime_summary": "monitoring",
+    "pr_review_parallel": "code-review",
+    "chat_send": "a2a-communication",
+    "chat_read": "a2a-communication",
+    "pheromone_deposit": "pheromone-ops",
+    "pheromone_sense": "pheromone-ops",
+    "flywheel_consolidation": "continuous-improvement",
+    "anomaly_scan": "anomaly-detection",
+    "hyperagent_auto_run": "autonomous-execution"
+  };
+  if (domainMap[taskType]) return domainMap[taskType];
+  for (const [prefix, domain] of Object.entries(domainMap)) {
+    if (taskType.startsWith(prefix)) return domain;
+  }
+  return taskType;
+}
+function getPreviousScore(taskType) {
+  return recentScores.get(taskType) ?? null;
+}
+function updateRecentScore(taskType, score) {
+  recentScores.set(taskType, score);
+  if (recentScores.size > MAX_CACHE_SIZE) {
+    const firstKey = recentScores.keys().next().value;
+    if (firstKey) recentScores.delete(firstKey);
+  }
+}
+async function processFleetEvalForPheromones(evalResult) {
+  const deposits = [];
+  const domain = taskTypeToDomain(evalResult.taskType);
+  const previousScore = getPreviousScore(evalResult.taskType);
+  updateRecentScore(evalResult.taskType, evalResult.score);
+  if (evalResult.score >= ATTRACTION_THRESHOLD) {
+    const deposit3 = {
+      type: "ATTRACTION",
+      domain,
+      intensity: evalResult.score,
+      agentId: evalResult.agentId,
+      metadata: {
+        taskType: evalResult.taskType,
+        score: evalResult.score,
+        latency_ms: evalResult.latency_ms,
+        cost: evalResult.cost,
+        source: "fleet-pheromone-bridge",
+        timestamp: evalResult.timestamp
+      }
+    };
+    deposits.push(deposit3);
+  }
+  if (evalResult.score < ALERT_THRESHOLD) {
+    const deposit3 = {
+      type: "ALERT",
+      domain,
+      intensity: 1 - evalResult.score,
+      agentId: evalResult.agentId,
+      metadata: {
+        taskType: evalResult.taskType,
+        score: evalResult.score,
+        latency_ms: evalResult.latency_ms,
+        source: "fleet-pheromone-bridge",
+        timestamp: evalResult.timestamp,
+        recommendation: `Avoid ${domain} domain until score improves`
+      }
+    };
+    deposits.push(deposit3);
+  }
+  if (previousScore !== null) {
+    const improvement = evalResult.score - previousScore;
+    if (improvement >= IMPROVEMENT_DELTA) {
+      const deposit3 = {
+        type: "TRAIL",
+        domain,
+        intensity: improvement,
+        agentId: evalResult.agentId,
+        metadata: {
+          taskType: evalResult.taskType,
+          previousScore,
+          currentScore: evalResult.score,
+          improvement,
+          source: "fleet-pheromone-bridge",
+          timestamp: evalResult.timestamp,
+          message: `Performance improved by ${(improvement * 100).toFixed(0)}%`
+        }
+      };
+      deposits.push(deposit3);
+    }
+  }
+  for (const deposit3 of deposits) {
+    try {
+      await callMcpTool({
+        toolName: "pheromone_deposit",
+        args: {
+          type: deposit3.type,
+          domain: deposit3.domain,
+          intensity: deposit3.intensity,
+          agent_id: deposit3.agentId,
+          metadata: deposit3.metadata
+        },
+        callId: `fleet-pheromone-${evalResult.taskType}-${Date.now()}`
+      });
+      logger.info(
+        { type: deposit3.type, domain: deposit3.domain, intensity: deposit3.intensity.toFixed(2), taskType: evalResult.taskType },
+        "Fleet pheromone deposited"
+      );
+    } catch (err) {
+      logger.warn(
+        { err: String(err), taskType: evalResult.taskType, type: deposit3.type },
+        "Failed to deposit fleet pheromone (non-critical)"
+      );
+    }
+  }
+  return deposits;
+}
+async function processFleetBatchForPheromones(evals) {
+  let deposited = 0;
+  let errors = 0;
+  for (const eval_ of evals) {
+    try {
+      const deposits = await processFleetEvalForPheromones(eval_);
+      deposited += deposits.length;
+    } catch {
+      errors++;
+    }
+  }
+  logger.info({ total: evals.length, deposited, errors }, "Fleet pheromone batch processing complete");
+  return { total: evals.length, deposited, errors };
+}
+function fleetPheromoneHook(taskType, agentId, score, latency_ms = 0, cost = 0) {
+  processFleetEvalForPheromones({
+    taskType,
+    agentId,
+    score,
+    latency_ms,
+    cost,
+    success: score >= 0.5,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  }).catch((err) => {
+    logger.warn({ err: String(err), taskType }, "Fleet pheromone hook failed (non-critical)");
+  });
+}
+var ATTRACTION_THRESHOLD, ALERT_THRESHOLD, IMPROVEMENT_DELTA, recentScores, MAX_CACHE_SIZE;
+var init_fleet_pheromone_bridge = __esm({
+  "src/swarm/fleet-pheromone-bridge.ts"() {
+    "use strict";
+    init_mcp_caller();
+    init_logger();
+    ATTRACTION_THRESHOLD = 0.75;
+    ALERT_THRESHOLD = 0.4;
+    IMPROVEMENT_DELTA = 0.1;
+    recentScores = /* @__PURE__ */ new Map();
+    MAX_CACHE_SIZE = 200;
+  }
+});
+
 // src/value-props/v8-v10-value-props.ts
 var v8_v10_value_props_exports = {};
 __export(v8_v10_value_props_exports, {
@@ -26526,7 +27013,7 @@ RULES:
       provider: "deepseek",
       messages: [
         { role: "system", content: "You are a JSON-only API for an evolutionary AI system. Respond with ONLY valid JSON. No markdown code blocks, no explanation text, no extra commentary. The response must parse as valid JSON." },
-        { role: "user", content: base_prompt }
+        { role: "user", content: basePrompt }
       ],
       model: "deepseek-chat",
       max_tokens: 4e3,
@@ -29754,6 +30241,79 @@ ${formatted}`;
       }
     }
     // ─── value-props.* — OSINT DD + DSPy + Bi-temporal (Week 9, V8-V10) ──
+    case "capability_match": {
+      try {
+        const { queryCapabilities: queryCapabilities2 } = await Promise.resolve().then(() => (init_capability_matcher(), capability_matcher_exports));
+        const requiredCapabilities = Array.isArray(args.required_capabilities) ? args.required_capabilities : [];
+        if (requiredCapabilities.length === 0) return "Error: required_capabilities array is required";
+        const matches = await queryCapabilities2({
+          required_capabilities: requiredCapabilities,
+          min_confidence: typeof args.min_confidence === "number" ? args.min_confidence : 0.3,
+          max_results: typeof args.max_results === "number" ? args.max_results : 20
+        });
+        if (matches.length === 0) return `No matches found for capabilities: ${requiredCapabilities.join(", ")}`;
+        const bySource = matches.reduce((acc, m) => {
+          if (!acc[m.source]) acc[m.source] = [];
+          acc[m.source].push(m);
+          return acc;
+        }, {});
+        const lines = [`# Capability Match Results`];
+        lines.push(`
+**Required:** ${requiredCapabilities.join(", ")}`);
+        lines.push(`**Found:** ${matches.length} matches across ${Object.keys(bySource).length} sources
+`);
+        for (const [source, sourceMatches] of Object.entries(bySource)) {
+          lines.push(`
+## ${source} (${sourceMatches.length})`);
+          for (const m of sourceMatches) {
+            lines.push(`
+### ${m.name} (confidence: ${(m.confidence * 100).toFixed(0)}%)`);
+            lines.push(`- Matched: ${m.matched_capabilities.join(", ")}`);
+            lines.push(`- All capabilities: ${m.capabilities.slice(0, 10).join(", ")}`);
+          }
+        }
+        return lines.join("\n");
+      } catch (err) {
+        return `Capability match failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    // ─── Fleet Learning D1: Fleet-Pheromone Bridge ──────────────────
+    case "fleet_pheromone_backfill": {
+      try {
+        const { processFleetBatchForPheromones: processFleetBatchForPheromones2 } = await Promise.resolve().then(() => (init_fleet_pheromone_bridge(), fleet_pheromone_bridge_exports));
+        const redis2 = getRedis();
+        if (!redis2) return "Error: Redis required for fleet pheromone backfill";
+        const raw = await redis2.lrange("peer-eval:all", 0, args.max_evals ?? 499);
+        const evals = raw.map((r) => {
+          try {
+            const parsed = JSON.parse(r);
+            return {
+              taskType: parsed.taskType ?? "unknown",
+              agentId: parsed.agentId ?? "unknown",
+              score: parsed.metrics?.quality_score ?? 0.5,
+              latency_ms: parsed.metrics?.latency_ms ?? 0,
+              cost: parsed.metrics?.cost_usd ?? 0,
+              success: parsed.success ?? true,
+              timestamp: parsed.timestamp ?? (/* @__PURE__ */ new Date()).toISOString()
+            };
+          } catch {
+            return null;
+          }
+        }).filter(Boolean);
+        const minScore = typeof args.min_score === "number" ? args.min_score : 0;
+        const filtered = evals.filter((e) => e.score >= minScore);
+        const result = await processFleetBatchForPheromones2(filtered);
+        return JSON.stringify({
+          total_evals_available: evals.length,
+          total_evals_processed: result.total,
+          pheromones_deposited: result.deposited,
+          errors: result.errors,
+          filter: { min_score: minScore }
+        }, null, 2);
+      } catch (err) {
+        return `Fleet pheromone backfill failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
     case "due_diligence": {
       try {
         const { handleDueDiligence: handleDueDiligence2 } = await Promise.resolve().then(() => (init_v8_v10_value_props(), v8_v10_value_props_exports));
@@ -30289,6 +30849,13 @@ ${lines.join("\n")}`;
         },
         insights
       });
+      if (qualityScore !== void 0) {
+        try {
+          const { fleetPheromoneHook: fleetPheromoneHook2 } = await Promise.resolve().then(() => (init_fleet_pheromone_bridge(), fleet_pheromone_bridge_exports));
+          fleetPheromoneHook2(taskType, agentId, qualityScore, latencyMs, costUsd ?? 0);
+        } catch {
+        }
+      }
       return JSON.stringify(report);
     }
     case "peer_eval_analyze": {
@@ -31569,6 +32136,10 @@ var init_mcp_caller = __esm({
       "prompt_ab_test",
       "fact_assert",
       "fact_query",
+      // LIN-774: Capability Matching
+      "capability_match",
+      // Fleet Learning D1
+      "fleet_pheromone_backfill",
       // Model routing
       "model_providers",
       "model_route",
