@@ -46469,6 +46469,7 @@ similarityRouter.get("/client/:id", async (req, res) => {
 // src/routes/engagements.ts
 init_engagement_engine();
 init_engagement_lineage();
+init_phantom_loop_selector();
 init_logger();
 import { Router as Router34 } from "express";
 var engagementsRouter = Router34();
@@ -46676,6 +46677,76 @@ engagementsRouter.get("/:id/context", async (req, res) => {
     res.status(500).json({
       success: false,
       error: { code: "CONTEXT_FAILED", message: err instanceof Error ? err.message : String(err), status_code: 500 }
+    });
+  }
+});
+engagementsRouter.get("/:id/intelligence", async (req, res) => {
+  const id = decodeURIComponent(req.params.id);
+  const engagement = await getEngagement(id);
+  if (!engagement) {
+    res.status(404).json({
+      success: false,
+      error: { code: "NOT_FOUND", message: "Engagement not found", status_code: 404 }
+    });
+    return;
+  }
+  try {
+    const [deliverables, artifacts, recommendation, plan] = await Promise.all([
+      listDeliverablesForEngagement(id, 8),
+      listArtifactsForEngagement(id, 8),
+      recommendPhantomSkillLoop(engagement.objective, engagement.domain),
+      getPlan2(id)
+    ]);
+    const recommendedNextAction = deliverables.length === 0 ? {
+      label: "Generate deliverable",
+      route: "/deliverable/draft",
+      rationale: "This engagement has no linked deliverable yet, so the next trustworthy move is to materialize the first client-facing output."
+    } : artifacts.length === 0 ? {
+      label: "Send artifact to Obsidian",
+      route: "/obsidian",
+      rationale: "The engagement has a deliverable but no deep-work artifact lineage yet. Materialization closes the consultant loop."
+    } : recommendation.recommended_loop.id === "standard_to_implementation" ? {
+      label: "Move to Project Board",
+      route: "/project-board",
+      rationale: "Coverage and runtime confidence are strong enough to convert recommendations into accountable execution."
+    } : recommendation.recommended_loop.id === "research_to_standard" || recommendation.recommended_loop.id === "harvest_to_pattern_library" ? {
+      label: "Expand evidence in Knowledge",
+      route: "/knowledge",
+      rationale: "The evidence pattern suggests that discovery or standardization should continue before more delivery work."
+    } : {
+      label: "Inspect Adoption Loop",
+      route: "/adoption",
+      rationale: "The best next move is to inspect reuse, pattern ranking, and adoption telemetry before acting further."
+    };
+    res.json({
+      success: true,
+      data: {
+        engagement_id: id,
+        framework_map: [
+          ...engagement.methodology_refs.map((framework) => ({
+            title: framework,
+            kind: "methodology_ref",
+            rationale: "Explicitly declared on the engagement object."
+          })),
+          {
+            title: `${engagement.domain} operating profile`,
+            kind: "domain_profile",
+            rationale: "Derived from the engagement domain for routing and framework framing."
+          }
+        ],
+        recommendation,
+        recommended_next_action: recommendedNextAction,
+        proof_state: {
+          has_plan: !!plan,
+          deliverables_count: deliverables.length,
+          artifacts_count: artifacts.length
+        }
+      }
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: { code: "INTELLIGENCE_FAILED", message: err instanceof Error ? err.message : String(err), status_code: 500 }
     });
   }
 });

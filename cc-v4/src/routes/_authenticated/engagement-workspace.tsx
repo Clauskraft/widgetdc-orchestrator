@@ -95,6 +95,38 @@ type EngagementContext = {
   }>
 }
 
+type EngagementIntelligence = {
+  engagement_id: string
+  framework_map: Array<{
+    title: string
+    kind: string
+    rationale: string
+  }>
+  recommendation: {
+    confidence: number
+    recommended_pattern: string
+    recommended_loop: {
+      id: string
+      name: string
+      description: string
+      skills: string[]
+    }
+    reuse_suggestions: string[]
+    warnings: string[]
+    selection_reasons: string[]
+  }
+  recommended_next_action: {
+    label: string
+    route: string
+    rationale: string
+  }
+  proof_state: {
+    has_plan: boolean
+    deliverables_count: number
+    artifacts_count: number
+  }
+}
+
 type KnowledgeFeed = {
   generated_at: string
   graph_pulse?: { total_nodes?: number } | null
@@ -232,6 +264,15 @@ function EngagementWorkspacePage() {
     if (engagementContextQuery.data?.plan) setGeneratedPlan(engagementContextQuery.data.plan)
   }, [engagementContextQuery.data?.plan])
 
+  const intelligenceQuery = useQuery<EngagementIntelligence | null>({
+    queryKey: ['engagement-intelligence', selectedEngagement?.$id],
+    enabled: !!selectedEngagement?.$id,
+    queryFn: async () => {
+      const response = await apiGet<ApiEnvelope<EngagementIntelligence>>(`/api/engagements/${selectedEngagement?.$id}/intelligence`)
+      return response.data
+    },
+  })
+
   const createEngagementMutation = useMutation({
     mutationFn: async () => apiPost<ApiEnvelope<Engagement>>('/api/engagements', {
       client: draftClient.trim(),
@@ -294,6 +335,8 @@ function EngagementWorkspacePage() {
   const gapAlerts = knowledgeFeedQuery.data?.gap_alerts ?? []
   const linkedDeliverables = engagementContextQuery.data?.deliverables ?? []
   const linkedArtifacts = engagementContextQuery.data?.artifacts ?? []
+  const frameworkMap = intelligenceQuery.data?.framework_map ?? []
+  const recommendation = intelligenceQuery.data?.recommendation ?? null
 
   return (
     <div className="flex flex-col gap-6 p-8">
@@ -492,6 +535,64 @@ function EngagementWorkspacePage() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-lg">
+              <Sparkles className="h-4 w-4" />
+              Consultant intelligence
+            </CardTitle>
+            <CardDescription>Phantom-guided loop selection and the next recommended consulting move for this engagement.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {intelligenceQuery.isLoading ? (
+              Array.from({ length: 3 }).map((_, index) => <Skeleton key={index} className="h-20 w-full" />)
+            ) : recommendation ? (
+              <>
+                <div className="rounded-xl border bg-muted/20 p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold">{recommendation.recommended_loop.name}</div>
+                      <p className="mt-1 text-sm text-muted-foreground">{recommendation.recommended_loop.description}</p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Badge>{Math.round(recommendation.confidence * 100)}% confidence</Badge>
+                      <Badge variant="outline">{recommendation.recommended_pattern}</Badge>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {recommendation.recommended_loop.skills.map((skill) => (
+                      <Badge key={skill} variant="secondary">{skill}</Badge>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-lg border p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold">{intelligenceQuery.data?.recommended_next_action.label}</div>
+                      <p className="mt-1 text-sm text-muted-foreground">{intelligenceQuery.data?.recommended_next_action.rationale}</p>
+                    </div>
+                    <Button variant="outline" onClick={() => navigate({ to: intelligenceQuery.data?.recommended_next_action.route as '/knowledge' | '/deliverable/draft' | '/obsidian' | '/project-board' | '/adoption' })}>
+                      Go to next move
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-3">
+                  <WorkspaceMetric label="Plan" value={intelligenceQuery.data?.proof_state.has_plan ? 'Yes' : 'No'} sub="Structured consulting path" />
+                  <WorkspaceMetric label="Deliverables" value={intelligenceQuery.data?.proof_state.deliverables_count ?? 0} sub="Linked client outputs" />
+                  <WorkspaceMetric label="Artifacts" value={intelligenceQuery.data?.proof_state.artifacts_count ?? 0} sub="Obsidian lineage items" />
+                </div>
+              </>
+            ) : (
+              <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
+                Intelligence will appear once an engagement is selected.
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-lg">
               <Network className="h-4 w-4" />
               Truth room
             </CardTitle>
@@ -584,6 +685,72 @@ function EngagementWorkspacePage() {
                 <ArrowRight className="h-4 w-4" />
               </button>
             </div>
+          </CardContent>
+        </Card>
+      </section>
+
+      <section className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <BookOpen className="h-4 w-4" />
+              Framework map
+            </CardTitle>
+            <CardDescription>Declared frameworks and domain profiles that shape this engagement.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {intelligenceQuery.isLoading ? (
+              Array.from({ length: 3 }).map((_, index) => <Skeleton key={index} className="h-20 w-full" />)
+            ) : frameworkMap.length === 0 ? (
+              <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
+                No framework anchors registered yet. Add methodology refs on the engagement to strengthen routing.
+              </div>
+            ) : (
+              frameworkMap.map((framework) => (
+                <div key={`${framework.kind}-${framework.title}`} className="rounded-lg border p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-semibold">{framework.title}</div>
+                    <Badge variant="outline">{framework.kind}</Badge>
+                  </div>
+                  <p className="mt-2 text-sm text-muted-foreground">{framework.rationale}</p>
+                </div>
+              ))
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <Target className="h-4 w-4" />
+              Routing rationale
+            </CardTitle>
+            <CardDescription>Explainable reasons behind the current Phantom-guided loop choice.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {intelligenceQuery.isLoading ? (
+              Array.from({ length: 3 }).map((_, index) => <Skeleton key={index} className="h-20 w-full" />)
+            ) : recommendation ? (
+              <>
+                {recommendation.selection_reasons.map((reason) => (
+                  <div key={reason} className="rounded-lg border p-4 text-sm text-muted-foreground">{reason}</div>
+                ))}
+                {recommendation.reuse_suggestions.length > 0 && (
+                  <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-4">
+                    <div className="text-sm font-semibold text-emerald-900">Reuse signals</div>
+                    <div className="mt-2 space-y-2 text-sm text-emerald-900/80">
+                      {recommendation.reuse_suggestions.map((suggestion) => (
+                        <div key={suggestion}>{suggestion}</div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
+                No routing rationale available yet.
+              </div>
+            )}
           </CardContent>
         </Card>
       </section>
