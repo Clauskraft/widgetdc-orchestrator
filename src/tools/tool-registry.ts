@@ -1193,6 +1193,19 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     outputDescription: 'Backfill results: total evals processed, pheromones deposited, errors',
   }),
 
+  // ─── Intent Detection + Skill Composition (LIN-774, @widgetdc/intent) ──
+
+  defineTool({
+    name: 'intent_detect',
+    namespace: 'intent',
+    description: 'LIN-774: Detect task intent and generate canonical skill composition plan. Uses shared @widgetdc/intent patterns: research-to-standard, harvest-to-pattern-library, standard-to-implementation, ci-triage, review-resolution, self-healing-recovery, visualization-system-loop. Returns: outputType, confidence, suggested skills, full composition plan with steps.',
+    input: z.object({
+      input: z.string().describe('Natural language task description'),
+    }),
+    timeoutMs: 5000,
+    outputDescription: 'IntentResult with matched intent, confidence, suggested skills, and SkillCompositionPlan with steps',
+  }),
+
   defineTool({
     name: 'failure_harvest',
     namespace: 'intelligence',

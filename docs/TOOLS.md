@@ -116,6 +116,7 @@ Every tool declares governance metadata per the Neural Bridge v2 specification:
 | 72 | `fact_query` | value-props | 10s | Query bi-temporal facts with temporal filters (as_of) |
 | 73 | `capability_match` | agents | 10s | LIN-774: Match capabilities across tools, agents, patterns, services |
 | 74 | `fleet_pheromone_backfill` | fleet-learning | 120s | D1: Backfill fleet evals into pheromone deposits (2,705+ evals) |
+| 75 | `intent_detect` | intent | 5s | LIN-774: Detect intent + generate skill composition plan (7 canonical patterns) |
 | 53 | `llm_chat` | llm | 60s | Direct LLM chat proxy supporting 6 providers |
 | 54 | `llm_providers` | llm | 5s | List available LLM providers with default models |
 | 55 | `decision_certify` | decisions | 30s | Certify an assembly as an architecture decision |

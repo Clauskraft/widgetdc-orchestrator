@@ -1288,6 +1288,12 @@ await test('118y. POST /api/tools/fleet_pheromone_backfill responds', async () =
   assert(r.status !== 404, `fleet_pheromone_backfill not deployed (404)`)
 })
 
+// ── 118z. intent_detect — LIN-774 Skill Composition ──
+await test('118z. POST /api/tools/intent_detect responds', async () => {
+  const r = await api('/api/tools/intent_detect', { method: 'POST', body: JSON.stringify({ input: 'implement the default method for all agents' }) })
+  assert(r.status !== 404, `intent_detect not deployed (404)`)
+})
+
 // ── 118w. memory_search with tier filter — CoALA W8.5 ──
 await test('118w. POST /api/tools/memory_search with tier responds', async () => {
   const r = await api('/api/tools/memory_search', { method: 'POST', body: JSON.stringify({ tier: 'episodic', limit: 3 }) })

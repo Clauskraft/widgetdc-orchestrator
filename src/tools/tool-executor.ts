@@ -1898,6 +1898,33 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    // ─── Intent Detection + Skill Composition (LIN-774) ─────────────
+
+    case 'intent_detect': {
+      try {
+        const { detectIntent, getSkillCompositionPatterns } = await import('../intent/intent-router.js')
+        const inputText = typeof args.input === 'string' ? args.input : ''
+        if (!inputText) return 'Error: input string is required'
+
+        const result = detectIntent(inputText)
+        const patterns = getSkillCompositionPatterns()
+
+        return JSON.stringify({
+          intent: {
+            matched: result.matched,
+            outputType: result.outputType,
+            confidence: result.confidence,
+            matchedKeywords: result.matchedKeywords,
+            suggestedSkills: result.suggestedSkills,
+          },
+          composition: result.composition,
+          availablePatterns: patterns.map(p => ({ id: p.id, name: p.name, taskClass: p.taskClass })),
+        }, null, 2)
+      } catch (err) {
+        return `Intent detection failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
     case 'due_diligence': {
       try {
         const { handleDueDiligence } = await import('../value-props/v8-v10-value-props.js')

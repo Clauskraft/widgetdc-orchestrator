@@ -205,6 +205,8 @@ const LOCAL_TOOLS = new Set([
   'capability_match',
   // Fleet Learning D1
   'fleet_pheromone_backfill',
+  // Intent Detection + Skill Composition (LIN-774)
+  'intent_detect',
   // Model routing
   'model_providers', 'model_route', 'model_cost_estimate', 'model_budget_status', 'model_policy_check',
   // Workflow
