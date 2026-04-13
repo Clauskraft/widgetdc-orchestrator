@@ -90,7 +90,10 @@ try {
     return m ? m[1] : null
   }).filter(Boolean)
 
-  console.log(`  Found ${registryTools.length} tools in registry: ${registryTools.join(', ')}`)
+  console.log(`  Found ${registryTools.length} tools in registry`)
+  if (process.env.CI_ADOPTION_VERBOSE === '1') {
+    console.log(`  ${registryTools.join(', ')}`)
+  }
 } catch (e) {
   addResult('Registry → Executor parity', false, [`ERROR reading tool-registry.ts: ${e.message}`])
 }
