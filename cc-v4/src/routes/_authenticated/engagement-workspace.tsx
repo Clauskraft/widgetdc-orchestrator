@@ -127,6 +127,35 @@ type EngagementIntelligence = {
   }
 }
 
+type EngagementEconomics = {
+  engagement_id: string
+  commercial: {
+    total_cost_dkk: number
+    total_requests: number
+    total_tokens: number
+    avg_success_rate: number
+    by_agent: Array<{
+      agent_id: string
+      requests: number
+      cost_dkk: number
+      success_rate: number
+    }>
+    by_tool: Record<string, {
+      calls: number
+      cost_dkk: number
+      avg_ms: number
+    }>
+  }
+  quality: {
+    deliverables_count: number
+    artifacts_count: number
+    total_citations: number
+    avg_confidence: number
+    provenance_completeness_percent: number
+    evidence_coverage_per_deliverable: number
+  }
+}
+
 type KnowledgeFeed = {
   generated_at: string
   graph_pulse?: { total_nodes?: number } | null
@@ -269,6 +298,15 @@ function EngagementWorkspacePage() {
     enabled: !!selectedEngagement?.$id,
     queryFn: async () => {
       const response = await apiGet<ApiEnvelope<EngagementIntelligence>>(`/api/engagements/${selectedEngagement?.$id}/intelligence`)
+      return response.data
+    },
+  })
+
+  const economicsQuery = useQuery<EngagementEconomics | null>({
+    queryKey: ['engagement-economics', selectedEngagement?.$id],
+    enabled: !!selectedEngagement?.$id,
+    queryFn: async () => {
+      const response = await apiGet<ApiEnvelope<EngagementEconomics>>(`/api/engagements/${selectedEngagement?.$id}/economics`)
       return response.data
     },
   })
@@ -817,6 +855,88 @@ function EngagementWorkspacePage() {
                       </div>
                     </div>
                   ))}
+                </div>
+              </>
+            )}
+          </CardContent>
+        </Card>
+      </section>
+
+      <section className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <Target className="h-4 w-4" />
+              Economics and quality
+            </CardTitle>
+            <CardDescription>Commercial legibility and output quality for the selected engagement.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {economicsQuery.isLoading ? (
+              Array.from({ length: 3 }).map((_, index) => <Skeleton key={index} className="h-20 w-full" />)
+            ) : (
+              <>
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  <WorkspaceMetric label="Cost" value={`${(economicsQuery.data?.commercial.total_cost_dkk ?? 0).toFixed(2)} DKK`} sub="Tracked engagement spend" />
+                  <WorkspaceMetric label="Requests" value={economicsQuery.data?.commercial.total_requests ?? 0} sub="Accounted requests" />
+                  <WorkspaceMetric label="Success" value={`${Math.round(economicsQuery.data?.commercial.avg_success_rate ?? 0)}%`} sub="Average successful executions" />
+                  <WorkspaceMetric label="Citations" value={economicsQuery.data?.quality.total_citations ?? 0} sub="Evidence across linked deliverables" />
+                  <WorkspaceMetric label="Confidence" value={`${Math.round((economicsQuery.data?.quality.avg_confidence ?? 0) * 100)}%`} sub="Average deliverable confidence" />
+                  <WorkspaceMetric label="Provenance" value={`${Math.round(economicsQuery.data?.quality.provenance_completeness_percent ?? 0)}%`} sub="Linked artifacts with traceable engagement ownership" />
+                </div>
+
+                <div className="rounded-lg border p-4 text-sm text-muted-foreground">
+                  Evidence coverage is currently {economicsQuery.data?.quality.evidence_coverage_per_deliverable ?? 0} citations per deliverable.
+                </div>
+              </>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <KanbanSquare className="h-4 w-4" />
+              Cost concentration
+            </CardTitle>
+            <CardDescription>See which agents and tools are carrying the engagement workload.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {economicsQuery.isLoading ? (
+              Array.from({ length: 3 }).map((_, index) => <Skeleton key={index} className="h-20 w-full" />)
+            ) : (
+              <>
+                <div className="space-y-3">
+                  {(economicsQuery.data?.commercial.by_agent ?? []).slice(0, 4).map((agent) => (
+                    <div key={agent.agent_id} className="rounded-lg border p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm font-semibold">{agent.agent_id}</div>
+                        <Badge variant="outline">{agent.cost_dkk.toFixed(2)} DKK</Badge>
+                      </div>
+                      <div className="mt-2 text-xs text-muted-foreground">
+                        {agent.requests} requests · {Math.round(agent.success_rate)}% success
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="space-y-3">
+                  {Object.entries(economicsQuery.data?.commercial.by_tool ?? {}).slice(0, 4).map(([tool, metrics]) => (
+                    <div key={tool} className="rounded-lg border p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm font-semibold">{tool}</div>
+                        <Badge variant="secondary">{metrics.cost_dkk.toFixed(2)} DKK</Badge>
+                      </div>
+                      <div className="mt-2 text-xs text-muted-foreground">
+                        {metrics.calls} calls · {metrics.avg_ms}ms avg latency
+                      </div>
+                    </div>
+                  ))}
+                  {Object.keys(economicsQuery.data?.commercial.by_tool ?? {}).length === 0 && (
+                    <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
+                      No engagement cost breakdown yet. This appears once tool calls are attributed with `engagement_id`.
+                    </div>
+                  )}
                 </div>
               </>
             )}
