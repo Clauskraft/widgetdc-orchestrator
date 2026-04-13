@@ -456,22 +456,79 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
     // If all rounds used tool_calls and no final content, do one more LLM call
     // WITHOUT tools to force a text response from the collected data
     if (!finalContent && toolRounds > 0) {
-      // Add explicit synthesis instruction
-      loopMessages.push({
-        role: 'user',
-        content: 'Baseret på alle tool-resultater ovenfor, generer nu dit fulde svar. Inkludér konkrete data, tal og referencer. Svar på dansk i consulting-kvalitet med overskrifter og struktur.',
+      // P0 FIX: Sanitize tool results — strip [object Object] and JSON noise
+      const sanitizedMessages = loopMessages.map(m => {
+        if (m.role === 'tool' && typeof m.content === 'string') {
+          let clean = m.content.replace(/\[object Object\]/g, '[structured data]')
+          // Strip excessive JSON blocks from tool results
+          clean = clean.replace(/```json[\s\S]*?```/g, '[JSON data omitted]')
+          return { ...m, content: clean }
+        }
+        return m
       })
-      logger.info({ toolRounds, messageCount: loopMessages.length }, 'Forcing text synthesis after tool rounds')
+
+      // P0 FIX: Structured synthesis prompt — enforce compliance-grade output
+      const assistant = ASSISTANT_MAP.get(model)
+      const domainContext = assistant ? `You are ${assistant.displayName}. ` : ''
+      const isCompliance = model === 'compliance-auditor'
+
+      const synthesisPrompt = isCompliance
+        ? `${domainContext}Based on all tool results above, generate a COMPLIANCE AUDIT REPORT in the following structure:
+
+# [Framework Name] Compliance Audit
+
+## Executive Summary
+- Overall compliance status (Compliant / Partial / Non-compliant)
+- Risk score (0-100)
+- Key findings (max 5 bullet points)
+
+## Gap Analysis
+For each gap found:
+- **Article/Requirement**: [reference]
+- **Status**: [Compliant/Partial/Non-compliant]
+- **Evidence**: [specific finding from tool results]
+- **Recommendation**: [actionable remediation]
+
+## Deadlines & Priority
+- Critical items (must fix immediately)
+- High priority (fix within 30 days)
+- Medium priority (fix within 90 days)
+
+## Conclusion
+Brief summary with next steps.
+
+RULES:
+- Use ONLY data from the tool results above — do NOT hallucinate
+- Cite specific sources as [Source: tool-name]
+- Do NOT include raw JSON, reasoning paths, or internal tool output
+- Reply in Danish with consulting-grade precision
+- If tool results contain "[structured data]" or "[JSON data omitted]", summarize what you know from the rest`
+        : `${domainContext}Baseret på alle tool-resultater ovenfor, generer nu dit fulde svar. Inkludér konkrete data, tal og referencer. Svar på dansk i consulting-kvalitet med overskrifter og struktur. Do NOT include raw JSON or internal reasoning — only the final structured answer.`
+
+      sanitizedMessages.push({
+        role: 'user',
+        content: synthesisPrompt,
+      })
+      logger.info({ toolRounds, messageCount: sanitizedMessages.length }, 'Forcing structured synthesis after tool rounds')
       const summaryResult = await chatLLM({
         provider,
-        messages: loopMessages,
+        messages: sanitizedMessages,
         model: providerModel,
-        temperature: temperature ?? 0.7,
+        temperature: temperature ?? 0.3, // Lower temp for structured output
         max_tokens: max_tokens ?? 4096,
         // No tools — force text response
       })
-      finalContent = summaryResult.content
-      logger.info({ contentLength: finalContent?.length ?? 0, hasContent: !!finalContent }, 'Synthesis result')
+
+      // P0 FIX: Strip raw reasoning from output
+      let cleanedOutput = summaryResult.content || ''
+      // Remove thinking/reasoning blocks
+      cleanedOutput = cleanedOutput.replace(/<think>[\s\S]*?<\/think>/g, '').trim()
+      cleanedOutput = cleanedOutput.replace(/##?\s*(?:Reasoning|Thought Process|Thinking|Analysis|Step[- ]by[- ]Step)[\s\S]*?(?=##|$)/gi, '').trim()
+      // Remove residual [object Object]
+      cleanedOutput = cleanedOutput.replace(/\[object Object\]/g, '')
+
+      finalContent = cleanedOutput
+      logger.info({ contentLength: finalContent?.length ?? 0, hasContent: !!finalContent, cleaned: cleanedOutput.length < (summaryResult.content?.length ?? 0) }, 'Structured synthesis complete')
       if (summaryResult.usage) {
         totalUsage.prompt_tokens += summaryResult.usage.prompt_tokens
         totalUsage.completion_tokens += summaryResult.usage.completion_tokens

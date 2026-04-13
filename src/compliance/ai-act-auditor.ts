@@ -281,6 +281,9 @@ export async function handleComplianceAudit(request: AgentRequest): Promise<Agen
 
     const report = runAudit(stack)
 
+    // P0 FIX: Persist to Neo4j as :ComplianceReport node
+    await persistComplianceReport(report)
+
     // Build human-readable output
     const lines = [
       `# EU AI Act Annex III Compliance Audit`,
@@ -324,5 +327,53 @@ export async function handleComplianceAudit(request: AgentRequest): Promise<Agen
     return agentSuccess(request, lines.join('\n'), { input: 0, output: lines.length * 10 })
   } catch (err) {
     return agentFailure(request, err instanceof Error ? err.message : String(err))
+  }
+}
+
+/**
+ * Persist compliance report as :ComplianceReport node in Neo4j.
+ * Uses MERGE idempotency on audit_id.
+ */
+export async function persistComplianceReport(report: AuditReport): Promise<void> {
+  try {
+    const { config } = await import('../config.js')
+    await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(config.backendApiKey ? { 'Authorization': `Bearer ${config.backendApiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        tool: 'graph.write_cypher',
+        payload: {
+          query: `MERGE (cr:ComplianceReport {audit_id: $audit_id})
+                  SET cr.framework = $framework,
+                      cr.score = $score,
+                      cr.critical_gaps = $critical_gaps,
+                      cr.high_gaps = $high_gaps,
+                      cr.medium_gaps = $medium_gaps,
+                      cr.low_gaps = $low_gaps,
+                      cr.total_gaps = $total_gaps,
+                      cr.components_audited = $components_audited,
+                      cr.generated_at = datetime($generated_at),
+                      cr.persisted_at = datetime()`,
+          params: {
+            audit_id: report.audit_id,
+            framework: 'EU AI Act Annex III',
+            score: report.compliance_score,
+            critical_gaps: report.critical_gaps,
+            high_gaps: report.high_gaps,
+            medium_gaps: report.medium_gaps,
+            low_gaps: report.low_gaps,
+            total_gaps: report.total_gaps,
+            components_audited: report.stack_items_count,
+            generated_at: report.audited_at,
+          },
+        },
+      }),
+      signal: AbortSignal.timeout(15000),
+    }).catch(() => {})
+  } catch {
+    // Non-fatal — report returned regardless of persistence
   }
 }

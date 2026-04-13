@@ -43,9 +43,28 @@ interface DualRAGResponse {
   route_strategy: QueryComplexity
   channels_used: string[]
   pollution_filtered: number
+  domain_filtered: number
 }
 
 // ─── Pollution Filter — imported from write-gate.ts (single source of truth) ─
+import { isPolluted } from '../write-gate.js'
+
+/** P0 FIX: Domain relevance filter — reject off-topic citations */
+const RELEVANCE_KEYWORDS = [
+  'compliance', 'regulation', 'GDPR', 'NIS2', 'DORA', 'CSRD', 'AI Act',
+  'security', 'risk', 'audit', 'governance', 'privacy', 'data protection',
+  'framework', 'standard', 'policy', 'control', 'requirement', 'enforcement',
+  'mapping', 'assessment', 'gap', 'remediation', 'article', 'directive',
+]
+
+function isDomainRelevant(text: string, query: string): boolean {
+  const q = query.toLowerCase()
+  // Always pass queries that contain compliance/regulation keywords
+  if (RELEVANCE_KEYWORDS.some(kw => q.includes(kw.toLowerCase()))) return true
+  // For general queries, check if content has relevant keywords
+  const t = text.toLowerCase()
+  return RELEVANCE_KEYWORDS.some(kw => t.includes(kw.toLowerCase()))
+}
 
 // ─── Query Complexity Classification ────────────────────────────────────────
 
@@ -279,6 +298,17 @@ export async function dualChannelRAG(query: string, options?: {
     return true
   })
 
+  // P0 FIX: Apply domain relevance filter — reject off-topic citations
+  let domainFiltered = 0
+  allResults = allResults.filter(r => {
+    if (!isDomainRelevant(r.content, query)) {
+      domainFiltered++
+      logger.debug({ source: r.source, preview: r.content.slice(0, 80) }, 'Filtered irrelevant result')
+      return false
+    }
+    return true
+  })
+
   // Sort by score descending, prioritize graphrag results
   allResults.sort((a, b) => {
     // graphrag synthesis always first
@@ -320,6 +350,7 @@ export async function dualChannelRAG(query: string, options?: {
     route_strategy: complexity,
     channels_used: channelsUsed,
     pollution_filtered: pollutionFiltered,
+    domain_filtered: domainFiltered,
   }
 
   // F4: Quality signal hook (non-blocking)
