@@ -26,6 +26,7 @@ import {
   ShieldCheck,
   FileSearch,
   Presentation,
+  BriefcaseBusiness,
 } from 'lucide-react'
 
 export interface NavItem {
@@ -44,6 +45,12 @@ export const sidebarData: NavGroup[] = [
   {
     label: 'Proof Flows',
     items: [
+      {
+        title: 'Engagement Workspace',
+        path: '/engagement-workspace',
+        icon: BriefcaseBusiness,
+        description: 'Unified consulting shell for context, precedents, planning, and handoff',
+      },
       {
         title: 'Compliance Audit',
         path: '/compliance/audit',

@@ -20,6 +20,7 @@ function AuthenticatedLayout() {
   const location = useLocation()
   const navigate = useNavigate()
   const activeClient = useSessionStore((state) => state.activeClient)
+  const engagementId = useSessionStore((state) => state.engagementId)
   const routeMeta = findRouteMeta(location.pathname)
 
   return (
@@ -41,6 +42,11 @@ function AuthenticatedLayout() {
                     Client: {activeClient}
                   </span>
                 )}
+                {engagementId && (
+                  <span className="text-sm text-muted-foreground">
+                    Engagement: {engagementId}
+                  </span>
+                )}
               </div>
               <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
                 {routeMeta?.description ?? 'Thin typed shell for WidgeTDC value-props and operator workflows.'}
@@ -48,6 +54,13 @@ function AuthenticatedLayout() {
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => navigate({ to: '/engagement-workspace' })}
+              >
+                Engagement Workspace
+              </Button>
               <Button
                 variant="outline"
                 size="sm"
