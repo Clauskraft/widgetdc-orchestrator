@@ -14,18 +14,36 @@ export const anomalyWatcherRouter = Router()
 
 /**
  * GET /status — Watcher state overview
+ * Returns full activeAnomalies and patterns arrays for frontend dashboard
  */
 anomalyWatcherRouter.get('/status', (_req: Request, res: Response) => {
   const state = getWatcherState()
   res.json({
     success: true,
     data: {
-      lastScanAt: state.lastScanAt,
       totalScans: state.totalScans,
+      lastScanAt: state.lastScanAt,
+      isScanning: false, // Static for now — could track in-progress scans
+      // Map anomalies to frontend shape: description → message
+      activeAnomalies: state.activeAnomalies.map(a => ({
+        id: a.id,
+        type: a.type,
+        severity: a.severity,
+        message: a.description, // Frontend expects 'message', backend has 'description'
+        detectedAt: a.detectedAt,
+        source: a.source,
+      })),
+      // Map patterns to frontend shape
+      patterns: state.patterns.map(p => ({
+        id: `pattern-${p.type}`,
+        name: p.knownFix || p.type,
+        type: p.type,
+        confidence: Math.min(1, p.count / 10), // Normalize count to 0-1 confidence
+        lastSeen: p.lastSeen,
+      })),
+      // Keep summary counts for backwards compatibility
       anomaliesDetected: state.anomaliesDetected,
       anomaliesResolved: state.anomaliesResolved,
-      activeCount: state.activeAnomalies.length,
-      patternCount: state.patterns.length,
       activeByValence: {
         negative: state.activeAnomalies.filter(a => a.valence === 'negative').length,
         positive: state.activeAnomalies.filter(a => a.valence === 'positive').length,
