@@ -56,6 +56,28 @@ interface TagCloud {
   [tag: string]: number
 }
 
+function isServiceUnavailableError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return /\b503\b/.test(error.message) || /service unavailable/i.test(error.message)
+}
+
+async function fetchVaultList(path?: string): Promise<{ files: VaultEntry[] }> {
+  const suffix = path ? `?path=${encodeURIComponent(path)}` : ''
+  try {
+    return await apiGet<{ files: VaultEntry[] }>(`/api/obsidian/vault/list${suffix}`)
+  } catch (error) {
+    if (isServiceUnavailableError(error)) {
+      return { files: [] }
+    }
+    throw error
+  }
+}
+
+function shouldRetryObsidianQuery(failureCount: number, error: unknown): boolean {
+  if (isServiceUnavailableError(error)) return false
+  return failureCount < 1
+}
+
 type OpenNoteResponse = {
   success: boolean
   path: string
@@ -262,9 +284,9 @@ function ObsidianPage() {
 
   const { data: vault, isLoading: vaultLoading } = useQuery<{ files: VaultEntry[] }>({
     queryKey: ['obsidian-vault'],
-    queryFn: () => apiGet('/api/obsidian/vault/list'),
+    queryFn: () => fetchVaultList(),
     enabled: status?.connected === true,
-    retry: 1,
+    retry: shouldRetryObsidianQuery,
   })
 
   const { data: vaultStats, isLoading: statsLoading } = useQuery<VaultStats>({
@@ -297,22 +319,22 @@ function ObsidianPage() {
 
   const { data: deliverableArtifacts, isLoading: deliverablesLoading } = useQuery<{ files: VaultEntry[] }>({
     queryKey: ['obsidian-artifacts', 'deliverables'],
-    queryFn: () => apiGet(`/api/obsidian/vault/list?path=${encodeURIComponent('/WidgeTDC/Deliverables')}`),
+    queryFn: () => fetchVaultList('/WidgeTDC/Deliverables'),
     enabled: status?.connected === true,
-    retry: 1,
+    retry: shouldRetryObsidianQuery,
   })
 
   const { data: complianceArtifacts, isLoading: complianceLoading } = useQuery<{ files: VaultEntry[] }>({
     queryKey: ['obsidian-artifacts', 'compliance'],
-    queryFn: () => apiGet(`/api/obsidian/vault/list?path=${encodeURIComponent('/WidgeTDC/Compliance Audits')}`),
+    queryFn: () => fetchVaultList('/WidgeTDC/Compliance Audits'),
     enabled: status?.connected === true,
-    retry: 1,
+    retry: shouldRetryObsidianQuery,
   })
   const { data: processDocsArtifacts, isLoading: processDocsLoading } = useQuery<{ files: VaultEntry[] }>({
     queryKey: ['obsidian-artifacts', 'process-docs'],
-    queryFn: () => apiGet(`/api/obsidian/vault/list?path=${encodeURIComponent('/WidgeTDC/Process Docs')}`),
+    queryFn: () => fetchVaultList('/WidgeTDC/Process Docs'),
     enabled: status?.connected === true,
-    retry: 1,
+    retry: shouldRetryObsidianQuery,
   })
   const metadataPaths = useMemo(
     () =>
