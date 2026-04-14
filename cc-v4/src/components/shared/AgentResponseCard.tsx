@@ -18,6 +18,11 @@ function StatusIcon({ status }: { status: AgentResponse['status'] }) {
 }
 
 export function AgentResponseCard({ response, title = 'Agent Response' }: { response: AgentResponse; title?: string }) {
+  const renderedOutput =
+    typeof response.output === 'string'
+      ? response.output
+      : JSON.stringify(response.output, null, 2)
+
   return (
     <Card>
       <CardHeader>
@@ -34,7 +39,7 @@ export function AgentResponseCard({ response, title = 'Agent Response' }: { resp
       </CardHeader>
       <CardContent className="space-y-4">
         <pre className="max-h-80 overflow-auto rounded-md border bg-muted/40 p-3 text-xs leading-5 whitespace-pre-wrap">
-          {response.output}
+          {renderedOutput}
         </pre>
 
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
