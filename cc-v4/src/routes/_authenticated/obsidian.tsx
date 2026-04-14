@@ -73,11 +73,6 @@ async function fetchVaultList(path?: string): Promise<{ files: VaultEntry[] }> {
   }
 }
 
-function shouldRetryObsidianQuery(failureCount: number, error: unknown): boolean {
-  if (isServiceUnavailableError(error)) return false
-  return failureCount < 1
-}
-
 type OpenNoteResponse = {
   success: boolean
   path: string
@@ -286,7 +281,7 @@ function ObsidianPage() {
     queryKey: ['obsidian-vault'],
     queryFn: () => fetchVaultList(),
     enabled: status?.connected === true,
-    retry: shouldRetryObsidianQuery,
+    retry: false,
   })
 
   const { data: vaultStats, isLoading: statsLoading } = useQuery<VaultStats>({
@@ -321,20 +316,20 @@ function ObsidianPage() {
     queryKey: ['obsidian-artifacts', 'deliverables'],
     queryFn: () => fetchVaultList('/WidgeTDC/Deliverables'),
     enabled: status?.connected === true,
-    retry: shouldRetryObsidianQuery,
+    retry: false,
   })
 
   const { data: complianceArtifacts, isLoading: complianceLoading } = useQuery<{ files: VaultEntry[] }>({
     queryKey: ['obsidian-artifacts', 'compliance'],
     queryFn: () => fetchVaultList('/WidgeTDC/Compliance Audits'),
     enabled: status?.connected === true,
-    retry: shouldRetryObsidianQuery,
+    retry: false,
   })
   const { data: processDocsArtifacts, isLoading: processDocsLoading } = useQuery<{ files: VaultEntry[] }>({
     queryKey: ['obsidian-artifacts', 'process-docs'],
     queryFn: () => fetchVaultList('/WidgeTDC/Process Docs'),
     enabled: status?.connected === true,
-    retry: shouldRetryObsidianQuery,
+    retry: false,
   })
   const metadataPaths = useMemo(
     () =>
