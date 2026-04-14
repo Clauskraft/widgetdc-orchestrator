@@ -41980,7 +41980,7 @@ cockpitRouter.get("/overview", async (req, res) => {
           sse_total: getSSEClientCount()
         },
         signals: {
-          anomaly_active: watcher.activeAnomalies,
+          anomaly_active: watcher.activeAnomalies.length,
           anomaly_scans: watcher.totalScans,
           pheromone_active: pheromone.activePheromones,
           pheromone_deposits: pheromone.totalDeposits,
