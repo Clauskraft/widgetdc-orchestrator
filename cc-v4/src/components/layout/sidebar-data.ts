@@ -1,5 +1,4 @@
 import {
-  BarChart3,
   Zap,
   Layers,
   MessageSquare,
@@ -15,7 +14,6 @@ import {
   Home,
   Bot,
   AlertTriangle,
-  LogOut,
   RefreshCw,
   Lightbulb,
   Activity,
@@ -27,7 +25,9 @@ import {
   FileSearch,
   Presentation,
   BriefcaseBusiness,
+  Workflow,
 } from 'lucide-react'
+import type { AppMode } from '@/lib/app-shell'
 
 export interface NavItem {
   title: string
@@ -38,12 +38,14 @@ export interface NavItem {
 
 export interface NavGroup {
   label: string
+  mode: AppMode | 'shared'
   items: NavItem[]
 }
 
 export const sidebarData: NavGroup[] = [
   {
-    label: 'Proof Flows',
+    label: 'Workspace',
+    mode: 'workspace',
     items: [
       {
         title: 'Engagement Workspace',
@@ -70,7 +72,7 @@ export const sidebarData: NavGroup[] = [
         description: 'V4 consulting deliverable factory',
       },
       {
-        title: 'Knowledge Search',
+        title: 'Knowledge',
         path: '/knowledge',
         icon: FileSearch,
         description: 'Search graph-backed context and evidence',
@@ -78,19 +80,50 @@ export const sidebarData: NavGroup[] = [
     ],
   },
   {
-    label: 'Operations',
+    label: 'Execution',
+    mode: 'workspace',
     items: [
-      {
-        title: 'Dashboard',
-        path: '/',
-        icon: Home,
-        description: 'Platform overview and KPIs',
-      },
       {
         title: 'Project Board',
         path: '/project-board',
         icon: Kanban,
-        description: 'Linear backlog — view, edit, assign agents',
+        description: 'Execution board for backlog, starts, and completion loops',
+      },
+      {
+        title: 'Obsidian Docs',
+        path: '/obsidian',
+        icon: BookOpen,
+        description: 'Canonical docs, lineage, and roundtrip artifacts',
+      },
+    ],
+  },
+  {
+    label: 'Cockpit',
+    mode: 'cockpit',
+    items: [
+      {
+        title: 'Cockpit Overview',
+        path: '/',
+        icon: Home,
+        description: 'MCP, provider, runtime, and operator control surface',
+      },
+      {
+        title: 'Chat',
+        path: '/chat',
+        icon: MessageSquare,
+        description: 'Operator chat and Open WebUI-adjacent conversations',
+      },
+      {
+        title: 'Observability',
+        path: '/observability',
+        icon: Activity,
+        description: 'Runtime health, Grafana, anomalies, and failures',
+      },
+      {
+        title: 'Architecture',
+        path: '/omega',
+        icon: Workflow,
+        description: 'Governance, architecture drift, and system integrity',
       },
       {
         title: 'Agents',
@@ -98,6 +131,12 @@ export const sidebarData: NavGroup[] = [
         icon: Bot,
         description: 'Agent status and capabilities',
       },
+    ],
+  },
+  {
+    label: 'Operations',
+    mode: 'cockpit',
+    items: [
       {
         title: 'Chains',
         path: '/chains',
@@ -110,52 +149,30 @@ export const sidebarData: NavGroup[] = [
         icon: RefreshCw,
         description: 'Scheduled jobs and triggers',
       },
-    ],
-  },
-  {
-    label: 'Intelligence',
-    items: [
-      {
-        title: 'Chat',
-        path: '/chat',
-        icon: MessageSquare,
-        description: 'Real-time chat interface',
-      },
-      {
-        title: 'Omega SITREP',
-        path: '/omega',
-        icon: ShieldAlert,
-        description: 'Governance and compliance status',
-      },
-      {
-        title: 'Knowledge',
-        path: '/knowledge',
-        icon: BookOpen,
-        description: 'Knowledge graph search',
-      },
-      {
-        title: 'Cognitive',
-        path: '/cognitive',
-        icon: Brain,
-        description: 'RLM reasoning status',
-      },
-    ],
-  },
-  {
-    label: 'Platform',
-    items: [
       {
         title: 'Value Flywheel',
         path: '/flywheel',
         icon: RotateCw,
-        description: '5-pillar compound health',
+        description: '5-pillar compound health and harvest-adjacent signals',
       },
       {
         title: 'Pheromone',
         path: '/pheromone',
         icon: Sparkles,
-        description: 'Signal layer activity',
+        description: 'Signal layer activity and nudge substrate',
       },
+      {
+        title: 'OpenClaw',
+        path: '/openclaw',
+        icon: Zap,
+        description: 'OpenClaw gateway',
+      },
+    ],
+  },
+  {
+    label: 'Signals',
+    mode: 'cockpit',
+    items: [
       {
         title: 'Fleet Learning',
         path: '/fleet-learning',
@@ -178,24 +195,13 @@ export const sidebarData: NavGroup[] = [
         title: 'Anomaly',
         path: '/anomaly',
         icon: AlertTriangle,
-        description: 'Anomaly detection',
+        description: 'Anomaly detection and active issues',
       },
       {
-        title: 'Observability',
-        path: '/observability',
-        icon: Activity,
-        description: 'Real-time platform health, Grafana, anomalies, failures',
-      },
-    ],
-  },
-  {
-    label: 'Analytics',
-    items: [
-      {
-        title: 'Audit Log',
-        path: '/audit',
-        icon: Activity,
-        description: 'System audit trail',
+        title: 'Adoption',
+        path: '/adoption',
+        icon: Network,
+        description: 'Tool adoption metrics and Phantom loop routing',
       },
       {
         title: 'Cost Intel',
@@ -204,32 +210,22 @@ export const sidebarData: NavGroup[] = [
         description: 'Token and DKK costs',
       },
       {
-        title: 'Adoption',
-        path: '/adoption',
-        icon: Network,
-        description: 'Tool adoption metrics',
-      },
-    ],
-  },
-  {
-    label: 'Integrations',
-    items: [
-      {
-        title: 'OpenClaw',
-        path: '/openclaw',
-        icon: Zap,
-        description: 'OpenClaw gateway',
+        title: 'Audit Log',
+        path: '/audit',
+        icon: Activity,
+        description: 'System audit trail',
       },
       {
-        title: 'Obsidian Vault',
-        path: '/obsidian',
-        icon: BookOpen,
-        description: 'Vault integration',
+        title: 'Cognitive',
+        path: '/cognitive',
+        icon: Brain,
+        description: 'RLM reasoning status',
       },
     ],
   },
   {
     label: 'System',
+    mode: 'shared',
     items: [
       {
         title: 'Settings',
@@ -237,15 +233,23 @@ export const sidebarData: NavGroup[] = [
         icon: Settings,
         description: 'Configuration and preferences',
       },
-      {
-        title: 'Help Center',
-        path: '/help',
-        icon: HelpCircle,
-        description: 'Documentation and support',
-      },
     ],
   },
 ]
+
+export function getSidebarGroupsForMode(mode: AppMode): NavGroup[] {
+  return sidebarData.filter((group) => group.mode === mode || group.mode === 'shared')
+}
+
+export function findRouteMeta(pathname: string) {
+  const items = sidebarData.flatMap((group) => group.items)
+
+  if (pathname === '/') {
+    return items.find((item) => item.path === '/')
+  }
+
+  return items.find((item) => pathname === item.path || pathname.startsWith(`${item.path}/`))
+}
 
 export const settingsSubPages = [
   { title: 'Account', path: '/settings/account', icon: Settings },
