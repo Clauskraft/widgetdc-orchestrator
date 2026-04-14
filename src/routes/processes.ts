@@ -35,7 +35,39 @@ type ProcessNode = {
   technology_links: Array<{ id: string; title: string; kind: string; support_score: number }>
 }
 
-const curatedState = new Map<string, Set<string>>()
+// Bounded LRU + TTL to prevent unbounded memory growth.
+// Engagements expire after 24h of no curate activity; cap at MAX_ENGAGEMENTS to
+// guard against worst-case unique-engagement bursts. (Persistent store is a
+// separate decision — this guard prevents OOM in single-instance mode.)
+const MAX_ENGAGEMENTS = 200
+const ENGAGEMENT_TTL_MS = 24 * 60 * 60 * 1000  // 24h
+type CuratedEntry = { ids: Set<string>; lastTouchedAt: number }
+const curatedState = new Map<string, CuratedEntry>()
+
+function touchCuratedEntry(engagementId: string): CuratedEntry {
+  const now = Date.now()
+  // Sweep stale entries
+  for (const [key, entry] of curatedState.entries()) {
+    if (now - entry.lastTouchedAt > ENGAGEMENT_TTL_MS) curatedState.delete(key)
+  }
+  let entry = curatedState.get(engagementId)
+  if (entry) {
+    entry.lastTouchedAt = now
+    // LRU: re-insert to move to end of insertion order
+    curatedState.delete(engagementId)
+    curatedState.set(engagementId, entry)
+    return entry
+  }
+  entry = { ids: new Set<string>(), lastTouchedAt: now }
+  curatedState.set(engagementId, entry)
+  // Cap on size — evict oldest (first key in insertion order = oldest LRU)
+  while (curatedState.size > MAX_ENGAGEMENTS) {
+    const oldestKey = curatedState.keys().next().value
+    if (!oldestKey) break
+    curatedState.delete(oldestKey)
+  }
+  return entry
+}
 
 const defaultLibraries: StandardLibrary[] = [
   {
@@ -142,10 +174,10 @@ function scoreFor(status: AlignmentStatus): number {
 }
 
 function buildNodes(engagementId: string, client: string, domain: string): ProcessNode[] {
-  const curated = curatedState.get(engagementId) ?? new Set<string>()
+  const curatedIds = curatedState.get(engagementId)?.ids ?? new Set<string>()
   return domainPreset(domain).map((preset, index) => {
     const processId = `${engagementId}:${preset.key}`
-    const isCurated = curated.has(processId)
+    const isCurated = curatedIds.has(processId)
     const structuralScore = scoreFor(preset.structural as AlignmentStatus)
     const controlScore = scoreFor(preset.control as AlignmentStatus)
     const methodScore = scoreFor(preset.method as AlignmentStatus)
@@ -257,9 +289,24 @@ processesRouter.post('/curate', async (req, res) => {
     return
   }
 
-  const curated = curatedState.get(engagement.$id) ?? new Set<string>()
-  curated.add(processId)
-  curatedState.set(engagement.$id, curated)
+  // Validate the process_id actually belongs to this engagement's inferred nodes.
+  // Prevents "curated" responses for IDs that never appear in /tree?mode=curated.
+  const validNode = buildNodes(engagement.$id, engagement.client, engagement.domain)
+    .find((entry) => entry.process_id === processId)
+  if (!validNode) {
+    res.status(404).json({
+      success: false,
+      error: {
+        code: 'NOT_FOUND',
+        message: `process_id '${processId}' is not part of engagement ${engagement.$id}`,
+        status_code: 404,
+      },
+    })
+    return
+  }
+
+  const entry = touchCuratedEntry(engagement.$id)
+  entry.ids.add(processId)
 
   res.json({
     success: true,
@@ -268,7 +315,7 @@ processesRouter.post('/curate', async (req, res) => {
       process_id: processId,
       curated: true,
       curated_at: new Date().toISOString(),
-      curated_count: curated.size,
+      curated_count: entry.ids.size,
     },
   })
 })

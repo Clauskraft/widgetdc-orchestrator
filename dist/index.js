@@ -47187,7 +47187,30 @@ engagementsRouter.get("/:id/outcome", async (req, res) => {
 init_engagement_engine();
 import { Router as Router37 } from "express";
 var processesRouter = Router37();
+var MAX_ENGAGEMENTS = 200;
+var ENGAGEMENT_TTL_MS = 24 * 60 * 60 * 1e3;
 var curatedState = /* @__PURE__ */ new Map();
+function touchCuratedEntry(engagementId) {
+  const now = Date.now();
+  for (const [key, entry2] of curatedState.entries()) {
+    if (now - entry2.lastTouchedAt > ENGAGEMENT_TTL_MS) curatedState.delete(key);
+  }
+  let entry = curatedState.get(engagementId);
+  if (entry) {
+    entry.lastTouchedAt = now;
+    curatedState.delete(engagementId);
+    curatedState.set(engagementId, entry);
+    return entry;
+  }
+  entry = { ids: /* @__PURE__ */ new Set(), lastTouchedAt: now };
+  curatedState.set(engagementId, entry);
+  while (curatedState.size > MAX_ENGAGEMENTS) {
+    const oldestKey = curatedState.keys().next().value;
+    if (!oldestKey) break;
+    curatedState.delete(oldestKey);
+  }
+  return entry;
+}
 var defaultLibraries = [
   {
     pack_id: "apqc-cross-industry",
@@ -47289,10 +47312,10 @@ function scoreFor(status) {
   }
 }
 function buildNodes(engagementId, client, domain) {
-  const curated = curatedState.get(engagementId) ?? /* @__PURE__ */ new Set();
+  const curatedIds = curatedState.get(engagementId)?.ids ?? /* @__PURE__ */ new Set();
   return domainPreset(domain).map((preset, index) => {
     const processId = `${engagementId}:${preset.key}`;
-    const isCurated = curated.has(processId);
+    const isCurated = curatedIds.has(processId);
     const structuralScore = scoreFor(preset.structural);
     const controlScore = scoreFor(preset.control);
     const methodScore = scoreFor(preset.method);
@@ -47389,9 +47412,20 @@ processesRouter.post("/curate", async (req, res) => {
     res.status(400).json({ success: false, error: { code: "VALIDATION_ERROR", message: "process_id is required", status_code: 400 } });
     return;
   }
-  const curated = curatedState.get(engagement.$id) ?? /* @__PURE__ */ new Set();
-  curated.add(processId);
-  curatedState.set(engagement.$id, curated);
+  const validNode = buildNodes(engagement.$id, engagement.client, engagement.domain).find((entry2) => entry2.process_id === processId);
+  if (!validNode) {
+    res.status(404).json({
+      success: false,
+      error: {
+        code: "NOT_FOUND",
+        message: `process_id '${processId}' is not part of engagement ${engagement.$id}`,
+        status_code: 404
+      }
+    });
+    return;
+  }
+  const entry = touchCuratedEntry(engagement.$id);
+  entry.ids.add(processId);
   res.json({
     success: true,
     data: {
@@ -47399,7 +47433,7 @@ processesRouter.post("/curate", async (req, res) => {
       process_id: processId,
       curated: true,
       curated_at: (/* @__PURE__ */ new Date()).toISOString(),
-      curated_count: curated.size
+      curated_count: entry.ids.size
     }
   });
 });
