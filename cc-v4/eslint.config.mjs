@@ -69,8 +69,8 @@ export default tseslint.config(
       'jsx-a11y/scope': 'warn',
       'jsx-a11y/tabindex-no-positive': 'warn',
 
-      // TanStack Router
-      '@tanstack/router/no-exported-route-file': 'warn',
+      // TanStack Router — plugin registered for future use
+      // '@tanstack/router/no-exported-route-file': 'warn',
     },
   },
 )

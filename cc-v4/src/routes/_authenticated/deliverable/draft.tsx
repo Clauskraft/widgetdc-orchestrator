@@ -80,7 +80,7 @@ const DELIVERABLE_BRIEFS: Record<'analysis' | 'roadmap' | 'assessment', { client
 }
 
 function parseInlineCitations(markdown: string): string[] {
-  const matches = [...markdown.matchAll(/\[\d+\]\s+([^\|\n]+)/g)]
+  const matches = [...markdown.matchAll(/\[\d+\]\s+([^|\n]+)/g)]
   const titles = matches.map((match) => match[1].trim()).filter(Boolean)
   return Array.from(new Set(titles))
 }
