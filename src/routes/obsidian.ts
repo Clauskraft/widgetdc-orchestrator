@@ -417,6 +417,16 @@ obsidianRouter.get('/vault/stats', async (_req, res) => {
 // ─── List directory ───────────────────────────────────────────────────────────
 
 obsidianRouter.get('/vault/list', async (req, res) => {
+  const respondDegraded = (message: string, mode: 'live' | 'github' | 'none', path: string) => {
+    res.json({
+      files: [],
+      degraded: true,
+      mode,
+      path,
+      error: message,
+    })
+  }
+
   if (isLiveMode()) {
     const path = (req.query.path as string) ?? '/'
     try {
@@ -424,7 +434,8 @@ obsidianRouter.get('/vault/list', async (req, res) => {
       if (!r.ok) throw new Error(`HTTP ${r.status}`)
       res.json(await r.json())
     } catch (err: any) {
-      res.status(503).json({ error: err.message })
+      logger.warn({ err: err.message, path }, 'Obsidian live list failed; returning degraded empty list')
+      respondDegraded(err?.message ?? 'Live vault list failed', 'live', path)
     }
     return
   }
@@ -437,12 +448,13 @@ obsidianRouter.get('/vault/list', async (req, res) => {
         files: entries.map(e => ({ path: e.path, type: e.type === 'dir' ? 'dir' : 'file' })),
       })
     } catch (err: any) {
-      res.status(503).json({ error: err.message })
+      logger.warn({ err: err.message, path }, 'Obsidian GitHub list failed; returning degraded empty list')
+      respondDegraded(err?.message ?? 'GitHub vault list failed', 'github', path)
     }
     return
   }
 
-  res.status(503).json({ error: 'Not configured' })
+  respondDegraded('Not configured', 'none', '/')
 })
 
 // ─── Search notes ─────────────────────────────────────────────────────────────
