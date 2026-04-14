@@ -79,6 +79,17 @@ function fmtDuration(ms?: number): string {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
+function asText(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (value == null) return '—'
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
 type SortKey = 'name' | 'status' | 'mode' | 'started' | 'duration'
 type SortDir = 'asc' | 'desc'
 
@@ -262,14 +273,14 @@ function ChainsPage() {
                           <div className="flex items-center gap-2">
                             <div className={`w-2 h-2 rounded-full flex-shrink-0 ${STATUS_DOT[exec.status] ?? 'bg-slate-400'}`} />
                             <div>
-                              <div className="font-medium">{exec.name}</div>
+                              <div className="font-medium">{asText(exec.name)}</div>
                               <div className="text-xs text-muted-foreground font-mono">{exec.execution_id.slice(0, 16)}…</div>
                             </div>
                           </div>
                         </td>
                         <td className="px-4 py-3">
                           <span className={`text-xs px-2 py-0.5 rounded-full font-medium capitalize ${CHAIN_MODE_COLORS[exec.mode] ?? 'bg-muted text-muted-foreground'}`}>
-                            {exec.mode}
+                            {asText(exec.mode)}
                           </span>
                         </td>
                         <td className="px-4 py-3">
@@ -319,12 +330,12 @@ function ChainsPage() {
                                     {exec.results.map((step, i) => (
                                       <tr key={step.step_id ?? i} className="border-b border-muted/40 last:border-0">
                                         <td className="py-1.5 pr-4 text-muted-foreground font-mono">{i + 1}</td>
-                                        <td className="py-1.5 pr-4 font-mono">{step.agent_id}</td>
-                                        <td className="py-1.5 pr-4 text-muted-foreground truncate max-w-[180px]">{step.action}</td>
+                                        <td className="py-1.5 pr-4 font-mono">{asText(step.agent_id)}</td>
+                                        <td className="py-1.5 pr-4 text-muted-foreground truncate max-w-[180px]">{asText(step.action)}</td>
                                         <td className="py-1.5 pr-4">
                                           <span className="flex items-center gap-1">
                                             <span className={`w-1.5 h-1.5 rounded-full ${STEP_STATUS_DOT[step.status] ?? 'bg-slate-400'}`} />
-                                            <span className="capitalize">{step.status}</span>
+                                            <span className="capitalize">{asText(step.status)}</span>
                                             {step.verified && <span className="text-green-600 ml-1">✓</span>}
                                           </span>
                                         </td>

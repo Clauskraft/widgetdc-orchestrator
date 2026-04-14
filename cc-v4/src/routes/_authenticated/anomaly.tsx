@@ -33,6 +33,24 @@ interface AnomalyStatus {
   }
 }
 
+function asText(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (value == null) return '—'
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function asLocaleTimestamp(value: unknown): string {
+  const raw = asText(value)
+  const ms = Date.parse(raw)
+  if (Number.isNaN(ms)) return raw
+  return new Date(ms).toLocaleString()
+}
+
 function AnomalyPage() {
   const queryClient = useQueryClient()
   const [acknowledging, setAcknowledging] = useState<string | null>(null)
@@ -159,13 +177,13 @@ function AnomalyPage() {
                           anomaly.severity === 'medium' ? 'default' : 'secondary'
                         }
                       >
-                        {anomaly.severity}
+                        {asText(anomaly.severity)}
                       </Badge>
-                      <span className="font-medium text-sm">{anomaly.type}</span>
+                      <span className="font-medium text-sm">{asText(anomaly.type)}</span>
                     </div>
-                    <p className="text-sm text-muted-foreground">{anomaly.message}</p>
+                    <p className="text-sm text-muted-foreground">{asText(anomaly.message)}</p>
                     <span className="text-xs text-muted-foreground">
-                      Source: {anomaly.source} · Detected: {new Date(anomaly.detectedAt).toLocaleString()}
+                      Source: {asText(anomaly.source)} · Detected: {asLocaleTimestamp(anomaly.detectedAt)}
                     </span>
                   </div>
                   <Button
@@ -201,9 +219,9 @@ function AnomalyPage() {
               {d.patterns.map((pattern) => (
                 <div key={pattern.id} className="flex items-center justify-between">
                   <div>
-                    <div className="font-medium text-sm">{pattern.name}</div>
+                    <div className="font-medium text-sm">{asText(pattern.name)}</div>
                     <div className="text-xs text-muted-foreground">
-                      Type: {pattern.type} · Last seen: {new Date(pattern.lastSeen).toLocaleString()}
+                      Type: {asText(pattern.type)} · Last seen: {asLocaleTimestamp(pattern.lastSeen)}
                     </div>
                   </div>
                   <div className="font-mono text-sm">
