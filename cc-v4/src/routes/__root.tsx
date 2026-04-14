@@ -1,5 +1,4 @@
 import { Outlet, createRootRoute } from '@tanstack/react-router'
-import { TanStackRouterDevtools } from '@tanstack/router-devtools'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 
 export const Route = createRootRoute({
@@ -20,7 +19,6 @@ export const Route = createRootRoute({
     >
       <>
         <Outlet />
-        {import.meta.env.DEV && <TanStackRouterDevtools />}
       </>
     </ErrorBoundary>
   ),
