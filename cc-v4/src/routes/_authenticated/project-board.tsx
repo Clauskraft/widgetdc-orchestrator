@@ -7,7 +7,7 @@
  */
 import { createFileRoute } from '@tanstack/react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { apiGet, apiPost, normalizeError } from '@/lib/api-client'
 import { EngagementScopeBanner } from '@/components/shared/EngagementScopeBanner'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -124,6 +124,26 @@ function applyIssueState(issues: LinearIssue[] | undefined, id: string, state: s
     : issue)
 }
 
+function dedupeIssues(issues: LinearIssue[] | undefined): LinearIssue[] {
+  if (!issues || issues.length === 0) return []
+  const byKey = new Map<string, LinearIssue>()
+  for (const issue of issues) {
+    const key = issue.id || issue.identifier
+    if (!key) continue
+    if (!byKey.has(key)) {
+      byKey.set(key, issue)
+      continue
+    }
+    const existing = byKey.get(key)!
+    const existingTs = Date.parse(existing.updatedAt || existing.createdAt || '')
+    const candidateTs = Date.parse(issue.updatedAt || issue.createdAt || '')
+    if (!Number.isNaN(candidateTs) && (Number.isNaN(existingTs) || candidateTs >= existingTs)) {
+      byKey.set(key, issue)
+    }
+  }
+  return Array.from(byKey.values())
+}
+
 // ─── Page ────────────────────────────────────────────────────────────────────
 
 function ProjectBoardPage() {
@@ -164,8 +184,10 @@ function ProjectBoardPage() {
     retry: false, // labels are non-critical
   })
 
+  const uniqueIssues = useMemo(() => dedupeIssues(issues), [issues])
+
   // Filter issues
-  const filteredIssues = issues?.filter(issue => {
+  const filteredIssues = useMemo(() => uniqueIssues.filter(issue => {
     const state = normalizeBoardState(issue.state)
     if (filterStatus !== 'all' && state !== normalizeBoardState(filterStatus)) return false
     if (filterAssignee !== 'all') {
@@ -173,7 +195,7 @@ function ProjectBoardPage() {
       if (assigneeName.toLowerCase() !== filterAssignee.toLowerCase()) return false
     }
     return true
-  }) ?? []
+  }), [uniqueIssues, filterStatus, filterAssignee])
 
   // Group by status
   const grouped = filteredIssues.reduce<Record<string, LinearIssue[]>>((acc, issue) => {
@@ -242,14 +264,14 @@ function ProjectBoardPage() {
 
   // Unique assignees
   const assignees = [...new Set(
-    issues?.map(i => i.assignee?.name || 'Unassigned')
+    uniqueIssues.map(i => i.assignee?.name || 'Unassigned')
   )].sort()
 
   // Stats
-  const totalIssues = issues?.length ?? 0
-  const inProgress = issues?.filter(i => normalizeBoardState(i.state) === 'in progress').length ?? 0
-  const completed = issues?.filter(i => normalizeBoardState(i.state) === 'completed').length ?? 0
-  const urgent = issues?.filter(i => i.priority === 1).length ?? 0
+  const totalIssues = uniqueIssues.length
+  const inProgress = uniqueIssues.filter(i => normalizeBoardState(i.state) === 'in progress').length
+  const completed = uniqueIssues.filter(i => normalizeBoardState(i.state) === 'completed').length
+  const urgent = uniqueIssues.filter(i => i.priority === 1).length
 
   return (
     <div className="flex flex-col gap-6 p-8">
