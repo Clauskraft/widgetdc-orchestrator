@@ -1,8 +1,8 @@
 {
-  "total": 165,
+  "total": 169,
   "clean": 122,
   "hard_errors": 0,
-  "warnings": 49,
+  "warnings": 55,
   "findings": [
     {
       "name": "adaptive_rag_query",
@@ -66,6 +66,15 @@
       "errors": [],
       "warnings": [
         "description 215 chars > 200"
+      ]
+    },
+    {
+      "name": "capability_match",
+      "namespace": "agents",
+      "errors": [],
+      "warnings": [
+        "description 219 chars > 200",
+        "description does not start with action verb (got \"lin\")"
       ]
     },
     {
@@ -174,6 +183,14 @@
       ]
     },
     {
+      "name": "fleet_pheromone_backfill",
+      "namespace": "fleet-learning",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"d\")"
+      ]
+    },
+    {
       "name": "forge_tool",
       "namespace": "intelligence",
       "errors": [],
@@ -233,6 +250,15 @@
       ]
     },
     {
+      "name": "intent_detect",
+      "namespace": "intent",
+      "errors": [],
+      "warnings": [
+        "description 356 chars > 200",
+        "description does not start with action verb (got \"lin\")"
+      ]
+    },
+    {
       "name": "inventor_run",
       "namespace": "inventor",
       "errors": [],
@@ -257,11 +283,11 @@
       ]
     },
     {
-      "name": "memory_consolidate",
+      "name": "memory_search",
       "namespace": "memory",
       "errors": [],
       "warnings": [
-        "description 215 chars > 200"
+        "description 213 chars > 200"
       ]
     },
     {
@@ -315,6 +341,14 @@
       ]
     },
     {
+      "name": "recommend_skill_loop",
+      "namespace": "adoption",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"recommend\")"
+      ]
+    },
+    {
       "name": "search_knowledge",
       "namespace": "knowledge",
       "errors": [],
@@ -355,5 +389,5 @@
       ]
     }
   ],
-  "generated_at": "2026-04-12T23:39:34.389Z"
+  "generated_at": "2026-04-14T16:57:12.329Z"
 }

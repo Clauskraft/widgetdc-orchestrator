@@ -72,8 +72,8 @@ function AuditPage() {
       rows = rows.filter((e) => e.status === statusFilter)
     }
     rows.sort((a, b) => {
-      let av = a[sort.key] ?? ''
-      let bv = b[sort.key] ?? ''
+      const av = a[sort.key] ?? ''
+      const bv = b[sort.key] ?? ''
       const cmp = av < bv ? -1 : av > bv ? 1 : 0
       return sort.dir === 'asc' ? cmp : -cmp
     })

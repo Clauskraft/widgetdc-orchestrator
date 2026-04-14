@@ -20,7 +20,9 @@ describe('cn() utility', () => {
   })
 
   it('handles conditional classes with array syntax', () => {
-    expect(cn('base', true && 'included', false && 'excluded')).toBe('base included')
+    const includeFirst = true
+    const includeSecond = false
+    expect(cn('base', includeFirst && 'included', includeSecond && 'excluded')).toBe('base included')
   })
 
   it('handles null and undefined inputs gracefully', () => {
