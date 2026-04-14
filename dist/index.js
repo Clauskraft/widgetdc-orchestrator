@@ -41927,6 +41927,13 @@ function summarizeCommand(command, result) {
       return `${result.providers.filter((provider) => provider.available).length} providers available.`;
     case "harvest.full":
       return `Full harvest completed across ${Object.keys(result.results ?? {}).length} domains.`;
+    case "harvest.guard":
+      return [
+        `Harvest guard executed.`,
+        `domains=${result.metrics?.domains_harvested ?? 0}`,
+        `providers=${result.metrics?.providers_available ?? 0}/${result.metrics?.providers_total ?? 0}`,
+        `score=${result.metrics?.compound_health_score ?? "n/a"}`
+      ].join(" ");
     case "flywheel.sync":
       return `Flywheel sync completed with compound score ${result.report?.compound_health_score ?? "n/a"}.`;
     case "flywheel.consolidation":
@@ -42024,6 +42031,38 @@ cockpitRouter.post("/commands/execute", async (req, res) => {
       case "harvest.full":
         result = { results: await runFullHarvest() };
         break;
+      case "harvest.guard": {
+        const [mcp, providers] = await Promise.all([
+          probeMcp(req),
+          Promise.resolve(listProviders())
+        ]);
+        const harvestResults = await runFullHarvest();
+        const syncReport = await runWeeklySync();
+        const watcher = getWatcherState();
+        const writeGate = getWriteGateStats();
+        const providerAvailable = providers.filter((provider) => provider.available).length;
+        result = {
+          gates: {
+            mcp_orchestrator: mcp.orchestrator.healthy,
+            mcp_backend: mcp.backend.healthy,
+            provider_available: providerAvailable > 0,
+            harvest_executed: Object.keys(harvestResults ?? {}).length > 0,
+            sync_executed: typeof syncReport?.compound_health_score === "number"
+          },
+          metrics: {
+            domains_harvested: Object.keys(harvestResults ?? {}).length,
+            providers_available: providerAvailable,
+            providers_total: providers.length,
+            compound_health_score: syncReport?.compound_health_score ?? null,
+            anomaly_active: watcher.activeAnomalies,
+            write_rejections: writeGate.writesRejected
+          },
+          harvest: harvestResults,
+          sync: syncReport,
+          mcp
+        };
+        break;
+      }
       case "flywheel.sync":
         result = { report: await runWeeklySync() };
         break;
@@ -49055,21 +49094,27 @@ anomalyWatcherRouter.get("/status", (_req, res) => {
       totalScans: state4.totalScans,
       lastScanAt: state4.lastScanAt,
       isScanning: false,
+      // Static for now — could track in-progress scans
+      // Map anomalies to frontend shape: description → message
       activeAnomalies: state4.activeAnomalies.map((a) => ({
         id: a.id,
         type: a.type,
         severity: a.severity,
         message: a.description,
+        // Frontend expects 'message', backend has 'description'
         detectedAt: a.detectedAt,
         source: a.source
       })),
+      // Map patterns to frontend shape
       patterns: state4.patterns.map((p) => ({
         id: `pattern-${p.type}`,
         name: p.knownFix || p.type,
         type: p.type,
         confidence: Math.min(1, p.count / 10),
+        // Normalize count to 0-1 confidence
         lastSeen: p.lastSeen
       })),
+      // Keep summary counts for backwards compatibility
       anomaliesDetected: state4.anomaliesDetected,
       anomaliesResolved: state4.anomaliesResolved,
       activeByValence: {
