@@ -49052,12 +49052,26 @@ anomalyWatcherRouter.get("/status", (_req, res) => {
   res.json({
     success: true,
     data: {
-      lastScanAt: state4.lastScanAt,
       totalScans: state4.totalScans,
+      lastScanAt: state4.lastScanAt,
+      isScanning: false,
+      activeAnomalies: state4.activeAnomalies.map((a) => ({
+        id: a.id,
+        type: a.type,
+        severity: a.severity,
+        message: a.description,
+        detectedAt: a.detectedAt,
+        source: a.source
+      })),
+      patterns: state4.patterns.map((p) => ({
+        id: `pattern-${p.type}`,
+        name: p.knownFix || p.type,
+        type: p.type,
+        confidence: Math.min(1, p.count / 10),
+        lastSeen: p.lastSeen
+      })),
       anomaliesDetected: state4.anomaliesDetected,
       anomaliesResolved: state4.anomaliesResolved,
-      activeCount: state4.activeAnomalies.length,
-      patternCount: state4.patterns.length,
       activeByValence: {
         negative: state4.activeAnomalies.filter((a) => a.valence === "negative").length,
         positive: state4.activeAnomalies.filter((a) => a.valence === "positive").length
