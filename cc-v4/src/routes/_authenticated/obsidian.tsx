@@ -237,6 +237,8 @@ function OutcomeBadge({ tone, children }: { tone: 'root' | 'evolving' | 'mature'
 }
 
 function ObsidianPage() {
+  "use no memo"
+
   const queryClient = useQueryClient()
   const [searchQuery, setSearchQuery] = useState('')
   const [activeSearch, setActiveSearch] = useState('')
