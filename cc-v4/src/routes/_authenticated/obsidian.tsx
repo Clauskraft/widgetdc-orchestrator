@@ -312,41 +312,22 @@ function ObsidianPage() {
     retry: 1,
   })
 
-  const { data: deliverableArtifacts, isLoading: deliverablesLoading } = useQuery<{ files: VaultEntry[] }>({
-    queryKey: ['obsidian-artifacts', 'deliverables'],
-    queryFn: () => fetchVaultList('/WidgeTDC/Deliverables'),
+  const activeArtifactFolder = ARTIFACT_FOLDERS.find((folder) => folder.key === artifactTab) ?? ARTIFACT_FOLDERS[0]
+  const { data: activeArtifactData, isLoading: artifactFilesLoading } = useQuery<{ files: VaultEntry[] }>({
+    queryKey: ['obsidian-artifacts', activeArtifactFolder.key],
+    queryFn: () => fetchVaultList(`/${activeArtifactFolder.path}`),
     enabled: status?.connected === true,
     retry: false,
   })
-
-  const { data: complianceArtifacts, isLoading: complianceLoading } = useQuery<{ files: VaultEntry[] }>({
-    queryKey: ['obsidian-artifacts', 'compliance'],
-    queryFn: () => fetchVaultList('/WidgeTDC/Compliance Audits'),
-    enabled: status?.connected === true,
-    retry: false,
-  })
-  const { data: processDocsArtifacts, isLoading: processDocsLoading } = useQuery<{ files: VaultEntry[] }>({
-    queryKey: ['obsidian-artifacts', 'process-docs'],
-    queryFn: () => fetchVaultList('/WidgeTDC/Process Docs'),
-    enabled: status?.connected === true,
-    retry: false,
-  })
+  const activeArtifactFiles = (activeArtifactData?.files ?? []).filter(
+    (file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')),
+  )
   const metadataPaths = useMemo(
     () =>
-      [
-        ...((deliverableArtifacts?.files ?? []).filter(
-          (file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')),
-        )),
-        ...((complianceArtifacts?.files ?? []).filter(
-          (file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')),
-        )),
-        ...((processDocsArtifacts?.files ?? []).filter(
-          (file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')),
-        )),
-      ]
+      activeArtifactFiles
         .slice(0, 24)
         .map((file) => file.path),
-    [complianceArtifacts?.files, deliverableArtifacts?.files, processDocsArtifacts?.files],
+    [activeArtifactFiles],
   )
 
   const { data: metadataBatch } = useQuery<{ entries: NoteMetadata[] }>({
@@ -450,15 +431,6 @@ function ObsidianPage() {
   const files = vault?.files ?? []
   const mdFiles = files.filter(f => f.type === 'file' && (f.path.endsWith('.md') || f.path.endsWith('.canvas')))
   const folders = files.filter(f => f.type === 'dir')
-  const deliverableFiles = (deliverableArtifacts?.files ?? []).filter((file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')))
-  const complianceFiles = (complianceArtifacts?.files ?? []).filter((file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')))
-  const processDocFiles = (processDocsArtifacts?.files ?? []).filter((file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')))
-  const activeArtifactFiles =
-    artifactTab === 'deliverables'
-      ? deliverableFiles
-      : artifactTab === 'compliance'
-        ? complianceFiles
-        : processDocFiles
   const parsedNote = noteContent ? parseFrontmatter(noteContent.content) : null
   const canvasPreview = noteContent && selectedNote?.endsWith('.canvas') ? parseCanvas(noteContent.content) : null
   const metadataEntries = metadataBatch?.entries ?? []
@@ -682,18 +654,8 @@ function ObsidianPage() {
               ))}
             </TabsList>
             {ARTIFACT_FOLDERS.map((folder) => {
-                    const filesForFolder =
-                      folder.key === 'deliverables'
-                        ? deliverableFiles
-                        : folder.key === 'compliance'
-                          ? complianceFiles
-                          : processDocFiles
-                    const isLoading =
-                      folder.key === 'deliverables'
-                        ? deliverablesLoading
-                        : folder.key === 'compliance'
-                          ? complianceLoading
-                          : processDocsLoading
+                    const filesForFolder = folder.key === artifactTab ? activeArtifactFiles : []
+                    const isLoading = folder.key === artifactTab ? artifactFilesLoading : false
               return (
                 <TabsContent key={folder.key} value={folder.key}>
                   <div className="grid gap-3 md:grid-cols-[1.15fr_0.85fr]">
