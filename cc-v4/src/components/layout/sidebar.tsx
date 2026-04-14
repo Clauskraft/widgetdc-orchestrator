@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useLocation, useNavigate } from '@tanstack/react-router'
-import { sidebarData } from './sidebar-data'
+import { getSidebarGroupsForMode } from './sidebar-data'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { Menu, X } from 'lucide-react'
@@ -8,6 +8,7 @@ import { useAuthStore } from '@/stores/auth-store'
 import { useSessionStore } from '@/stores/session'
 import { useTelemetryStore } from '@/stores/telemetry'
 import { useJobStore } from '@/stores/jobs'
+import { getAppModeForPath, getModeLabel } from '@/lib/app-shell'
 
 export function Sidebar() {
   const location = useLocation()
@@ -18,6 +19,8 @@ export function Sidebar() {
   const resetTelemetry = useTelemetryStore((state) => state.reset)
   const resetJobs = useJobStore((state) => state.reset)
   const activeClient = useSessionStore((state) => state.activeClient)
+  const appMode = getAppModeForPath(location.pathname)
+  const groups = getSidebarGroupsForMode(appMode)
 
   const isActive = (path: string) => location.pathname === path
 
@@ -46,16 +49,34 @@ export function Sidebar() {
           <div className="hidden md:block space-y-2">
             <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-muted-foreground">WidgeTDC</p>
             <div>
-              <h1 className="text-lg font-semibold">Client Delivery Cockpit</h1>
+              <h1 className="text-lg font-semibold">Unified Operating Shell</h1>
               <p className="text-sm text-muted-foreground">
-                {activeClient ? `Active client: ${activeClient}` : 'Proof-facing operator shell'}
+                {activeClient && appMode === 'workspace'
+                  ? `Active client: ${activeClient}`
+                  : `${getModeLabel(appMode)} mode`}
               </p>
+            </div>
+            <div className="flex gap-2 pt-1">
+              <Button
+                variant={appMode === 'workspace' ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => navigate({ to: '/engagement-workspace' })}
+              >
+                Workspace
+              </Button>
+              <Button
+                variant={appMode === 'cockpit' ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => navigate({ to: '/' })}
+              >
+                Cockpit
+              </Button>
             </div>
           </div>
         </div>
 
         <nav className="flex-1 overflow-auto p-4 space-y-6">
-          {sidebarData.map((group) => (
+          {groups.map((group) => (
             <div key={group.label}>
               <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">
                 {group.label}

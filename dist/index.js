@@ -41659,13 +41659,405 @@ dashboardRouter.get("/data", async (_req, res) => {
   res.json(payload);
 });
 
+// src/routes/cockpit.ts
+init_config();
+init_logger();
+init_agent_registry();
+init_llm_proxy();
+init_chain_engine();
+import { Router as Router14 } from "express";
+init_chat_broadcaster();
+init_sse();
+init_cognitive_proxy();
+init_mcp_caller();
+init_anomaly_watcher();
+init_pheromone_layer();
+init_peer_eval();
+init_write_gate();
+
+// src/flywheel/harvest-pipeline.ts
+init_logger();
+init_mcp_caller();
+import { v4 as uuid29 } from "uuid";
+async function extract(domain) {
+  const callId = `harvest-extract-${uuid29().substring(0, 8)}`;
+  try {
+    const result = await callMcpTool({
+      toolName: "srag.query",
+      args: {
+        query: `Find reusable consulting frameworks, templates, and solution patterns in the ${domain} domain. Focus on methodologies that can be generalized across clients.`
+      },
+      callId,
+      timeoutMs: 3e4
+    });
+    const items = result?.sources ?? result?.results ?? [];
+    logger.info({ domain, items: Array.isArray(items) ? items.length : 0 }, "Harvest extract complete");
+    return Array.isArray(items) ? items : [];
+  } catch (err) {
+    logger.warn({ domain, err: String(err) }, "Harvest extract failed");
+    return [];
+  }
+}
+function generalize(items, domain) {
+  return items.map((item, i) => {
+    const name = String(item.name ?? item.title ?? `${domain}-pattern-${i}`);
+    const content = String(item.content ?? item.description ?? item.summary ?? "");
+    let tier = "component";
+    if (content.length > 2e3 || name.toLowerCase().includes("framework")) tier = "framework";
+    else if (content.length > 500 || name.toLowerCase().includes("template")) tier = "template";
+    return {
+      id: `harvest-${uuid29().substring(0, 12)}`,
+      name,
+      tier,
+      description: content.substring(0, 300),
+      content: content.substring(0, 5e3),
+      // Cap at 5K chars
+      industries: [domain],
+      capabilities: [],
+      reuse_count: 0,
+      status: "draft",
+      created_at: (/* @__PURE__ */ new Date()).toISOString(),
+      source: `harvest-pipeline/${domain}`
+    };
+  });
+}
+async function store(components) {
+  if (components.length === 0) return 0;
+  const callId = `harvest-store-${uuid29().substring(0, 8)}`;
+  const labelMap = {
+    framework: "Framework",
+    template: "Template",
+    component: "Component"
+  };
+  let stored = 0;
+  for (const comp of components) {
+    try {
+      const label = labelMap[comp.tier];
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `MERGE (c:${label}:HarvestedComponent {id: $id})
+                  SET c.name = $name, c.description = $desc, c.content = $content,
+                      c.tier = $tier, c.status = $status, c.reuseCount = $reuseCount,
+                      c.source = $source, c.createdAt = datetime()
+                  WITH c
+                  UNWIND $industries AS ind
+                  MERGE (i:Industry {name: ind})
+                  MERGE (c)-[:APPLICABLE_TO]->(i)
+                  RETURN c.id`,
+          params: {
+            id: comp.id,
+            name: comp.name,
+            desc: comp.description,
+            content: comp.content,
+            tier: comp.tier,
+            status: comp.status,
+            reuseCount: comp.reuse_count,
+            source: comp.source,
+            industries: comp.industries
+          }
+        },
+        callId,
+        timeoutMs: 15e3
+      });
+      stored++;
+    } catch (err) {
+      logger.warn({ id: comp.id, err: String(err) }, "Harvest store failed for component");
+    }
+  }
+  logger.info({ stored, total: components.length }, "Harvest store complete");
+  return stored;
+}
+async function verify(components) {
+  let verified = 0;
+  for (const comp of components) {
+    try {
+      const result = await callMcpTool({
+        toolName: "srag.query",
+        args: { query: `${comp.tier} for ${comp.industries[0]}: ${comp.name}` },
+        callId: `harvest-verify-${uuid29().substring(0, 8)}`,
+        timeoutMs: 15e3
+      });
+      const resultStr = JSON.stringify(result).toLowerCase();
+      if (resultStr.includes(comp.name.toLowerCase().substring(0, 20))) {
+        verified++;
+      }
+    } catch {
+    }
+  }
+  logger.info({ verified, total: components.length }, "Harvest verify complete");
+  return verified;
+}
+async function runHarvestPipeline(domain) {
+  const start = Date.now();
+  logger.info({ domain }, "Harvest pipeline starting");
+  const raw = await extract(domain);
+  const components = generalize(raw, domain);
+  const stored = await store(components);
+  const verified = await verify(components);
+  const result = {
+    extracted: raw.length,
+    stored,
+    verified,
+    duration_ms: Date.now() - start
+  };
+  logger.info(result, "Harvest pipeline complete");
+  return result;
+}
+async function runFullHarvest() {
+  const domains = [
+    "Strategy",
+    "Financial",
+    "Operations",
+    "Technology",
+    "Cybersecurity",
+    "ESG & Sustainability",
+    "Digital & Analytics",
+    "Risk & Compliance",
+    "Supply Chain",
+    "Due Diligence"
+  ];
+  const results = {};
+  for (const domain of domains) {
+    results[domain] = await runHarvestPipeline(domain);
+  }
+  return results;
+}
+
+// src/routes/cockpit.ts
+init_flywheel_coordinator();
+init_consolidation_engine();
+var cockpitRouter = Router14();
+function requestOrigin(req) {
+  return `${req.protocol}://${req.get("host")}`;
+}
+function normalizeToolCount(payload) {
+  if (Array.isArray(payload)) return payload.length;
+  if (Array.isArray(payload?.tools)) return payload.tools.length;
+  if (Array.isArray(payload?.data?.tools)) return payload.data.tools.length;
+  if (Array.isArray(payload?.result?.tools)) return payload.result.tools.length;
+  if (Array.isArray(payload?.result)) return payload.result.length;
+  return 0;
+}
+async function fetchBackendTools() {
+  try {
+    const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.backendApiKey}`
+      },
+      body: JSON.stringify({ tool: "list_tools", payload: {} }),
+      signal: AbortSignal.timeout(15e3)
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      return { ok: false, toolCount: 0, error: `HTTP ${res.status}` };
+    }
+    const toolCount = normalizeToolCount(body);
+    return { ok: true, toolCount };
+  } catch (error) {
+    return {
+      ok: false,
+      toolCount: 0,
+      error: error instanceof Error ? error.message : "Unknown backend MCP error"
+    };
+  }
+}
+async function fetchOrchestratorMcp(req, method) {
+  const url = new URL("/mcp", requestOrigin(req));
+  if (config.orchestratorApiKey) {
+    url.searchParams.set("api_key", config.orchestratorApiKey);
+  }
+  const body = method === "initialize" ? {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2025-03-26",
+      capabilities: {},
+      clientInfo: { name: "cockpit-probe", version: "1.0.0" }
+    }
+  } : {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/list",
+    params: { cursor: "include_backend" }
+  };
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15e3)
+  });
+  const payload = await res.json().catch(() => null);
+  return { ok: res.ok, status: res.status, payload };
+}
+async function probeMcp(req) {
+  const [initializeProbe, toolsProbe, backendProbe] = await Promise.all([
+    fetchOrchestratorMcp(req, "initialize"),
+    fetchOrchestratorMcp(req, "tools/list"),
+    fetchBackendTools()
+  ]);
+  return {
+    orchestrator: {
+      healthy: initializeProbe.ok,
+      status_code: initializeProbe.status,
+      protocol_version: initializeProbe.payload?.result?.protocolVersion ?? null,
+      server_name: initializeProbe.payload?.result?.serverInfo?.name ?? "widgetdc-orchestrator",
+      server_version: initializeProbe.payload?.result?.serverInfo?.version ?? null,
+      tool_count: normalizeToolCount(toolsProbe.payload?.result),
+      raw: initializeProbe.payload
+    },
+    backend: {
+      healthy: backendProbe.ok,
+      tool_count: backendProbe.toolCount,
+      error: backendProbe.error ?? null
+    },
+    checked_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function summarizeCommand(command, result) {
+  switch (command) {
+    case "mcp.initialize":
+      return result.orchestrator.healthy ? `MCP initialized. Protocol ${result.orchestrator.protocol_version}; ${result.orchestrator.tool_count} tools visible.` : "MCP initialize failed.";
+    case "mcp.list_tools":
+      return `Orchestrator sees ${result.orchestrator.tool_count} tools and backend sees ${result.backend.tool_count}.`;
+    case "providers.list":
+      return `${result.providers.filter((provider) => provider.available).length} providers available.`;
+    case "harvest.full":
+      return `Full harvest completed across ${Object.keys(result.results ?? {}).length} domains.`;
+    case "flywheel.sync":
+      return `Flywheel sync completed with compound score ${result.report?.compound_health_score ?? "n/a"}.`;
+    case "flywheel.consolidation":
+      return `Consolidation scan completed with ${result.report?.items?.length ?? 0} findings.`;
+    case "pheromone.decay":
+      return `Pheromone decay completed with ${result.data?.decayed ?? result.decayed ?? 0} decays.`;
+    default:
+      return `${command} completed`;
+  }
+}
+cockpitRouter.get("/overview", async (req, res) => {
+  try {
+    const [mcp, providers] = await Promise.all([
+      probeMcp(req),
+      Promise.resolve(listProviders())
+    ]);
+    const agents = AgentRegistry.all();
+    const executions2 = listExecutions();
+    const cronJobs = listCronJobs();
+    const ws = getConnectionStats();
+    const watcher = getWatcherState();
+    const pheromone = getPheromoneState();
+    const peerEval = getPeerEvalState();
+    const writeGate = getWriteGateStats();
+    res.json({
+      success: true,
+      data: {
+        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        services: {
+          rlm_available: isRlmAvailable(),
+          openclaw_healthy: isOpenClawHealthy(),
+          backend_circuit_breaker: getBackendCircuitState(),
+          rate_limit_backpressure: getRateLimitState()
+        },
+        mcp,
+        providers,
+        agents: {
+          total: agents.length,
+          active: agents.filter((agent) => ["online", "idle", "busy"].includes(agent.handshake.status)).length
+        },
+        chains: {
+          total: executions2.length,
+          running: executions2.filter((execution) => execution.status === "running").length
+        },
+        cron: {
+          total: cronJobs.length,
+          enabled: cronJobs.filter((job) => job.enabled).length
+        },
+        connections: {
+          ws_total: ws.total,
+          sse_total: getSSEClientCount()
+        },
+        signals: {
+          anomaly_active: watcher.activeAnomalies,
+          anomaly_scans: watcher.totalScans,
+          pheromone_active: pheromone.activePheromones,
+          pheromone_deposits: pheromone.totalDeposits,
+          peer_evals: peerEval.totalEvals,
+          write_rejections: writeGate.writesRejected
+        }
+      }
+    });
+  } catch (error) {
+    logger.error({ err: String(error) }, "Cockpit overview failed");
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+cockpitRouter.post("/mcp/initialize", async (req, res) => {
+  try {
+    const result = await probeMcp(req);
+    res.json({ success: true, data: result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+cockpitRouter.get("/providers", (_req, res) => {
+  res.json({ success: true, data: { providers: listProviders() } });
+});
+cockpitRouter.post("/commands/execute", async (req, res) => {
+  const command = req.body?.command;
+  if (!command) {
+    res.status(400).json({ success: false, error: "command is required" });
+    return;
+  }
+  try {
+    let result;
+    switch (command) {
+      case "mcp.initialize":
+      case "mcp.list_tools":
+        result = await probeMcp(req);
+        break;
+      case "providers.list":
+        result = { providers: listProviders() };
+        break;
+      case "harvest.full":
+        result = { results: await runFullHarvest() };
+        break;
+      case "flywheel.sync":
+        result = { report: await runWeeklySync() };
+        break;
+      case "flywheel.consolidation":
+        result = { report: await runWeeklyConsolidation() };
+        break;
+      case "pheromone.decay":
+        result = { data: await runPheromoneCron() };
+        break;
+      default:
+        res.status(404).json({ success: false, error: `Unknown command: ${command}` });
+        return;
+    }
+    res.json({
+      success: true,
+      data: {
+        command,
+        summary: summarizeCommand(command, result),
+        result
+      }
+    });
+  } catch (error) {
+    logger.error({ command, err: String(error) }, "Cockpit command failed");
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
 // src/routes/llm.ts
 init_llm_proxy();
 init_chat_broadcaster();
 init_chat_store();
 init_logger();
-import { Router as Router14 } from "express";
-var llmRouter = Router14();
+import { Router as Router15 } from "express";
+var llmRouter = Router15();
 llmRouter.get("/providers", (_req, res) => {
   res.json({ success: true, data: { providers: listProviders() } });
 });
@@ -41756,7 +42148,7 @@ llmRouter.post("/conversation", async (req, res) => {
 });
 
 // src/routes/audit.ts
-import { Router as Router15 } from "express";
+import { Router as Router16 } from "express";
 
 // src/audit.ts
 init_redis();
@@ -41838,7 +42230,7 @@ function auditMiddleware(req, res, next) {
 }
 
 // src/routes/audit.ts
-var auditRouter = Router15();
+var auditRouter = Router16();
 auditRouter.get("/log", async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 100, 500);
   const offset = parseInt(req.query.offset) || 0;
@@ -41856,8 +42248,8 @@ auditRouter.get("/log", async (req, res) => {
 // src/routes/tool-output.ts
 init_redis();
 init_logger();
-import { Router as Router16 } from "express";
-var toolOutputRouter = Router16();
+import { Router as Router17 } from "express";
+var toolOutputRouter = Router17();
 var TOOL_OUTPUT_PREFIX2 = "orchestrator:tool-output:";
 var ID_PATTERN = /^[a-f0-9-]{36}$/;
 toolOutputRouter.get("/:id", async (req, res) => {
@@ -41932,8 +42324,8 @@ toolOutputRouter.get("/:id/raw", async (req, res) => {
 init_config();
 init_redis();
 init_logger();
-import { Router as Router17 } from "express";
-var knowledgeRouter = Router17();
+import { Router as Router18 } from "express";
+var knowledgeRouter = Router18();
 var FEED_CACHE_KEY = "orchestrator:knowledge-feed";
 var BRIEFING_CACHE_KEY = "orchestrator:knowledge-briefing-prompt";
 var FEED_TTL_SECONDS = 86400;
@@ -42092,9 +42484,9 @@ knowledgeRouter.get("/briefing", async (_req, res) => {
 // src/routes/neural-bus.ts
 init_logger();
 init_redis();
-import { Router as Router18 } from "express";
-import { v4 as uuid29 } from "uuid";
-var neuralBusRouter = Router18();
+import { Router as Router19 } from "express";
+import { v4 as uuid30 } from "uuid";
+var neuralBusRouter = Router19();
 var BUS_MESSAGES_KEY = "neural-bus:messages";
 var BUS_AGENTS_KEY = "neural-bus:agents";
 var BUS_INBOX_KEY = "neural-bus:inbox";
@@ -42109,7 +42501,7 @@ neuralBusRouter.post("/broadcast", async (req, res) => {
     const redis2 = await getRedisClient();
     const msg = {
       ...req.body,
-      id: uuid29(),
+      id: uuid30(),
       acknowledgedBy: []
     };
     await redis2.hset(BUS_MESSAGES_KEY, msg.id, JSON.stringify(msg));
@@ -42131,7 +42523,7 @@ neuralBusRouter.post("/send", async (req, res) => {
     const redis2 = await getRedisClient();
     const msg = {
       ...req.body,
-      id: uuid29(),
+      id: uuid30(),
       acknowledgedBy: []
     };
     if (!msg.to) {
@@ -42153,7 +42545,7 @@ neuralBusRouter.post("/publish", async (req, res) => {
     const redis2 = await getRedisClient();
     const msg = {
       ...req.body,
-      id: uuid29(),
+      id: uuid30(),
       acknowledgedBy: []
     };
     await redis2.hset(BUS_MESSAGES_KEY, msg.id, JSON.stringify(msg));
@@ -42285,6 +42677,81 @@ neuralBusRouter.post("/register", async (req, res) => {
   }
 });
 
+// src/routes/pheromone.ts
+init_pheromone_layer();
+init_logger();
+import { Router as Router20 } from "express";
+var pheromoneRouter = Router20();
+pheromoneRouter.get("/status", (_req, res) => {
+  res.json({ success: true, data: getPheromoneState() });
+});
+pheromoneRouter.get("/sense", async (req, res) => {
+  try {
+    const domain = req.query.domain;
+    const type = req.query.type;
+    const tags = req.query.tags ? req.query.tags.split(",") : void 0;
+    const minStrength = req.query.min_strength ? parseFloat(req.query.min_strength) : void 0;
+    const limit = req.query.limit ? parseInt(req.query.limit, 10) : 20;
+    const pheromones = await sense({ domain, type, tags, minStrength, limit });
+    res.json({ success: true, data: pheromones, count: pheromones.length });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { code: "SENSE_FAILED", message: String(err), status_code: 500 } });
+  }
+});
+pheromoneRouter.get("/trails", async (req, res) => {
+  try {
+    const domain = req.query.domain;
+    if (!domain) {
+      res.status(400).json({ success: false, error: { code: "VALIDATION_ERROR", message: "domain query param required", status_code: 400 } });
+      return;
+    }
+    const summary = await getTrailSummary(domain);
+    res.json({ success: true, data: summary });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { code: "TRAIL_FAILED", message: String(err), status_code: 500 } });
+  }
+});
+pheromoneRouter.get("/heatmap", async (_req, res) => {
+  try {
+    const heatmap = await getHeatmap();
+    res.json({ success: true, data: heatmap, count: heatmap.length });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { code: "HEATMAP_FAILED", message: String(err), status_code: 500 } });
+  }
+});
+pheromoneRouter.post("/deposit", async (req, res) => {
+  try {
+    const { source, domain, label, strength, metrics: metrics2 } = req.body;
+    if (!source || !domain || !label || strength == null) {
+      res.status(400).json({ success: false, error: { code: "VALIDATION_ERROR", message: "Required: source, domain, label, strength", status_code: 400 } });
+      return;
+    }
+    const clampedStrength = Math.max(0, Math.min(1, Number(strength) || 0));
+    const safeSource = String(source).slice(0, 128);
+    const safeDomain = String(domain).slice(0, 128);
+    const safeLabel = String(label).slice(0, 256);
+    const safeMetrics = {};
+    if (metrics2 && typeof metrics2 === "object") {
+      for (const [k, v] of Object.entries(metrics2).slice(0, 20)) {
+        safeMetrics[String(k).slice(0, 64)] = Number(v) || 0;
+      }
+    }
+    await onExternalSignal(safeSource, safeDomain, safeLabel, clampedStrength, safeMetrics);
+    res.json({ success: true, message: "External pheromone deposited" });
+  } catch (err) {
+    res.status(500).json({ success: false, error: { code: "DEPOSIT_FAILED", message: String(err), status_code: 500 } });
+  }
+});
+pheromoneRouter.post("/decay", async (_req, res) => {
+  try {
+    const result = await runPheromoneCron();
+    res.json({ success: true, data: result });
+  } catch (err) {
+    logger.error({ error: String(err) }, "Manual pheromone decay failed");
+    res.status(500).json({ success: false, error: { code: "DECAY_FAILED", message: String(err), status_code: 500 } });
+  }
+});
+
 // src/index.ts
 init_artifacts();
 
@@ -42293,10 +42760,10 @@ init_redis();
 init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
-import { Router as Router19 } from "express";
+import { Router as Router21 } from "express";
 import { randomUUID as randomUUID3 } from "crypto";
-import { v4 as uuid30 } from "uuid";
-var notebookRouter = Router19();
+import { v4 as uuid31 } from "uuid";
+var notebookRouter = Router21();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
 var TTL_SECONDS8 = 2592e3;
@@ -42335,7 +42802,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query, params: {} },
-        callId: uuid30(),
+        callId: uuid31(),
         timeoutMs: 15e3
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -42343,7 +42810,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "kg_rag.query",
         args: { question: query, max_evidence: 10 },
-        callId: uuid30(),
+        callId: uuid31(),
         timeoutMs: 2e4
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -42552,7 +43019,7 @@ init_drill();
 
 // src/routes/monitor.ts
 init_mcp_caller();
-import { Router as Router20 } from "express";
+import { Router as Router22 } from "express";
 
 // src/memory/context-compress.ts
 init_cognitive_proxy();
@@ -42678,13 +43145,13 @@ ${compressed}`,
 init_chain_engine();
 init_cognitive_proxy();
 init_logger();
-import { v4 as uuid31 } from "uuid";
-var monitorRouter = Router20();
+import { v4 as uuid32 } from "uuid";
+var monitorRouter = Router22();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid31(),
+    callId: uuid32(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];
@@ -42962,9 +43429,9 @@ init_redis();
 init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
-import { Router as Router21 } from "express";
-import { v4 as uuid32 } from "uuid";
-var assemblyRouter = Router21();
+import { Router as Router23 } from "express";
+import { v4 as uuid33 } from "uuid";
+var assemblyRouter = Router23();
 var REDIS_PREFIX11 = "orchestrator:assembly:";
 var REDIS_INDEX5 = "orchestrator:assemblies:index";
 var TTL_SECONDS9 = 2592e3;
@@ -43027,7 +43494,7 @@ ORDER BY b.domain, b.name LIMIT 50`;
     const graphResult = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params },
-      callId: uuid32(),
+      callId: uuid33(),
       timeoutMs: 15e3
     });
     if (graphResult.status === "success" && graphResult.result) {
@@ -43093,7 +43560,7 @@ Reply as JSON:
   const assemblies = [];
   const now = (/* @__PURE__ */ new Date()).toISOString();
   for (const candidate of analysis.candidates.slice(0, maxCandidates)) {
-    const assemblyId = `widgetdc:assembly:${uuid32()}`;
+    const assemblyId = `widgetdc:assembly:${uuid33()}`;
     const selectedBlocks = blocks.filter((b) => candidate.block_ids.includes(b.block_id));
     const conflictCount = candidate.conflicts?.length ?? 0;
     const coherence = Math.max(0, Math.min(1, candidate.coherence ?? 0.5));
@@ -43152,7 +43619,7 @@ MERGE (a)-[:COMPOSED_OF]->(b)`,
             blockIds: selectedBlocks.map((b) => b.block_id)
           }
         },
-        callId: uuid32(),
+        callId: uuid33(),
         timeoutMs: 1e4
       });
     } catch (err) {
@@ -43242,7 +43709,7 @@ assemblyRouter.put("/:id", async (req, res) => {
         query: "MATCH (a:Assembly {id: $id}) SET a.status = $status, a.updated_at = datetime()",
         params: { id: assembly.$id, status: assembly.status }
       },
-      callId: uuid32(),
+      callId: uuid33(),
       timeoutMs: 5e3
     });
   } catch {
@@ -43257,8 +43724,8 @@ init_decisions();
 // src/routes/s1-s4.ts
 init_chain_engine();
 init_logger();
-import { Router as Router22 } from "express";
-var s1s4Router = Router22();
+import { Router as Router24 } from "express";
+var s1s4Router = Router24();
 s1s4Router.post("/trigger", async (req, res) => {
   const { url, source_type, topic, weights } = req.body;
   if (!url) {
@@ -43376,162 +43843,13 @@ async function listPlans() {
   }
 }
 
-// src/flywheel/harvest-pipeline.ts
-init_logger();
-init_mcp_caller();
-import { v4 as uuid33 } from "uuid";
-async function extract(domain) {
-  const callId = `harvest-extract-${uuid33().substring(0, 8)}`;
-  try {
-    const result = await callMcpTool({
-      toolName: "srag.query",
-      args: {
-        query: `Find reusable consulting frameworks, templates, and solution patterns in the ${domain} domain. Focus on methodologies that can be generalized across clients.`
-      },
-      callId,
-      timeoutMs: 3e4
-    });
-    const items = result?.sources ?? result?.results ?? [];
-    logger.info({ domain, items: Array.isArray(items) ? items.length : 0 }, "Harvest extract complete");
-    return Array.isArray(items) ? items : [];
-  } catch (err) {
-    logger.warn({ domain, err: String(err) }, "Harvest extract failed");
-    return [];
-  }
-}
-function generalize(items, domain) {
-  return items.map((item, i) => {
-    const name = String(item.name ?? item.title ?? `${domain}-pattern-${i}`);
-    const content = String(item.content ?? item.description ?? item.summary ?? "");
-    let tier = "component";
-    if (content.length > 2e3 || name.toLowerCase().includes("framework")) tier = "framework";
-    else if (content.length > 500 || name.toLowerCase().includes("template")) tier = "template";
-    return {
-      id: `harvest-${uuid33().substring(0, 12)}`,
-      name,
-      tier,
-      description: content.substring(0, 300),
-      content: content.substring(0, 5e3),
-      // Cap at 5K chars
-      industries: [domain],
-      capabilities: [],
-      reuse_count: 0,
-      status: "draft",
-      created_at: (/* @__PURE__ */ new Date()).toISOString(),
-      source: `harvest-pipeline/${domain}`
-    };
-  });
-}
-async function store(components) {
-  if (components.length === 0) return 0;
-  const callId = `harvest-store-${uuid33().substring(0, 8)}`;
-  const labelMap = {
-    framework: "Framework",
-    template: "Template",
-    component: "Component"
-  };
-  let stored = 0;
-  for (const comp of components) {
-    try {
-      const label = labelMap[comp.tier];
-      await callMcpTool({
-        toolName: "graph.write_cypher",
-        args: {
-          query: `MERGE (c:${label}:HarvestedComponent {id: $id})
-                  SET c.name = $name, c.description = $desc, c.content = $content,
-                      c.tier = $tier, c.status = $status, c.reuseCount = $reuseCount,
-                      c.source = $source, c.createdAt = datetime()
-                  WITH c
-                  UNWIND $industries AS ind
-                  MERGE (i:Industry {name: ind})
-                  MERGE (c)-[:APPLICABLE_TO]->(i)
-                  RETURN c.id`,
-          params: {
-            id: comp.id,
-            name: comp.name,
-            desc: comp.description,
-            content: comp.content,
-            tier: comp.tier,
-            status: comp.status,
-            reuseCount: comp.reuse_count,
-            source: comp.source,
-            industries: comp.industries
-          }
-        },
-        callId,
-        timeoutMs: 15e3
-      });
-      stored++;
-    } catch (err) {
-      logger.warn({ id: comp.id, err: String(err) }, "Harvest store failed for component");
-    }
-  }
-  logger.info({ stored, total: components.length }, "Harvest store complete");
-  return stored;
-}
-async function verify(components) {
-  let verified = 0;
-  for (const comp of components) {
-    try {
-      const result = await callMcpTool({
-        toolName: "srag.query",
-        args: { query: `${comp.tier} for ${comp.industries[0]}: ${comp.name}` },
-        callId: `harvest-verify-${uuid33().substring(0, 8)}`,
-        timeoutMs: 15e3
-      });
-      const resultStr = JSON.stringify(result).toLowerCase();
-      if (resultStr.includes(comp.name.toLowerCase().substring(0, 20))) {
-        verified++;
-      }
-    } catch {
-    }
-  }
-  logger.info({ verified, total: components.length }, "Harvest verify complete");
-  return verified;
-}
-async function runHarvestPipeline(domain) {
-  const start = Date.now();
-  logger.info({ domain }, "Harvest pipeline starting");
-  const raw = await extract(domain);
-  const components = generalize(raw, domain);
-  const stored = await store(components);
-  const verified = await verify(components);
-  const result = {
-    extracted: raw.length,
-    stored,
-    verified,
-    duration_ms: Date.now() - start
-  };
-  logger.info(result, "Harvest pipeline complete");
-  return result;
-}
-async function runFullHarvest() {
-  const domains = [
-    "Strategy",
-    "Financial",
-    "Operations",
-    "Technology",
-    "Cybersecurity",
-    "ESG & Sustainability",
-    "Digital & Analytics",
-    "Risk & Compliance",
-    "Supply Chain",
-    "Due Diligence"
-  ];
-  const results = {};
-  for (const domain of domains) {
-    results[domain] = await runHarvestPipeline(domain);
-  }
-  return results;
-}
-
 // src/routes/openai-compat.ts
 init_llm();
 init_llm_proxy();
 init_tool_executor();
 init_logger();
 init_config();
-import { Router as Router23 } from "express";
+import { Router as Router25 } from "express";
 import { v4 as uuid34 } from "uuid";
 var MATRIX_ALIAS_TARGETS = {
   "claude-sonnet": "claude-sonnet-4-20250514",
@@ -43583,7 +43901,7 @@ function recordMetrics(model, toolCalls, toolRounds, totalTokens, toolsOffered) 
   metricsBuffer.push({ model, tool_calls: toolCalls, tool_rounds: toolRounds, total_tokens: totalTokens, timestamp: Date.now() });
   if (metricsBuffer.length > MAX_METRICS) metricsBuffer.splice(0, metricsBuffer.length - MAX_METRICS);
 }
-var openaiCompatRouter = Router23();
+var openaiCompatRouter = Router25();
 var rateLimitMap = /* @__PURE__ */ new Map();
 var RATE_LIMIT_WINDOW_MS = 6e4;
 var RATE_LIMIT_MAX = 30;
@@ -43962,8 +44280,8 @@ RULES:
 
 // src/routes/prompt-generator.ts
 init_logger();
-import { Router as Router24 } from "express";
-var promptGeneratorRouter = Router24();
+import { Router as Router26 } from "express";
+var promptGeneratorRouter = Router26();
 var intentRules = [
   {
     keywords: ["pr\xE6sentation", "praesentation", "presentation", "slides", "deck", "slide"],
@@ -44187,7 +44505,7 @@ promptGeneratorRouter.get("/skills", (_req, res) => {
 
 // src/openapi.ts
 init_tool_registry();
-import { Router as Router25 } from "express";
+import { Router as Router27 } from "express";
 import swaggerUi from "swagger-ui-express";
 function buildOpenAPISpec() {
   return {
@@ -44974,7 +45292,7 @@ function buildChatGPTSpec() {
     }
   };
 }
-var openapiRouter = Router25();
+var openapiRouter = Router27();
 var spec = buildOpenAPISpec();
 var gptSpec = buildChatGPTSpec();
 openapiRouter.get("/openapi.json", (_req, res) => {
@@ -45000,9 +45318,9 @@ init_tool_registry();
 init_mcp_caller();
 init_config();
 init_logger();
-import { Router as Router26 } from "express";
+import { Router as Router28 } from "express";
 import { v4 as uuid35 } from "uuid";
-var mcpGatewayRouter = Router26();
+var mcpGatewayRouter = Router28();
 var backendToolsCache = [];
 var backendToolsCacheTime = 0;
 var CACHE_TTL_MS2 = 3e5;
@@ -45233,9 +45551,9 @@ init_tool_executor();
 init_tool_registry();
 init_logger();
 init_adoption_telemetry();
-import { Router as Router27 } from "express";
+import { Router as Router29 } from "express";
 import { v4 as uuid36 } from "uuid";
-var toolGatewayRouter = Router27();
+var toolGatewayRouter = Router29();
 function respondLegacyToolResult(res, result) {
   const httpStatus = result.status === "success" ? 200 : result.status === "timeout" ? 504 : 500;
   res.status(httpStatus).json({
@@ -45655,8 +45973,8 @@ init_chat_store();
 init_failure_harvester();
 init_redis();
 init_logger();
-import { Router as Router28 } from "express";
-var failuresRouter = Router28();
+import { Router as Router30 } from "express";
+var failuresRouter = Router30();
 failuresRouter.get("/summary", async (_req, res) => {
   try {
     const redis2 = getRedis();
@@ -45698,8 +46016,8 @@ failuresRouter.post("/harvest", async (req, res) => {
 init_competitive_crawler();
 init_redis();
 init_logger();
-import { Router as Router29 } from "express";
-var competitiveRouter = Router29();
+import { Router as Router31 } from "express";
+var competitiveRouter = Router31();
 var crawlInProgress = false;
 var lastCrawlAt = 0;
 var CRAWL_COOLDOWN_MS = 36e5;
@@ -45766,8 +46084,8 @@ competitiveRouter.get("/targets", (_req, res) => {
 init_cognitive_proxy();
 init_redis();
 init_logger();
-import { Router as Router30 } from "express";
-var foldRouter = Router30();
+import { Router as Router32 } from "express";
+var foldRouter = Router32();
 var DAILY_LIMIT = 100;
 var REDIS_PREFIX12 = "caas:usage:";
 async function getUsageCount(apiKey) {
@@ -45921,7 +46239,7 @@ foldRouter.get("/usage", async (req, res) => {
 });
 
 // src/routes/graph-hygiene.ts
-import { Router as Router31 } from "express";
+import { Router as Router33 } from "express";
 
 // src/graph/graph-hygiene.ts
 init_mcp_caller();
@@ -46153,7 +46471,7 @@ async function runGraphHygiene2() {
 
 // src/routes/graph-hygiene.ts
 init_logger();
-var graphHygieneRouter = Router31();
+var graphHygieneRouter = Router33();
 var hygieneInProgress = false;
 graphHygieneRouter.post("/run", async (_req, res) => {
   if (hygieneInProgress) {
@@ -46201,8 +46519,8 @@ graphHygieneRouter.post("/fix/:op", async (req, res) => {
 // src/routes/deliverables.ts
 init_deliverable_engine();
 init_logger();
-import { Router as Router32 } from "express";
-var deliverablesRouter = Router32();
+import { Router as Router34 } from "express";
+var deliverablesRouter = Router34();
 var VALID_TYPES = ["analysis", "roadmap", "assessment"];
 var VALID_FORMATS = ["pdf", "markdown"];
 var rateLimitMap2 = /* @__PURE__ */ new Map();
@@ -46344,8 +46662,8 @@ deliverablesRouter.get("/:id/markdown", async (req, res) => {
 init_similarity_engine();
 init_compound_hooks();
 init_logger();
-import { Router as Router33 } from "express";
-var similarityRouter = Router33();
+import { Router as Router35 } from "express";
+var similarityRouter = Router35();
 var VALID_DIMENSIONS = [
   "industry",
   "service",
@@ -46473,8 +46791,8 @@ init_engagement_lineage();
 init_engagement_cost_tracker();
 init_phantom_loop_selector();
 init_logger();
-import { Router as Router34 } from "express";
-var engagementsRouter = Router34();
+import { Router as Router36 } from "express";
+var engagementsRouter = Router36();
 var VALID_GRADES = ["exceeded", "met", "partial", "missed"];
 var rateLimitMap3 = /* @__PURE__ */ new Map();
 var RATE_LIMIT2 = 20;
@@ -46877,8 +47195,8 @@ init_write_gate();
 init_adaptive_rag();
 init_engagement_engine();
 init_logger();
-import { Router as Router35 } from "express";
-var intelligenceRouter = Router35();
+import { Router as Router37 } from "express";
+var intelligenceRouter = Router37();
 intelligenceRouter.post("/ingest", async (req, res) => {
   const body = req.body;
   const content = body.content;
@@ -47054,9 +47372,9 @@ intelligenceRouter.post("/engagement/plan", async (req, res) => {
 init_manifesto_governance();
 init_mcp_caller();
 init_logger();
-import { Router as Router36 } from "express";
+import { Router as Router38 } from "express";
 import { v4 as uuid38 } from "uuid";
-var governanceRouter = Router36();
+var governanceRouter = Router38();
 governanceRouter.get("/matrix", (_req, res) => {
   res.json({
     success: true,
@@ -47146,8 +47464,8 @@ RETURN p.name as name, p.status as status`,
 // src/routes/osint.ts
 init_osint_scanner();
 init_logger();
-import { Router as Router37 } from "express";
-var osintRouter = Router37();
+import { Router as Router39 } from "express";
+var osintRouter = Router39();
 osintRouter.post("/scan", async (req, res) => {
   try {
     const body = req.body;
@@ -47282,8 +47600,8 @@ osintRouter.get("/domains", (_req, res) => {
 // src/routes/evolution.ts
 init_evolution_loop();
 init_logger();
-import { Router as Router38 } from "express";
-var evolutionRouter = Router38();
+import { Router as Router40 } from "express";
+var evolutionRouter = Router40();
 evolutionRouter.post("/run", async (req, res) => {
   const { focus_area, dry_run } = req.body ?? {};
   try {
@@ -47350,8 +47668,8 @@ evolutionRouter.get("/history", async (req, res) => {
 // src/routes/memory.ts
 init_working_memory();
 init_logger();
-import { Router as Router39 } from "express";
-var memoryRouter = Router39();
+import { Router as Router41 } from "express";
+var memoryRouter = Router41();
 memoryRouter.post("/store", async (req, res) => {
   const body = req.body;
   const agentId = body.agent_id;
@@ -47410,8 +47728,8 @@ memoryRouter.delete("/:agent_id", async (req, res) => {
 init_tool_registry();
 init_tool_executor();
 init_logger();
-import { Router as Router40 } from "express";
-var abiDocsRouter = Router40();
+import { Router as Router42 } from "express";
+var abiDocsRouter = Router42();
 abiDocsRouter.get("/docs", (_req, res) => {
   const namespace = _req.query.namespace ?? void 0;
   const category = _req.query.category ?? void 0;
@@ -47553,12 +47871,12 @@ var CURATED_EXAMPLES = {
 // src/routes/abi-health.ts
 init_tool_registry();
 init_logger();
-import { Router as Router41 } from "express";
+import { Router as Router43 } from "express";
 import { readFileSync as readFileSync2, writeFileSync, existsSync, mkdirSync } from "fs";
 import path2 from "path";
 import { fileURLToPath as fileURLToPath2 } from "url";
 var __dirname3 = path2.dirname(fileURLToPath2(import.meta.url));
-var abiHealthRouter = Router41();
+var abiHealthRouter = Router43();
 function getSnapshotPath() {
   const testPath = path2.resolve(__dirname3, "..", "..", "test", "snapshots", "abi-snapshot.json");
   if (existsSync(testPath)) return testPath;
@@ -47747,8 +48065,8 @@ abiHealthRouter.post("/snapshot", (_req, res) => {
 
 // src/routes/abi-versioning.ts
 init_tool_registry();
-import { Router as Router42 } from "express";
-var abiVersioningRouter = Router42();
+import { Router as Router44 } from "express";
+var abiVersioningRouter = Router44();
 abiVersioningRouter.get("/versions", (_req, res) => {
   const tools = TOOL_REGISTRY.map((t) => ({
     name: t.name,
@@ -47858,8 +48176,8 @@ abiVersioningRouter.get("/changelog", (_req, res) => {
 // src/routes/hyperagent.ts
 init_hyperagent();
 init_logger();
-import { Router as Router43 } from "express";
-var hyperagentRouter = Router43();
+import { Router as Router45 } from "express";
+var hyperagentRouter = Router45();
 hyperagentRouter.post("/plan", async (req, res) => {
   const { goal, sessionId, profile } = req.body;
   if (!goal || typeof goal !== "string") {
@@ -48019,8 +48337,8 @@ hyperagentRouter.get("/health", (_req, res) => {
 init_hyperagent_autonomous();
 init_redis();
 init_logger();
-import { Router as Router44 } from "express";
-var hyperagentAutoRouter = Router44();
+import { Router as Router46 } from "express";
+var hyperagentAutoRouter = Router46();
 hyperagentAutoRouter.post("/run", async (req, res) => {
   const { phase, maxTargets } = req.body;
   try {
@@ -48188,8 +48506,8 @@ init_chat_broadcaster();
 init_mcp_caller();
 init_inventor_loop();
 init_logger();
-import { Router as Router45 } from "express";
-var inventorRouter = Router45();
+import { Router as Router47 } from "express";
+var inventorRouter = Router47();
 inventorRouter.post("/run", async (req, res) => {
   const { config: config2, resume } = req.body;
   if (!config2 || !config2.experimentName || !config2.taskDescription) {
@@ -48439,8 +48757,8 @@ inventorRouter.get("/export/:name", async (req, res) => {
 // src/routes/anomaly-watcher.ts
 init_anomaly_watcher();
 init_logger();
-import { Router as Router46 } from "express";
-var anomalyWatcherRouter = Router46();
+import { Router as Router48 } from "express";
+var anomalyWatcherRouter = Router48();
 anomalyWatcherRouter.get("/status", (_req, res) => {
   const state4 = getWatcherState();
   res.json({
@@ -48532,86 +48850,11 @@ anomalyWatcherRouter.post("/scan", async (_req, res) => {
 // src/index.ts
 init_anomaly_watcher();
 
-// src/routes/pheromone.ts
-init_pheromone_layer();
-init_logger();
-import { Router as Router47 } from "express";
-var pheromoneRouter = Router47();
-pheromoneRouter.get("/status", (_req, res) => {
-  res.json({ success: true, data: getPheromoneState() });
-});
-pheromoneRouter.get("/sense", async (req, res) => {
-  try {
-    const domain = req.query.domain;
-    const type = req.query.type;
-    const tags = req.query.tags ? req.query.tags.split(",") : void 0;
-    const minStrength = req.query.min_strength ? parseFloat(req.query.min_strength) : void 0;
-    const limit = req.query.limit ? parseInt(req.query.limit, 10) : 20;
-    const pheromones = await sense({ domain, type, tags, minStrength, limit });
-    res.json({ success: true, data: pheromones, count: pheromones.length });
-  } catch (err) {
-    res.status(500).json({ success: false, error: { code: "SENSE_FAILED", message: String(err), status_code: 500 } });
-  }
-});
-pheromoneRouter.get("/trails", async (req, res) => {
-  try {
-    const domain = req.query.domain;
-    if (!domain) {
-      res.status(400).json({ success: false, error: { code: "VALIDATION_ERROR", message: "domain query param required", status_code: 400 } });
-      return;
-    }
-    const summary = await getTrailSummary(domain);
-    res.json({ success: true, data: summary });
-  } catch (err) {
-    res.status(500).json({ success: false, error: { code: "TRAIL_FAILED", message: String(err), status_code: 500 } });
-  }
-});
-pheromoneRouter.get("/heatmap", async (_req, res) => {
-  try {
-    const heatmap = await getHeatmap();
-    res.json({ success: true, data: heatmap, count: heatmap.length });
-  } catch (err) {
-    res.status(500).json({ success: false, error: { code: "HEATMAP_FAILED", message: String(err), status_code: 500 } });
-  }
-});
-pheromoneRouter.post("/deposit", async (req, res) => {
-  try {
-    const { source, domain, label, strength, metrics: metrics2 } = req.body;
-    if (!source || !domain || !label || strength == null) {
-      res.status(400).json({ success: false, error: { code: "VALIDATION_ERROR", message: "Required: source, domain, label, strength", status_code: 400 } });
-      return;
-    }
-    const clampedStrength = Math.max(0, Math.min(1, Number(strength) || 0));
-    const safeSource = String(source).slice(0, 128);
-    const safeDomain = String(domain).slice(0, 128);
-    const safeLabel = String(label).slice(0, 256);
-    const safeMetrics = {};
-    if (metrics2 && typeof metrics2 === "object") {
-      for (const [k, v] of Object.entries(metrics2).slice(0, 20)) {
-        safeMetrics[String(k).slice(0, 64)] = Number(v) || 0;
-      }
-    }
-    await onExternalSignal(safeSource, safeDomain, safeLabel, clampedStrength, safeMetrics);
-    res.json({ success: true, message: "External pheromone deposited" });
-  } catch (err) {
-    res.status(500).json({ success: false, error: { code: "DEPOSIT_FAILED", message: String(err), status_code: 500 } });
-  }
-});
-pheromoneRouter.post("/decay", async (_req, res) => {
-  try {
-    const result = await runPheromoneCron();
-    res.json({ success: true, data: result });
-  } catch (err) {
-    logger.error({ error: String(err) }, "Manual pheromone decay failed");
-    res.status(500).json({ success: false, error: { code: "DECAY_FAILED", message: String(err), status_code: 500 } });
-  }
-});
-
 // src/routes/peer-eval.ts
 init_peer_eval();
 init_logger();
-import { Router as Router48 } from "express";
-var peerEvalRouter = Router48();
+import { Router as Router49 } from "express";
+var peerEvalRouter = Router49();
 peerEvalRouter.get("/status", (_req, res) => {
   res.json({ success: true, data: getPeerEvalState() });
 });
@@ -48688,8 +48931,8 @@ init_flywheel_coordinator();
 init_consolidation_engine();
 init_cost_optimizer();
 init_logger();
-import { Router as Router49 } from "express";
-var flywheelRouter = Router49();
+import { Router as Router50 } from "express";
+var flywheelRouter = Router50();
 flywheelRouter.get("/metrics", async (_req, res) => {
   try {
     const data = await getFlywheelMetrics();
@@ -48735,7 +48978,7 @@ flywheelRouter.get("/cost-summary", (_req, res) => {
 });
 
 // src/routes/benchmark.ts
-import { Router as Router50 } from "express";
+import { Router as Router51 } from "express";
 
 // src/benchmark-runner.ts
 init_redis();
@@ -49124,7 +49367,7 @@ function buildRecommendation(results, taskId) {
 
 // src/routes/benchmark.ts
 init_logger();
-var benchmarkRouter = Router50();
+var benchmarkRouter = Router51();
 benchmarkRouter.get("/tasks", (_req, res) => {
   const tasks = listBenchmarkTasks();
   res.json({ success: true, tasks });
@@ -49221,8 +49464,8 @@ benchmarkRouter.get("/ablation/:taskId/report", (req, res) => {
 init_config();
 init_logger();
 init_engagement_lineage();
-import { Router as Router51 } from "express";
-var obsidianRouter = Router51();
+import { Router as Router52 } from "express";
+var obsidianRouter = Router52();
 var TIMEOUT_MS = 8e3;
 function isLiveMode() {
   return !!config.obsidianUrl;
@@ -49764,8 +50007,8 @@ obsidianRouter.post("/canvas", async (req, res) => {
 // src/routes/grafana-proxy.ts
 init_logger();
 init_config();
-import { Router as Router52 } from "express";
-var grafanaProxyRouter = Router52();
+import { Router as Router53 } from "express";
+var grafanaProxyRouter = Router53();
 var GRAFANA_URL = "https://clauskraft.grafana.net";
 var GRAFANA_API_KEY = config.grafanaApiKey;
 var PROM_URL = "https://prometheus-prod-39-prod-eu-north-0.grafana.net/api/prom";
@@ -49861,7 +50104,7 @@ grafanaProxyRouter.get("/alerts", async (_req, res) => {
 });
 
 // src/routes/phantom-bom.ts
-import { Router as Router53 } from "express";
+import { Router as Router54 } from "express";
 
 // src/phantom-bom.ts
 init_config();
@@ -50975,7 +51218,7 @@ async function getProviderRegistry() {
 init_logger();
 init_config();
 init_phantom_loop_selector();
-var phantomBomRouter = Router53();
+var phantomBomRouter = Router54();
 var activeExtractions = 0;
 var MAX_CONCURRENT3 = 3;
 phantomBomRouter.post("/skills/route", async (req, res) => {
@@ -51158,8 +51401,8 @@ phantomBomRouter.get("/clusters/debug", async (_req, res) => {
 // src/routes/linear-proxy.ts
 init_logger();
 init_config();
-import { Router as Router54 } from "express";
-var linearProxyRouter = Router54();
+import { Router as Router55 } from "express";
+var linearProxyRouter = Router55();
 async function callBackendMcp2(toolName2, payload) {
   const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
     method: "POST",
@@ -51265,8 +51508,8 @@ linearProxyRouter.post("/issues/:id", async (req, res) => {
 
 // src/routes/prometheus-metrics.ts
 init_logger();
-import { Router as Router55 } from "express";
-var prometheusMetricsRouter = Router55();
+import { Router as Router56 } from "express";
+var prometheusMetricsRouter = Router56();
 var samples = [];
 function collectMetrics(health) {
   const now = Date.now();
@@ -51565,6 +51808,7 @@ app.use("/chains", requireApiKey, apiRateLimiter, chainsRouter);
 app.use("/cognitive", requireApiKey, apiRateLimiter, cognitiveRouter);
 app.use("/cron", requireApiKey, cronRouter);
 app.use("/api/dashboard", dashboardRouter);
+app.use("/api/cockpit", requireApiKey, apiRateLimiter, cockpitRouter);
 app.use("/api/openclaw", requireApiKey, openclawRouter);
 app.use("/api/audit", requireApiKey, auditRouter);
 app.use("/api/tool-output", toolOutputRouter);
@@ -51598,7 +51842,6 @@ app.use("/api/abi", requireApiKey, abiHealthRouter);
 app.use("/api/abi", requireApiKey, abiVersioningRouter);
 app.use("/api/inventor", requireApiKey, apiRateLimiter, inventorRouter);
 app.use("/api/anomaly-watcher", requireApiKey, anomalyWatcherRouter);
-app.use("/api/pheromone", requireApiKey, pheromoneRouter);
 app.use("/api/peer-eval", requireApiKey, peerEvalRouter);
 app.use("/api/flywheel", requireApiKey, flywheelRouter);
 app.use("/api/benchmark", requireApiKey, benchmarkRouter);

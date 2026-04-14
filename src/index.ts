@@ -36,6 +36,7 @@ import { chainsRouter } from './routes/chains.js'
 import { cognitiveRouter } from './routes/cognitive.js'
 import { cronRouter } from './routes/cron.js'
 import { dashboardRouter } from './routes/dashboard.js'
+import { cockpitRouter } from './routes/cockpit.js'
 import { openclawRouter, initOpenClaw, isOpenClawHealthy } from './routes/openclaw.js'
 import { llmRouter } from './routes/llm.js'
 import { auditRouter } from './routes/audit.js'
@@ -92,7 +93,6 @@ import { hyperagentAutoRouter } from './routes/hyperagent-autonomous.js'
 import { inventorRouter } from './routes/inventor.js'
 import { anomalyWatcherRouter } from './routes/anomaly-watcher.js'
 import { initAnomalyWatcher, getWatcherState } from './swarm/anomaly-watcher.js'
-import { pheromoneRouter } from './routes/pheromone.js'
 import { peerEvalRouter } from './routes/peer-eval.js'
 import { flywheelRouter } from './routes/flywheel.js'
 import { benchmarkRouter } from './routes/benchmark.js'
@@ -271,6 +271,7 @@ app.use('/cron', requireApiKey, cronRouter)
 
 // Dashboard data API + OpenClaw proxy + Audit log + LLM + SSE
 app.use('/api/dashboard', dashboardRouter)
+app.use('/api/cockpit', requireApiKey, apiRateLimiter, cockpitRouter)
 app.use('/api/openclaw', requireApiKey, openclawRouter)
 app.use('/api/audit', requireApiKey, auditRouter)
 app.use('/api/tool-output', toolOutputRouter)  // Public — MCP tools embed these URLs in results
@@ -324,9 +325,6 @@ app.use('/api/inventor', requireApiKey, apiRateLimiter, inventorRouter)
 
 // Proactive Anomaly Watcher: DETECT→LEARN→REASON→ACT→REMEMBER pipeline
 app.use('/api/anomaly-watcher', requireApiKey, anomalyWatcherRouter)
-
-// Pheromone Layer: stigmergic communication substrate (5 pheromone types, TTL decay)
-app.use('/api/pheromone', requireApiKey, pheromoneRouter)
 
 // PeerEval: fleet learning engine (self-assessment + best practice broadcasting)
 app.use('/api/peer-eval', requireApiKey, peerEvalRouter)
