@@ -50047,6 +50047,15 @@ obsidianRouter.get("/vault/stats", async (_req, res) => {
   res.status(503).json({ error: "Not configured" });
 });
 obsidianRouter.get("/vault/list", async (req, res) => {
+  const respondDegraded = (message, mode, path4) => {
+    res.json({
+      files: [],
+      degraded: true,
+      mode,
+      path: path4,
+      error: message
+    });
+  };
   if (isLiveMode()) {
     const path4 = req.query.path ?? "/";
     try {
@@ -50054,7 +50063,8 @@ obsidianRouter.get("/vault/list", async (req, res) => {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       res.json(await r.json());
     } catch (err) {
-      res.status(503).json({ error: err.message });
+      logger.warn({ err: err.message, path: path4 }, "Obsidian live list failed; returning degraded empty list");
+      respondDegraded(err?.message ?? "Live vault list failed", "live", path4);
     }
     return;
   }
@@ -50066,11 +50076,12 @@ obsidianRouter.get("/vault/list", async (req, res) => {
         files: entries.map((e) => ({ path: e.path, type: e.type === "dir" ? "dir" : "file" }))
       });
     } catch (err) {
-      res.status(503).json({ error: err.message });
+      logger.warn({ err: err.message, path: path4 }, "Obsidian GitHub list failed; returning degraded empty list");
+      respondDegraded(err?.message ?? "GitHub vault list failed", "github", path4);
     }
     return;
   }
-  res.status(503).json({ error: "Not configured" });
+  respondDegraded("Not configured", "none", "/");
 });
 obsidianRouter.get("/search", async (req, res) => {
   const query = req.query.q;
