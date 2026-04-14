@@ -2,12 +2,9 @@
  * Integration test for the Dashboard route.
  * Tests data loading, KPI cards, chart rendering, and error/empty states.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
-import { MemoryRouter } from '@tanstack/react-router'
 
 const server = setupServer()
 
@@ -19,48 +16,31 @@ afterEach(() => {
   server.close()
 })
 
-function createQueryClient() {
-  return new QueryClient({
-    defaultOptions: {
-      queries: { retry: false, gcTime: 0 },
-    },
-  })
-}
-
-function renderWithProviders(ui: React.ReactElement) {
-  const queryClient = createQueryClient()
-  return render(
-    <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={['/']}>
-        {ui}
-      </MemoryRouter>
-    </QueryClientProvider>
-  )
-}
-
 describe('Dashboard route', () => {
   it('shows loading skeletons initially', async () => {
-    // Delay response to show loading state
     server.use(
       http.get('/api/dashboard/data', async () => {
-        await new Promise(r => setTimeout(r, 100))
-        return HttpResponse.json({ agents: [], chains: [], cronJobs: [], rlmAvailable: true, adoptionTrends: [], timestamp: '' })
-      })
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        return HttpResponse.json({
+          agents: [],
+          chains: [],
+          cronJobs: [],
+          rlmAvailable: true,
+          adoptionTrends: [],
+          timestamp: '',
+        })
+      }),
     )
 
-    // We can't easily test the route component without the full route tree,
-    // so we test the data fetching pattern instead
     const { apiGet } = await import('@/lib/api-client')
 
-    // Set up a delayed response
     server.use(
       http.get('/api/dashboard/data', async () => {
-        await new Promise(r => setTimeout(r, 50))
+        await new Promise((resolve) => setTimeout(resolve, 50))
         return HttpResponse.json({ test: true })
-      })
+      }),
     )
 
-    // Verify the API call works (loading → data pattern)
     const promise = apiGet('/api/dashboard/data')
     expect(promise).toBeInstanceOf(Promise)
     const data = await promise
@@ -70,18 +50,30 @@ describe('Dashboard route', () => {
   it('fetches dashboard data with correct shape', async () => {
     const mockData = {
       agents: [
-        { agent_id: 'a1', display_name: 'Agent 1', status: 'online', active_calls: 1, registered_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-01T00:00:00Z' },
+        {
+          agent_id: 'a1',
+          display_name: 'Agent 1',
+          status: 'online',
+          active_calls: 1,
+          registered_at: '2026-01-01T00:00:00Z',
+          last_seen_at: '2026-01-01T00:00:00Z',
+        },
       ],
-      chains: [{ execution_id: 'c1', mode: 'sequential', status: 'completed', started_at: '2026-01-01T00:00:00Z' }],
+      chains: [
+        {
+          execution_id: 'c1',
+          mode: 'sequential',
+          status: 'completed',
+          started_at: '2026-01-01T00:00:00Z',
+        },
+      ],
       cronJobs: [],
       rlmAvailable: true,
       adoptionTrends: [],
       timestamp: '2026-01-01T00:00:00Z',
     }
 
-    server.use(
-      http.get('/api/dashboard/data', () => HttpResponse.json(mockData))
-    )
+    server.use(http.get('/api/dashboard/data', () => HttpResponse.json(mockData)))
 
     const { apiGet } = await import('@/lib/api-client')
     const data = await apiGet<typeof mockData>('/api/dashboard/data')
@@ -95,18 +87,18 @@ describe('Dashboard route', () => {
   it('handles API error gracefully', async () => {
     server.use(
       http.get('/api/dashboard/data', () =>
-        HttpResponse.json({ message: 'Service unavailable' }, { status: 503 })
-      )
+        HttpResponse.json({ message: 'Service unavailable' }, { status: 503 }),
+      ),
     )
 
     const { apiGet, normalizeError } = await import('@/lib/api-client')
     try {
       await apiGet('/api/dashboard/data')
       expect.fail('Should have thrown')
-    } catch (e) {
-      const err = normalizeError(e)
-      expect(err.status).toBe(503)
-      expect(err.isRetryable).toBe(true)
+    } catch (error) {
+      const normalized = normalizeError(error)
+      expect(normalized.status).toBe(503)
+      expect(normalized.isRetryable).toBe(true)
     }
   })
 
@@ -120,9 +112,7 @@ describe('Dashboard route', () => {
       timestamp: '2026-01-01T00:00:00Z',
     }
 
-    server.use(
-      http.get('/api/dashboard/data', () => HttpResponse.json(emptyData))
-    )
+    server.use(http.get('/api/dashboard/data', () => HttpResponse.json(emptyData)))
 
     const { apiGet } = await import('@/lib/api-client')
     const data = await apiGet<typeof emptyData>('/api/dashboard/data')
@@ -136,21 +126,53 @@ describe('Dashboard route', () => {
 describe('Agents page data pattern', () => {
   it('fetches and filters agents by status', async () => {
     const mockAgents = [
-      { agent_id: 'a1', display_name: 'Alpha', status: 'online', active_calls: 2, registered_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-01T00:00:00Z', capabilities: [], allowed_tool_namespaces: [], source: 'manual', version: '1.0.0' },
-      { agent_id: 'a2', display_name: 'Beta', status: 'offline', active_calls: 0, registered_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-01T00:00:00Z', capabilities: [], allowed_tool_namespaces: [], source: 'auto', version: '1.0.0' },
-      { agent_id: 'a3', display_name: 'Gamma', status: 'online', active_calls: 0, registered_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-01T00:00:00Z', capabilities: ['rag.query'], allowed_tool_namespaces: ['rag'], source: 'auto', version: '1.2.0' },
+      {
+        agent_id: 'a1',
+        display_name: 'Alpha',
+        status: 'online',
+        active_calls: 2,
+        registered_at: '2026-01-01T00:00:00Z',
+        last_seen_at: '2026-01-01T00:00:00Z',
+        capabilities: [],
+        allowed_tool_namespaces: [],
+        source: 'manual',
+        version: '1.0.0',
+      },
+      {
+        agent_id: 'a2',
+        display_name: 'Beta',
+        status: 'offline',
+        active_calls: 0,
+        registered_at: '2026-01-01T00:00:00Z',
+        last_seen_at: '2026-01-01T00:00:00Z',
+        capabilities: [],
+        allowed_tool_namespaces: [],
+        source: 'auto',
+        version: '1.0.0',
+      },
+      {
+        agent_id: 'a3',
+        display_name: 'Gamma',
+        status: 'online',
+        active_calls: 0,
+        registered_at: '2026-01-01T00:00:00Z',
+        last_seen_at: '2026-01-01T00:00:00Z',
+        capabilities: ['rag.query'],
+        allowed_tool_namespaces: ['rag'],
+        source: 'auto',
+        version: '1.2.0',
+      },
     ]
 
-    // Filter logic (same as Agents page)
-    const onlineAgents = mockAgents.filter(a => a.status === 'online')
+    const onlineAgents = mockAgents.filter((agent) => agent.status === 'online')
     expect(onlineAgents).toHaveLength(2)
-    expect(onlineAgents.map(a => a.display_name)).toEqual(['Alpha', 'Gamma'])
+    expect(onlineAgents.map((agent) => agent.display_name)).toEqual(['Alpha', 'Gamma'])
 
-    // Search logic
     const searchQuery = 'gamma'
-    const searchResults = mockAgents.filter(a =>
-      a.display_name.toLowerCase().includes(searchQuery) ||
-      a.capabilities.some(c => c.toLowerCase().includes(searchQuery))
+    const searchResults = mockAgents.filter(
+      (agent) =>
+        agent.display_name.toLowerCase().includes(searchQuery) ||
+        agent.capabilities.some((capability) => capability.toLowerCase().includes(searchQuery)),
     )
     expect(searchResults).toHaveLength(1)
     expect(searchResults[0].display_name).toBe('Gamma')
@@ -166,9 +188,9 @@ describe('Agents page data pattern', () => {
     ]
 
     const total = mockAgents.length
-    const active = mockAgents.filter(a => a.status === 'online' || a.status === 'idle').length
-    const busy = mockAgents.filter(a => a.active_calls > 0).length
-    const totalCalls = mockAgents.reduce((s, a) => s + a.active_calls, 0)
+    const active = mockAgents.filter((agent) => agent.status === 'online' || agent.status === 'idle').length
+    const busy = mockAgents.filter((agent) => agent.active_calls > 0).length
+    const totalCalls = mockAgents.reduce((sum, agent) => sum + agent.active_calls, 0)
 
     expect(total).toBe(5)
     expect(active).toBe(2)

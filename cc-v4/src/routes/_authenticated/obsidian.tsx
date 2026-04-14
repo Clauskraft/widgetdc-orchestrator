@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMemo, useState, type ReactNode } from 'react'
 import { apiGet, apiPost } from '@/lib/api-client'
 import { dispatch } from '@/lib/agent-client'
@@ -70,6 +70,7 @@ type NoteMetadata = {
 const ARTIFACT_FOLDERS = [
   { key: 'deliverables', label: 'Deliverables', path: 'WidgeTDC/Deliverables', tone: 'bg-amber-100 text-amber-800' },
   { key: 'compliance', label: 'Compliance Audits', path: 'WidgeTDC/Compliance Audits', tone: 'bg-emerald-100 text-emerald-800' },
+  { key: 'process-docs', label: 'Process Docs', path: 'WidgeTDC/Process Docs', tone: 'bg-sky-100 text-sky-800' },
 ] as const
 
 function MetadataPill({ label, value }: { label: string; value: string }) {
@@ -305,18 +306,46 @@ function ObsidianPage() {
     enabled: status?.connected === true,
     retry: 1,
   })
-  const artifactMetadataQueries = useQueries({
-    queries: [
-      ...((deliverableArtifacts?.files ?? []).filter((file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')))),
-      ...((complianceArtifacts?.files ?? []).filter((file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')))),
-    ]
-      .slice(0, 24)
-      .map((file) => ({
-        queryKey: ['obsidian-metadata', file.path],
-        queryFn: () => apiGet<NoteMetadata>(`/api/obsidian/metadata?path=${encodeURIComponent(file.path)}`),
-        enabled: status?.connected === true,
-        retry: 1,
-      })),
+  const { data: processDocsArtifacts, isLoading: processDocsLoading } = useQuery<{ files: VaultEntry[] }>({
+    queryKey: ['obsidian-artifacts', 'process-docs'],
+    queryFn: () => apiGet(`/api/obsidian/vault/list?path=${encodeURIComponent('/WidgeTDC/Process Docs')}`),
+    enabled: status?.connected === true,
+    retry: 1,
+  })
+  const metadataPaths = useMemo(
+    () =>
+      [
+        ...((deliverableArtifacts?.files ?? []).filter(
+          (file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')),
+        )),
+        ...((complianceArtifacts?.files ?? []).filter(
+          (file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')),
+        )),
+        ...((processDocsArtifacts?.files ?? []).filter(
+          (file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')),
+        )),
+      ]
+        .slice(0, 24)
+        .map((file) => file.path),
+    [complianceArtifacts?.files, deliverableArtifacts?.files, processDocsArtifacts?.files],
+  )
+
+  const { data: metadataBatch } = useQuery<{ entries: NoteMetadata[] }>({
+    queryKey: ['obsidian-metadata-batch', metadataPaths],
+    enabled: status?.connected === true && metadataPaths.length > 0,
+    retry: 1,
+    queryFn: async () => {
+      const entries = await Promise.all(
+        metadataPaths.map(async (path) => {
+          try {
+            return await apiGet<NoteMetadata>(`/api/obsidian/metadata?path=${encodeURIComponent(path)}`)
+          } catch {
+            return null
+          }
+        }),
+      )
+      return { entries: entries.filter((entry): entry is NoteMetadata => Boolean(entry)) }
+    },
   })
 
   const handleRefresh = () => {
@@ -404,12 +433,16 @@ function ObsidianPage() {
   const folders = files.filter(f => f.type === 'dir')
   const deliverableFiles = (deliverableArtifacts?.files ?? []).filter((file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')))
   const complianceFiles = (complianceArtifacts?.files ?? []).filter((file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')))
-  const activeArtifactFiles = artifactTab === 'deliverables' ? deliverableFiles : complianceFiles
+  const processDocFiles = (processDocsArtifacts?.files ?? []).filter((file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')))
+  const activeArtifactFiles =
+    artifactTab === 'deliverables'
+      ? deliverableFiles
+      : artifactTab === 'compliance'
+        ? complianceFiles
+        : processDocFiles
   const parsedNote = noteContent ? parseFrontmatter(noteContent.content) : null
   const canvasPreview = noteContent && selectedNote?.endsWith('.canvas') ? parseCanvas(noteContent.content) : null
-  const metadataEntries = artifactMetadataQueries
-    .map((query) => query.data)
-    .filter((entry): entry is NoteMetadata => Boolean(entry))
+  const metadataEntries = metadataBatch?.entries ?? []
   const visualizationContract =
     selectedNote?.endsWith('.canvas')
       ? (canvasPreview?.widgetdc ? resolveVisualizationContractFromProperties(canvasPreview.widgetdc) : null)
@@ -422,42 +455,42 @@ function ObsidianPage() {
     ? noteContent?.content ?? ''
     : parsedNote?.body ?? ''
   const refinementTitle = selectedNote ? makeRefinementTitle(selectedNote, roundtripMode) : 'artifact refinement'
-  const roundtripNoteProperties = useMemo(() => {
-    if (!selectedNote || !roundtripResponse) return null
-    return buildVisualizationProperties(
-      roundtripMode === 'deliverable'
-        ? { kind: 'deliverable_draft', deliverableType: 'analysis' }
-        : { kind: 'knowledge_artifact' },
-      {
-        client:
-          parsedNote?.properties.client
-          ?? canvasPreview?.widgetdc?.client
-          ?? 'Unknown',
-        source_tool: roundtripMode === 'deliverable' ? 'deliverable_draft' : 'reason_deeply',
-        status: roundtripResponse.status,
-        refined_from: selectedNote,
-        refinement_mode: roundtripMode,
-      }
-    )
-  }, [canvasPreview?.widgetdc?.client, parsedNote?.properties.client, roundtripMode, roundtripResponse, selectedNote])
-  const roundtripCanvasPayload = useMemo(() => {
-    if (!selectedNote || !roundtripResponse) return null
-    return buildCanvasPayload(
-      roundtripMode === 'deliverable'
-        ? { kind: 'deliverable_draft', deliverableType: 'analysis' }
-        : { kind: 'knowledge_artifact' },
-      {
-        title: refinementTitle,
-        markdown: roundtripResponse.output,
-        client:
-          parsedNote?.properties.client
-          ?? canvasPreview?.widgetdc?.client
-          ?? 'Unknown',
-        sourceTool: roundtripMode === 'deliverable' ? 'deliverable_draft' : 'reason_deeply',
-        status: roundtripResponse.status,
-      }
-    )
-  }, [canvasPreview?.widgetdc?.client, parsedNote?.properties.client, refinementTitle, roundtripMode, roundtripResponse, selectedNote])
+  const roundtripNoteProperties =
+    !selectedNote || !roundtripResponse
+      ? null
+      : buildVisualizationProperties(
+          roundtripMode === 'deliverable'
+            ? { kind: 'deliverable_draft', deliverableType: 'analysis' }
+            : { kind: 'knowledge_artifact' },
+          {
+            client:
+              parsedNote?.properties.client
+              ?? canvasPreview?.widgetdc?.client
+              ?? 'Unknown',
+            source_tool: roundtripMode === 'deliverable' ? 'deliverable_draft' : 'reason_deeply',
+            status: roundtripResponse.status,
+            refined_from: selectedNote,
+            refinement_mode: roundtripMode,
+          },
+        )
+  const roundtripCanvasPayload =
+    !selectedNote || !roundtripResponse
+      ? null
+      : buildCanvasPayload(
+          roundtripMode === 'deliverable'
+            ? { kind: 'deliverable_draft', deliverableType: 'analysis' }
+            : { kind: 'knowledge_artifact' },
+          {
+            title: refinementTitle,
+            markdown: roundtripResponse.output,
+            client:
+              parsedNote?.properties.client
+              ?? canvasPreview?.widgetdc?.client
+              ?? 'Unknown',
+            sourceTool: roundtripMode === 'deliverable' ? 'deliverable_draft' : 'reason_deeply',
+            status: roundtripResponse.status,
+          },
+        )
 
   // Sort tags by frequency, get top 20
   const sortedTags = tags ? Object.entries(tags).sort((a, b) => b[1] - a[1]).slice(0, 20) : []
@@ -630,8 +663,18 @@ function ObsidianPage() {
               ))}
             </TabsList>
             {ARTIFACT_FOLDERS.map((folder) => {
-              const filesForFolder = folder.key === 'deliverables' ? deliverableFiles : complianceFiles
-              const isLoading = folder.key === 'deliverables' ? deliverablesLoading : complianceLoading
+                    const filesForFolder =
+                      folder.key === 'deliverables'
+                        ? deliverableFiles
+                        : folder.key === 'compliance'
+                          ? complianceFiles
+                          : processDocFiles
+                    const isLoading =
+                      folder.key === 'deliverables'
+                        ? deliverablesLoading
+                        : folder.key === 'compliance'
+                          ? complianceLoading
+                          : processDocsLoading
               return (
                 <TabsContent key={folder.key} value={folder.key}>
                   <div className="grid gap-3 md:grid-cols-[1.15fr_0.85fr]">
@@ -825,8 +868,17 @@ function ObsidianPage() {
                     {parsedNote.properties.widgetdc_kind && (
                       <MetadataPill label="Artifact kind" value={parsedNote.properties.widgetdc_kind} />
                     )}
+                    {parsedNote.properties.process_id && (
+                      <MetadataPill label="Process ID" value={parsedNote.properties.process_id} />
+                    )}
+                    {parsedNote.properties.process_level && (
+                      <MetadataPill label="Process level" value={parsedNote.properties.process_level} />
+                    )}
                     {parsedNote.properties.client && (
                       <MetadataPill label="Client" value={parsedNote.properties.client} />
+                    )}
+                    {parsedNote.properties.industry_profile && (
+                      <MetadataPill label="Industry profile" value={parsedNote.properties.industry_profile} />
                     )}
                     {parsedNote.properties.source_tool && (
                       <MetadataPill label="Source tool" value={parsedNote.properties.source_tool} />

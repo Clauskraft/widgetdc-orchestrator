@@ -25,6 +25,7 @@ import {
   FileSearch,
   Presentation,
   BriefcaseBusiness,
+  GitBranch,
   Workflow,
 } from 'lucide-react'
 import type { AppMode } from '@/lib/app-shell'
@@ -76,6 +77,12 @@ export const sidebarData: NavGroup[] = [
         path: '/knowledge',
         icon: FileSearch,
         description: 'Search graph-backed context and evidence',
+      },
+      {
+        title: 'Process Workspace',
+        path: '/process-workspace',
+        icon: GitBranch,
+        description: 'Infer, curate, and align client process trees against standard packs',
       },
     ],
   },

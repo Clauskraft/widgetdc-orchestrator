@@ -6,6 +6,7 @@ const workspacePrefixes = [
   '/deliverable',
   '/project-board',
   '/project-overview',
+  '/process-workspace',
   '/obsidian',
   '/knowledge',
 ]

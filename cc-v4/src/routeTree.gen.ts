@@ -14,6 +14,7 @@ import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/
 import { Route as AuthenticatedSettingsRouteImport } from './routes/_authenticated/settings'
 import { Route as AuthenticatedProjectOverviewRouteImport } from './routes/_authenticated/project-overview'
 import { Route as AuthenticatedProjectBoardRouteImport } from './routes/_authenticated/project-board'
+import { Route as AuthenticatedProcessWorkspaceRouteImport } from './routes/_authenticated/process-workspace'
 import { Route as AuthenticatedPheromoneRouteImport } from './routes/_authenticated/pheromone'
 import { Route as AuthenticatedOpenclawRouteImport } from './routes/_authenticated/openclaw'
 import { Route as AuthenticatedOmegaRouteImport } from './routes/_authenticated/omega'
@@ -67,6 +68,12 @@ const AuthenticatedProjectBoardRoute =
   AuthenticatedProjectBoardRouteImport.update({
     id: '/project-board',
     path: '/project-board',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedProcessWorkspaceRoute =
+  AuthenticatedProcessWorkspaceRouteImport.update({
+    id: '/process-workspace',
+    path: '/process-workspace',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
 const AuthenticatedPheromoneRoute = AuthenticatedPheromoneRouteImport.update({
@@ -243,6 +250,7 @@ export interface FileRoutesByFullPath {
   '/omega': typeof AuthenticatedOmegaRoute
   '/openclaw': typeof AuthenticatedOpenclawRoute
   '/pheromone': typeof AuthenticatedPheromoneRoute
+  '/process-workspace': typeof AuthenticatedProcessWorkspaceRoute
   '/project-board': typeof AuthenticatedProjectBoardRoute
   '/project-overview': typeof AuthenticatedProjectOverviewRoute
   '/settings': typeof AuthenticatedSettingsRouteWithChildren
@@ -276,6 +284,7 @@ export interface FileRoutesByTo {
   '/omega': typeof AuthenticatedOmegaRoute
   '/openclaw': typeof AuthenticatedOpenclawRoute
   '/pheromone': typeof AuthenticatedPheromoneRoute
+  '/process-workspace': typeof AuthenticatedProcessWorkspaceRoute
   '/project-board': typeof AuthenticatedProjectBoardRoute
   '/project-overview': typeof AuthenticatedProjectOverviewRoute
   '/settings': typeof AuthenticatedSettingsRouteWithChildren
@@ -312,6 +321,7 @@ export interface FileRoutesById {
   '/_authenticated/omega': typeof AuthenticatedOmegaRoute
   '/_authenticated/openclaw': typeof AuthenticatedOpenclawRoute
   '/_authenticated/pheromone': typeof AuthenticatedPheromoneRoute
+  '/_authenticated/process-workspace': typeof AuthenticatedProcessWorkspaceRoute
   '/_authenticated/project-board': typeof AuthenticatedProjectBoardRoute
   '/_authenticated/project-overview': typeof AuthenticatedProjectOverviewRoute
   '/_authenticated/settings': typeof AuthenticatedSettingsRouteWithChildren
@@ -349,6 +359,7 @@ export interface FileRouteTypes {
     | '/omega'
     | '/openclaw'
     | '/pheromone'
+    | '/process-workspace'
     | '/project-board'
     | '/project-overview'
     | '/settings'
@@ -382,6 +393,7 @@ export interface FileRouteTypes {
     | '/omega'
     | '/openclaw'
     | '/pheromone'
+    | '/process-workspace'
     | '/project-board'
     | '/project-overview'
     | '/settings'
@@ -417,6 +429,7 @@ export interface FileRouteTypes {
     | '/_authenticated/omega'
     | '/_authenticated/openclaw'
     | '/_authenticated/pheromone'
+    | '/_authenticated/process-workspace'
     | '/_authenticated/project-board'
     | '/_authenticated/project-overview'
     | '/_authenticated/settings'
@@ -470,6 +483,13 @@ declare module '@tanstack/react-router' {
       path: '/project-board'
       fullPath: '/project-board'
       preLoaderRoute: typeof AuthenticatedProjectBoardRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/process-workspace': {
+      id: '/_authenticated/process-workspace'
+      path: '/process-workspace'
+      fullPath: '/process-workspace'
+      preLoaderRoute: typeof AuthenticatedProcessWorkspaceRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/pheromone': {
@@ -714,6 +734,7 @@ interface AuthenticatedRouteChildren {
   AuthenticatedOmegaRoute: typeof AuthenticatedOmegaRoute
   AuthenticatedOpenclawRoute: typeof AuthenticatedOpenclawRoute
   AuthenticatedPheromoneRoute: typeof AuthenticatedPheromoneRoute
+  AuthenticatedProcessWorkspaceRoute: typeof AuthenticatedProcessWorkspaceRoute
   AuthenticatedProjectBoardRoute: typeof AuthenticatedProjectBoardRoute
   AuthenticatedProjectOverviewRoute: typeof AuthenticatedProjectOverviewRoute
   AuthenticatedSettingsRoute: typeof AuthenticatedSettingsRouteWithChildren
@@ -743,6 +764,7 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedOmegaRoute: AuthenticatedOmegaRoute,
   AuthenticatedOpenclawRoute: AuthenticatedOpenclawRoute,
   AuthenticatedPheromoneRoute: AuthenticatedPheromoneRoute,
+  AuthenticatedProcessWorkspaceRoute: AuthenticatedProcessWorkspaceRoute,
   AuthenticatedProjectBoardRoute: AuthenticatedProjectBoardRoute,
   AuthenticatedProjectOverviewRoute: AuthenticatedProjectOverviewRoute,
   AuthenticatedSettingsRoute: AuthenticatedSettingsRouteWithChildren,

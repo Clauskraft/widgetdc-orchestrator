@@ -47183,6 +47183,294 @@ engagementsRouter.get("/:id/outcome", async (req, res) => {
   res.json({ success: true, data: outcome });
 });
 
+// src/routes/processes.ts
+init_engagement_engine();
+import { Router as Router37 } from "express";
+var processesRouter = Router37();
+var MAX_ENGAGEMENTS = 200;
+var ENGAGEMENT_TTL_MS = 24 * 60 * 60 * 1e3;
+var curatedState = /* @__PURE__ */ new Map();
+function touchCuratedEntry(engagementId) {
+  const now = Date.now();
+  for (const [key, entry2] of curatedState.entries()) {
+    if (now - entry2.lastTouchedAt > ENGAGEMENT_TTL_MS) curatedState.delete(key);
+  }
+  let entry = curatedState.get(engagementId);
+  if (entry) {
+    entry.lastTouchedAt = now;
+    curatedState.delete(engagementId);
+    curatedState.set(engagementId, entry);
+    return entry;
+  }
+  entry = { ids: /* @__PURE__ */ new Set(), lastTouchedAt: now };
+  curatedState.set(engagementId, entry);
+  while (curatedState.size > MAX_ENGAGEMENTS) {
+    const oldestKey = curatedState.keys().next().value;
+    if (!oldestKey) break;
+    curatedState.delete(oldestKey);
+  }
+  return entry;
+}
+var defaultLibraries = [
+  {
+    pack_id: "apqc-cross-industry",
+    version: "1.0.0",
+    title: "APQC Cross-Industry Process Backbone",
+    family: "structural",
+    description: "Structural baseline for canonical process decomposition and coverage checks.",
+    primary: true
+  },
+  {
+    pack_id: "eu-ai-governance-controls",
+    version: "1.0.0",
+    title: "EU AI Governance Controls",
+    family: "control",
+    description: "Control overlay for governance, documentation, monitoring, and human oversight.",
+    primary: false
+  },
+  {
+    pack_id: "widgetdc-consulting-method",
+    version: "1.0.0",
+    title: "WidgeTDC Consulting Method Pack",
+    family: "method",
+    description: "Preferred consulting methods, review checkpoints, and delivery patterns.",
+    primary: false
+  }
+];
+function domainPreset(domain) {
+  const lower = domain.toLowerCase();
+  if (lower.includes("governance") || lower.includes("ai")) {
+    return [
+      {
+        key: "intake",
+        title: "Engagement Intake and Scoping",
+        structural: "matched",
+        control: "partial",
+        method: "matched"
+      },
+      {
+        key: "inventory",
+        title: "System and Model Inventory",
+        structural: "matched",
+        control: "technology_weak",
+        method: "matched"
+      },
+      {
+        key: "risk",
+        title: "Risk and Control Assessment",
+        structural: "partial",
+        control: "control_weak",
+        method: "matched"
+      },
+      {
+        key: "operating-model",
+        title: "Operating Model and Governance Design",
+        structural: "custom",
+        control: "partial",
+        method: "matched"
+      }
+    ];
+  }
+  return [
+    {
+      key: "intake",
+      title: "Current-State Discovery",
+      structural: "matched",
+      control: "partial",
+      method: "matched"
+    },
+    {
+      key: "design",
+      title: "Target Process Design",
+      structural: "partial",
+      control: "missing",
+      method: "matched"
+    },
+    {
+      key: "delivery",
+      title: "Execution and Adoption Planning",
+      structural: "custom",
+      control: "partial",
+      method: "matched"
+    }
+  ];
+}
+function scoreFor(status) {
+  switch (status) {
+    case "matched":
+      return 0.92;
+    case "partial":
+      return 0.72;
+    case "custom":
+      return 0.68;
+    case "technology_weak":
+    case "control_weak":
+      return 0.51;
+    case "missing":
+    default:
+      return 0.33;
+  }
+}
+function buildNodes(engagementId, client, domain) {
+  const curatedIds = curatedState.get(engagementId)?.ids ?? /* @__PURE__ */ new Set();
+  return domainPreset(domain).map((preset, index) => {
+    const processId = `${engagementId}:${preset.key}`;
+    const isCurated = curatedIds.has(processId);
+    const structuralScore = scoreFor(preset.structural);
+    const controlScore = scoreFor(preset.control);
+    const methodScore = scoreFor(preset.method);
+    const coverageScore = Number(((structuralScore + controlScore + methodScore) / 3).toFixed(2));
+    return {
+      process_id: processId,
+      title: preset.title,
+      parent_process_id: null,
+      phase: `P${index + 1}`,
+      confidence: Number((0.61 + index * 0.09).toFixed(2)),
+      status: isCurated ? "curated" : "inferred",
+      alignment: {
+        structural: preset.structural,
+        control: preset.control,
+        method: preset.method,
+        coverage_score: coverageScore,
+        matched_standard_refs: [
+          `apqc-cross-industry:${preset.key}`,
+          `widgetdc-consulting-method:${preset.key}`
+        ]
+      },
+      evidence: [
+        { id: `${processId}:objective`, title: `${client} objective`, kind: "engagement" },
+        { id: `${processId}:plan`, title: `${preset.title} plan signal`, kind: "plan" }
+      ],
+      technology_links: [
+        { id: `${processId}:orchestrator`, title: "widgetdc-orchestrator", kind: "service", support_score: 0.88 },
+        { id: `${processId}:obsidian`, title: "Obsidian process docs", kind: "documentation", support_score: 0.74 }
+      ]
+    };
+  });
+}
+function averageSupportScore(links) {
+  if (links.length === 0) return 0;
+  return Number((links.reduce((sum, entry) => sum + entry.support_score, 0) / links.length).toFixed(2));
+}
+async function engagementOr404(req, res) {
+  const engagementId = String(req.query.engagement_id ?? req.body?.engagement_id ?? "");
+  if (!engagementId) {
+    res.status(400).json({ success: false, error: { code: "VALIDATION_ERROR", message: "engagement_id is required", status_code: 400 } });
+    return null;
+  }
+  const engagement = await getEngagement(engagementId);
+  if (!engagement) {
+    res.status(404).json({ success: false, error: { code: "NOT_FOUND", message: "Engagement not found", status_code: 404 } });
+    return null;
+  }
+  return engagement;
+}
+processesRouter.get("/libraries", (_req, res) => {
+  res.json({ success: true, data: { libraries: defaultLibraries } });
+});
+processesRouter.get("/tree", async (req, res) => {
+  const engagement = await engagementOr404(req, res);
+  if (!engagement) return;
+  const mode = req.query.mode === "curated" ? "curated" : "inferred";
+  const nodes2 = buildNodes(engagement.$id, engagement.client, engagement.domain);
+  const filtered = mode === "curated" ? nodes2.filter((node) => node.status === "curated") : nodes2;
+  res.json({
+    success: true,
+    data: {
+      engagement_id: engagement.$id,
+      client: engagement.client,
+      domain: engagement.domain,
+      mode,
+      nodes: filtered,
+      summary: {
+        total_nodes: filtered.length,
+        curated_nodes: nodes2.filter((node) => node.status === "curated").length,
+        inferred_nodes: nodes2.filter((node) => node.status === "inferred").length,
+        avg_coverage_score: filtered.length > 0 ? Number((filtered.reduce((sum, node) => sum + node.alignment.coverage_score, 0) / filtered.length).toFixed(2)) : 0
+      }
+    }
+  });
+});
+processesRouter.post("/infer", async (req, res) => {
+  const engagement = await engagementOr404(req, res);
+  if (!engagement) return;
+  const nodes2 = buildNodes(engagement.$id, engagement.client, engagement.domain);
+  res.json({
+    success: true,
+    data: {
+      engagement_id: engagement.$id,
+      inferred_at: (/* @__PURE__ */ new Date()).toISOString(),
+      nodes: nodes2
+    }
+  });
+});
+processesRouter.post("/curate", async (req, res) => {
+  const engagement = await engagementOr404(req, res);
+  if (!engagement) return;
+  const processId = String(req.body?.process_id ?? "");
+  if (!processId) {
+    res.status(400).json({ success: false, error: { code: "VALIDATION_ERROR", message: "process_id is required", status_code: 400 } });
+    return;
+  }
+  const validNode = buildNodes(engagement.$id, engagement.client, engagement.domain).find((entry2) => entry2.process_id === processId);
+  if (!validNode) {
+    res.status(404).json({
+      success: false,
+      error: {
+        code: "NOT_FOUND",
+        message: `process_id '${processId}' is not part of engagement ${engagement.$id}`,
+        status_code: 404
+      }
+    });
+    return;
+  }
+  const entry = touchCuratedEntry(engagement.$id);
+  entry.ids.add(processId);
+  res.json({
+    success: true,
+    data: {
+      engagement_id: engagement.$id,
+      process_id: processId,
+      curated: true,
+      curated_at: (/* @__PURE__ */ new Date()).toISOString(),
+      curated_count: entry.ids.size
+    }
+  });
+});
+processesRouter.get("/:process_id/alignment", async (req, res) => {
+  const engagement = await engagementOr404(req, res);
+  if (!engagement) return;
+  const processId = String(req.params.process_id ?? "");
+  if (!processId) {
+    res.status(400).json({
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: "process_id is required", status_code: 400 }
+    });
+    return;
+  }
+  const node = buildNodes(engagement.$id, engagement.client, engagement.domain).find((entry) => entry.process_id === processId);
+  if (!node) {
+    res.status(404).json({
+      success: false,
+      error: { code: "NOT_FOUND", message: "Process node not found", status_code: 404 }
+    });
+    return;
+  }
+  res.json({
+    success: true,
+    data: {
+      engagement_id: engagement.$id,
+      process_id: node.process_id,
+      title: node.title,
+      alignment: node.alignment,
+      technology_support_score: averageSupportScore(node.technology_links),
+      evidence_count: node.evidence.length,
+      technology_link_count: node.technology_links.length,
+      review_required: node.alignment.structural !== "matched" || node.alignment.control !== "matched" || node.alignment.method !== "matched"
+    }
+  });
+});
+
 // src/index.ts
 init_write_gate();
 init_mcp_caller();
@@ -47195,8 +47483,8 @@ init_write_gate();
 init_adaptive_rag();
 init_engagement_engine();
 init_logger();
-import { Router as Router37 } from "express";
-var intelligenceRouter = Router37();
+import { Router as Router38 } from "express";
+var intelligenceRouter = Router38();
 intelligenceRouter.post("/ingest", async (req, res) => {
   const body = req.body;
   const content = body.content;
@@ -47372,9 +47660,9 @@ intelligenceRouter.post("/engagement/plan", async (req, res) => {
 init_manifesto_governance();
 init_mcp_caller();
 init_logger();
-import { Router as Router38 } from "express";
+import { Router as Router39 } from "express";
 import { v4 as uuid38 } from "uuid";
-var governanceRouter = Router38();
+var governanceRouter = Router39();
 governanceRouter.get("/matrix", (_req, res) => {
   res.json({
     success: true,
@@ -47464,8 +47752,8 @@ RETURN p.name as name, p.status as status`,
 // src/routes/osint.ts
 init_osint_scanner();
 init_logger();
-import { Router as Router39 } from "express";
-var osintRouter = Router39();
+import { Router as Router40 } from "express";
+var osintRouter = Router40();
 osintRouter.post("/scan", async (req, res) => {
   try {
     const body = req.body;
@@ -47600,8 +47888,8 @@ osintRouter.get("/domains", (_req, res) => {
 // src/routes/evolution.ts
 init_evolution_loop();
 init_logger();
-import { Router as Router40 } from "express";
-var evolutionRouter = Router40();
+import { Router as Router41 } from "express";
+var evolutionRouter = Router41();
 evolutionRouter.post("/run", async (req, res) => {
   const { focus_area, dry_run } = req.body ?? {};
   try {
@@ -47668,8 +47956,8 @@ evolutionRouter.get("/history", async (req, res) => {
 // src/routes/memory.ts
 init_working_memory();
 init_logger();
-import { Router as Router41 } from "express";
-var memoryRouter = Router41();
+import { Router as Router42 } from "express";
+var memoryRouter = Router42();
 memoryRouter.post("/store", async (req, res) => {
   const body = req.body;
   const agentId = body.agent_id;
@@ -47728,8 +48016,8 @@ memoryRouter.delete("/:agent_id", async (req, res) => {
 init_tool_registry();
 init_tool_executor();
 init_logger();
-import { Router as Router42 } from "express";
-var abiDocsRouter = Router42();
+import { Router as Router43 } from "express";
+var abiDocsRouter = Router43();
 abiDocsRouter.get("/docs", (_req, res) => {
   const namespace = _req.query.namespace ?? void 0;
   const category = _req.query.category ?? void 0;
@@ -47871,12 +48159,12 @@ var CURATED_EXAMPLES = {
 // src/routes/abi-health.ts
 init_tool_registry();
 init_logger();
-import { Router as Router43 } from "express";
+import { Router as Router44 } from "express";
 import { readFileSync as readFileSync2, writeFileSync, existsSync, mkdirSync } from "fs";
 import path2 from "path";
 import { fileURLToPath as fileURLToPath2 } from "url";
 var __dirname3 = path2.dirname(fileURLToPath2(import.meta.url));
-var abiHealthRouter = Router43();
+var abiHealthRouter = Router44();
 function getSnapshotPath() {
   const testPath = path2.resolve(__dirname3, "..", "..", "test", "snapshots", "abi-snapshot.json");
   if (existsSync(testPath)) return testPath;
@@ -48065,8 +48353,8 @@ abiHealthRouter.post("/snapshot", (_req, res) => {
 
 // src/routes/abi-versioning.ts
 init_tool_registry();
-import { Router as Router44 } from "express";
-var abiVersioningRouter = Router44();
+import { Router as Router45 } from "express";
+var abiVersioningRouter = Router45();
 abiVersioningRouter.get("/versions", (_req, res) => {
   const tools = TOOL_REGISTRY.map((t) => ({
     name: t.name,
@@ -48176,8 +48464,8 @@ abiVersioningRouter.get("/changelog", (_req, res) => {
 // src/routes/hyperagent.ts
 init_hyperagent();
 init_logger();
-import { Router as Router45 } from "express";
-var hyperagentRouter = Router45();
+import { Router as Router46 } from "express";
+var hyperagentRouter = Router46();
 hyperagentRouter.post("/plan", async (req, res) => {
   const { goal, sessionId, profile } = req.body;
   if (!goal || typeof goal !== "string") {
@@ -48337,8 +48625,8 @@ hyperagentRouter.get("/health", (_req, res) => {
 init_hyperagent_autonomous();
 init_redis();
 init_logger();
-import { Router as Router46 } from "express";
-var hyperagentAutoRouter = Router46();
+import { Router as Router47 } from "express";
+var hyperagentAutoRouter = Router47();
 hyperagentAutoRouter.post("/run", async (req, res) => {
   const { phase, maxTargets } = req.body;
   try {
@@ -48506,8 +48794,8 @@ init_chat_broadcaster();
 init_mcp_caller();
 init_inventor_loop();
 init_logger();
-import { Router as Router47 } from "express";
-var inventorRouter = Router47();
+import { Router as Router48 } from "express";
+var inventorRouter = Router48();
 inventorRouter.post("/run", async (req, res) => {
   const { config: config2, resume } = req.body;
   if (!config2 || !config2.experimentName || !config2.taskDescription) {
@@ -48757,8 +49045,8 @@ inventorRouter.get("/export/:name", async (req, res) => {
 // src/routes/anomaly-watcher.ts
 init_anomaly_watcher();
 init_logger();
-import { Router as Router48 } from "express";
-var anomalyWatcherRouter = Router48();
+import { Router as Router49 } from "express";
+var anomalyWatcherRouter = Router49();
 anomalyWatcherRouter.get("/status", (_req, res) => {
   const state4 = getWatcherState();
   res.json({
@@ -48853,8 +49141,8 @@ init_anomaly_watcher();
 // src/routes/peer-eval.ts
 init_peer_eval();
 init_logger();
-import { Router as Router49 } from "express";
-var peerEvalRouter = Router49();
+import { Router as Router50 } from "express";
+var peerEvalRouter = Router50();
 peerEvalRouter.get("/status", (_req, res) => {
   res.json({ success: true, data: getPeerEvalState() });
 });
@@ -48931,8 +49219,8 @@ init_flywheel_coordinator();
 init_consolidation_engine();
 init_cost_optimizer();
 init_logger();
-import { Router as Router50 } from "express";
-var flywheelRouter = Router50();
+import { Router as Router51 } from "express";
+var flywheelRouter = Router51();
 flywheelRouter.get("/metrics", async (_req, res) => {
   try {
     const data = await getFlywheelMetrics();
@@ -48978,7 +49266,7 @@ flywheelRouter.get("/cost-summary", (_req, res) => {
 });
 
 // src/routes/benchmark.ts
-import { Router as Router51 } from "express";
+import { Router as Router52 } from "express";
 
 // src/benchmark-runner.ts
 init_redis();
@@ -49367,7 +49655,7 @@ function buildRecommendation(results, taskId) {
 
 // src/routes/benchmark.ts
 init_logger();
-var benchmarkRouter = Router51();
+var benchmarkRouter = Router52();
 benchmarkRouter.get("/tasks", (_req, res) => {
   const tasks = listBenchmarkTasks();
   res.json({ success: true, tasks });
@@ -49464,8 +49752,8 @@ benchmarkRouter.get("/ablation/:taskId/report", (req, res) => {
 init_config();
 init_logger();
 init_engagement_lineage();
-import { Router as Router52 } from "express";
-var obsidianRouter = Router52();
+import { Router as Router53 } from "express";
+var obsidianRouter = Router53();
 var TIMEOUT_MS = 8e3;
 function isLiveMode() {
   return !!config.obsidianUrl;
@@ -50007,8 +50295,8 @@ obsidianRouter.post("/canvas", async (req, res) => {
 // src/routes/grafana-proxy.ts
 init_logger();
 init_config();
-import { Router as Router53 } from "express";
-var grafanaProxyRouter = Router53();
+import { Router as Router54 } from "express";
+var grafanaProxyRouter = Router54();
 var GRAFANA_URL = "https://clauskraft.grafana.net";
 var GRAFANA_API_KEY = config.grafanaApiKey;
 var PROM_URL = "https://prometheus-prod-39-prod-eu-north-0.grafana.net/api/prom";
@@ -50104,7 +50392,7 @@ grafanaProxyRouter.get("/alerts", async (_req, res) => {
 });
 
 // src/routes/phantom-bom.ts
-import { Router as Router54 } from "express";
+import { Router as Router55 } from "express";
 
 // src/phantom-bom.ts
 init_config();
@@ -51218,7 +51506,7 @@ async function getProviderRegistry() {
 init_logger();
 init_config();
 init_phantom_loop_selector();
-var phantomBomRouter = Router54();
+var phantomBomRouter = Router55();
 var activeExtractions = 0;
 var MAX_CONCURRENT3 = 3;
 phantomBomRouter.post("/skills/route", async (req, res) => {
@@ -51401,8 +51689,8 @@ phantomBomRouter.get("/clusters/debug", async (_req, res) => {
 // src/routes/linear-proxy.ts
 init_logger();
 init_config();
-import { Router as Router55 } from "express";
-var linearProxyRouter = Router55();
+import { Router as Router56 } from "express";
+var linearProxyRouter = Router56();
 async function callBackendMcp2(toolName2, payload) {
   const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
     method: "POST",
@@ -51508,8 +51796,8 @@ linearProxyRouter.post("/issues/:id", async (req, res) => {
 
 // src/routes/prometheus-metrics.ts
 init_logger();
-import { Router as Router56 } from "express";
-var prometheusMetricsRouter = Router56();
+import { Router as Router57 } from "express";
+var prometheusMetricsRouter = Router57();
 var samples = [];
 function collectMetrics(health) {
   const now = Date.now();
@@ -51832,6 +52120,7 @@ app.use("/api/graph-hygiene", requireApiKey, graphHygieneRouter);
 app.use("/api/deliverables", requireApiKey, deliverablesRouter);
 app.use("/api/similarity", requireApiKey, similarityRouter);
 app.use("/api/engagements", requireApiKey, engagementsRouter);
+app.use("/api/processes", requireApiKey, processesRouter);
 app.use("/api/intelligence", requireApiKey, apiRateLimiter, intelligenceRouter);
 app.use("/api/governance", requireApiKey, governanceRouter);
 app.use("/api/osint", requireApiKey, osintRouter);

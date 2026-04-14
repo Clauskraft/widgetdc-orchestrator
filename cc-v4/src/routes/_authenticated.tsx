@@ -25,6 +25,7 @@ function AuthenticatedLayout() {
   const quickActions = appMode === 'workspace'
     ? [
         { label: 'Engagement Workspace', to: '/engagement-workspace' as const, variant: 'outline' as const },
+        { label: 'Process Workspace', to: '/process-workspace' as const, variant: 'outline' as const },
         { label: 'Compliance Audit', to: '/compliance/audit' as const, variant: 'outline' as const },
         { label: 'Deliverable Draft', to: '/deliverable/draft' as const, variant: 'outline' as const },
         { label: 'Project Board', to: '/project-board' as const, variant: 'ghost' as const },
