@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMemo, useState, type ReactNode } from 'react'
 import { apiGet, apiPost } from '@/lib/api-client'
 import { dispatch } from '@/lib/agent-client'
@@ -312,19 +312,40 @@ function ObsidianPage() {
     enabled: status?.connected === true,
     retry: 1,
   })
-  const artifactMetadataQueries = useQueries({
-    queries: [
-      ...((deliverableArtifacts?.files ?? []).filter((file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')))),
-      ...((complianceArtifacts?.files ?? []).filter((file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')))),
-      ...((processDocsArtifacts?.files ?? []).filter((file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')))),
-    ]
-      .slice(0, 24)
-      .map((file) => ({
-        queryKey: ['obsidian-metadata', file.path],
-        queryFn: () => apiGet<NoteMetadata>(`/api/obsidian/metadata?path=${encodeURIComponent(file.path)}`),
-        enabled: status?.connected === true,
-        retry: 1,
-      })),
+  const metadataPaths = useMemo(
+    () =>
+      [
+        ...((deliverableArtifacts?.files ?? []).filter(
+          (file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')),
+        )),
+        ...((complianceArtifacts?.files ?? []).filter(
+          (file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')),
+        )),
+        ...((processDocsArtifacts?.files ?? []).filter(
+          (file) => file.type === 'file' && (file.path.endsWith('.md') || file.path.endsWith('.canvas')),
+        )),
+      ]
+        .slice(0, 24)
+        .map((file) => file.path),
+    [complianceArtifacts?.files, deliverableArtifacts?.files, processDocsArtifacts?.files],
+  )
+
+  const { data: metadataBatch } = useQuery<{ entries: NoteMetadata[] }>({
+    queryKey: ['obsidian-metadata-batch', metadataPaths],
+    enabled: status?.connected === true && metadataPaths.length > 0,
+    retry: 1,
+    queryFn: async () => {
+      const entries = await Promise.all(
+        metadataPaths.map(async (path) => {
+          try {
+            return await apiGet<NoteMetadata>(`/api/obsidian/metadata?path=${encodeURIComponent(path)}`)
+          } catch {
+            return null
+          }
+        }),
+      )
+      return { entries: entries.filter((entry): entry is NoteMetadata => Boolean(entry)) }
+    },
   })
 
   const handleRefresh = () => {
@@ -421,9 +442,7 @@ function ObsidianPage() {
         : processDocFiles
   const parsedNote = noteContent ? parseFrontmatter(noteContent.content) : null
   const canvasPreview = noteContent && selectedNote?.endsWith('.canvas') ? parseCanvas(noteContent.content) : null
-  const metadataEntries = artifactMetadataQueries
-    .map((query) => query.data)
-    .filter((entry): entry is NoteMetadata => Boolean(entry))
+  const metadataEntries = metadataBatch?.entries ?? []
   const visualizationContract =
     selectedNote?.endsWith('.canvas')
       ? (canvasPreview?.widgetdc ? resolveVisualizationContractFromProperties(canvasPreview.widgetdc) : null)
@@ -436,42 +455,42 @@ function ObsidianPage() {
     ? noteContent?.content ?? ''
     : parsedNote?.body ?? ''
   const refinementTitle = selectedNote ? makeRefinementTitle(selectedNote, roundtripMode) : 'artifact refinement'
-  const roundtripNoteProperties = useMemo(() => {
-    if (!selectedNote || !roundtripResponse) return null
-    return buildVisualizationProperties(
-      roundtripMode === 'deliverable'
-        ? { kind: 'deliverable_draft', deliverableType: 'analysis' }
-        : { kind: 'knowledge_artifact' },
-      {
-        client:
-          parsedNote?.properties.client
-          ?? canvasPreview?.widgetdc?.client
-          ?? 'Unknown',
-        source_tool: roundtripMode === 'deliverable' ? 'deliverable_draft' : 'reason_deeply',
-        status: roundtripResponse.status,
-        refined_from: selectedNote,
-        refinement_mode: roundtripMode,
-      }
-    )
-  }, [canvasPreview?.widgetdc?.client, parsedNote?.properties.client, roundtripMode, roundtripResponse, selectedNote])
-  const roundtripCanvasPayload = useMemo(() => {
-    if (!selectedNote || !roundtripResponse) return null
-    return buildCanvasPayload(
-      roundtripMode === 'deliverable'
-        ? { kind: 'deliverable_draft', deliverableType: 'analysis' }
-        : { kind: 'knowledge_artifact' },
-      {
-        title: refinementTitle,
-        markdown: roundtripResponse.output,
-        client:
-          parsedNote?.properties.client
-          ?? canvasPreview?.widgetdc?.client
-          ?? 'Unknown',
-        sourceTool: roundtripMode === 'deliverable' ? 'deliverable_draft' : 'reason_deeply',
-        status: roundtripResponse.status,
-      }
-    )
-  }, [canvasPreview?.widgetdc?.client, parsedNote?.properties.client, refinementTitle, roundtripMode, roundtripResponse, selectedNote])
+  const roundtripNoteProperties =
+    !selectedNote || !roundtripResponse
+      ? null
+      : buildVisualizationProperties(
+          roundtripMode === 'deliverable'
+            ? { kind: 'deliverable_draft', deliverableType: 'analysis' }
+            : { kind: 'knowledge_artifact' },
+          {
+            client:
+              parsedNote?.properties.client
+              ?? canvasPreview?.widgetdc?.client
+              ?? 'Unknown',
+            source_tool: roundtripMode === 'deliverable' ? 'deliverable_draft' : 'reason_deeply',
+            status: roundtripResponse.status,
+            refined_from: selectedNote,
+            refinement_mode: roundtripMode,
+          },
+        )
+  const roundtripCanvasPayload =
+    !selectedNote || !roundtripResponse
+      ? null
+      : buildCanvasPayload(
+          roundtripMode === 'deliverable'
+            ? { kind: 'deliverable_draft', deliverableType: 'analysis' }
+            : { kind: 'knowledge_artifact' },
+          {
+            title: refinementTitle,
+            markdown: roundtripResponse.output,
+            client:
+              parsedNote?.properties.client
+              ?? canvasPreview?.widgetdc?.client
+              ?? 'Unknown',
+            sourceTool: roundtripMode === 'deliverable' ? 'deliverable_draft' : 'reason_deeply',
+            status: roundtripResponse.status,
+          },
+        )
 
   // Sort tags by frequency, get top 20
   const sortedTags = tags ? Object.entries(tags).sort((a, b) => b[1] - a[1]).slice(0, 20) : []
