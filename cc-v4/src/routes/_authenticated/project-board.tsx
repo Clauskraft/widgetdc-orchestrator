@@ -144,6 +144,10 @@ function dedupeIssues(issues: LinearIssue[] | undefined): LinearIssue[] {
   return Array.from(byKey.values())
 }
 
+function issueKey(issue: LinearIssue): string {
+  return issue.id || issue.identifier
+}
+
 // ─── Page ────────────────────────────────────────────────────────────────────
 
 function ProjectBoardPage() {
@@ -404,7 +408,7 @@ function ProjectBoardPage() {
                 ) : (
                   colIssues.map(issue => (
                     <IssueCard
-                      key={issue.id}
+                      key={issueKey(issue)}
                       issue={issue}
                       onEdit={() => setEditIssue(issue)}
                       onSelect={() => setSelectedIssue(issue)}
