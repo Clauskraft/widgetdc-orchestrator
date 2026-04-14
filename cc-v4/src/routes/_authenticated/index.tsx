@@ -136,7 +136,7 @@ function CockpitPage() {
 
   const commandMutation = useMutation({
     mutationFn: async (command: string) => {
-      return apiPost<{ success: boolean; data: { summary?: string; command: string } }>(
+      return apiPost<{ success: boolean; data: { summary?: string; command: string; result?: unknown } }>(
         '/api/cockpit/commands/execute',
         { command },
       )
@@ -147,6 +147,10 @@ function CockpitPage() {
   const availableProviders = overview?.providers.filter((provider) => provider.available) ?? []
   const latestCommandMessage = commandMutation.data?.data?.summary
   const commandError = commandMutation.error ? normalizeError(commandMutation.error).message : null
+  const guardMetrics = (commandMutation.data?.data?.result as { metrics?: Record<string, unknown>; gates?: Record<string, boolean> } | undefined)
+    ?.metrics
+  const guardGates = (commandMutation.data?.data?.result as { metrics?: Record<string, unknown>; gates?: Record<string, boolean> } | undefined)
+    ?.gates
 
   return (
     <div className="flex flex-col gap-6 p-8">
@@ -196,129 +200,49 @@ function CockpitPage() {
         </Alert>
       )}
 
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <section className="grid gap-4 md:grid-cols-3">
         {overviewQuery.isLoading || !overview ? (
-          Array.from({ length: 4 }).map((_, index) => <Skeleton key={index} className="h-28 w-full" />)
+          Array.from({ length: 3 }).map((_, index) => <Skeleton key={index} className="h-28 w-full" />)
         ) : (
           <>
             <MetricCard
-              title="Orchestrator MCP"
-              value={overview.mcp.orchestrator.healthy ? 'Online' : 'Down'}
-              description={`${overview.mcp.orchestrator.tool_count} tools visible`}
+              title="System Status"
+              value={overview.mcp.orchestrator.healthy && overview.mcp.backend.healthy ? 'Ready' : 'Attention'}
+              description={`MCP ${overview.mcp.orchestrator.healthy && overview.mcp.backend.healthy ? 'healthy' : 'needs check'}`}
             />
             <MetricCard
-              title="Backend MCP"
-              value={overview.mcp.backend.healthy ? 'Online' : 'Down'}
-              description={`${overview.mcp.backend.tool_count} tools reported`}
+              title="Providers Ready"
+              value={`${availableProviders.length}/${overview.providers.length}`}
+              description="Available model providers"
             />
             <MetricCard
-              title="Providers"
-              value={availableProviders.length}
-              description={`${overview.providers.length} configured surfaces checked`}
-            />
-            <MetricCard
-              title="Agents"
-              value={overview.agents.total}
-              description={`${overview.agents.active} active · ${overview.chains.running} chains running`}
+              title="Active Runtime Risk"
+              value={overview.signals.anomaly_active}
+              description={`${overview.signals.write_rejections} write rejections`}
             />
           </>
         )}
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-[1.25fr_0.95fr]">
+      <section className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
         <Card>
           <CardHeader>
-            <CardTitle>Live MCP and runtime state</CardTitle>
-            <CardDescription>These values come from production-facing probes and current orchestrator internals.</CardDescription>
+            <CardTitle>Primary Operator Actions</CardTitle>
+            <CardDescription>Minimal control surface: start guard loop, run harvest, sync signals.</CardDescription>
           </CardHeader>
-          <CardContent className="grid gap-4 md:grid-cols-2">
-            {overviewQuery.isLoading || !overview ? (
-              Array.from({ length: 6 }).map((_, index) => <Skeleton key={index} className="h-20 w-full" />)
-            ) : (
-              <>
-                <div className="rounded-lg border p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-medium">Orchestrator MCP</p>
-                      <p className="text-xs text-muted-foreground">Protocol {overview.mcp.orchestrator.protocol_version ?? 'unknown'}</p>
-                    </div>
-                    <StatusBadge ok={overview.mcp.orchestrator.healthy} />
-                  </div>
-                </div>
-                <div className="rounded-lg border p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-medium">Backend Neural Bridge</p>
-                      <p className="text-xs text-muted-foreground">
-                        {overview.mcp.backend.error ?? `${overview.mcp.backend.tool_count} tools reachable`}
-                      </p>
-                    </div>
-                    <StatusBadge ok={overview.mcp.backend.healthy} />
-                  </div>
-                </div>
-                <div className="rounded-lg border p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-medium">RLM Engine</p>
-                      <p className="text-xs text-muted-foreground">Reasoning proxy availability</p>
-                    </div>
-                    <StatusBadge ok={overview.services.rlm_available} goodLabel="available" badLabel="offline" />
-                  </div>
-                </div>
-                <div className="rounded-lg border p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-medium">OpenClaw</p>
-                      <p className="text-xs text-muted-foreground">External executor bridge</p>
-                    </div>
-                    <StatusBadge ok={overview.services.openclaw_healthy} goodLabel="healthy" badLabel="degraded" />
-                  </div>
-                </div>
-                <div className="rounded-lg border p-4">
-                  <div className="flex items-center gap-3">
-                    <TriangleAlert className="h-4 w-4 text-amber-500" />
-                    <div>
-                      <p className="text-sm font-medium">Anomalies</p>
-                      <p className="text-xs text-muted-foreground">
-                        {overview.signals.anomaly_active} active · {overview.signals.anomaly_scans} total scans
-                      </p>
-                    </div>
-                  </div>
-                </div>
-                <div className="rounded-lg border p-4">
-                  <div className="flex items-center gap-3">
-                    <Sparkles className="h-4 w-4 text-violet-500" />
-                    <div>
-                      <p className="text-sm font-medium">Signals</p>
-                      <p className="text-xs text-muted-foreground">
-                        {overview.signals.pheromone_active} active pheromones · {overview.signals.write_rejections} rejected writes
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              </>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Operator actions</CardTitle>
-            <CardDescription>Typed actions for MCP, harvest, nudge, and evolution loops.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
+          <CardContent className="grid gap-3 md:grid-cols-2">
             {[
-              { command: 'mcp.initialize', label: 'Initialize MCP', icon: Zap },
-              { command: 'mcp.list_tools', label: 'List MCP Tools', icon: Boxes },
-              { command: 'providers.list', label: 'List Providers', icon: Bot },
+              { command: 'harvest.guard', label: 'Run Harvest Guard', icon: ShieldCheck },
               { command: 'harvest.full', label: 'Run Full Harvest', icon: RefreshCw },
-              { command: 'flywheel.sync', label: 'Run Flywheel Sync', icon: Activity },
-              { command: 'pheromone.decay', label: 'Run Pheromone Decay', icon: Sparkles },
+              { command: 'flywheel.sync', label: 'Sync Flywheel', icon: Activity },
+              { command: 'pheromone.decay', label: 'Run Nudge Decay', icon: Sparkles },
+              { command: 'mcp.initialize', label: 'Initialize MCP', icon: Zap },
+              { command: 'providers.list', label: 'Refresh Providers', icon: Bot },
             ].map(({ command, label, icon: Icon }) => (
               <Button
                 key={command}
-                variant="outline"
-                className="w-full justify-start"
+                variant={command === 'harvest.guard' ? 'default' : 'outline'}
+                className="justify-start"
                 disabled={commandMutation.isPending}
                 onClick={() => commandMutation.mutate(command)}
               >
@@ -328,95 +252,60 @@ function CockpitPage() {
             ))}
           </CardContent>
         </Card>
-      </section>
 
-      <section className="grid gap-4 xl:grid-cols-[1.1fr_1fr]">
         <Card>
           <CardHeader>
-            <CardTitle>Provider availability</CardTitle>
-            <CardDescription>Explicit-select provider model for cockpit and chat flows.</CardDescription>
+            <CardTitle>Harvest Guard Snapshot</CardTitle>
+            <CardDescription>Aligned to visualization harvest execution gates.</CardDescription>
           </CardHeader>
-          <CardContent className="grid gap-3 md:grid-cols-2">
-            {overviewQuery.isLoading || !overview ? (
-              Array.from({ length: 4 }).map((_, index) => <Skeleton key={index} className="h-20 w-full" />)
+          <CardContent className="space-y-3">
+            {!guardMetrics ? (
+              <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                Run <span className="font-medium">Harvest Guard</span> to get a compact gate summary.
+              </div>
             ) : (
-              overview.providers.map((provider) => (
-                <div key={provider.id} className="rounded-lg border p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="font-medium">{provider.name}</p>
-                      <p className="text-xs text-muted-foreground">{provider.model}</p>
-                    </div>
-                    <StatusBadge ok={provider.available} goodLabel="available" badLabel="offline" />
+              <>
+                <div className="rounded-lg border p-3">
+                  <p className="text-xs text-muted-foreground">Domains harvested</p>
+                  <p className="text-lg font-semibold">{String(guardMetrics.domains_harvested ?? 0)}</p>
+                </div>
+                <div className="rounded-lg border p-3">
+                  <p className="text-xs text-muted-foreground">Providers available</p>
+                  <p className="text-lg font-semibold">
+                    {String(guardMetrics.providers_available ?? 0)}/{String(guardMetrics.providers_total ?? 0)}
+                  </p>
+                </div>
+                <div className="rounded-lg border p-3">
+                  <p className="text-xs text-muted-foreground">Compound health</p>
+                  <p className="text-lg font-semibold">{String(guardMetrics.compound_health_score ?? 'n/a')}</p>
+                </div>
+                <div className="rounded-lg border p-3">
+                  <p className="text-xs text-muted-foreground">Gates</p>
+                  <div className="mt-1 flex flex-wrap gap-2">
+                    {Object.entries(guardGates ?? {}).map(([key, passed]) => (
+                      <Badge key={key} variant={passed ? 'default' : 'destructive'}>
+                        {key.replace(/_/g, ' ')}
+                      </Badge>
+                    ))}
                   </div>
                 </div>
-              ))
+              </>
             )}
           </CardContent>
         </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Operator links</CardTitle>
-            <CardDescription>Fast pivots into the rest of the cockpit and external surfaces.</CardDescription>
-          </CardHeader>
-          <CardContent className="grid gap-3 sm:grid-cols-2">
-            <Button variant="outline" className="justify-start" onClick={() => navigate({ to: '/chat' })}>
-              <Bot className="mr-2 h-4 w-4" />
-              Open Chat
-            </Button>
-            <Button variant="outline" className="justify-start" onClick={() => navigate({ to: '/observability' })}>
-              <Activity className="mr-2 h-4 w-4" />
-              Open Observability
-            </Button>
-            <Button variant="outline" className="justify-start" onClick={() => navigate({ to: '/omega' })}>
-              <Workflow className="mr-2 h-4 w-4" />
-              Open Architecture
-            </Button>
-            <Button variant="outline" className="justify-start" onClick={() => navigate({ to: '/openclaw' })}>
-              <Zap className="mr-2 h-4 w-4" />
-              Open OpenClaw
-            </Button>
-            <Button variant="outline" className="justify-start" onClick={() => navigate({ to: '/pheromone' })}>
-              <Sparkles className="mr-2 h-4 w-4" />
-              Open Signals
-            </Button>
-            <Button
-              variant="outline"
-              className="justify-start"
-              onClick={() => window.open('https://arch-mcp-server-production.up.railway.app', '_blank', 'noopener,noreferrer')}
-            >
-              <ExternalLink className="mr-2 h-4 w-4" />
-              Open arch-mcp
-            </Button>
-          </CardContent>
-        </Card>
       </section>
 
-      {overview && (
-        <section className="grid gap-4 md:grid-cols-4">
-          <MetricCard
-            title="Cron"
-            value={overview.cron.enabled}
-            description={`${overview.cron.total} jobs registered`}
-          />
-          <MetricCard
-            title="Connections"
-            value={overview.connections.ws_total}
-            description={`${overview.connections.sse_total} SSE clients`}
-          />
-          <MetricCard
-            title="Pheromones"
-            value={overview.signals.pheromone_deposits}
-            description={`${overview.signals.pheromone_active} active`}
-          />
-          <MetricCard
-            title="Peer Eval"
-            value={overview.signals.peer_evals}
-            description="Fleet learning events recorded"
-          />
-        </section>
-      )}
+      <details className="rounded-lg border bg-card p-4">
+        <summary className="cursor-pointer text-sm font-medium">Advanced telemetry (optional)</summary>
+        {overview && (
+          <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <MetricCard title="Cron" value={overview.cron.enabled} description={`${overview.cron.total} jobs`} />
+            <MetricCard title="Connections" value={overview.connections.ws_total} description={`${overview.connections.sse_total} SSE`} />
+            <MetricCard title="Pheromones" value={overview.signals.pheromone_active} description={`${overview.signals.pheromone_deposits} deposits`} />
+            <MetricCard title="Peer Eval" value={overview.signals.peer_evals} description="Fleet events" />
+          </div>
+        )}
+      </details>
     </div>
   )
 }
