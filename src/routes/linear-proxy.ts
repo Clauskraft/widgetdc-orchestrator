@@ -61,8 +61,9 @@ linearProxyRouter.get('/issues', async (req: Request, res: Response) => {
     }))
     res.json(Array.isArray(issues) ? issues : [])
   } catch (err) {
-    logger.error({ err: String(err) }, 'Linear proxy: failed to fetch issues')
-    res.status(502).json({ error: `Failed to fetch Linear issues: ${String(err)}` })
+    logger.warn({ err: String(err) }, 'Linear proxy: issues unavailable, returning degraded empty list')
+    res.setHeader('X-Widgetdc-Degraded', 'linear-issues')
+    res.json([])
   }
 })
 
@@ -76,8 +77,9 @@ linearProxyRouter.get('/labels', async (_req: Request, res: Response) => {
     const labels = result?.labels ?? result?.nodes ?? result ?? []
     res.json(Array.isArray(labels) ? labels : [])
   } catch (err) {
-    logger.error({ err: String(err) }, 'Linear proxy: failed to fetch labels')
-    res.status(502).json({ error: `Failed to fetch Linear labels: ${String(err)}` })
+    logger.warn({ err: String(err) }, 'Linear proxy: labels unavailable, returning degraded empty list')
+    res.setHeader('X-Widgetdc-Degraded', 'linear-labels')
+    res.json([])
   }
 })
 
