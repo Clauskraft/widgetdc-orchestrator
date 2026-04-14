@@ -1,4 +1,4 @@
-import axios, { AxiosInstance, AxiosError } from 'axios'
+import axios, { AxiosInstance, AxiosError, type AxiosRequestConfig } from 'axios'
 import { useAuthStore } from '@/stores/auth-store'
 
 let apiClient: AxiosInstance | null = null
@@ -73,6 +73,16 @@ async function withRetry<T>(fn: () => Promise<T>, retries = MAX_RETRIES): Promis
   throw new Error('unreachable')
 }
 
+interface RequestOptions extends AxiosRequestConfig {
+  retry?: boolean | number
+}
+
+function resolveRetryCount(retry: RequestOptions['retry']): number {
+  if (retry === false) return 0
+  if (typeof retry === 'number') return Math.max(0, retry)
+  return MAX_RETRIES
+}
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 export interface ApiError {
@@ -99,36 +109,40 @@ function normalizeError(error: unknown): ApiError {
   }
 }
 
-export async function apiGet<T>(url: string, config?: any): Promise<T> {
+export async function apiGet<T>(url: string, config?: RequestOptions): Promise<T> {
   const client = getApiClient()
+  const { retry, ...axiosConfig } = config ?? {}
   return withRetry(async () => {
-    const response = await client.get<T>(url, config)
+    const response = await client.get<T>(url, axiosConfig)
     return response.data
-  })
+  }, resolveRetryCount(retry))
 }
 
-export async function apiPost<T>(url: string, data?: any, config?: any): Promise<T> {
+export async function apiPost<T>(url: string, data?: any, config?: RequestOptions): Promise<T> {
   const client = getApiClient()
+  const { retry, ...axiosConfig } = config ?? {}
   return withRetry(async () => {
-    const response = await client.post<T>(url, data, config)
+    const response = await client.post<T>(url, data, axiosConfig)
     return response.data
-  })
+  }, resolveRetryCount(retry))
 }
 
-export async function apiPut<T>(url: string, data?: any, config?: any): Promise<T> {
+export async function apiPut<T>(url: string, data?: any, config?: RequestOptions): Promise<T> {
   const client = getApiClient()
+  const { retry, ...axiosConfig } = config ?? {}
   return withRetry(async () => {
-    const response = await client.put<T>(url, data, config)
+    const response = await client.put<T>(url, data, axiosConfig)
     return response.data
-  })
+  }, resolveRetryCount(retry))
 }
 
-export async function apiDelete<T>(url: string, config?: any): Promise<T> {
+export async function apiDelete<T>(url: string, config?: RequestOptions): Promise<T> {
   const client = getApiClient()
+  const { retry, ...axiosConfig } = config ?? {}
   return withRetry(async () => {
-    const response = await client.delete<T>(url, config)
+    const response = await client.delete<T>(url, axiosConfig)
     return response.data
-  })
+  }, resolveRetryCount(retry))
 }
 
 export { normalizeError }
