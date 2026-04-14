@@ -64,7 +64,7 @@ function isServiceUnavailableError(error: unknown): boolean {
 async function fetchVaultList(path?: string): Promise<{ files: VaultEntry[] }> {
   const suffix = path ? `?path=${encodeURIComponent(path)}` : ''
   try {
-    return await apiGet<{ files: VaultEntry[] }>(`/api/obsidian/vault/list${suffix}`)
+    return await apiGet<{ files: VaultEntry[] }>(`/api/obsidian/vault/list${suffix}`, { retry: false })
   } catch (error) {
     if (isServiceUnavailableError(error)) {
       return { files: [] }

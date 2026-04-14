@@ -120,6 +120,21 @@ describe('api-client', () => {
       const data = await promise
       expect(data).toEqual({ ok: true })
     })
+
+    it('supports per-request retry override (retry: false)', async () => {
+      let attempt = 0
+      server.use(
+        http.get('*/api/no-retry', () => {
+          attempt++
+          return HttpResponse.json({ message: 'Server error' }, { status: 503 })
+        })
+      )
+
+      vi.resetModules()
+      const { apiGet } = await import('@/lib/api-client')
+      await expect(apiGet('/api/no-retry', { retry: false })).rejects.toThrow()
+      expect(attempt).toBe(1)
+    })
   })
 
   describe('apiPost', () => {
