@@ -460,8 +460,8 @@ function ProjectBoardPage() {
               </div>
             )}
             <div className="flex flex-wrap gap-2 mt-4">
-              {selectedIssue.labels.map(l => (
-                <Badge key={l.name} variant="outline" style={{ borderColor: l.color, color: l.color }}>
+              {selectedIssue.labels.map((l, index) => (
+                <Badge key={`${selectedIssue.id}-${l.name}-${index}`} variant="outline" style={{ borderColor: l.color, color: l.color }}>
                   <Tag className="w-3 h-3 mr-1" /> {l.name}
                 </Badge>
               ))}
@@ -581,15 +581,23 @@ function IssueCard({
 
   return (
     <div
-      className="p-3 rounded-lg border bg-card hover:bg-accent cursor-pointer transition-colors group"
+      className="p-3 rounded-lg border bg-card hover:bg-accent cursor-pointer transition-colors group focus:outline-none focus:ring-2 focus:ring-primary/40"
       onClick={onSelect}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onSelect()
+        }
+      }}
     >
       <div className="flex items-start justify-between gap-2">
         <div className="flex-1 min-w-0">
           <div className="text-sm font-medium truncate">{issue.title}</div>
           <div className="text-xs text-muted-foreground font-mono">{issue.identifier}</div>
         </div>
-        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+        <div className="flex gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
           {stateLower !== 'in progress' && stateLower !== 'completed' && (
             <button
               onClick={(e) => { e.stopPropagation(); onStateChange('in progress') }}
@@ -627,8 +635,8 @@ function IssueCard({
             {issue.assignee.displayName}
           </span>
         )}
-        {issue.labels.slice(0, 2).map(l => (
-          <span key={l.name} className="px-1.5 py-0.5 rounded text-[10px] border" style={{ borderColor: l.color, color: l.color }}>
+        {issue.labels.slice(0, 2).map((l, index) => (
+          <span key={`${issue.id}-${l.name}-${index}`} className="px-1.5 py-0.5 rounded text-[10px] border" style={{ borderColor: l.color, color: l.color }}>
             {l.name}
           </span>
         ))}
@@ -645,10 +653,14 @@ function IssueCard({
               key={state}
               disabled={isMutating}
               onClick={(e) => { e.stopPropagation(); onStateChange(state) }}
-              className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground px-2 py-1 rounded bg-muted/50 hover:bg-muted transition-colors disabled:opacity-50"
+              className={`flex items-center gap-1 text-[10px] px-2 py-1 rounded transition-colors disabled:opacity-50 ${
+                state === 'in progress'
+                  ? 'bg-primary/10 text-primary hover:bg-primary/20'
+                  : 'bg-muted/50 text-muted-foreground hover:text-foreground hover:bg-muted'
+              }`}
             >
               {state === 'in progress' ? <Play className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-              {isMutating ? 'Updating…' : state === 'in progress' ? 'Start work' : state === 'completed' ? 'Done' : formatStateLabel(state)}
+              {isMutating ? 'Updating…' : state === 'in progress' ? 'Start work now' : state === 'completed' ? 'Done' : formatStateLabel(state)}
             </button>
           ))}
         </div>
@@ -786,9 +798,9 @@ function IssueDialog({
               {labels?.length === 0 && (
                 <span className="text-xs text-muted-foreground">No labels available</span>
               )}
-              {labels?.map(label => (
+              {labels?.map((label, index) => (
                 <button
-                  key={label.name}
+                  key={`${label.id ?? label.name}-${index}`}
                   onClick={() => setFormLabels(prev =>
                     prev.includes(label.name) ? prev.filter(l => l !== label.name) : [...prev, label.name]
                   )}
