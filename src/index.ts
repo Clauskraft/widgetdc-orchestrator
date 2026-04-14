@@ -78,6 +78,7 @@ import { graphHygieneRouter } from './routes/graph-hygiene.js'
 import { deliverablesRouter } from './routes/deliverables.js'
 import { similarityRouter } from './routes/similarity.js'
 import { engagementsRouter } from './routes/engagements.js'
+import { processesRouter } from './routes/processes.js'
 import { getWriteGateStats } from './write-gate.js'
 import { getBackendCircuitState, getRateLimitState } from './mcp-caller.js'
 import { intelligenceRouter } from './routes/intelligence.js'
@@ -305,6 +306,7 @@ app.use('/api/graph-hygiene', requireApiKey, graphHygieneRouter)
 app.use('/api/deliverables', requireApiKey, deliverablesRouter)
 app.use('/api/similarity', requireApiKey, similarityRouter)
 app.use('/api/engagements', requireApiKey, engagementsRouter)
+app.use('/api/processes', requireApiKey, processesRouter)
 app.use('/api/intelligence', requireApiKey, apiRateLimiter, intelligenceRouter)
 app.use('/api/governance', requireApiKey, governanceRouter)
 // LIN-480: OSINT Scanning Pipeline
