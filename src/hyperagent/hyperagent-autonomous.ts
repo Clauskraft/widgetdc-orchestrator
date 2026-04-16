@@ -571,9 +571,34 @@ async function enrichTargetWithRAG(target: TargetDef, edgeGap: number): Promise<
       // non-blocking
     }
 
-    // Fold the merged RAG context (graphrag + srag + kg_rag) to fit in planner window
+    // PhantomBOM — capability_match: map what's available to close this target
+    let phantomBomContext = ''
+    try {
+      const bomResult = await callMcpTool({
+        toolName: 'capability_match',
+        args: {
+          required_capabilities: [target.metric.split(':').slice(1).join(' ') || target.metric, target.edge, target.category],
+          min_confidence: 0.3,
+          max_results: 8,
+        },
+        callId: `hyp-bom-${target.id}-${Date.now()}`,
+      })
+      const bomRaw = bomResult.result
+      if (typeof bomRaw === 'string') {
+        phantomBomContext = bomRaw.slice(0, 400)
+      } else if (bomRaw && typeof bomRaw === 'object') {
+        const b = bomRaw as Record<string, unknown>
+        const matches = b.matches ?? b.results ?? b.capabilities
+        if (matches) phantomBomContext = JSON.stringify(matches).slice(0, 400)
+      }
+    } catch {
+      // non-blocking
+    }
+
+    // Fold the merged RAG context (graphrag + srag + kg_rag + PhantomBOM) to fit in planner window
     const mergedContext = ragResponse.merged_context +
-      (kgRagContext ? `\n\n[KG-RAG Evidence]\n${kgRagContext.slice(0, 600)}` : '')
+      (kgRagContext ? `\n\n[KG-RAG Evidence]\n${kgRagContext.slice(0, 600)}` : '') +
+      (phantomBomContext ? `\n\n[PhantomBOM — Available Capabilities]\n${phantomBomContext}` : '')
     const folded = await foldContext(
       `[RAG context for ${target.id}]\n${mergedContext}`,
       1500,
@@ -755,7 +780,7 @@ export async function runAutonomousCycle(
 
   isRunning = true
 
-  // Restore totalCycles + closedTargetIds from Redis on first cycle (survives redeploys)
+  // Restore totalCycles + closedTargetIds on first call to this instance
   if (totalCycles === 0) {
     const redisRestore = getRedis()
     if (redisRestore) {
@@ -765,43 +790,44 @@ export async function runAutonomousCycle(
           totalCycles = parseInt(stored, 10) || 0
           logger.info({ totalCycles }, 'HyperAgent-Auto: restored totalCycles from Redis')
         }
+        // Legacy key — may have stale data; we always merge Neo4j on top
         const closedRaw = await redisRestore.get('hyperagent:closedTargets')
         if (closedRaw) {
           const ids = JSON.parse(closedRaw) as string[]
           ids.forEach(id => closedTargetIds.add(id))
-          logger.info({ count: closedTargetIds.size }, 'HyperAgent-Auto: restored closedTargets from Redis')
+          logger.info({ count: closedTargetIds.size }, 'HyperAgent-Auto: partial restore from Redis legacy key')
         }
       } catch { /* non-blocking */ }
     }
 
-    // Neo4j fallback for closedTargetIds (survives Railway LB + Redis eviction)
-    if (closedTargetIds.size === 0) {
-      try {
-        const closedResult = await callMcpTool({
-          toolName: 'data_graph_read',
-          args: {
-            query: `MATCH (m:HyperAgentMemory {domain: 'targets', key: 'closed-ids'})
-                    RETURN m.value AS value ORDER BY m.updated_at DESC LIMIT 1`,
-            params: {},
-          },
-          callId: `hyp-closed-restore-${Date.now()}`,
-        })
-        if (closedResult.status === 'success' && closedResult.result) {
-          const outerStr = typeof closedResult.result === 'string' ? closedResult.result : JSON.stringify(closedResult.result)
-          const outer = JSON.parse(outerStr) as Record<string, unknown>
-          const inner = (outer?.result as Record<string, unknown>) ?? outer
-          const rows = (inner?.results ?? outer?.results) as Array<Record<string, unknown>> | undefined
-          if (Array.isArray(rows) && rows.length > 0) {
-            const rawValue = rows[0]?.value
-            const ids = typeof rawValue === 'string' ? JSON.parse(rawValue) as string[] : rawValue as string[]
-            if (Array.isArray(ids)) {
-              ids.forEach(id => closedTargetIds.add(id))
-              logger.info({ count: closedTargetIds.size }, 'HyperAgent-Auto: restored closedTargets from Neo4j')
-            }
+    // Neo4j is authoritative — ALWAYS merge on top of whatever Redis had.
+    // The old Redis key 'hyperagent:closedTargets' may be stale from cycle-1;
+    // Neo4j always has the latest full set written by persistCrossRepoMemory.
+    try {
+      const closedResult = await callMcpTool({
+        toolName: 'data_graph_read',
+        args: {
+          query: `MATCH (m:HyperAgentMemory {domain: 'targets', key: 'closed-ids'})
+                  RETURN m.value AS value ORDER BY m.updated_at DESC LIMIT 1`,
+          params: {},
+        },
+        callId: `hyp-closed-restore-${Date.now()}`,
+      })
+      if (closedResult.status === 'success' && closedResult.result) {
+        const outerStr = typeof closedResult.result === 'string' ? closedResult.result : JSON.stringify(closedResult.result)
+        const outer = JSON.parse(outerStr) as Record<string, unknown>
+        const inner = (outer?.result as Record<string, unknown>) ?? outer
+        const rows = (inner?.results ?? outer?.results) as Array<Record<string, unknown>> | undefined
+        if (Array.isArray(rows) && rows.length > 0) {
+          const rawValue = rows[0]?.value
+          const ids = typeof rawValue === 'string' ? JSON.parse(rawValue) as string[] : rawValue as string[]
+          if (Array.isArray(ids)) {
+            ids.forEach(id => closedTargetIds.add(id))
+            logger.info({ count: closedTargetIds.size }, 'HyperAgent-Auto: authoritative restore from Neo4j closed-ids')
           }
         }
-      } catch { /* non-blocking */ }
-    }
+      }
+    } catch { /* non-blocking */ }
   }
 
   const cycleId = `auto-${uuid().slice(0, 8)}`
@@ -1039,6 +1065,27 @@ export async function runAutonomousCycle(
         logger.info({ cycleId, targets: targetsCompleted }, 'HyperAgent-Auto: cycle lesson ingested to SRAG')
       } catch {
         logger.debug('HyperAgent-Auto: SRAG ingest failed (non-blocking)')
+      }
+
+      // Normalization layer — push through KnowledgeBus normalization so lesson
+      // gets scored, tiered (L2/L3/L4), and made available for future agents
+      try {
+        await callMcpTool({
+          toolName: 'knowledge_normalize',
+          args: {
+            source: 'phantom_bom',
+            title: `[HyperAgent ${effectivePhase}] ${lessons.slice(0, 2).join(' | ')}`,
+            content: foldedSummary,
+            summary: `Autonomous cycle ${cycleId}: ${targetsCompleted} targets closed, fitness Δ${fitnessDelta.toFixed(3)}`,
+            score: fitnessDelta > 0.05 ? 0.72 : 0.55,
+            tags: ['hyperagent', 'autonomous', effectivePhase, 'cycle-lesson'],
+            repo: 'widgetdc-orchestrator',
+          },
+          callId: `hyp-normalize-${cycleId}`,
+        })
+        logger.info({ cycleId }, 'HyperAgent-Auto: lesson pushed through normalization bus')
+      } catch {
+        logger.debug('HyperAgent-Auto: knowledge_normalize failed (non-blocking)')
       }
     }
 
