@@ -6,7 +6,7 @@ export const TIER_THRESHOLDS = {
 } as const
 
 export function routeTier(score: number | undefined): Tier {
-  if (score === undefined || score < TIER_THRESHOLDS.L3_MIN) return 'l2'
+  if (score === undefined || Number.isNaN(score) || score < TIER_THRESHOLDS.L3_MIN) return 'l2'
   if (score < TIER_THRESHOLDS.L4_MIN) return 'l3'
   return 'l4'
 }

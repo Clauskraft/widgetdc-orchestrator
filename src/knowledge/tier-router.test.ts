@@ -10,4 +10,5 @@ describe('routeTier', () => {
   it('routes score 0.69 to l2', () => assert.equal(routeTier(0.69), 'l2'))
   it('routes undefined score to l2', () => assert.equal(routeTier(undefined), 'l2'))
   it('routes 0 to l2', () => assert.equal(routeTier(0), 'l2'))
+  it('routes NaN to l2', () => assert.equal(routeTier(NaN), 'l2'))
 })
