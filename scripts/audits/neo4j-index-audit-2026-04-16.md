@@ -64,6 +64,23 @@ Report §11.4's listed timeouts are in the second + third category. These are **
 
 **Net effect**: the production platform currently has no reliable way to introspect its own Neo4j index state via MCP. Any "SHOW INDEXES" call either times out or returns fabricated data.
 
+## Follow-up actions executed 2026-04-16 09:00Z
+
+After Action G fix landed (backend `5c741f839cae`, `SHOW INDEXES` now returns real data), the orchestrator audit added targeted indexes for the two labels with zero coverage:
+
+| Index | Label | Property | Type | State |
+|-------|-------|----------|------|-------|
+| `mcptool_name` | MCPTool | name | RANGE | ONLINE |
+| `llmdecision_createdAt` | LLMDecision | createdAt | RANGE | ONLINE |
+| `llmdecision_agentId` | LLMDecision | agent_id | RANGE | ONLINE |
+
+Created via `call_mcp_tool` → `graph.write_cypher` with full governance payload (intent/purpose/objective/evidence/verification/test_results). Total index count on the graph is now 167 ONLINE.
+
+**Why these three specifically**:
+- `MCPTool.name` is the dispatch key — every MCP tool call looks up by name. Without index, each dispatch scanned 7.6K nodes.
+- `LLMDecision.createdAt` supports time-window queries that are common on the largest unindexed label (102K nodes).
+- `LLMDecision.agent_id` supports per-agent attribution queries on the same label.
+
 ## Recommendations
 
 1. **Close Action D as "NO-OP, evidence-based"**: hot-path performance is within SLO; rapport's timeouts were on non-hot-path ops. Do not create speculative indexes — they slow writes and bloat storage on 1.5M-node / 935-label graph.
