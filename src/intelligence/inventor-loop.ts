@@ -1089,9 +1089,12 @@ export function getBestNode(): InventorNode | undefined {
 
 export function stopInventor(): { success: boolean; message: string } {
   if (!isRunning) return { success: false, message: 'No experiment is currently running' }
+  const name = currentConfig?.experimentName ?? ''
+  const step = currentStep
   abortRequested = true
-  logger.info('Inventor: stop requested — will halt after current step completes')
-  return { success: true, message: `Stopping experiment "${currentConfig?.experimentName ?? ''}" after step ${currentStep}` }
+  isRunning = false  // unblock startInventor immediately; loop cleanup handles the rest
+  logger.info('Inventor: stop requested — unblocked isRunning, will abort after current step')
+  return { success: true, message: `Stopped: Stopping experiment "${name}" after step ${step}` }
 }
 
 /**

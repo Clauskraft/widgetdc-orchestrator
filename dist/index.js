@@ -27851,9 +27851,12 @@ function getBestNode() {
 }
 function stopInventor() {
   if (!isRunning3) return { success: false, message: "No experiment is currently running" };
+  const name = currentConfig?.experimentName ?? "";
+  const step = currentStep2;
   abortRequested = true;
-  logger.info("Inventor: stop requested \u2014 will halt after current step completes");
-  return { success: true, message: `Stopping experiment "${currentConfig?.experimentName ?? ""}" after step ${currentStep2}` };
+  isRunning3 = false;
+  logger.info("Inventor: stop requested \u2014 unblocked isRunning, will abort after current step");
+  return { success: true, message: `Stopped: Stopping experiment "${name}" after step ${step}` };
 }
 async function getNodesByExperiment(experimentName) {
   const redis2 = getRedis();
