@@ -15,8 +15,8 @@ interface FoldOutput {
   deploy_events: string[]
 }
 
-function parseTranscript(transcriptPath: string): FoldOutput {
-  const lines = fs.readFileSync(transcriptPath, 'utf8').split('\n').filter(Boolean)
+function parseTranscript(rawContent: string, transcriptPath: string): FoldOutput {
+  const lines = rawContent.split('\n').filter(Boolean)
   const messages: Array<{ role: string; text: string; idx: number }> = []
 
   for (const [idx, line] of lines.entries()) {
@@ -84,8 +84,13 @@ function parseTranscript(transcriptPath: string): FoldOutput {
 }
 
 export async function foldSession(transcriptPath: string): Promise<FoldOutput> {
-  if (!fs.existsSync(transcriptPath)) throw new Error(`Transcript not found: ${transcriptPath}`)
-  const fold = parseTranscript(transcriptPath)
+  let raw: string
+  try {
+    raw = await fs.promises.readFile(transcriptPath, 'utf8')
+  } catch {
+    throw new Error(`Transcript not found: ${transcriptPath}`)
+  }
+  const fold = parseTranscript(raw, transcriptPath)
 
   const content = `## Session Fold — ${fold.session_id}
 
