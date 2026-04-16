@@ -2869,7 +2869,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     case 'data_integrity_check': {
       const { callMcpTool: callMcp } = await import('../mcp-caller.js')
       const backendMap: Record<string, string> = { data_graph_read: 'graph.read_cypher', data_graph_stats: 'graph.stats', data_integrity_check: 'graph.hintegrity_run' }
-      const result = await callMcp({ toolName: backendMap[toolName] || 'graph.read_cypher', args: args ?? {}, callId: `data-${toolName}-${Date.now()}` })
+      const result = await callMcp({ toolName: backendMap[name] || 'graph.read_cypher', args: args ?? {}, callId: `data-${name}-${Date.now()}` })
       return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
     }
 
@@ -2890,7 +2890,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     case 'system_service_status':
     case 'system_metrics_summary': {
       const { callMcpTool: callMcp } = await import('../mcp-caller.js')
-      const result = await callMcp({ toolName: 'get_platform_health', args: {}, callId: `system-${toolName}-${Date.now()}` })
+      const result = await callMcp({ toolName: 'get_platform_health', args: {}, callId: `system-${name}-${Date.now()}` })
       return typeof result === 'string' ? result : JSON.stringify(result, null, 2)
     }
 
@@ -2913,7 +2913,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       const agentId = args?.agent_id
       if (!agentId) throw new Error('agent_id is required')
       const { callMcpTool: callMcp } = await import('../mcp-caller.js')
-      const result = await callMcp({ toolName: 'graph.read_cypher', args: { query: 'MATCH (a:Agent {agentId: $id}) RETURN properties(a) as agent', params: { id: agentId } }, callId: `agent-${toolName}-${Date.now()}` })
+      const result = await callMcp({ toolName: 'graph.read_cypher', args: { query: 'MATCH (a:Agent {agentId: $id}) RETURN properties(a) as agent', params: { id: agentId } }, callId: `agent-${name}-${Date.now()}` })
       return typeof result === 'string' ? result : JSON.stringify((result as any)?.results?.[0]?.agent ?? result, null, 2)
     }
 
@@ -3419,6 +3419,6 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
     }
 
     default:
-      throw new Error(`Unknown tool: ${toolName}`)
+      throw new Error(`Unknown tool: ${name}`)
   }
 }
