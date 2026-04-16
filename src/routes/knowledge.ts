@@ -4,9 +4,11 @@
  * G2.6: GET /api/knowledge/feed — Cached daily knowledge briefing
  */
 import { Router, Request, Response } from 'express'
+import { v4 as uuid } from 'uuid'
 import { config } from '../config.js'
 import { getRedis } from '../redis.js'
 import { logger } from '../logger.js'
+import { callMcpTool } from '../mcp-caller.js'
 
 export const knowledgeRouter = Router()
 
@@ -255,24 +257,32 @@ knowledgeRouter.get('/briefing', async (_req: Request, res: Response) => {
  * Used by agents and dashboards to see KB health at a glance.
  */
 knowledgeRouter.get('/bus/status', async (_req: Request, res: Response) => {
+  const extractRecords = (result: Awaited<ReturnType<typeof callMcpTool>>): Array<Record<string, unknown>> => {
+    if (result.status !== 'success') return []
+    const r = result.result as Record<string, unknown> | undefined
+    if (Array.isArray(r)) return r as Array<Record<string, unknown>>
+    if (Array.isArray(r?.results)) return r.results as Array<Record<string, unknown>>
+    return []
+  }
+
   const [tierResult, recentResult] = await Promise.allSettled([
-    callMcp('graph.read_cypher', {
-      query: 'MATCH (n:KnowledgeCandidate) RETURN n.tier AS tier, count(n) AS cnt ORDER BY n.tier',
+    callMcpTool({
+      toolName: 'graph.read_cypher',
+      args: { query: 'MATCH (n:KnowledgeCandidate) RETURN n.tier AS tier, count(n) AS cnt ORDER BY n.tier' },
+      callId: uuid(),
+      timeoutMs: 12000,
     }),
-    callMcp('graph.read_cypher', {
-      query: 'MATCH (n:KnowledgeCandidate) RETURN n.title AS title, n.tier AS tier, n.score AS score, n.source AS source, n.created_at AS created_at ORDER BY n.created_at DESC LIMIT 10',
+    callMcpTool({
+      toolName: 'graph.read_cypher',
+      args: { query: 'MATCH (n:KnowledgeCandidate) RETURN n.title AS title, n.tier AS tier, n.score AS score, n.source AS source, n.created_at AS created_at ORDER BY n.created_at DESC LIMIT 10' },
+      callId: uuid(),
+      timeoutMs: 12000,
     }),
   ])
 
   const tiers: Record<string, number> = {}
-  if (tierResult.status === 'fulfilled' && tierResult.value.ok) {
-    const data = tierResult.value.data as Record<string, unknown> | undefined
-    const records = Array.isArray(data)
-      ? data
-      : Array.isArray((data as Record<string, unknown>)?.results)
-        ? (data as Record<string, unknown>).results as unknown[]
-        : []
-    for (const rec of records as Array<Record<string, unknown>>) {
+  if (tierResult.status === 'fulfilled') {
+    for (const rec of extractRecords(tierResult.value)) {
       const tier = String(rec.tier ?? 'unknown')
       const cnt = typeof rec.cnt === 'number' ? rec.cnt
         : typeof (rec.cnt as Record<string, unknown>)?.low === 'number' ? (rec.cnt as Record<string, unknown>).low as number
@@ -281,16 +291,9 @@ knowledgeRouter.get('/bus/status', async (_req: Request, res: Response) => {
     }
   }
 
-  const recentEvents: unknown[] = []
-  if (recentResult.status === 'fulfilled' && recentResult.value.ok) {
-    const data = recentResult.value.data as Record<string, unknown> | undefined
-    const records = Array.isArray(data)
-      ? data
-      : Array.isArray((data as Record<string, unknown>)?.results)
-        ? (data as Record<string, unknown>).results as unknown[]
-        : []
-    recentEvents.push(...(records as unknown[]))
-  }
+  const recentEvents: unknown[] = recentResult.status === 'fulfilled'
+    ? extractRecords(recentResult.value)
+    : []
 
   // L2 staging count from Redis
   let l2StagingCount = 0

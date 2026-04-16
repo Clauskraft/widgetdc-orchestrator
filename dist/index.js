@@ -43189,7 +43189,9 @@ toolOutputRouter.get("/:id/raw", async (req, res) => {
 init_config();
 init_redis();
 init_logger();
+init_mcp_caller();
 import { Router as Router18 } from "express";
+import { v4 as uuid33 } from "uuid";
 var knowledgeRouter = Router18();
 var FEED_CACHE_KEY = "orchestrator:knowledge-feed";
 var BRIEFING_CACHE_KEY = "orchestrator:knowledge-briefing-prompt";
@@ -43346,30 +43348,36 @@ knowledgeRouter.get("/briefing", async (_req, res) => {
   }
 });
 knowledgeRouter.get("/bus/status", async (_req, res) => {
+  const extractRecords2 = (result) => {
+    if (result.status !== "success") return [];
+    const r = result.result;
+    if (Array.isArray(r)) return r;
+    if (Array.isArray(r?.results)) return r.results;
+    return [];
+  };
   const [tierResult, recentResult] = await Promise.allSettled([
-    callMcp2("graph.read_cypher", {
-      query: "MATCH (n:KnowledgeCandidate) RETURN n.tier AS tier, count(n) AS cnt ORDER BY n.tier"
+    callMcpTool({
+      toolName: "graph.read_cypher",
+      args: { query: "MATCH (n:KnowledgeCandidate) RETURN n.tier AS tier, count(n) AS cnt ORDER BY n.tier" },
+      callId: uuid33(),
+      timeoutMs: 12e3
     }),
-    callMcp2("graph.read_cypher", {
-      query: "MATCH (n:KnowledgeCandidate) RETURN n.title AS title, n.tier AS tier, n.score AS score, n.source AS source, n.created_at AS created_at ORDER BY n.created_at DESC LIMIT 10"
+    callMcpTool({
+      toolName: "graph.read_cypher",
+      args: { query: "MATCH (n:KnowledgeCandidate) RETURN n.title AS title, n.tier AS tier, n.score AS score, n.source AS source, n.created_at AS created_at ORDER BY n.created_at DESC LIMIT 10" },
+      callId: uuid33(),
+      timeoutMs: 12e3
     })
   ]);
   const tiers = {};
-  if (tierResult.status === "fulfilled" && tierResult.value.ok) {
-    const data = tierResult.value.data;
-    const records = Array.isArray(data) ? data : Array.isArray(data?.results) ? data.results : [];
-    for (const rec of records) {
+  if (tierResult.status === "fulfilled") {
+    for (const rec of extractRecords2(tierResult.value)) {
       const tier = String(rec.tier ?? "unknown");
       const cnt = typeof rec.cnt === "number" ? rec.cnt : typeof rec.cnt?.low === "number" ? rec.cnt.low : parseInt(String(rec.cnt)) || 0;
       tiers[tier] = cnt;
     }
   }
-  const recentEvents = [];
-  if (recentResult.status === "fulfilled" && recentResult.value.ok) {
-    const data = recentResult.value.data;
-    const records = Array.isArray(data) ? data : Array.isArray(data?.results) ? data.results : [];
-    recentEvents.push(...records);
-  }
+  const recentEvents = recentResult.status === "fulfilled" ? extractRecords2(recentResult.value) : [];
   let l2StagingCount = 0;
   const redis2 = getRedis();
   if (redis2) {
@@ -43443,7 +43451,7 @@ knowledgeRouter.post("/bus/fold", async (req, res) => {
 init_logger();
 init_redis();
 import { Router as Router19 } from "express";
-import { v4 as uuid33 } from "uuid";
+import { v4 as uuid34 } from "uuid";
 var neuralBusRouter = Router19();
 var BUS_MESSAGES_KEY = "neural-bus:messages";
 var BUS_AGENTS_KEY = "neural-bus:agents";
@@ -43459,7 +43467,7 @@ neuralBusRouter.post("/broadcast", async (req, res) => {
     const redis2 = await getRedisClient();
     const msg = {
       ...req.body,
-      id: uuid33(),
+      id: uuid34(),
       acknowledgedBy: []
     };
     await redis2.hset(BUS_MESSAGES_KEY, msg.id, JSON.stringify(msg));
@@ -43481,7 +43489,7 @@ neuralBusRouter.post("/send", async (req, res) => {
     const redis2 = await getRedisClient();
     const msg = {
       ...req.body,
-      id: uuid33(),
+      id: uuid34(),
       acknowledgedBy: []
     };
     if (!msg.to) {
@@ -43503,7 +43511,7 @@ neuralBusRouter.post("/publish", async (req, res) => {
     const redis2 = await getRedisClient();
     const msg = {
       ...req.body,
-      id: uuid33(),
+      id: uuid34(),
       acknowledgedBy: []
     };
     await redis2.hset(BUS_MESSAGES_KEY, msg.id, JSON.stringify(msg));
@@ -43720,7 +43728,7 @@ init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router21 } from "express";
 import { randomUUID as randomUUID3 } from "crypto";
-import { v4 as uuid34 } from "uuid";
+import { v4 as uuid35 } from "uuid";
 var notebookRouter = Router21();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
@@ -43760,7 +43768,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query, params: {} },
-        callId: uuid34(),
+        callId: uuid35(),
         timeoutMs: 15e3
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -43768,7 +43776,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "kg_rag.query",
         args: { question: query, max_evidence: 10 },
-        callId: uuid34(),
+        callId: uuid35(),
         timeoutMs: 2e4
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -44103,13 +44111,13 @@ ${compressed}`,
 init_chain_engine();
 init_cognitive_proxy();
 init_logger();
-import { v4 as uuid35 } from "uuid";
+import { v4 as uuid36 } from "uuid";
 var monitorRouter = Router22();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid35(),
+    callId: uuid36(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];
@@ -44388,7 +44396,7 @@ init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router23 } from "express";
-import { v4 as uuid36 } from "uuid";
+import { v4 as uuid37 } from "uuid";
 var assemblyRouter = Router23();
 var REDIS_PREFIX11 = "orchestrator:assembly:";
 var REDIS_INDEX5 = "orchestrator:assemblies:index";
@@ -44452,7 +44460,7 @@ ORDER BY b.domain, b.name LIMIT 50`;
     const graphResult = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params },
-      callId: uuid36(),
+      callId: uuid37(),
       timeoutMs: 15e3
     });
     if (graphResult.status === "success" && graphResult.result) {
@@ -44518,7 +44526,7 @@ Reply as JSON:
   const assemblies = [];
   const now = (/* @__PURE__ */ new Date()).toISOString();
   for (const candidate of analysis.candidates.slice(0, maxCandidates)) {
-    const assemblyId = `widgetdc:assembly:${uuid36()}`;
+    const assemblyId = `widgetdc:assembly:${uuid37()}`;
     const selectedBlocks = blocks.filter((b) => candidate.block_ids.includes(b.block_id));
     const conflictCount = candidate.conflicts?.length ?? 0;
     const coherence = Math.max(0, Math.min(1, candidate.coherence ?? 0.5));
@@ -44577,7 +44585,7 @@ MERGE (a)-[:COMPOSED_OF]->(b)`,
             blockIds: selectedBlocks.map((b) => b.block_id)
           }
         },
-        callId: uuid36(),
+        callId: uuid37(),
         timeoutMs: 1e4
       });
     } catch (err) {
@@ -44667,7 +44675,7 @@ assemblyRouter.put("/:id", async (req, res) => {
         query: "MATCH (a:Assembly {id: $id}) SET a.status = $status, a.updated_at = datetime()",
         params: { id: assembly.$id, status: assembly.status }
       },
-      callId: uuid36(),
+      callId: uuid37(),
       timeoutMs: 5e3
     });
   } catch {
@@ -44808,7 +44816,7 @@ init_tool_executor();
 init_logger();
 init_config();
 import { Router as Router25 } from "express";
-import { v4 as uuid37 } from "uuid";
+import { v4 as uuid38 } from "uuid";
 var MATRIX_ALIAS_TARGETS = {
   "claude-sonnet": "claude-sonnet-4-20250514",
   "claude-opus": "claude-sonnet-4-20250514",
@@ -45039,7 +45047,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     return;
   }
   const { model, messages, stream: stream3, temperature, max_tokens } = req.body;
-  const requestId = `chatcmpl-${uuid37().substring(0, 12)}`;
+  const requestId = `chatcmpl-${uuid38().substring(0, 12)}`;
   const assistant = ASSISTANT_MAP.get(model);
   const resolvedModel = assistant ? assistant.baseModel : model;
   const mapping = resolveModelToProvider(resolvedModel) ?? resolveModelToProvider("gemini-flash");
@@ -46277,7 +46285,7 @@ init_mcp_caller();
 init_config();
 init_logger();
 import { Router as Router28 } from "express";
-import { v4 as uuid38 } from "uuid";
+import { v4 as uuid39 } from "uuid";
 var mcpGatewayRouter = Router28();
 var backendToolsCache = [];
 var backendToolsCacheTime = 0;
@@ -46363,7 +46371,7 @@ async function handleToolsCall(id, params) {
   if (isOrchestratorTool) {
     try {
       const results = await executeToolCalls([{
-        id: uuid38(),
+        id: uuid39(),
         function: { name: toolName, arguments: JSON.stringify(args) }
       }]);
       const result = results[0];
@@ -46391,7 +46399,7 @@ async function handleToolsCall(id, params) {
     const mcpResult = await callMcpTool({
       toolName: backendName,
       args,
-      callId: uuid38(),
+      callId: uuid39(),
       timeoutMs: 3e4
     });
     if (mcpResult.status !== "success") {
@@ -46510,7 +46518,7 @@ init_tool_registry();
 init_logger();
 init_adoption_telemetry();
 import { Router as Router29 } from "express";
-import { v4 as uuid39 } from "uuid";
+import { v4 as uuid40 } from "uuid";
 var toolGatewayRouter = Router29();
 function respondLegacyToolResult(res, result) {
   const httpStatus = result.status === "success" ? 200 : result.status === "timeout" ? 504 : 500;
@@ -46525,7 +46533,7 @@ function respondLegacyToolResult(res, result) {
 }
 toolGatewayRouter.post("/call", async (req, res) => {
   const toolName = typeof req.body?.tool_name === "string" ? req.body.tool_name : null;
-  const callId = typeof req.body?.call_id === "string" ? req.body.call_id : uuid39();
+  const callId = typeof req.body?.call_id === "string" ? req.body.call_id : uuid40();
   const args = req.body?.arguments && typeof req.body.arguments === "object" ? req.body.arguments : {};
   if (!toolName) {
     res.status(400).json({
@@ -46564,7 +46572,7 @@ toolGatewayRouter.post("/:name", async (req, res) => {
     });
     return;
   }
-  const callId = req.body?.call_id ?? uuid39();
+  const callId = req.body?.call_id ?? uuid40();
   const args = req.body ?? {};
   logger.info({ tool: name, call_id: callId }, "REST tool gateway call");
   const result = await executeToolUnified(name, args, {
@@ -47203,12 +47211,12 @@ import { Router as Router33 } from "express";
 init_mcp_caller();
 init_logger();
 init_sse();
-import { v4 as uuid40 } from "uuid";
+import { v4 as uuid41 } from "uuid";
 async function graphRead3(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid40(),
+    callId: uuid41(),
     timeoutMs: 3e4
   });
   if (result.status !== "success") return [];
@@ -47219,7 +47227,7 @@ async function graphWrite2(cypher, params) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {} },
-    callId: uuid40(),
+    callId: uuid41(),
     timeoutMs: 6e4
   });
   return result.status === "success";
@@ -48519,7 +48527,7 @@ intelligenceRouter.post("/adaptive-rag/retrain", async (_req, res) => {
 });
 intelligenceRouter.post("/extract-test", async (req, res) => {
   const { callMcpTool: callMcpTool2 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
-  const { v4: uuid42 } = await import("uuid");
+  const { v4: uuid43 } = await import("uuid");
   const content = req.body?.content ?? "CSRD regulation, ATP pension fund, GRI framework";
   try {
     const llmResult = await callMcpTool2({
@@ -48529,7 +48537,7 @@ intelligenceRouter.post("/extract-test", async (req, res) => {
 
 Content: ${content.slice(0, 2e3)}`
       },
-      callId: uuid42(),
+      callId: uuid43(),
       timeoutMs: 3e4
     });
     const raw = llmResult.result;
@@ -48619,7 +48627,7 @@ init_manifesto_governance();
 init_mcp_caller();
 init_logger();
 import { Router as Router39 } from "express";
-import { v4 as uuid41 } from "uuid";
+import { v4 as uuid42 } from "uuid";
 var governanceRouter = Router39();
 governanceRouter.get("/matrix", (_req, res) => {
   res.json({
@@ -48677,7 +48685,7 @@ RETURN p.name as name, p.status as status`,
               gap_remediation: p.gap_remediation ?? ""
             }
           },
-          callId: uuid41(),
+          callId: uuid42(),
           timeoutMs: 15e3
         });
         results.push({
