@@ -22817,6 +22817,53 @@ __export(pheromone_layer_exports, {
   sense: () => sense
 });
 import { v4 as uuid19 } from "uuid";
+function adaptiveDecayFactor(p) {
+  const now = Date.now();
+  const depositedMs = new Date(p.depositedAt).getTime();
+  const ageCycles = (now - depositedMs) / CYCLE_MS;
+  const quality = p.quality_score ?? 0.5;
+  let baseFactor;
+  switch (p.type) {
+    case "attraction":
+      baseFactor = quality > 0.7 ? 0.95 : quality < 0.4 ? 0.65 : 0.85;
+      break;
+    case "repellent":
+      baseFactor = 0.88;
+      break;
+    case "trail": {
+      const reinfluence = Math.min(p.reinforcements / 10, 1);
+      baseFactor = 0.8 + 0.15 * reinfluence;
+      break;
+    }
+    case "external":
+      baseFactor = 0.6;
+      break;
+    case "amplification":
+      baseFactor = 0.98;
+      break;
+    default:
+      baseFactor = 0.85;
+  }
+  const agePenalty = p.type !== "amplification" && ageCycles > 5 ? Math.min((ageCycles - 5) * 5e-3, 0.1) : 0;
+  return Math.round(Math.max(0.5, Math.min(0.99, baseFactor - agePenalty)) * 1e3) / 1e3;
+}
+function adaptiveReinforcementTTLBonus(p) {
+  const quality = p.quality_score ?? 0.5;
+  switch (p.type) {
+    case "attraction":
+      return (quality > 0.7 ? 1200 : 600) * 1e3;
+    case "repellent":
+      return 300 * 1e3;
+    case "trail":
+      return (900 + p.reinforcements * 60) * 1e3;
+    case "external":
+      return 150 * 1e3;
+    case "amplification":
+      return 1800 * 1e3;
+    default:
+      return 600 * 1e3;
+  }
+}
 async function deposit(agentId, type, domain, strength, label, metrics2 = {}, tags = [], ttlSeconds = DEFAULT_TTL2) {
   const pheromone = {
     id: `ph-${uuid19().slice(0, 12)}`,
@@ -22921,7 +22968,8 @@ async function reinforce(pheromoneId, boostFactor = 0.2) {
     const p = JSON.parse(raw);
     p.strength = Math.min(1, p.strength + boostFactor);
     p.reinforcements++;
-    const newTtl = Math.min(p.ttlSeconds * 1.5, 86400);
+    const bonusMs = adaptiveReinforcementTTLBonus(p);
+    const newTtl = Math.min(p.ttlSeconds + bonusMs / 1e3, 86400);
     p.ttlSeconds = newTtl;
     await redis2.set(key, JSON.stringify(p), "EX", Math.round(newTtl));
     await redis2.zadd(REDIS_INDEX_KEY, p.strength, pheromoneId);
@@ -22954,7 +23002,7 @@ async function runDecayCycle() {
       }
       try {
         const p = JSON.parse(raw);
-        p.strength *= DECAY_FACTOR;
+        p.strength *= adaptiveDecayFactor(p);
         if (p.strength < 0.05) {
           await redis2.del(key);
           await redis2.zrem(REDIS_INDEX_KEY, id);
@@ -23265,7 +23313,7 @@ async function initPheromoneLayer() {
     "Pheromone layer initialized"
   );
 }
-var REDIS_PREFIX7, REDIS_STATE_KEY, REDIS_INDEX_KEY, DEFAULT_TTL2, PERSIST_THRESHOLD, AMPLIFICATION_MULTIPLIER, DECAY_FACTOR, state;
+var REDIS_PREFIX7, REDIS_STATE_KEY, REDIS_INDEX_KEY, DEFAULT_TTL2, PERSIST_THRESHOLD, AMPLIFICATION_MULTIPLIER, CYCLE_MS, state;
 var init_pheromone_layer = __esm({
   "src/swarm/pheromone-layer.ts"() {
     "use strict";
@@ -23279,7 +23327,7 @@ var init_pheromone_layer = __esm({
     DEFAULT_TTL2 = 3600;
     PERSIST_THRESHOLD = 0.7;
     AMPLIFICATION_MULTIPLIER = 1.5;
-    DECAY_FACTOR = 0.85;
+    CYCLE_MS = 15 * 60 * 1e3;
     state = {
       totalDeposits: 0,
       totalDecays: 0,

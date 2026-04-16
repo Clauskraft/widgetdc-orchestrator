@@ -45,6 +45,8 @@ export interface Pheromone {
   ttlSeconds: number
   /** How many times this trail was reinforced */
   reinforcements: number
+  /** Quality score 0–1 from scoreToolOutput — drives adaptive decay rate */
+  quality_score?: number
 }
 
 export interface PheromoneQuery {
@@ -84,7 +86,72 @@ const DEFAULT_TTL = 3600 // 1 hour default
 const MAX_PHEROMONES = 2000
 const PERSIST_THRESHOLD = 0.7 // persist to Neo4j if strength > this
 const AMPLIFICATION_MULTIPLIER = 1.5
-const DECAY_FACTOR = 0.85 // 15% per decay cycle
+const DECAY_FACTOR = 0.85 // legacy — superseded by adaptiveDecayFactor()
+const CYCLE_MS = 15 * 60 * 1000 // 15-minute decay cycle
+
+// ─── Adaptive decay (Inventor pheromone-decay-v1, score 0.86) ───────────────
+
+/**
+ * Per-type adaptive decay multiplier applied each 15-min cycle.
+ * Replaces the uniform DECAY_FACTOR=0.85.
+ * - attraction: quality-driven (0.65–0.95)
+ * - repellent:  medium fixed (0.88) — clears in 2–4h
+ * - trail:      reinforcement-driven (0.80–0.95)
+ * - external:   fast (0.60) — stale intel expires quickly
+ * - amplification: very slow (0.98) — cross-pillar consensus is durable
+ */
+function adaptiveDecayFactor(p: Pheromone): number {
+  const now = Date.now()
+  const depositedMs = new Date(p.depositedAt).getTime()
+  const ageCycles = (now - depositedMs) / CYCLE_MS
+  const quality = p.quality_score ?? 0.5
+
+  let baseFactor: number
+  switch (p.type) {
+    case 'attraction':
+      baseFactor = quality > 0.7 ? 0.95 : quality < 0.4 ? 0.65 : 0.85
+      break
+    case 'repellent':
+      baseFactor = 0.88
+      break
+    case 'trail': {
+      const reinfluence = Math.min(p.reinforcements / 10, 1)
+      baseFactor = 0.80 + 0.15 * reinfluence
+      break
+    }
+    case 'external':
+      baseFactor = 0.60
+      break
+    case 'amplification':
+      baseFactor = 0.98
+      break
+    default:
+      baseFactor = 0.85
+  }
+
+  // Age penalty: non-amplification pheromones degrade faster after 5 cycles
+  const agePenalty = p.type !== 'amplification' && ageCycles > 5
+    ? Math.min((ageCycles - 5) * 0.005, 0.10)
+    : 0
+
+  return Math.round(Math.max(0.50, Math.min(0.99, baseFactor - agePenalty)) * 1000) / 1000
+}
+
+/**
+ * TTL extension (ms) added to a pheromone when reinforced.
+ * Replaces the flat 1.5× multiplier.
+ */
+function adaptiveReinforcementTTLBonus(p: Pheromone): number {
+  const quality = p.quality_score ?? 0.5
+  switch (p.type) {
+    case 'attraction':     return (quality > 0.7 ? 1200 : 600) * 1000
+    case 'repellent':      return 300 * 1000
+    case 'trail':          return (900 + p.reinforcements * 60) * 1000
+    case 'external':       return 150 * 1000
+    case 'amplification':  return 1800 * 1000
+    default:               return 600 * 1000
+  }
+}
 
 let state: PheromoneState = {
   totalDeposits: 0,
@@ -235,8 +302,9 @@ export async function reinforce(pheromoneId: string, boostFactor: number = 0.2):
     p.strength = Math.min(1.0, p.strength + boostFactor)
     p.reinforcements++
 
-    // Extend TTL on reinforcement (successful trails live longer)
-    const newTtl = Math.min(p.ttlSeconds * 1.5, 86400) // max 24h
+    // Extend TTL on reinforcement — adaptive bonus per type + quality
+    const bonusMs = adaptiveReinforcementTTLBonus(p)
+    const newTtl = Math.min(p.ttlSeconds + bonusMs / 1000, 86400) // max 24h
     p.ttlSeconds = newTtl
 
     await redis.set(key, JSON.stringify(p), 'EX', Math.round(newTtl))
@@ -282,7 +350,7 @@ export async function runDecayCycle(): Promise<{ decayed: number; evaporated: nu
 
     try {
       const p = JSON.parse(raw) as Pheromone
-      p.strength *= DECAY_FACTOR
+      p.strength *= adaptiveDecayFactor(p)
 
       if (p.strength < 0.05) {
         // Evaporate — too weak to matter
