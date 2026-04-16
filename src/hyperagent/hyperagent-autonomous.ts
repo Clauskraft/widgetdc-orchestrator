@@ -142,6 +142,9 @@ let currentStep = 'idle'
 let totalCycles = 0
 let lastCycle: CycleResult | null = null
 
+/** Persist closed target IDs across cycles — survives Redis eviction via Neo4j */
+const closedTargetIds = new Set<string>()
+
 /** Adaptive edge weights — start equal, evolve */
 const edgeWeights: Record<string, number> = {
   Husker: 1 / 6, Laerer: 1 / 6, Heler: 1 / 6,
@@ -184,7 +187,7 @@ function computePriority(target: TargetDef, edgeScores: EdgeScore[]): number {
 
 function rankTargets(targets: TargetDef[], edgeScores: EdgeScore[]): TargetDef[] {
   return targets
-    .filter(t => t.status === 'open')
+    .filter(t => t.status === 'open' && !closedTargetIds.has(t.id))
     .map(t => ({ target: t, priority: computePriority(t, edgeScores) }))
     .sort((a, b) => b.priority - a.priority)
     .map(x => x.target)
@@ -723,7 +726,7 @@ export async function runAutonomousCycle(
 
   isRunning = true
 
-  // Restore totalCycles from Redis on first cycle (survives redeploys)
+  // Restore totalCycles + closedTargetIds from Redis on first cycle (survives redeploys)
   if (totalCycles === 0) {
     const redisRestore = getRedis()
     if (redisRestore) {
@@ -732,6 +735,12 @@ export async function runAutonomousCycle(
         if (stored) {
           totalCycles = parseInt(stored, 10) || 0
           logger.info({ totalCycles }, 'HyperAgent-Auto: restored totalCycles from Redis')
+        }
+        const closedRaw = await redisRestore.get('hyperagent:closedTargets')
+        if (closedRaw) {
+          const ids = JSON.parse(closedRaw) as string[]
+          ids.forEach(id => closedTargetIds.add(id))
+          logger.info({ count: closedTargetIds.size }, 'HyperAgent-Auto: restored closedTargets from Redis')
         }
       } catch { /* non-blocking */ }
     }
@@ -822,6 +831,7 @@ export async function runAutonomousCycle(
           if (execution.status === 'completed') {
             targetsCompleted++
             target.status = 'closed'
+            closedTargetIds.add(target.id)
             closedTargets.push(target)
             stream('target_complete', {
               targetId: target.id, status: 'completed',
@@ -836,6 +846,14 @@ export async function runAutonomousCycle(
 
             // Evaluate and persist KPI
             await evaluatePlan(execution.execution_id, plan.planId, 80, 'hyperagent-auto')
+
+            // Persist closed target set to Redis (best-effort — guards against re-processing same target)
+            try {
+              const redis = getRedis()
+              if (redis) {
+                await redis.set('hyperagent:closedTargets', JSON.stringify([...closedTargetIds]), 'EX', MEMORY_TTL)
+              }
+            } catch { /* non-blocking */ }
 
             lessons.push(`Target ${target.id} closed via ${chainMode} (conf=${confidence.toFixed(2)}, rag=${ragResultCount})`)
           } else {
