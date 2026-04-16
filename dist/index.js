@@ -3570,6 +3570,24 @@ var init_tool_registry = __esm({
         timeoutMs: 1e4,
         outputDescription: "KnowledgeDocument[] sorted by word_count descending"
       }),
+      // ─── knowledge.* — KnowledgeBus Manual Trigger (Knowledge Bus) ──
+      defineTool({
+        name: "knowledge_normalize",
+        namespace: "knowledge",
+        description: "Emit a knowledge event to the normalization bus. Routes to L2/L3/L4 based on PRISM score. Use for manual promotion of protocols, patterns, or improvements.",
+        input: z.object({
+          source: z.enum(["inventor", "session_fold", "phantom_bom", "commit", "manual"]).default("manual").describe("Origin of the knowledge event"),
+          title: z.string().describe("Human-readable title for the skill"),
+          content: z.string().describe("Full protocol/skill content in markdown"),
+          summary: z.string().describe("One-line description"),
+          score: z.number().min(0).max(1).optional().describe("Pre-computed PRISM score \u2014 omit to auto-score"),
+          tags: z.array(z.string()).default([]).describe("Classification tags"),
+          repo: z.string().default("widgetdc-orchestrator").describe("Source repo"),
+          session_id: z.string().optional().describe("For source=session_fold: path to JSONL transcript")
+        }),
+        timeoutMs: 3e4,
+        outputDescription: "Confirmation of emitted KnowledgeEvent with tier routing (L2/L3/L4)"
+      }),
       // ─── compliance.* — EU AI Act Compliance (Phantom Week 6, V1) ──
       defineTool({
         name: "compliance_gap_audit",
@@ -26684,192 +26702,6 @@ var init_hyperagent_autonomous = __esm({
   }
 });
 
-// src/intelligence/inventor-sampler.ts
-function createSampler(config2) {
-  switch (config2.algorithm) {
-    case "ucb1":
-      return new UCB1Sampler(config2.ucb1C ?? 1.414);
-    case "greedy":
-      return new GreedySampler();
-    case "random":
-      return new RandomSampler();
-    case "island":
-      return new IslandSampler(config2.islands ?? { count: 5, migrationInterval: 10, migrationRate: 0.1 });
-    default:
-      return new UCB1Sampler();
-  }
-}
-var UCB1Sampler, GreedySampler, RandomSampler, IslandSampler;
-var init_inventor_sampler = __esm({
-  "src/intelligence/inventor-sampler.ts"() {
-    "use strict";
-    init_logger();
-    UCB1Sampler = class {
-      algorithm = "ucb1";
-      c;
-      totalVisits = 0;
-      pheromoneBias = /* @__PURE__ */ new Map();
-      alpha = 0.3;
-      // pheromone influence weight
-      constructor(c = 1.414) {
-        this.c = c;
-      }
-      setPheromoneSignals(signals) {
-        this.pheromoneBias = signals;
-      }
-      sample(nodes2, n) {
-        if (nodes2.length === 0) return [];
-        if (nodes2.length <= n) return [...nodes2];
-        const minScore = Math.min(...nodes2.map((nd) => nd.score));
-        const maxScore = Math.max(...nodes2.map((nd) => nd.score));
-        const scoreRange = maxScore - minScore || 1;
-        const scored = nodes2.map((node) => {
-          const normalizedScore = (node.score - minScore) / scoreRange;
-          const exploration = node.visitCount === 0 ? Infinity : this.c * Math.sqrt(Math.log(Math.max(this.totalVisits, 1)) / node.visitCount);
-          const pheromoneBoost = this.pheromoneBias.get(node.id) ?? 0;
-          return { node, ucb1: normalizedScore + exploration + this.alpha * pheromoneBoost };
-        });
-        scored.sort((a, b) => b.ucb1 - a.ucb1);
-        const selected = scored.slice(0, n).map((s) => s.node);
-        for (const node of selected) {
-          node.visitCount++;
-          this.totalVisits++;
-        }
-        return selected;
-      }
-      onNodeAdded(_node) {
-      }
-      getState() {
-        return { totalVisits: this.totalVisits, c: this.c };
-      }
-      loadState(state4) {
-        this.totalVisits = state4.totalVisits || 0;
-        this.c = state4.c || 1.414;
-      }
-    };
-    GreedySampler = class {
-      algorithm = "greedy";
-      sample(nodes2, n) {
-        if (nodes2.length === 0) return [];
-        const sorted = [...nodes2].sort((a, b) => b.score - a.score);
-        return sorted.slice(0, n);
-      }
-      onNodeAdded(_node) {
-      }
-      getState() {
-        return {};
-      }
-      loadState(_state) {
-      }
-    };
-    RandomSampler = class {
-      algorithm = "random";
-      sample(nodes2, n) {
-        if (nodes2.length === 0) return [];
-        const shuffled = [...nodes2].sort(() => Math.random() - 0.5);
-        return shuffled.slice(0, n);
-      }
-      onNodeAdded(_node) {
-      }
-      getState() {
-        return {};
-      }
-      loadState(_state) {
-      }
-    };
-    IslandSampler = class {
-      algorithm = "island";
-      islands = /* @__PURE__ */ new Map();
-      islandCount;
-      migrationInterval;
-      migrationRate;
-      currentIsland = 0;
-      generationCount = 0;
-      lastMigration = 0;
-      constructor(config2) {
-        this.islandCount = config2.count;
-        this.migrationInterval = config2.migrationInterval;
-        this.migrationRate = config2.migrationRate;
-        for (let i = 0; i < this.islandCount; i++) {
-          this.islands.set(i, /* @__PURE__ */ new Set());
-        }
-      }
-      sample(nodes2, n) {
-        if (nodes2.length === 0) return [];
-        this.generationCount++;
-        if (this.generationCount - this.lastMigration >= this.migrationInterval) {
-          this.migrate(nodes2);
-          this.lastMigration = this.generationCount;
-        }
-        const islandNodeIds = this.islands.get(this.currentIsland) ?? /* @__PURE__ */ new Set();
-        const islandNodes = nodes2.filter((nd) => islandNodeIds.has(nd.id));
-        this.currentIsland = (this.currentIsland + 1) % this.islandCount;
-        if (islandNodes.length === 0) {
-          const sorted2 = [...nodes2].sort((a, b) => b.score - a.score);
-          return sorted2.slice(0, n);
-        }
-        const explorationCount = Math.max(1, Math.floor(n * 0.3));
-        const exploitationCount = n - explorationCount;
-        const sorted = [...islandNodes].sort((a, b) => b.score - a.score);
-        const exploited = sorted.slice(0, exploitationCount);
-        const remaining = islandNodes.filter((nd) => !exploited.includes(nd));
-        const shuffled = remaining.sort(() => Math.random() - 0.5);
-        const explored = shuffled.slice(0, explorationCount);
-        return [...exploited, ...explored];
-      }
-      onNodeAdded(node) {
-        const targetIsland = node.island >= 0 ? node.island : this.currentIsland;
-        const island = this.islands.get(targetIsland % this.islandCount);
-        if (island) island.add(node.id);
-        node.island = targetIsland % this.islandCount;
-      }
-      migrate(allNodes) {
-        const nodeMap = new Map(allNodes.map((n) => [n.id, n]));
-        for (let i = 0; i < this.islandCount; i++) {
-          const islandIds = this.islands.get(i) ?? /* @__PURE__ */ new Set();
-          const islandNodes = [...islandIds].map((id) => nodeMap.get(id)).filter((n) => n !== void 0).sort((a, b) => b.score - a.score);
-          const migrantCount = Math.max(1, Math.floor(islandNodes.length * this.migrationRate));
-          const migrants = islandNodes.slice(0, migrantCount);
-          const leftNeighbor = (i - 1 + this.islandCount) % this.islandCount;
-          const rightNeighbor = (i + 1) % this.islandCount;
-          for (const migrant of migrants) {
-            const targetIsland = Math.random() < 0.5 ? leftNeighbor : rightNeighbor;
-            const target = this.islands.get(targetIsland);
-            if (target && !target.has(migrant.id)) {
-              target.add(migrant.id);
-            }
-          }
-        }
-        logger.debug({ generation: this.generationCount }, "Inventor: island migration completed");
-      }
-      getState() {
-        const islands = {};
-        this.islands.forEach((ids, idx) => {
-          islands[idx] = [...ids];
-        });
-        return {
-          islands,
-          currentIsland: this.currentIsland,
-          generationCount: this.generationCount,
-          lastMigration: this.lastMigration
-        };
-      }
-      loadState(state4) {
-        const islands = state4.islands;
-        if (islands) {
-          this.islands.clear();
-          for (const [idx, ids] of Object.entries(islands)) {
-            this.islands.set(Number(idx), new Set(ids));
-          }
-        }
-        this.currentIsland = state4.currentIsland || 0;
-        this.generationCount = state4.generationCount || 0;
-        this.lastMigration = state4.lastMigration || 0;
-      }
-    };
-  }
-});
-
 // src/knowledge/knowledge-bus.ts
 import { EventEmitter } from "node:events";
 import { v4 as uuid24 } from "uuid";
@@ -27061,6 +26893,12 @@ var init_l4_writer = __esm({
 });
 
 // src/knowledge/index.ts
+var knowledge_exports = {};
+__export(knowledge_exports, {
+  emitKnowledge: () => emitKnowledge,
+  initKnowledgeBus: () => initKnowledgeBus,
+  onKnowledge: () => onKnowledge
+});
 function initKnowledgeBus() {
   if (initialized) return;
   initialized = true;
@@ -27111,6 +26949,292 @@ var init_knowledge = __esm({
     init_logger();
     init_knowledge_bus();
     initialized = false;
+  }
+});
+
+// src/knowledge/adapters/session-fold-adapter.ts
+var session_fold_adapter_exports = {};
+__export(session_fold_adapter_exports, {
+  foldSession: () => foldSession
+});
+import * as fs from "node:fs";
+function parseTranscript(rawContent, transcriptPath) {
+  const lines = rawContent.split("\n").filter(Boolean);
+  const messages = [];
+  for (const [idx, line] of lines.entries()) {
+    try {
+      const obj = JSON.parse(line);
+      const role = obj.message?.role || obj.role;
+      if (role !== "user" && role !== "assistant") continue;
+      const content = obj.message?.content || obj.content;
+      const text = Array.isArray(content) ? content.filter((p) => p.type === "text").map((p) => p.text).join(" ") : String(content || "");
+      if (text.trim().length > 10) messages.push({ role, text, idx });
+    } catch {
+      continue;
+    }
+  }
+  const commits = [...new Set(messages.flatMap(
+    (m) => [...m.text.matchAll(/\b([a-f0-9]{7,12})\b/g)].map((x) => x[1]).filter((h) => /^[a-f0-9]+$/.test(h) && h.length >= 7)
+  ))].slice(0, 20);
+  const prs = [...new Set(messages.flatMap(
+    (m) => [...m.text.matchAll(/PR\s*#?(\d+)/gi)].map((x) => x[1])
+  ))];
+  const linearRefs = [...new Set(messages.flatMap(
+    (m) => [...m.text.matchAll(/LIN-(\d+)/gi)].map((x) => `LIN-${x[1]}`)
+  ))];
+  const deployEvents = messages.filter((m) => /railway up|deployed|live.*uptime|deploy.*complete/i.test(m.text)).map((m) => m.text.slice(0, 200)).slice(0, 5);
+  const tagged = new Set(messages.filter(
+    (m) => commits.some((c) => m.text.includes(c)) || prs.some((p) => m.text.includes(`#${p}`)) || linearRefs.some((r) => m.text.includes(r))
+  ).map((m) => m.idx));
+  const untagged = messages.filter((m) => !tagged.has(m.idx));
+  const openTasks = untagged.filter((m) => /TODO|FIXME|open|uafsluttet|mangler|Actions?\s+[A-F]|ikke.*håndteret/i.test(m.text)).map((m) => ({ text: m.text.slice(0, 300), source: m.role })).slice(0, 10);
+  const decisions = messages.filter((m) => /besluttet|approved|confirmed|merged|✅|oprettet|persisteret|fixed|deployet/i.test(m.text)).map((m) => ({ text: m.text.slice(0, 300), source: m.role })).slice(0, 10);
+  return {
+    session_id: transcriptPath.split("/").pop()?.replace(".jsonl", "") ?? "unknown",
+    folded_at: (/* @__PURE__ */ new Date()).toISOString(),
+    transcript_lines: lines.length,
+    commits,
+    prs,
+    open_tasks: openTasks,
+    decisions,
+    linear_refs: linearRefs,
+    deploy_events: deployEvents
+  };
+}
+async function foldSession(transcriptPath) {
+  let raw;
+  try {
+    raw = await fs.promises.readFile(transcriptPath, "utf8");
+  } catch {
+    throw new Error(`Transcript not found: ${transcriptPath}`);
+  }
+  const fold = parseTranscript(raw, transcriptPath);
+  const content = `## Session Fold \u2014 ${fold.session_id}
+
+**Folded:** ${fold.folded_at}
+**Lines:** ${fold.transcript_lines}
+
+### Commits
+${fold.commits.map((c) => `- \`${c}\``).join("\n") || "(none)"}
+
+### PRs
+${fold.prs.map((p) => `- PR #${p}`).join("\n") || "(none)"}
+
+### Linear Refs
+${fold.linear_refs.join(", ") || "(none)"}
+
+### Open Tasks
+${fold.open_tasks.map((t) => `- ${t.text}`).join("\n") || "(none)"}
+
+### Key Decisions
+${fold.decisions.map((d) => `- ${d.text}`).join("\n") || "(none)"}
+
+### Deploy Events
+${fold.deploy_events.map((d) => `- ${d}`).join("\n") || "(none)"}
+`;
+  emitKnowledge({
+    source: "session_fold",
+    title: `Session Fold: ${fold.session_id}`,
+    content,
+    summary: `Session ${fold.session_id}: ${fold.commits.length} commits, ${fold.open_tasks.length} open tasks, ${fold.decisions.length} decisions`,
+    tags: ["session-fold", fold.session_id, ...fold.linear_refs],
+    repo: "widgetdc-orchestrator",
+    metadata: fold
+  });
+  logger.info({ session_id: fold.session_id, commits: fold.commits.length }, "SessionFoldAdapter: emitted to KnowledgeBus");
+  return fold;
+}
+var init_session_fold_adapter = __esm({
+  "src/knowledge/adapters/session-fold-adapter.ts"() {
+    "use strict";
+    init_knowledge();
+    init_logger();
+  }
+});
+
+// src/intelligence/inventor-sampler.ts
+function createSampler(config2) {
+  switch (config2.algorithm) {
+    case "ucb1":
+      return new UCB1Sampler(config2.ucb1C ?? 1.414);
+    case "greedy":
+      return new GreedySampler();
+    case "random":
+      return new RandomSampler();
+    case "island":
+      return new IslandSampler(config2.islands ?? { count: 5, migrationInterval: 10, migrationRate: 0.1 });
+    default:
+      return new UCB1Sampler();
+  }
+}
+var UCB1Sampler, GreedySampler, RandomSampler, IslandSampler;
+var init_inventor_sampler = __esm({
+  "src/intelligence/inventor-sampler.ts"() {
+    "use strict";
+    init_logger();
+    UCB1Sampler = class {
+      algorithm = "ucb1";
+      c;
+      totalVisits = 0;
+      pheromoneBias = /* @__PURE__ */ new Map();
+      alpha = 0.3;
+      // pheromone influence weight
+      constructor(c = 1.414) {
+        this.c = c;
+      }
+      setPheromoneSignals(signals) {
+        this.pheromoneBias = signals;
+      }
+      sample(nodes2, n) {
+        if (nodes2.length === 0) return [];
+        if (nodes2.length <= n) return [...nodes2];
+        const minScore = Math.min(...nodes2.map((nd) => nd.score));
+        const maxScore = Math.max(...nodes2.map((nd) => nd.score));
+        const scoreRange = maxScore - minScore || 1;
+        const scored = nodes2.map((node) => {
+          const normalizedScore = (node.score - minScore) / scoreRange;
+          const exploration = node.visitCount === 0 ? Infinity : this.c * Math.sqrt(Math.log(Math.max(this.totalVisits, 1)) / node.visitCount);
+          const pheromoneBoost = this.pheromoneBias.get(node.id) ?? 0;
+          return { node, ucb1: normalizedScore + exploration + this.alpha * pheromoneBoost };
+        });
+        scored.sort((a, b) => b.ucb1 - a.ucb1);
+        const selected = scored.slice(0, n).map((s) => s.node);
+        for (const node of selected) {
+          node.visitCount++;
+          this.totalVisits++;
+        }
+        return selected;
+      }
+      onNodeAdded(_node) {
+      }
+      getState() {
+        return { totalVisits: this.totalVisits, c: this.c };
+      }
+      loadState(state4) {
+        this.totalVisits = state4.totalVisits || 0;
+        this.c = state4.c || 1.414;
+      }
+    };
+    GreedySampler = class {
+      algorithm = "greedy";
+      sample(nodes2, n) {
+        if (nodes2.length === 0) return [];
+        const sorted = [...nodes2].sort((a, b) => b.score - a.score);
+        return sorted.slice(0, n);
+      }
+      onNodeAdded(_node) {
+      }
+      getState() {
+        return {};
+      }
+      loadState(_state) {
+      }
+    };
+    RandomSampler = class {
+      algorithm = "random";
+      sample(nodes2, n) {
+        if (nodes2.length === 0) return [];
+        const shuffled = [...nodes2].sort(() => Math.random() - 0.5);
+        return shuffled.slice(0, n);
+      }
+      onNodeAdded(_node) {
+      }
+      getState() {
+        return {};
+      }
+      loadState(_state) {
+      }
+    };
+    IslandSampler = class {
+      algorithm = "island";
+      islands = /* @__PURE__ */ new Map();
+      islandCount;
+      migrationInterval;
+      migrationRate;
+      currentIsland = 0;
+      generationCount = 0;
+      lastMigration = 0;
+      constructor(config2) {
+        this.islandCount = config2.count;
+        this.migrationInterval = config2.migrationInterval;
+        this.migrationRate = config2.migrationRate;
+        for (let i = 0; i < this.islandCount; i++) {
+          this.islands.set(i, /* @__PURE__ */ new Set());
+        }
+      }
+      sample(nodes2, n) {
+        if (nodes2.length === 0) return [];
+        this.generationCount++;
+        if (this.generationCount - this.lastMigration >= this.migrationInterval) {
+          this.migrate(nodes2);
+          this.lastMigration = this.generationCount;
+        }
+        const islandNodeIds = this.islands.get(this.currentIsland) ?? /* @__PURE__ */ new Set();
+        const islandNodes = nodes2.filter((nd) => islandNodeIds.has(nd.id));
+        this.currentIsland = (this.currentIsland + 1) % this.islandCount;
+        if (islandNodes.length === 0) {
+          const sorted2 = [...nodes2].sort((a, b) => b.score - a.score);
+          return sorted2.slice(0, n);
+        }
+        const explorationCount = Math.max(1, Math.floor(n * 0.3));
+        const exploitationCount = n - explorationCount;
+        const sorted = [...islandNodes].sort((a, b) => b.score - a.score);
+        const exploited = sorted.slice(0, exploitationCount);
+        const remaining = islandNodes.filter((nd) => !exploited.includes(nd));
+        const shuffled = remaining.sort(() => Math.random() - 0.5);
+        const explored = shuffled.slice(0, explorationCount);
+        return [...exploited, ...explored];
+      }
+      onNodeAdded(node) {
+        const targetIsland = node.island >= 0 ? node.island : this.currentIsland;
+        const island = this.islands.get(targetIsland % this.islandCount);
+        if (island) island.add(node.id);
+        node.island = targetIsland % this.islandCount;
+      }
+      migrate(allNodes) {
+        const nodeMap = new Map(allNodes.map((n) => [n.id, n]));
+        for (let i = 0; i < this.islandCount; i++) {
+          const islandIds = this.islands.get(i) ?? /* @__PURE__ */ new Set();
+          const islandNodes = [...islandIds].map((id) => nodeMap.get(id)).filter((n) => n !== void 0).sort((a, b) => b.score - a.score);
+          const migrantCount = Math.max(1, Math.floor(islandNodes.length * this.migrationRate));
+          const migrants = islandNodes.slice(0, migrantCount);
+          const leftNeighbor = (i - 1 + this.islandCount) % this.islandCount;
+          const rightNeighbor = (i + 1) % this.islandCount;
+          for (const migrant of migrants) {
+            const targetIsland = Math.random() < 0.5 ? leftNeighbor : rightNeighbor;
+            const target = this.islands.get(targetIsland);
+            if (target && !target.has(migrant.id)) {
+              target.add(migrant.id);
+            }
+          }
+        }
+        logger.debug({ generation: this.generationCount }, "Inventor: island migration completed");
+      }
+      getState() {
+        const islands = {};
+        this.islands.forEach((ids, idx) => {
+          islands[idx] = [...ids];
+        });
+        return {
+          islands,
+          currentIsland: this.currentIsland,
+          generationCount: this.generationCount,
+          lastMigration: this.lastMigration
+        };
+      }
+      loadState(state4) {
+        const islands = state4.islands;
+        if (islands) {
+          this.islands.clear();
+          for (const [idx, ids] of Object.entries(islands)) {
+            this.islands.set(Number(idx), new Set(ids));
+          }
+        }
+        this.currentIsland = state4.currentIsland || 0;
+        this.generationCount = state4.generationCount || 0;
+        this.lastMigration = state4.lastMigration || 0;
+      }
+    };
   }
 });
 
@@ -28202,7 +28326,7 @@ __export(agentic_runner_exports, {
 });
 import { spawn } from "child_process";
 import path from "path";
-import fs from "fs";
+import fs2 from "fs";
 function resolveAgenticKitDir() {
   const candidates = [
     // Railway production: repo root /agentic-kit/
@@ -28213,7 +28337,7 @@ function resolveAgenticKitDir() {
     "C:\\Users\\claus\\Projetcs\\widgetdc-orchestrator\\agentic-kit"
   ];
   for (const dir of candidates) {
-    if (fs.existsSync(path.join(dir, "run_mcp.py"))) {
+    if (fs2.existsSync(path.join(dir, "run_mcp.py"))) {
       return dir;
     }
   }
@@ -28305,7 +28429,7 @@ async function checkAgenticKitHealth() {
   } catch {
     return { available: false, error: `Python '${pythonPath}' not found or not executable` };
   }
-  if (!fs.existsSync(path.join(AGENTIC_KIT_DIR, "run_mcp.py"))) {
+  if (!fs2.existsSync(path.join(AGENTIC_KIT_DIR, "run_mcp.py"))) {
     return { available: false, error: `run_mcp.py not found in ${AGENTIC_KIT_DIR}` };
   }
   const missing = [];
@@ -31441,6 +31565,30 @@ ${lines.join("\n")}`;
         return JSON.stringify({ issues: allIssues.slice(0, limit), count: allIssues.length });
       } catch (err) {
         return `HyperAgent auto-issues failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    // ── KnowledgeBus Manual Trigger ──────────────────────────────────────
+    case "knowledge_normalize": {
+      try {
+        const { emitKnowledge: emitKnowledge2 } = await Promise.resolve().then(() => (init_knowledge(), knowledge_exports));
+        const { foldSession: foldSession2 } = await Promise.resolve().then(() => (init_session_fold_adapter(), session_fold_adapter_exports));
+        if (args.source === "session_fold" && args.session_id) {
+          const fold = await foldSession2(args.session_id);
+          return `Session fold emitted to KnowledgeBus: ${fold.commits.length} commits, ${fold.open_tasks.length} open tasks, ${fold.decisions.length} decisions`;
+        }
+        emitKnowledge2({
+          source: args.source ?? "manual",
+          title: args.title,
+          content: args.content,
+          summary: args.summary,
+          score: args.score,
+          tags: args.tags ?? [],
+          repo: args.repo ?? "widgetdc-orchestrator"
+        });
+        const tier = args.score !== void 0 ? args.score >= 0.85 ? "L4 (skill candidate)" : args.score >= 0.7 ? "L3 (AgentMemory)" : "L2 (staging)" : "auto-scored";
+        return `KnowledgeEvent emitted: "${args.title}" \u2192 ${tier}`;
+      } catch (err) {
+        return `knowledge_normalize failed: ${err instanceof Error ? err.message : String(err)}`;
       }
     }
     // ── Inventor (ASI-Evolve MCP Tools — LIN-XXX) ────────────────────────

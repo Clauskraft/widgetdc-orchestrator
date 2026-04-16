@@ -2626,6 +2626,36 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    // ── KnowledgeBus Manual Trigger ──────────────────────────────────────
+
+    case 'knowledge_normalize': {
+      try {
+        const { emitKnowledge } = await import('../knowledge/index.js')
+        const { foldSession } = await import('../knowledge/adapters/session-fold-adapter.js')
+
+        if (args.source === 'session_fold' && args.session_id) {
+          const fold = await foldSession(args.session_id as string)
+          return `Session fold emitted to KnowledgeBus: ${fold.commits.length} commits, ${fold.open_tasks.length} open tasks, ${fold.decisions.length} decisions`
+        }
+
+        emitKnowledge({
+          source: (args.source ?? 'manual') as 'inventor' | 'session_fold' | 'phantom_bom' | 'commit' | 'manual',
+          title: args.title as string,
+          content: args.content as string,
+          summary: args.summary as string,
+          score: args.score as number | undefined,
+          tags: (args.tags as string[]) ?? [],
+          repo: (args.repo as string) ?? 'widgetdc-orchestrator',
+        })
+        const tier = args.score !== undefined
+          ? (args.score >= 0.85 ? 'L4 (skill candidate)' : args.score >= 0.70 ? 'L3 (AgentMemory)' : 'L2 (staging)')
+          : 'auto-scored'
+        return `KnowledgeEvent emitted: "${args.title as string}" → ${tier}`
+      } catch (err) {
+        return `knowledge_normalize failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
     // ── Inventor (ASI-Evolve MCP Tools — LIN-XXX) ────────────────────────
 
     case 'inventor_run': {
