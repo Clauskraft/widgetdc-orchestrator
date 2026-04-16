@@ -26714,9 +26714,12 @@ async function loadTargetRegistry() {
       const neo4jToolResult = await callMcpTool({
         toolName: "data_graph_read",
         args: {
-          query: `MATCH (m:HyperAgentMemory {domain: 'targets'})
+          // Pin exact registry key — do NOT use ORDER BY updated_at here: closed-ids node
+          // (domain='targets', key='closed-ids') is updated on every cycle and would shadow
+          // the registry node (key='full-registry-v2.2') once any targets are closed.
+          query: `MATCH (m:HyperAgentMemory {domain: 'targets', key: 'full-registry-v2.2'})
                   RETURN m.value AS value, m.key AS key
-                  ORDER BY m.updated_at DESC LIMIT 1`,
+                  LIMIT 1`,
           params: {}
         },
         callId: `hyp-registry-fallback-${Date.now()}`
@@ -27372,8 +27375,8 @@ function getAutonomousStatus() {
     lastCycle: lastCycle2,
     edgeScores: edges,
     fitnessScore: computeFitness(edges),
-    targetsRemaining: 72 - (lastCycle2?.targetsCompleted ?? 0),
-    targetsCompleted: lastCycle2?.targetsCompleted ?? 0
+    targetsRemaining: 72 - closedTargetIds.size,
+    targetsCompleted: closedTargetIds.size
   };
 }
 function checkPhaseGate() {
@@ -29503,6 +29506,7 @@ var init_agentic_runner = __esm({
 // src/flywheel/flywheel-coordinator.ts
 var flywheel_coordinator_exports = {};
 __export(flywheel_coordinator_exports, {
+  computeEnrichedCompoundScore: () => computeEnrichedCompoundScore,
   getFlywheelMetrics: () => getFlywheelMetrics,
   getLastReport: () => getLastReport,
   runWeeklySync: () => runWeeklySync
@@ -29740,6 +29744,55 @@ async function scorePlatformHealth() {
     logger.warn({ err }, "[Flywheel] scorePlatformHealth failed");
     return fallbackPillar("Platform Health");
   }
+}
+async function computeEnrichedCompoundScore() {
+  const [telemetry, fleetState] = await Promise.allSettled([
+    computeTelemetry(),
+    Promise.resolve(getPeerEvalState())
+  ]);
+  let trustScore = 0.8;
+  try {
+    const { getDegradedAgents: getDegradedAgents2 } = await Promise.resolve().then(() => (init_peer_eval(), peer_eval_exports));
+    const degraded = getDegradedAgents2();
+    const peerState = fleetState.status === "fulfilled" ? fleetState.value : null;
+    const total = peerState ? Math.max(degraded.length + 5, 10) : 10;
+    trustScore = Math.max(0, 1 - degraded.length / total);
+  } catch {
+  }
+  let adoptionGapScore = 0.7;
+  try {
+    const { detectAdoptionGaps: detectAdoptionGaps2 } = await Promise.resolve().then(() => (init_adoption_telemetry(), adoption_telemetry_exports));
+    const summary = telemetry.status === "fulfilled" ? telemetry.value : void 0;
+    const gaps = await detectAdoptionGaps2(summary);
+    const highPriority = gaps.filter((g) => g.priority === "high").length;
+    const total = summary?.total_tools ?? 32;
+    adoptionGapScore = Math.max(0, 1 - highPriority / total);
+  } catch {
+  }
+  let kbDensityScore = 0.5;
+  if (telemetry.status === "fulfilled") {
+    const adv = telemetry.value.kpis.advanced_utilisation_pct;
+    kbDensityScore = Math.min(1, adv / 100);
+  }
+  let utilisationScore = 0.5;
+  if (telemetry.status === "fulfilled") {
+    utilisationScore = Math.min(1, telemetry.value.kpis.utilisation_rate_pct / 100);
+  }
+  const subPillars = [
+    { name: "Trust Health", score: parseFloat(trustScore.toFixed(3)), weight: 0.3 },
+    { name: "Adoption Gap", score: parseFloat(adoptionGapScore.toFixed(3)), weight: 0.3 },
+    { name: "KB Density", score: parseFloat(kbDensityScore.toFixed(3)), weight: 0.2 },
+    { name: "Utilisation", score: parseFloat(utilisationScore.toFixed(3)), weight: 0.2 }
+  ];
+  let v1 = lastReport?.compoundScore ?? 0.5;
+  try {
+    const report = await runWeeklySync();
+    v1 = report.compoundScore;
+  } catch {
+  }
+  const subScore = subPillars.reduce((sum, s) => sum + s.score * s.weight, 0);
+  const v2 = parseFloat((v1 * 0.6 + subScore * 0.4).toFixed(4));
+  return { v1, v2, subPillars, generatedAt: (/* @__PURE__ */ new Date()).toISOString() };
 }
 var FLYWHEEL_REDIS_KEY, lastReport;
 var init_flywheel_coordinator = __esm({

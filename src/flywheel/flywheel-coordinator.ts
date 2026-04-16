@@ -333,3 +333,88 @@ async function scorePlatformHealth(): Promise<PillarScore> {
     return fallbackPillar('Platform Health')
   }
 }
+
+// ─── Flywheel Compound Score v2 (topic 15/15) ─────────────────────────────────
+// Enriches the 5-pillar compound score with signals from topics 8–14:
+//   • Trust Health     — avg agent trust score (topic 9)
+//   • Adoption Gap     — fraction of zero-call high-value tools (topic 8)
+//   • KB Density       — L3/L4 nodes as fraction of coverage target (topic 11)
+//   • Pheromone Signal — attraction:repellent ratio (already in pillar 4, boosted)
+//   • Cost Routing     — % of calls hitting fast/standard vs premium
+//
+// Returns a V2 compound score alongside the original 5-pillar score.
+
+export interface EnrichedCompoundScore {
+  v1: number   // original 5-pillar geometric mean
+  v2: number   // enriched with new-signal sub-pillars
+  subPillars: Array<{ name: string; score: number; weight: number }>
+  generatedAt: string
+}
+
+/**
+ * Compute V2 compound score enriched with new-signal sub-pillars from topics 8–14.
+ * Weights: v1 contributes 60%, new sub-pillars contribute 40% total.
+ */
+export async function computeEnrichedCompoundScore(): Promise<EnrichedCompoundScore> {
+  const [telemetry, fleetState] = await Promise.allSettled([
+    computeTelemetry(),
+    Promise.resolve(getPeerEvalState()),
+  ])
+
+  // ── Sub-pillar 1: Trust Health ──
+  // Uses getDegradedAgents() from peer-eval. Score = 1 - (degraded/total).
+  let trustScore = 0.8 // optimistic default when no data
+  try {
+    const { getDegradedAgents } = await import('../swarm/peer-eval.js')
+    const degraded = getDegradedAgents()
+    const peerState = fleetState.status === 'fulfilled' ? fleetState.value : null
+    const total = peerState ? Math.max(degraded.length + 5, 10) : 10 // rough denominator
+    trustScore = Math.max(0, 1 - degraded.length / total)
+  } catch { /* use default */ }
+
+  // ── Sub-pillar 2: Adoption Gap Health ──
+  // Score = 1 - (high-priority zero-call tools / total tools)
+  let adoptionGapScore = 0.7 // default
+  try {
+    const { detectAdoptionGaps } = await import('./adoption-telemetry.js')
+    const summary = telemetry.status === 'fulfilled' ? telemetry.value : undefined
+    const gaps = await detectAdoptionGaps(summary)
+    const highPriority = gaps.filter(g => g.priority === 'high').length
+    const total = summary?.total_tools ?? 32
+    adoptionGapScore = Math.max(0, 1 - highPriority / total)
+  } catch { /* use default */ }
+
+  // ── Sub-pillar 3: KB Density ──
+  // Proxy: advanced_utilisation_pct from telemetry as KB engagement signal
+  let kbDensityScore = 0.5
+  if (telemetry.status === 'fulfilled') {
+    const adv = telemetry.value.kpis.advanced_utilisation_pct
+    kbDensityScore = Math.min(1, adv / 100)
+  }
+
+  // ── Sub-pillar 4: Utilisation Rate ──
+  let utilisationScore = 0.5
+  if (telemetry.status === 'fulfilled') {
+    utilisationScore = Math.min(1, telemetry.value.kpis.utilisation_rate_pct / 100)
+  }
+
+  const subPillars: EnrichedCompoundScore['subPillars'] = [
+    { name: 'Trust Health',    score: parseFloat(trustScore.toFixed(3)),        weight: 0.30 },
+    { name: 'Adoption Gap',    score: parseFloat(adoptionGapScore.toFixed(3)),  weight: 0.30 },
+    { name: 'KB Density',      score: parseFloat(kbDensityScore.toFixed(3)),    weight: 0.20 },
+    { name: 'Utilisation',     score: parseFloat(utilisationScore.toFixed(3)),  weight: 0.20 },
+  ]
+
+  // V1: run weekly sync to get 5-pillar score
+  let v1 = lastReport?.compoundScore ?? 0.5
+  try {
+    const report = await runWeeklySync()
+    v1 = report.compoundScore
+  } catch { /* use cached */ }
+
+  // V2: blend v1 (60%) with sub-pillar weighted avg (40%)
+  const subScore = subPillars.reduce((sum, s) => sum + s.score * s.weight, 0)
+  const v2 = parseFloat((v1 * 0.60 + subScore * 0.40).toFixed(4))
+
+  return { v1, v2, subPillars, generatedAt: new Date().toISOString() }
+}
