@@ -10,7 +10,7 @@ import { getRedis } from '../redis.js'
 import { logger } from '../logger.js'
 import { callMcpTool } from '../mcp-caller.js'
 import { v4 as uuid } from 'uuid'
-import { computeTelemetry } from '../flywheel/adoption-telemetry.js'
+import { computeTelemetry, detectAdoptionGaps } from '../flywheel/adoption-telemetry.js'
 import { recommendPhantomSkillLoop } from '../services/phantom-loop-selector.js'
 
 export const adoptionRouter = Router()
@@ -68,6 +68,27 @@ adoptionRouter.get('/telemetry', async (_req: Request, res: Response) => {
   } catch (err) {
     logger.error({ err: String(err) }, 'adoption telemetry compute failed')
     res.status(500).json({ success: false, error: { code: 'TELEMETRY_ERROR', message: String(err) } })
+  }
+})
+
+/* ─── GET /gaps — Adoption gap detector ──────────────────────────────────── */
+
+adoptionRouter.get('/gaps', async (_req: Request, res: Response) => {
+  try {
+    const summary = await computeTelemetry()
+    const gaps = await detectAdoptionGaps(summary)
+    res.json({
+      success: true,
+      data: {
+        gaps,
+        total: gaps.length,
+        high_priority: gaps.filter(g => g.priority === 'high').length,
+        generated_at: summary.generated_at,
+      },
+    })
+  } catch (err) {
+    logger.error({ err: String(err) }, 'adoption gap detection failed')
+    res.status(500).json({ success: false, error: { code: 'GAP_DETECTION_ERROR', message: String(err) } })
   }
 })
 
