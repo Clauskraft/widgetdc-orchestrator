@@ -30,6 +30,7 @@ import type {
 } from './inventor-types.js'
 import { onInventorTrial } from '../swarm/pheromone-layer.js'
 import { hookIntoExecution } from '../swarm/peer-eval.js'
+import { emitInventorResult } from '../knowledge/adapters/inventor-adapter.js'
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -1029,6 +1030,18 @@ export async function runInventor(
       }
     } catch (histErr) {
       logger.error({ error: histErr }, 'Inventor: failed to persist history')
+    }
+
+    // Emit best node to Knowledge Bus (non-blocking, skip if aborted or low-quality)
+    if (!abortRequested) {
+      try {
+        const best = getBestNode()
+        if (best && currentConfig) {
+          emitInventorResult(currentConfig.experimentName, best, results.length)
+        }
+      } catch (emitErr) {
+        logger.error({ error: emitErr }, 'Inventor: failed to emit to KnowledgeBus')
+      }
     }
 
     isRunning = false
