@@ -27626,6 +27626,24 @@ __export(knowledge_exports, {
   initKnowledgeBus: () => initKnowledgeBus,
   onKnowledge: () => onKnowledge
 });
+function knowledgeFingerprint(title, source) {
+  const normalized = `${source}:${title}`.toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, "-").slice(0, 80);
+  return normalized;
+}
+async function isDuplicate(title, source) {
+  const redis2 = getRedis();
+  if (!redis2) return false;
+  const key = `${DEDUP_PREFIX}${knowledgeFingerprint(title, source)}`;
+  const exists = await redis2.exists(key).catch(() => 0);
+  return exists > 0;
+}
+async function markSeen(title, source) {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  const key = `${DEDUP_PREFIX}${knowledgeFingerprint(title, source)}`;
+  await redis2.set(key, "1", "EX", DEDUP_TTL).catch(() => {
+  });
+}
 function initKnowledgeBus() {
   if (initialized) return;
   initialized = true;
@@ -27644,6 +27662,14 @@ function initKnowledgeBus() {
         event = { ...event, score };
       }
       const tier = routeTier(score);
+      if (tier === "l3" || tier === "l4") {
+        const dup = await isDuplicate(event.title, event.source);
+        if (dup) {
+          logger.debug({ title: event.title, source: event.source }, "KnowledgeBus: dedup hit \u2014 skipping promotion");
+          return;
+        }
+        await markSeen(event.title, event.source);
+      }
       logger.info({ title: event.title, score, tier }, "KnowledgeBus: routing event");
       if (tier === "l4") {
         await writeL4(event);
@@ -27663,7 +27689,7 @@ function initKnowledgeBus() {
   });
   logger.info("KnowledgeBus: initialized (bus \u2192 router \u2192 L2/L3/L4 writers)");
 }
-var initialized;
+var DEDUP_PREFIX, DEDUP_TTL, initialized;
 var init_knowledge = __esm({
   "src/knowledge/index.ts"() {
     "use strict";
@@ -27673,8 +27699,11 @@ var init_knowledge = __esm({
     init_l3_writer();
     init_l4_writer();
     init_agent_judge();
+    init_redis();
     init_logger();
     init_knowledge_bus();
+    DEDUP_PREFIX = "knowledge:dedup:";
+    DEDUP_TTL = 7 * 24 * 3600;
     initialized = false;
   }
 });
