@@ -363,14 +363,15 @@ async function loadTargetRegistry(): Promise<TargetDef[]> {
 
     logger.warn({ diagnostics }, 'HyperAgent-Auto: no target registry found in Redis — trying Neo4j fallback')
 
-    // Neo4j fallback: use data_graph_read (LOCAL tool — no HTTP round-trip)
+    // Neo4j fallback: use graph.read_cypher DIRECTLY (not data_graph_read LOCAL wrapper).
+    // data_graph_read adds an extra OrchestratorToolResult layer requiring double-unwrap parsing.
+    // graph.read_cypher returns {success, results: [...]} directly as callMcpTool().result.
+    // Pin exact registry key — closed-ids node (key='closed-ids') is updated every cycle and
+    // would shadow this node if we used ORDER BY updated_at DESC without a key filter.
     try {
       const neo4jToolResult = await callMcpTool({
-        toolName: 'data_graph_read',
+        toolName: 'graph.read_cypher',
         args: {
-          // Pin exact registry key — do NOT use ORDER BY updated_at here: closed-ids node
-          // (domain='targets', key='closed-ids') is updated on every cycle and would shadow
-          // the registry node (key='full-registry-v2.2') once any targets are closed.
           query: `MATCH (m:HyperAgentMemory {domain: 'targets', key: 'full-registry-v2.2'})
                   RETURN m.value AS value, m.key AS key
                   LIMIT 1`,
@@ -382,15 +383,10 @@ async function loadTargetRegistry(): Promise<TargetDef[]> {
       if (neo4jToolResult.status !== 'success' || !neo4jToolResult.result) {
         logger.warn({ status: neo4jToolResult.status, err: neo4jToolResult.error_message }, 'HyperAgent-Auto: Neo4j fallback call failed')
       } else {
-        // data_graph_read LOCAL tool returns JSON.stringify(OrchestratorToolResult)
-        // so result is a JSON string wrapping {call_id, status, result: {success, results: [...]}}
-        const rawResult = neo4jToolResult.result
-        const outerStr = typeof rawResult === 'string' ? rawResult : JSON.stringify(rawResult)
-        const outer = JSON.parse(outerStr) as Record<string, unknown>
-        // Handle both direct {results:[...]} and nested {result:{results:[...]}} shapes
-        const inner = (outer?.result as Record<string, unknown>) ?? outer
-        const rows = (inner?.results ?? outer?.results) as Array<Record<string, unknown>> | undefined
-        logger.info({ rowCount: rows?.length ?? 0, outerKeys: Object.keys(outer) }, 'HyperAgent-Auto: Neo4j fallback raw response')
+        // graph.read_cypher returns {success, results: [{value: '{"categories":{...}}', key: '...'}]}
+        const r = neo4jToolResult.result as Record<string, unknown>
+        const rows = r.results as Array<Record<string, unknown>> | undefined
+        logger.info({ rowCount: rows?.length ?? 0 }, 'HyperAgent-Auto: Neo4j registry fallback response')
         if (Array.isArray(rows) && rows.length > 0) {
           const rawValue = rows[0]?.value
           const neo4jKey = rows[0]?.key
