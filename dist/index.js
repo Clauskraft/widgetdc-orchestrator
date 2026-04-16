@@ -50789,6 +50789,58 @@ function runRepomix(repoUrl) {
   const text = typeof raw === "string" ? raw : raw.toString("utf8");
   return text.substring(0, REPOMIX_MAX_CHARS);
 }
+function isAwesomeList(repoUrl) {
+  const name = (repoUrl.split("/").pop() ?? "").toLowerCase().replace(/\.git$/, "");
+  return /^awesome[-_]/.test(name) || name.includes("-awesome-") || name.endsWith("-awesome");
+}
+function buildAwesomeExtractionPrompt(repoUrl, packedRepo) {
+  return `You are a pattern-stealing software intelligence analyst. This is an AWESOME-LIST: a curated markdown catalog of projects, ideas, or patterns.
+
+Your job is NOT to extract verbatim code. Your job is to STEAL THE CORE IDEAS \u2014 distill each listed entry into a reusable pattern that a downstream platform could learn from and adapt. Think: "what is the stealable insight", not "what is the library".
+
+CRITICAL: Your entire response must be valid JSON only. No markdown, no explanation, no prose. Start with { and end with }.
+
+Repository: ${repoUrl}
+
+LIST CONTENTS (packed by repomix):
+${packedRepo}
+
+Return EXACTLY this JSON structure:
+
+{
+  "repo_meta": {
+    "name": "short list name",
+    "description": "1-2 sentences on the domain this list curates",
+    "primary_language": "markdown",
+    "license": "license name or unknown",
+    "topics": ["topic1", "topic2"]
+  },
+  "confidence_score": 85,
+  "summary": "2-3 sentences on what patterns/ideas this list surfaces that are worth stealing",
+  "components": [
+    {
+      "name": "pattern name (short, descriptive \u2014 NOT the verbatim project name)",
+      "type": "pattern",
+      "description": "the STEALABLE CORE IDEA in one sentence \u2014 the insight, architecture, or technique a new implementation could adopt",
+      "source_file": "https://\u2026 provenance URL if present in the list, else null",
+      "capabilities": ["what this pattern enables", "downstream use"],
+      "dependencies": ["conceptual prerequisites, NOT verbatim libraries"],
+      "confidence": 85,
+      "tags": ["domain tag", "pattern-family tag"]
+    }
+  ]
+}
+
+RULES:
+- type MUST be "pattern" for every component \u2014 this list is a pattern catalog.
+- description is the IDEA, not a project blurb. One sentence, re-implementable.
+- name should be a GENERIC pattern name when possible (e.g. "Sliding-window context compression" not "Compressor-2024"). If a verbatim name carries the idea, keep it.
+- capabilities describe what the pattern DOES, not what the project claims.
+- Extract 10-30 patterns. Prioritize the ones that transfer to multi-agent / RAG / MCP / knowledge-graph platforms.
+- confidence_score: 80+ if pattern is clear, 70-79 if curated with prose, <70 if guessing.
+
+Return ONLY valid JSON.`;
+}
 function buildExtractionPrompt(repoUrl, packedRepo) {
   return `You are a software intelligence analyst. Analyze this repository and extract a structured Bill of Materials (BOM).
 
@@ -51221,7 +51273,9 @@ Return: {"name":"...","description":"...","primary_language":"...","license":"..
       logger.info({ runId: id }, "No Tree-sitter results \u2014 falling back to LLM extraction");
       const packedRepo = runRepomix(repoUrl);
       logger.info({ runId: id, chars: packedRepo.length }, "Repomix packed repo");
-      const prompt = buildExtractionPrompt(repoUrl, packedRepo);
+      const awesomeMode = isAwesomeList(repoUrl);
+      const prompt = awesomeMode ? buildAwesomeExtractionPrompt(repoUrl, packedRepo) : buildExtractionPrompt(repoUrl, packedRepo);
+      if (awesomeMode) logger.info({ runId: id, repoUrl }, "Awesome-list detected \u2014 using pattern-steal prompt");
       let lastError2 = null;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
@@ -51237,8 +51291,11 @@ Return: {"name":"...","description":"...","primary_language":"...","license":"..
         }
       }
       if (!extracted) throw lastError2 ?? new Error("LLM extraction failed after 3 attempts");
-      const modules = extractModuleStructure(repoUrl);
-      const gate2 = checkCompleteness(extracted.components, modules);
+      if (awesomeMode) {
+        logger.info({ runId: id, components: extracted.components.length }, "Awesome-list mode: skipping module-based completeness gate");
+      }
+      const modules = awesomeMode ? [] : extractModuleStructure(repoUrl);
+      const gate2 = awesomeMode ? { completeness: 100, matched: extracted.components.length, missed: [], total: extracted.components.length } : checkCompleteness(extracted.components, modules);
       logger.info({
         runId: id,
         completeness: gate2.completeness,
