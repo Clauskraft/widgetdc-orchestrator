@@ -646,6 +646,10 @@ export async function extractPhantomBOM(
   runState.set(id, { status: 'running', startedAt: new Date().toISOString() })
   logger.info({ runId: id, repoUrl }, 'PhantomBOM extraction started')
 
+  // Hoist completeness-gate result so it's defined for both Tree-sitter and LLM paths.
+  // Tree-sitter path is deterministic/complete by construction → 100%.
+  let gate: { completeness: number; matched: number; missed: string[]; total: number } = { completeness: 100, matched: 0, missed: [], total: 0 }
+
   try {
     // 1. ── TREE-SITTER AST EXTRACTION (LIN-764: Primary method) ─────────────
     let astResult: { components: Omit<PhantomComponent, 'id'>[]; moduleCount: number; symbolCount: number; callSiteCount: number } | null = null
@@ -736,7 +740,7 @@ export async function extractPhantomBOM(
         logger.info({ runId: id, components: extracted.components.length }, 'Awesome-list mode: skipping module-based completeness gate')
       }
       const modules = awesomeMode ? [] : extractModuleStructure(repoUrl)
-      const gate = awesomeMode
+      gate = awesomeMode
         ? { completeness: 100, matched: extracted.components.length, missed: [] as string[], total: extracted.components.length }
         : checkCompleteness(extracted.components, modules)
       logger.info({

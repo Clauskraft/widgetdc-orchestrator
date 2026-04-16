@@ -19566,9 +19566,9 @@ async function generatePlan(req) {
   let consensusProposalId = "";
   let consensusQuorum = 0;
   if (highStakes) {
-    const gate2 = await enforceConsensusGate(engagementId, req);
-    consensusProposalId = gate2.proposalId;
-    consensusQuorum = gate2.quorum;
+    const gate = await enforceConsensusGate(engagementId, req);
+    consensusProposalId = gate.proposalId;
+    consensusQuorum = gate.quorum;
     logger.info({ engagementId, proposalId: consensusProposalId, quorum: consensusQuorum }, "EIE gate: consensus opened");
   }
   let rlmMissionId = null;
@@ -26483,26 +26483,26 @@ function checkPhaseGate() {
     return { shouldAdvance: false, nextPhase: currentPhase, reason: "Already at max phase", details: { phase: currentPhase } };
   }
   const nextPhase = phases[currentIdx + 1];
-  const gate2 = PHASE_GATES[nextPhase];
+  const gate = PHASE_GATES[nextPhase];
   const details = {
     currentPhase,
     nextPhase,
     minEdge,
-    requiredMinEdge: gate2.minEdge,
+    requiredMinEdge: gate.minEdge,
     totalCycles: totalCycles2,
-    requiredMinCycles: gate2.minCycles,
+    requiredMinCycles: gate.minCycles,
     policy: PHASE_POLICY[nextPhase]
   };
-  if (minEdge < gate2.minEdge) {
-    return { shouldAdvance: false, nextPhase, reason: `Min edge ${minEdge.toFixed(1)} < gate ${gate2.minEdge}`, details };
+  if (minEdge < gate.minEdge) {
+    return { shouldAdvance: false, nextPhase, reason: `Min edge ${minEdge.toFixed(1)} < gate ${gate.minEdge}`, details };
   }
-  if (totalCycles2 < gate2.minCycles) {
-    return { shouldAdvance: false, nextPhase, reason: `Cycles ${totalCycles2} < required ${gate2.minCycles}`, details };
+  if (totalCycles2 < gate.minCycles) {
+    return { shouldAdvance: false, nextPhase, reason: `Cycles ${totalCycles2} < required ${gate.minCycles}`, details };
   }
   return {
     shouldAdvance: true,
     nextPhase,
-    reason: `Min edge ${minEdge.toFixed(1)} >= ${gate2.minEdge}, cycles ${totalCycles2} >= ${gate2.minCycles}. Ready to advance to ${nextPhase} (policy: ${PHASE_POLICY[nextPhase]})`,
+    reason: `Min edge ${minEdge.toFixed(1)} >= ${gate.minEdge}, cycles ${totalCycles2} >= ${gate.minCycles}. Ready to advance to ${nextPhase} (policy: ${PHASE_POLICY[nextPhase]})`,
     details
   };
 }
@@ -48778,12 +48778,12 @@ hyperagentAutoRouter.post("/phase/advance", (_req, res) => {
   });
 });
 hyperagentAutoRouter.get("/phase/gate", (_req, res) => {
-  const gate2 = checkPhaseGate();
+  const gate = checkPhaseGate();
   const status = getAutonomousStatus();
   res.json({
     success: true,
     currentPhase: status.currentPhase,
-    ...gate2,
+    ...gate,
     currentFitness: status.fitnessScore,
     edgeScores: status.edgeScores
   });
@@ -51222,6 +51222,7 @@ async function extractPhantomBOM(repoUrl, sourceType = "git", runId) {
   const id = runId ?? `pbom-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
   runState.set(id, { status: "running", startedAt: (/* @__PURE__ */ new Date()).toISOString() });
   logger.info({ runId: id, repoUrl }, "PhantomBOM extraction started");
+  let gate = { completeness: 100, matched: 0, missed: [], total: 0 };
   try {
     let astResult = null;
     try {
@@ -51295,18 +51296,18 @@ Return: {"name":"...","description":"...","primary_language":"...","license":"..
         logger.info({ runId: id, components: extracted.components.length }, "Awesome-list mode: skipping module-based completeness gate");
       }
       const modules = awesomeMode ? [] : extractModuleStructure(repoUrl);
-      const gate2 = awesomeMode ? { completeness: 100, matched: extracted.components.length, missed: [], total: extracted.components.length } : checkCompleteness(extracted.components, modules);
+      gate = awesomeMode ? { completeness: 100, matched: extracted.components.length, missed: [], total: extracted.components.length } : checkCompleteness(extracted.components, modules);
       logger.info({
         runId: id,
-        completeness: gate2.completeness,
-        matched: gate2.matched,
-        missed: gate2.missed,
-        total: gate2.total
+        completeness: gate.completeness,
+        matched: gate.matched,
+        missed: gate.missed,
+        total: gate.total
       }, "Completeness gate check");
-      if (gate2.completeness < 80 && gate2.missed.length > 0) {
-        logger.info({ runId: id, missed: gate2.missed }, "Completeness < 80% \u2014 re-extraction");
+      if (gate.completeness < 80 && gate.missed.length > 0) {
+        logger.info({ runId: id, missed: gate.missed }, "Completeness < 80% \u2014 re-extraction");
         try {
-          const recoveryPrompt = buildRecoveryPrompt(repoUrl, packedRepo, gate2.missed);
+          const recoveryPrompt = buildRecoveryPrompt(repoUrl, packedRepo, gate.missed);
           const recoveryRaw = await callDeepSeekLlm(recoveryPrompt);
           const recoveryParsed = parseLlmBom(recoveryRaw, repoUrl);
           const existingNames = new Set(extracted.components.map((c) => c.name.toLowerCase()));
@@ -51319,7 +51320,7 @@ Return: {"name":"...","description":"...","primary_language":"...","license":"..
           const newGate = checkCompleteness(extracted.components, modules);
           logger.info({
             runId: id,
-            completeness_before: gate2.completeness,
+            completeness_before: gate.completeness,
             completeness_after: newGate.completeness,
             added: recoveryParsed.components.length
           }, "Completeness gate recovery complete");
