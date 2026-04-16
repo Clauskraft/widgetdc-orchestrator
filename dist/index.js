@@ -2712,6 +2712,168 @@ var init_routing_engine = __esm({
   }
 });
 
+// src/flywheel/quality-scorer.ts
+function categorize(toolName) {
+  if (toolName.startsWith("graph.") || toolName.startsWith("data_graph")) return "graph";
+  if (toolName.startsWith("kg_rag") || toolName.startsWith("srag") || toolName.startsWith("rag_") || toolName.startsWith("adaptive_rag") || toolName.startsWith("knowledge_")) return "rag";
+  if (toolName.startsWith("linear.") || toolName.startsWith("linear_")) return "linear";
+  if (toolName.startsWith("rlm.") || toolName.startsWith("cognitive") || toolName.startsWith("reason") || toolName.startsWith("llm_")) return "cognitive";
+  if (toolName.startsWith("knowledge") || toolName.startsWith("memory_") || toolName.startsWith("fact_")) return "knowledge";
+  if (toolName.startsWith("agent_") || toolName.startsWith("hyperagent")) return "agent";
+  return "generic";
+}
+function scoreGraph(output) {
+  if (Array.isArray(output)) {
+    if (output.length === 0) return 0.2;
+    const hasEdges = output.some((r2) => typeof r2 === "object" && r2 !== null && ("relationship" in r2 || "rel" in r2 || "type" in r2));
+    const sizeScore = Math.min(1, 0.3 + 0.7 * (output.length / 20));
+    return hasEdges ? Math.min(1, sizeScore + 0.2) : sizeScore;
+  }
+  const r = output;
+  if (Array.isArray(r?.records)) {
+    const recs = r.records;
+    if (recs.length === 0) return 0.25;
+    return Math.min(1, 0.4 + 0.6 * (recs.length / 20));
+  }
+  if (typeof r?.nodes_created === "number" && r.nodes_created > 0) return 0.85;
+  if (typeof r?.relationships_created === "number" && r.relationships_created > 0) return 0.8;
+  if (r?.success === true) return 0.75;
+  return 0.5;
+}
+function scoreRag(output) {
+  if (typeof output === "string") {
+    if (output.length < 50) return 0.2;
+    const citationCount = (output.match(/\[|\bsource\b|\bref\b/gi) ?? []).length;
+    const citationBonus = Math.min(0.3, citationCount * 0.05);
+    return Math.min(1, 0.3 + 0.7 * Math.min(1, output.length / 1e3) + citationBonus);
+  }
+  const r = output;
+  const results = Array.isArray(r?.results) ? r.results : Array.isArray(r?.cards) ? r.cards : Array.isArray(r?.entries) ? r.entries : null;
+  if (results !== null) {
+    if (results.length === 0) return 0.15;
+    const avgScore = results.reduce((sum, item) => {
+      const s = item?.score;
+      return sum + (typeof s === "number" ? s : 0.5);
+    }, 0) / results.length;
+    return Math.min(1, 0.3 + 0.4 * (results.length / 10) + 0.3 * avgScore);
+  }
+  return 0.5;
+}
+function scoreLinear(output) {
+  if (output === null || output === void 0) return 0.1;
+  const r = output;
+  if (r?.identifier || r?.id) return 0.9;
+  if (Array.isArray(r?.issues)) {
+    const issues = r.issues;
+    return issues.length > 0 ? Math.min(1, 0.5 + 0.5 * (issues.length / 10)) : 0.3;
+  }
+  if (r?.success === true) return 0.8;
+  if (typeof r?.status === "string" && r.status === "updated") return 0.85;
+  return 0.5;
+}
+function scoreCognitive(output) {
+  if (typeof output === "string") {
+    const len = output.length;
+    if (len < 100) return 0.3;
+    const depthMarkers = (output.match(/\b(because|therefore|however|furthermore|analysis|conclusion|reasoning)\b/gi) ?? []).length;
+    const depthBonus = Math.min(0.25, depthMarkers * 0.03);
+    return Math.min(1, 0.4 + 0.35 * Math.min(1, len / 800) + depthBonus);
+  }
+  const r = output;
+  if (typeof r?.confidence === "number") {
+    return Math.min(1, 0.4 + 0.6 * r.confidence);
+  }
+  if (r?.reasoning || r?.analysis || r?.plan) return 0.75;
+  return 0.55;
+}
+function scoreKnowledge(output) {
+  const r = output;
+  if (r?.tier === "L4") return 0.95;
+  if (r?.tier === "L3") return 0.8;
+  if (r?.tier === "L2") return 0.6;
+  if (Array.isArray(r?.results) && r.results.length > 0) return 0.75;
+  if (r?.success === true || r?.stored === true) return 0.7;
+  return 0.5;
+}
+function scoreAgent(output) {
+  const r = output;
+  if (typeof r?.fitness_score === "number") return Math.min(1, r.fitness_score);
+  if (typeof r?.targets_completed === "number" && r.targets_completed > 0) return 0.8;
+  if (r?.status === "completed") return 0.75;
+  if (r?.status === "running") return 0.6;
+  return 0.5;
+}
+function scoreGeneric(output) {
+  if (output === null || output === void 0) return 0;
+  if (typeof output === "boolean") return output ? 0.7 : 0.2;
+  if (typeof output === "number") return Math.min(1, 0.5 + Math.abs(output) * 0.05);
+  if (typeof output === "string") {
+    if (output.length === 0) return 0.1;
+    return Math.min(1, 0.4 + 0.6 * Math.min(1, output.length / 200));
+  }
+  if (Array.isArray(output)) {
+    if (output.length === 0) return 0.2;
+    return Math.min(1, 0.4 + 0.6 * Math.min(1, output.length / 10));
+  }
+  const r = output;
+  if (r?.success === true || r?.ok === true) return 0.75;
+  if (r?.error || r?.err) return 0.15;
+  return 0.55;
+}
+function scoreToolOutput(output, toolName, durationMs) {
+  if (output === null || output === void 0) return 0;
+  const r = output;
+  if (typeof r === "object" && r !== null) {
+    if (r.error && r.error !== null) return 0.1;
+    if (typeof r.status === "number" && r.status >= 400) return 0.2;
+  }
+  const category = categorize(toolName);
+  let base;
+  switch (category) {
+    case "graph":
+      base = scoreGraph(output);
+      break;
+    case "rag":
+      base = scoreRag(output);
+      break;
+    case "linear":
+      base = scoreLinear(output);
+      break;
+    case "cognitive":
+      base = scoreCognitive(output);
+      break;
+    case "knowledge":
+      base = scoreKnowledge(output);
+      break;
+    case "agent":
+      base = scoreAgent(output);
+      break;
+    default:
+      base = scoreGeneric(output);
+      break;
+  }
+  const expected = EXPECTED_DURATION[category];
+  const efficiencyRatio = Math.min(2, expected / Math.max(durationMs, 1));
+  const efficiencyBonus = category === "cognitive" || category === "rag" ? 0.2 * Math.min(1, efficiencyRatio) : 0.1 * Math.min(1, efficiencyRatio);
+  const durationPenalty = durationMs > 3e4 ? -0.2 : durationMs > 1e4 ? -0.1 : 0;
+  return Math.round(Math.max(0, Math.min(1, base + efficiencyBonus + durationPenalty)) * 1e3) / 1e3;
+}
+var EXPECTED_DURATION;
+var init_quality_scorer = __esm({
+  "src/flywheel/quality-scorer.ts"() {
+    "use strict";
+    EXPECTED_DURATION = {
+      graph: 3e3,
+      rag: 4e3,
+      linear: 2e3,
+      cognitive: 8e3,
+      knowledge: 3e3,
+      agent: 5e3,
+      generic: 2e3
+    };
+  }
+});
+
 // src/tools/tool-registry.ts
 var tool_registry_exports = {};
 __export(tool_registry_exports, {
@@ -6264,12 +6426,12 @@ async function executeStep(step, previousOutput) {
       success: true,
       inputs: step.arguments,
       outputs: typeof output === "object" && output !== null ? output : { result: output },
-      metrics: { latency_ms: successResult.duration_ms, quality_score: 0.75 }
+      metrics: { latency_ms: successResult.duration_ms, quality_score: scoreToolOutput(output, step.tool_name ?? step.cognitive_action ?? "unknown", successResult.duration_ms) }
     }).catch(() => {
     });
     updateCostProfile(step.agent_id, step.tool_name ?? step.cognitive_action ?? "unknown", {
       latency_ms: successResult.duration_ms,
-      quality_score: 0.75,
+      quality_score: scoreToolOutput(output, step.tool_name ?? step.cognitive_action ?? "unknown", successResult.duration_ms),
       cost_usd: 0
     }).catch(() => {
     });
@@ -6692,6 +6854,7 @@ var init_chain_engine = __esm({
     init_logger();
     init_redis();
     init_routing_engine();
+    init_quality_scorer();
     init_peer_eval();
     init_adoption_telemetry();
     init_failure_harvester();
@@ -22654,6 +22817,53 @@ __export(pheromone_layer_exports, {
   sense: () => sense
 });
 import { v4 as uuid19 } from "uuid";
+function adaptiveDecayFactor(p) {
+  const now = Date.now();
+  const depositedMs = new Date(p.depositedAt).getTime();
+  const ageCycles = (now - depositedMs) / CYCLE_MS;
+  const quality = p.quality_score ?? 0.5;
+  let baseFactor;
+  switch (p.type) {
+    case "attraction":
+      baseFactor = quality > 0.7 ? 0.95 : quality < 0.4 ? 0.65 : 0.85;
+      break;
+    case "repellent":
+      baseFactor = 0.88;
+      break;
+    case "trail": {
+      const reinfluence = Math.min(p.reinforcements / 10, 1);
+      baseFactor = 0.8 + 0.15 * reinfluence;
+      break;
+    }
+    case "external":
+      baseFactor = 0.6;
+      break;
+    case "amplification":
+      baseFactor = 0.98;
+      break;
+    default:
+      baseFactor = 0.85;
+  }
+  const agePenalty = p.type !== "amplification" && ageCycles > 5 ? Math.min((ageCycles - 5) * 5e-3, 0.1) : 0;
+  return Math.round(Math.max(0.5, Math.min(0.99, baseFactor - agePenalty)) * 1e3) / 1e3;
+}
+function adaptiveReinforcementTTLBonus(p) {
+  const quality = p.quality_score ?? 0.5;
+  switch (p.type) {
+    case "attraction":
+      return (quality > 0.7 ? 1200 : 600) * 1e3;
+    case "repellent":
+      return 300 * 1e3;
+    case "trail":
+      return (900 + p.reinforcements * 60) * 1e3;
+    case "external":
+      return 150 * 1e3;
+    case "amplification":
+      return 1800 * 1e3;
+    default:
+      return 600 * 1e3;
+  }
+}
 async function deposit(agentId, type, domain, strength, label, metrics2 = {}, tags = [], ttlSeconds = DEFAULT_TTL2) {
   const pheromone = {
     id: `ph-${uuid19().slice(0, 12)}`,
@@ -22758,7 +22968,8 @@ async function reinforce(pheromoneId, boostFactor = 0.2) {
     const p = JSON.parse(raw);
     p.strength = Math.min(1, p.strength + boostFactor);
     p.reinforcements++;
-    const newTtl = Math.min(p.ttlSeconds * 1.5, 86400);
+    const bonusMs = adaptiveReinforcementTTLBonus(p);
+    const newTtl = Math.min(p.ttlSeconds + bonusMs / 1e3, 86400);
     p.ttlSeconds = newTtl;
     await redis2.set(key, JSON.stringify(p), "EX", Math.round(newTtl));
     await redis2.zadd(REDIS_INDEX_KEY, p.strength, pheromoneId);
@@ -22791,7 +23002,7 @@ async function runDecayCycle() {
       }
       try {
         const p = JSON.parse(raw);
-        p.strength *= DECAY_FACTOR;
+        p.strength *= adaptiveDecayFactor(p);
         if (p.strength < 0.05) {
           await redis2.del(key);
           await redis2.zrem(REDIS_INDEX_KEY, id);
@@ -23102,7 +23313,7 @@ async function initPheromoneLayer() {
     "Pheromone layer initialized"
   );
 }
-var REDIS_PREFIX7, REDIS_STATE_KEY, REDIS_INDEX_KEY, DEFAULT_TTL2, PERSIST_THRESHOLD, AMPLIFICATION_MULTIPLIER, DECAY_FACTOR, state;
+var REDIS_PREFIX7, REDIS_STATE_KEY, REDIS_INDEX_KEY, DEFAULT_TTL2, PERSIST_THRESHOLD, AMPLIFICATION_MULTIPLIER, CYCLE_MS, state;
 var init_pheromone_layer = __esm({
   "src/swarm/pheromone-layer.ts"() {
     "use strict";
@@ -23116,7 +23327,7 @@ var init_pheromone_layer = __esm({
     DEFAULT_TTL2 = 3600;
     PERSIST_THRESHOLD = 0.7;
     AMPLIFICATION_MULTIPLIER = 1.5;
-    DECAY_FACTOR = 0.85;
+    CYCLE_MS = 15 * 60 * 1e3;
     state = {
       totalDeposits: 0,
       totalDecays: 0,
@@ -26445,6 +26656,34 @@ async function runAutonomousCycle(phase, maxTargets) {
       } catch {
       }
     }
+    if (closedTargetIds.size === 0) {
+      try {
+        const closedResult = await callMcpTool({
+          toolName: "data_graph_read",
+          args: {
+            query: `MATCH (m:HyperAgentMemory {domain: 'targets', key: 'closed-ids'})
+                    RETURN m.value AS value ORDER BY m.updated_at DESC LIMIT 1`,
+            params: {}
+          },
+          callId: `hyp-closed-restore-${Date.now()}`
+        });
+        if (closedResult.status === "success" && closedResult.result) {
+          const outerStr = typeof closedResult.result === "string" ? closedResult.result : JSON.stringify(closedResult.result);
+          const outer = JSON.parse(outerStr);
+          const inner = outer?.result ?? outer;
+          const rows = inner?.results ?? outer?.results;
+          if (Array.isArray(rows) && rows.length > 0) {
+            const rawValue = rows[0]?.value;
+            const ids = typeof rawValue === "string" ? JSON.parse(rawValue) : rawValue;
+            if (Array.isArray(ids)) {
+              ids.forEach((id) => closedTargetIds.add(id));
+              logger.info({ count: closedTargetIds.size }, "HyperAgent-Auto: restored closedTargets from Neo4j");
+            }
+          }
+        }
+      } catch {
+      }
+    }
   }
   const cycleId = `auto-${uuid23().slice(0, 8)}`;
   const effectivePhase = phase ?? currentPhase;
@@ -26524,6 +26763,10 @@ ${approach.slice(0, 500)}
             await emitReward(target.id, true, edgeDelta);
             await emitPerChannelReward(target.id, true, edgeDelta, channelsUsed);
             await evaluatePlan(execution.execution_id, plan.planId, 80, "hyperagent-auto");
+            try {
+              await persistCrossRepoMemory("targets", "closed-ids", [...closedTargetIds], "hyperagent-auto");
+            } catch {
+            }
             lessons.push(`Target ${target.id} closed via ${chainMode} (conf=${confidence.toFixed(2)}, rag=${ragResultCount})`);
           } else {
             targetsFailed++;
