@@ -360,10 +360,10 @@ async function loadTargetRegistry(): Promise<TargetDef[]> {
 
     logger.warn({ diagnostics }, 'HyperAgent-Auto: no target registry found in Redis — trying Neo4j fallback')
 
-    // Neo4j fallback: query HyperAgentMemory nodes for target registry
+    // Neo4j fallback: use data_graph_read (LOCAL tool — no HTTP round-trip)
     try {
       const neo4jToolResult = await callMcpTool({
-        toolName: 'graph.read_cypher',
+        toolName: 'data_graph_read',
         args: {
           query: `MATCH (m:HyperAgentMemory {domain: 'targets'})
                   RETURN m.value AS value, m.key AS key
@@ -372,25 +372,32 @@ async function loadTargetRegistry(): Promise<TargetDef[]> {
         },
         callId: `hyp-registry-fallback-${Date.now()}`,
       })
-      // callMcpTool returns OrchestratorToolResult — unwrap .result (JSON string from backend)
-      const rawResult = neo4jToolResult.result
-      const backendResp = typeof rawResult === 'string' ? JSON.parse(rawResult) : rawResult as Record<string, unknown>
-      const rows = (backendResp?.results as Array<Record<string, unknown>>) ?? []
-      if (rows.length > 0) {
-        const rawValue = rows[0]?.value
-        const neo4jKey = rows[0]?.key
-        if (rawValue) {
-          // value is stored as JSON string in Neo4j
-          const parsed = typeof rawValue === 'string' ? JSON.parse(rawValue) : rawValue
-          // parsed may be {categories: {...}} directly, or wrapped in {value: {categories: {...}}}
-          const inner = (parsed as Record<string, unknown>)?.categories
-            ? parsed as Record<string, unknown>
-            : (parsed as Record<string, unknown>)?.value as Record<string, unknown> ?? parsed
-          const data = typeof inner === 'string' ? JSON.parse(inner) : inner
-          const targets = parseRegistryToTargets(data as Record<string, unknown>)
-          if (targets.length > 0) {
-            logger.info({ key: neo4jKey, targetCount: targets.length }, 'HyperAgent-Auto: loaded target registry from Neo4j fallback')
-            return targets
+
+      if (neo4jToolResult.status !== 'success' || !neo4jToolResult.result) {
+        logger.warn({ status: neo4jToolResult.status, err: neo4jToolResult.error_message }, 'HyperAgent-Auto: Neo4j fallback call failed')
+      } else {
+        // data_graph_read LOCAL tool returns JSON.stringify(OrchestratorToolResult)
+        // so result is a JSON string wrapping {call_id, status, result: {success, results: [...]}}
+        const rawResult = neo4jToolResult.result
+        const outerStr = typeof rawResult === 'string' ? rawResult : JSON.stringify(rawResult)
+        const outer = JSON.parse(outerStr) as Record<string, unknown>
+        // Handle both direct {results:[...]} and nested {result:{results:[...]}} shapes
+        const inner = (outer?.result as Record<string, unknown>) ?? outer
+        const rows = (inner?.results ?? outer?.results) as Array<Record<string, unknown>> | undefined
+        logger.info({ rowCount: rows?.length ?? 0, outerKeys: Object.keys(outer) }, 'HyperAgent-Auto: Neo4j fallback raw response')
+        if (Array.isArray(rows) && rows.length > 0) {
+          const rawValue = rows[0]?.value
+          const neo4jKey = rows[0]?.key
+          if (rawValue) {
+            const parsed = typeof rawValue === 'string' ? JSON.parse(rawValue) : rawValue
+            const data = (parsed as Record<string, unknown>)?.categories
+              ? parsed as Record<string, unknown>
+              : ((parsed as Record<string, unknown>)?.value ?? parsed) as Record<string, unknown>
+            const targets = parseRegistryToTargets(typeof data === 'string' ? JSON.parse(data) : data)
+            if (targets.length > 0) {
+              logger.info({ key: neo4jKey, targetCount: targets.length }, 'HyperAgent-Auto: loaded target registry from Neo4j fallback')
+              return targets
+            }
           }
         }
       }
