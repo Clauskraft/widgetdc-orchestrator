@@ -3284,9 +3284,11 @@ __export(pheromone_layer_exports, {
   amplify: () => amplify,
   deposit: () => deposit,
   depositFeedbackPheromone: () => depositFeedbackPheromone,
+  getCachedCapabilityProfile: () => getCachedCapabilityProfile,
   getHeatmap: () => getHeatmap,
   getPheromoneState: () => getPheromoneState,
   getTrailSummary: () => getTrailSummary,
+  inferAgentCapabilities: () => inferAgentCapabilities,
   initPheromoneLayer: () => initPheromoneLayer,
   onAnomaly: () => onAnomaly,
   onChainStepFailure: () => onChainStepFailure,
@@ -3859,6 +3861,62 @@ async function _depositFeedbackPheromoneAsync(toolName, agentId, qualityScore, d
         logger.warn({ toolName, repellentCount: count }, "Stigmergic escalation: 3+ repellents \u2192 failure harvest");
       }
     }
+  }
+}
+async function inferAgentCapabilities(agentId) {
+  const redis2 = getRedis();
+  if (!redis2) {
+    return { agentId, capabilities: [], inferredAt: (/* @__PURE__ */ new Date()).toISOString(), primaryDomain: null };
+  }
+  let cursor = "0";
+  const agentPheromones = [];
+  do {
+    const [next, keys] = await redis2.scan(cursor, "MATCH", `${REDIS_PREFIX2}*`, "COUNT", "100").catch(() => ["0", []]);
+    cursor = next;
+    for (const key of keys) {
+      if (!key.startsWith(REDIS_PREFIX2) || key === REDIS_INDEX_KEY || key === REDIS_STATE_KEY) continue;
+      try {
+        const raw = await redis2.get(key);
+        if (!raw) continue;
+        const p = JSON.parse(raw);
+        if (p.agentId === agentId && p.type === "attraction") agentPheromones.push(p);
+      } catch {
+      }
+    }
+  } while (cursor !== "0" && agentPheromones.length < 100);
+  const domainMap = /* @__PURE__ */ new Map();
+  for (const p of agentPheromones) {
+    const existing = domainMap.get(p.domain) ?? { strength: 0, evidence: 0 };
+    domainMap.set(p.domain, {
+      strength: existing.strength + p.strength,
+      evidence: existing.evidence + 1 + (p.reinforcements ?? 0)
+    });
+  }
+  const capabilities = [...domainMap.entries()].map(([domain, { strength, evidence }]) => ({
+    domain,
+    strength: Math.min(1, strength / Math.max(agentPheromones.length, 1)),
+    evidence,
+    confidence: evidence > 20 ? "high" : evidence >= 5 ? "medium" : "low"
+  })).sort((a, b) => b.strength - a.strength).slice(0, 10);
+  const primaryDomain = capabilities[0]?.domain ?? null;
+  const profile = {
+    agentId,
+    capabilities,
+    inferredAt: (/* @__PURE__ */ new Date()).toISOString(),
+    primaryDomain
+  };
+  redis2.set(`${REDIS_PREFIX2}inferred:${agentId}`, JSON.stringify(profile), "EX", 900).catch(() => {
+  });
+  return profile;
+}
+async function getCachedCapabilityProfile(agentId) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  try {
+    const raw = await redis2.get(`${REDIS_PREFIX2}inferred:${agentId}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
   }
 }
 async function initPheromoneLayer() {

@@ -835,6 +835,105 @@ async function _depositFeedbackPheromoneAsync(
   }
 }
 
+// ─── Agent Capability Inference (topic 12/15) ────────────────────────────────
+// Reads an agent's attraction trail history and infers which capability domains
+// it is demonstrably competent in. Used by routing-engine as a complement to
+// the static agent-seeds.ts capabilities list.
+
+export interface InferredCapability {
+  domain: string
+  /** Aggregated attraction strength across all trails in this domain */
+  strength: number
+  /** How many reinforcements contribute (proxy for experience) */
+  evidence: number
+  /** Confidence: low (<5 trails), medium (5-20), high (>20) */
+  confidence: 'low' | 'medium' | 'high'
+}
+
+export interface InferredAgentProfile {
+  agentId: string
+  capabilities: InferredCapability[]
+  inferredAt: string
+  /** Top domain by strength */
+  primaryDomain: string | null
+}
+
+/**
+ * Infer an agent's capabilities from its pheromone attraction trails.
+ * Reads up to 100 attraction pheromones for the agent and groups by domain.
+ *
+ * Lightweight: one Redis ZRANGEBYSCORE scan (no Neo4j reads).
+ * Cache result externally if calling in hot path.
+ */
+export async function inferAgentCapabilities(agentId: string): Promise<InferredAgentProfile> {
+  const redis = getRedis()
+  if (!redis) {
+    return { agentId, capabilities: [], inferredAt: new Date().toISOString(), primaryDomain: null }
+  }
+
+  // Fetch all active pheromones, filter by agentId + attraction type
+  let cursor = '0'
+  const agentPheromones: Pheromone[] = []
+
+  do {
+    const [next, keys] = await redis.scan(cursor, 'MATCH', `${REDIS_PREFIX}*`, 'COUNT', '100').catch(() => ['0', []])
+    cursor = next as string
+    for (const key of keys as string[]) {
+      if (!key.startsWith(REDIS_PREFIX) || key === REDIS_INDEX_KEY || key === REDIS_STATE_KEY) continue
+      try {
+        const raw = await redis.get(key)
+        if (!raw) continue
+        const p: Pheromone = JSON.parse(raw)
+        if (p.agentId === agentId && p.type === 'attraction') agentPheromones.push(p)
+      } catch { /* skip malformed */ }
+    }
+  } while (cursor !== '0' && agentPheromones.length < 100)
+
+  // Group by domain, aggregate strength + evidence
+  const domainMap = new Map<string, { strength: number; evidence: number }>()
+  for (const p of agentPheromones) {
+    const existing = domainMap.get(p.domain) ?? { strength: 0, evidence: 0 }
+    domainMap.set(p.domain, {
+      strength: existing.strength + p.strength,
+      evidence: existing.evidence + 1 + (p.reinforcements ?? 0),
+    })
+  }
+
+  const capabilities: InferredCapability[] = [...domainMap.entries()]
+    .map(([domain, { strength, evidence }]) => ({
+      domain,
+      strength: Math.min(1, strength / Math.max(agentPheromones.length, 1)),
+      evidence,
+      confidence: evidence > 20 ? 'high' : evidence >= 5 ? 'medium' : 'low',
+    } as InferredCapability))
+    .sort((a, b) => b.strength - a.strength)
+    .slice(0, 10) // top 10 domains
+
+  const primaryDomain = capabilities[0]?.domain ?? null
+
+  const profile: InferredAgentProfile = {
+    agentId, capabilities, inferredAt: new Date().toISOString(), primaryDomain,
+  }
+
+  // Cache in Redis for 15min to avoid repeated scans
+  redis.set(`${REDIS_PREFIX}inferred:${agentId}`, JSON.stringify(profile), 'EX', 900).catch(() => {})
+
+  return profile
+}
+
+/**
+ * Read a cached capability profile (15min TTL) without triggering a full scan.
+ * Returns null if no cache entry exists.
+ */
+export async function getCachedCapabilityProfile(agentId: string): Promise<InferredAgentProfile | null> {
+  const redis = getRedis()
+  if (!redis) return null
+  try {
+    const raw = await redis.get(`${REDIS_PREFIX}inferred:${agentId}`)
+    return raw ? JSON.parse(raw) : null
+  } catch { return null }
+}
+
 // ─── Init ───────────────────────────────────────────────────────────────────
 
 export async function initPheromoneLayer(): Promise<void> {
