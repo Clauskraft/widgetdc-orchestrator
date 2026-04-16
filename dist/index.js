@@ -51073,6 +51073,47 @@ function parseDirectory(dir, maxFiles = 500) {
   return result;
 }
 
+// src/knowledge/adapters/phantom-bom-adapter.ts
+init_knowledge();
+init_logger();
+function emitPhantomDiscovery(discovery) {
+  const content = `## Phantom Tool Discovery: ${discovery.toolName}
+
+**Tool:** \`${discovery.toolName}\`
+**Type:** ${discovery.componentType}
+**Description:** ${discovery.toolDescription}
+**Discovered in:** ${discovery.discoveredIn}
+**Repo:** ${discovery.repo}
+**Confidence:** ${discovery.confidence}%
+
+### Capabilities
+${discovery.capabilities.length ? discovery.capabilities.map((c) => `- ${c}`).join("\n") : "- (none extracted)"}
+
+### Issue
+This tool is called in orchestrator code but is NOT registered in the backend MCP catalogue.
+It routes via \`callMcpTool\` to the backend bridge and silently fails.
+
+### Fix Pattern
+Import and call the local function directly instead of via MCP bridge:
+\`\`\`typescript
+// WRONG: const result = await callMcpTool({ toolName: '${discovery.toolName}', ... })
+// RIGHT: const { localFn } = await import('../path/to/local.js'); await localFn(...)
+\`\`\`
+`;
+  emitKnowledge({
+    source: "phantom_bom",
+    title: `PhantomBOM: ${discovery.toolName} not in backend catalogue`,
+    content,
+    summary: `Tool ${discovery.toolName} used via callMcpTool but missing from backend \u2014 use local import`,
+    score: 0.8,
+    // Known-good pattern → L3 tier directly
+    tags: ["phantom-bom", "tool-routing", discovery.toolName, discovery.repo, ...discovery.tags],
+    repo: discovery.repo,
+    metadata: discovery
+  });
+  logger.info({ toolName: discovery.toolName }, "PhantomBOMAdapter: discovery emitted to KnowledgeBus");
+}
+
 // src/phantom-bom.ts
 var REPOMIX_MAX_CHARS = 6e4;
 var LLM_TIMEOUT_MS = 12e4;
@@ -51348,6 +51389,20 @@ RETURN c.componentId as id`;
         runId: bom.run_id
       }
     });
+    try {
+      emitPhantomDiscovery({
+        toolName: comp.name,
+        toolDescription: comp.description,
+        repo: bom.source_repo,
+        discoveredIn: comp.source_file ?? `${bom.source_repo} (phantom-bom scan)`,
+        componentType: comp.type,
+        confidence: comp.confidence,
+        capabilities: comp.capabilities,
+        tags: comp.tags
+      });
+    } catch (err) {
+      logger.warn({ componentId: comp.id, err: String(err) }, "PhantomBOMAdapter: emit failed (non-blocking)");
+    }
     autoEmbedComponent(comp, bom).catch((err) => {
       logger.warn({ runId: bom.run_id, componentId: comp.id, err: String(err) }, "Auto-embed failed (non-blocking)");
     });
