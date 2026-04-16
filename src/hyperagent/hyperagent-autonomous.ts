@@ -804,33 +804,37 @@ export async function runAutonomousCycle(
     }
 
     // Neo4j is authoritative — ALWAYS merge on top of whatever Redis had.
-    // The old Redis key 'hyperagent:closedTargets' may be stale from cycle-1;
-    // Neo4j always has the latest full set written by persistCrossRepoMemory.
+    // Use graph.read_cypher DIRECTLY (not via data_graph_read LOCAL wrapper) to
+    // avoid double-wrapping. callMcpTool('graph.read_cypher').result is always
+    // {success, results: [{value: '["A-01"...]', ...}]} — one predictable level.
     try {
       const closedResult = await callMcpTool({
-        toolName: 'data_graph_read',
+        toolName: 'graph.read_cypher',
         args: {
           query: `MATCH (m:HyperAgentMemory {domain: 'targets', key: 'closed-ids'})
-                  RETURN m.value AS value ORDER BY m.updated_at DESC LIMIT 1`,
+                  RETURN m.value AS value LIMIT 1`,
           params: {},
         },
         callId: `hyp-closed-restore-${Date.now()}`,
       })
       if (closedResult.status === 'success' && closedResult.result) {
-        const outerStr = typeof closedResult.result === 'string' ? closedResult.result : JSON.stringify(closedResult.result)
-        const outer = JSON.parse(outerStr) as Record<string, unknown>
-        const inner = (outer?.result as Record<string, unknown>) ?? outer
-        const rows = (inner?.results ?? outer?.results) as Array<Record<string, unknown>> | undefined
+        // graph.read_cypher returns {success, results: [{value: '["A-01"...]'}]}
+        const r = closedResult.result as Record<string, unknown>
+        const rows = r.results as Array<Record<string, unknown>> | undefined
         if (Array.isArray(rows) && rows.length > 0) {
           const rawValue = rows[0]?.value
           const ids = typeof rawValue === 'string' ? JSON.parse(rawValue) as string[] : rawValue as string[]
-          if (Array.isArray(ids)) {
+          if (Array.isArray(ids) && ids.length > 0) {
             ids.forEach(id => closedTargetIds.add(id))
-            logger.info({ count: closedTargetIds.size }, 'HyperAgent-Auto: authoritative restore from Neo4j closed-ids')
+            logger.info({ count: closedTargetIds.size, ids }, 'HyperAgent-Auto: authoritative restore from Neo4j closed-ids')
           }
         }
+      } else {
+        logger.warn({ status: closedResult.status, err: closedResult.error_message }, 'HyperAgent-Auto: closed-ids Neo4j restore call failed')
       }
-    } catch { /* non-blocking */ }
+    } catch (err) {
+      logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'HyperAgent-Auto: closed-ids Neo4j restore threw')
+    }
   }
 
   const cycleId = `auto-${uuid().slice(0, 8)}`
