@@ -568,6 +568,9 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 // Validation (74 live backend calls) can take >2min when backend is rate-limiting —
 // moving it after listen() prevents healthcheck timeout on deploy.
 initWebSocket(server)
+// Wire KnowledgeBus handler immediately — it's pure EventEmitter, no async deps.
+// Must run BEFORE boot() so a Redis/pheromone crash can't prevent routing.
+initKnowledgeBus()
 server.listen(config.port, () => {
   logger.info(
     { port: config.port, backend: config.backendUrl, env: config.nodeEnv, redis: isRedisEnabled() },
@@ -592,11 +595,10 @@ async function boot() {
   registerDefaultLoops()
   // Initialize proactive anomaly watcher (loads state from Redis)
   await initAnomalyWatcher()
-  // Initialize pheromone layer + peer-eval fleet learning
-  await initPheromoneLayer()
-  await initPeerEval()
-  // Wire KnowledgeBus → tier router → L2/L3/L4 writers (after Redis is ready)
-  initKnowledgeBus()
+  // Initialize pheromone layer + peer-eval fleet learning (non-fatal — KB already wired above)
+  await initPheromoneLayer().catch(err => logger.warn({ err: String(err) }, 'initPheromoneLayer failed (non-fatal)'))
+  await initPeerEval().catch(err => logger.warn({ err: String(err) }, 'initPeerEval failed (non-fatal)'))
+  // Note: initKnowledgeBus() already called before server.listen() — idempotent guard inside
   // Load persisted benchmark runs from Redis (non-blocking)
   loadBenchmarkRuns().catch(err => {
     logger.warn({ err: String(err) }, 'Benchmark run hydration failed (non-critical)')

@@ -53171,6 +53171,7 @@ app.use((err, _req, res, _next) => {
   });
 });
 initWebSocket(server);
+initKnowledgeBus();
 server.listen(config.port, () => {
   logger.info(
     { port: config.port, backend: config.backendUrl, env: config.nodeEnv, redis: isRedisEnabled() },
@@ -53189,9 +53190,8 @@ async function boot() {
   await hydrateCronJobs();
   registerDefaultLoops();
   await initAnomalyWatcher();
-  await initPheromoneLayer();
-  await initPeerEval();
-  initKnowledgeBus();
+  await initPheromoneLayer().catch((err) => logger.warn({ err: String(err) }, "initPheromoneLayer failed (non-fatal)"));
+  await initPeerEval().catch((err) => logger.warn({ err: String(err) }, "initPeerEval failed (non-fatal)"));
   loadBenchmarkRuns().catch((err) => {
     logger.warn({ err: String(err) }, "Benchmark run hydration failed (non-critical)");
   });
