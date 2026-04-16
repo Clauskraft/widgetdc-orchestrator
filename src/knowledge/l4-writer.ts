@@ -8,6 +8,7 @@
  * Oracle Protocol governance fields required on all graph writes:
  *   destructiveHint, contains_pii, confidence_score, agentId
  */
+import { v4 as uuid } from 'uuid'
 import { callMcpTool } from '../mcp-caller.js'
 import { logger } from '../logger.js'
 import type { KnowledgeEvent } from './knowledge-bus.js'
@@ -53,7 +54,7 @@ RETURN n.slug`,
         intent: `Promote L4 skill candidate from ${event.source}: ${event.title}`,
         evidence: `PRISM score ${event.score} >= 0.85 threshold, source ${event.source}`,
       },
-      callId: `knowledge-l4-${event.event_id}`,
+      callId: uuid(),
     })
     logger.info(
       { event_id: event.event_id, slug, title: event.title },

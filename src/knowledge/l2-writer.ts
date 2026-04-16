@@ -25,8 +25,12 @@ export async function writeL2(event: KnowledgeEvent): Promise<void> {
 export async function listL2(): Promise<KnowledgeEvent[]> {
   const redis = getRedis()
   if (!redis) return []
+  // NOTE: redis.keys() is O(N) — acceptable only while staging keyspace is small.
+  // Migrate to SCAN-based iteration if this grows beyond ~10k entries.
   const keys = await redis.keys(`${KEY_PREFIX}*`)
   if (keys.length === 0) return []
   const raws = await redis.mget(...keys)
-  return raws.filter(Boolean).map(r => JSON.parse(r!) as KnowledgeEvent)
+  return raws
+    .filter((r): r is string => typeof r === 'string' && r.length > 0)
+    .map(r => JSON.parse(r) as KnowledgeEvent)
 }

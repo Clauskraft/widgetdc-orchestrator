@@ -8,6 +8,7 @@
  * Oracle Protocol governance fields required on all graph writes:
  *   destructiveHint, contains_pii, confidence_score, agentId
  */
+import { v4 as uuid } from 'uuid'
 import { callMcpTool } from '../mcp-caller.js'
 import { logger } from '../logger.js'
 import type { KnowledgeEvent } from './knowledge-bus.js'
@@ -46,7 +47,7 @@ RETURN n.event_id`,
         intent: `Persist L3 knowledge candidate from ${event.source}: ${event.title}`,
         evidence: `PRISM score ${event.score}, source ${event.source}, repo ${event.repo}`,
       },
-      callId: `knowledge-l3-${event.event_id}`,
+      callId: uuid(),
     })
     logger.info({ event_id: event.event_id, title: event.title }, 'KnowledgeBus L3: written to Neo4j')
   } catch (err) {
