@@ -3588,6 +3588,19 @@ var init_tool_registry = __esm({
         timeoutMs: 3e4,
         outputDescription: "Confirmation of emitted KnowledgeEvent with tier routing (L2/L3/L4)"
       }),
+      defineTool({
+        name: "knowledge_bus_consolidate",
+        namespace: "knowledge",
+        description: "Promote L2 staged knowledge events to L3 AgentMemory if score meets threshold. Runs daily via cron.",
+        input: z.object({
+          promote_threshold: z.number().default(0.7),
+          max_items: z.number().default(50)
+        }),
+        timeoutMs: 12e4,
+        authRequired: true,
+        availableVia: ["openai", "openapi", "mcp"],
+        outputDescription: "Summary of staged events evaluated and count promoted to L3"
+      }),
       // ─── compliance.* — EU AI Act Compliance (Phantom Week 6, V1) ──
       defineTool({
         name: "compliance_gap_audit",
@@ -26762,6 +26775,11 @@ var init_tier_router = __esm({
 });
 
 // src/knowledge/l2-writer.ts
+var l2_writer_exports = {};
+__export(l2_writer_exports, {
+  listL2: () => listL2,
+  writeL2: () => writeL2
+});
 async function writeL2(event) {
   const redis2 = getRedis();
   if (!redis2) {
@@ -26771,6 +26789,14 @@ async function writeL2(event) {
   const key = `${KEY_PREFIX}${event.event_id}`;
   await redis2.set(key, JSON.stringify(event), "EX", L2_TTL);
   logger.info({ key, title: event.title, score: event.score }, "KnowledgeBus L2: staged");
+}
+async function listL2() {
+  const redis2 = getRedis();
+  if (!redis2) return [];
+  const keys = await redis2.keys(`${KEY_PREFIX}*`);
+  if (keys.length === 0) return [];
+  const raws = await redis2.mget(...keys);
+  return raws.filter((r) => typeof r === "string" && r.length > 0).map((r) => JSON.parse(r));
 }
 var L2_TTL, KEY_PREFIX;
 var init_l2_writer = __esm({
@@ -26784,6 +26810,10 @@ var init_l2_writer = __esm({
 });
 
 // src/knowledge/l3-writer.ts
+var l3_writer_exports = {};
+__export(l3_writer_exports, {
+  writeL3: () => writeL3
+});
 import { v4 as uuid25 } from "uuid";
 async function writeL3(event) {
   try {
@@ -31589,6 +31619,31 @@ ${lines.join("\n")}`;
         return `KnowledgeEvent emitted: "${args.title}" \u2192 ${tier}`;
       } catch (err) {
         return `knowledge_normalize failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "knowledge_bus_consolidate": {
+      try {
+        const { listL2: listL22 } = await Promise.resolve().then(() => (init_l2_writer(), l2_writer_exports));
+        const { writeL3: writeL32 } = await Promise.resolve().then(() => (init_l3_writer(), l3_writer_exports));
+        const { judgeResponse: judgeResponse2 } = await Promise.resolve().then(() => (init_agent_judge(), agent_judge_exports));
+        const threshold = args.promote_threshold ?? 0.7;
+        const maxItems = args.max_items ?? 50;
+        const staged = await listL22();
+        let promoted = 0;
+        for (const event of staged.slice(0, maxItems)) {
+          if (event.score === void 0) {
+            const jr = await judgeResponse2(event.title, event.content.slice(0, 1500), void 0, "deepseek");
+            const raw = jr.score.aggregate;
+            event.score = Math.min(1, Math.max(0, raw > 1 ? raw / 10 : raw));
+          }
+          if (event.score >= threshold) {
+            await writeL32(event);
+            promoted++;
+          }
+        }
+        return `Knowledge consolidation: ${staged.length} staged, ${promoted} promoted to L3`;
+      } catch (err) {
+        return `knowledge_bus_consolidate failed: ${String(err)}`;
       }
     }
     // ── Inventor (ASI-Evolve MCP Tools — LIN-XXX) ────────────────────────
@@ -41805,6 +41860,22 @@ function registerDefaultLoops() {
       name: "HyperAgent Autonomous Cycle",
       mode: "sequential",
       steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
+    }
+  });
+  registerCronJob({
+    id: "knowledge-bus-consolidation",
+    name: "Knowledge Bus Consolidation (Daily L2\u2192L3 promotion)",
+    schedule: "0 3 * * *",
+    // 03:00 UTC daily
+    enabled: true,
+    chain: {
+      name: "Knowledge Bus Consolidation",
+      mode: "sequential",
+      steps: [{
+        agent_id: "orchestrator",
+        tool_name: "knowledge_bus_consolidate",
+        arguments: { promote_threshold: 0.7, max_items: 50 }
+      }]
     }
   });
 }

@@ -1867,4 +1867,21 @@ export function registerDefaultLoops(): void {
       steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
     },
   })
+
+  // Knowledge Bus Consolidation — daily L2→L3 promotion at 03:00 UTC
+  registerCronJob({
+    id: 'knowledge-bus-consolidation',
+    name: 'Knowledge Bus Consolidation (Daily L2→L3 promotion)',
+    schedule: '0 3 * * *',  // 03:00 UTC daily
+    enabled: true,
+    chain: {
+      name: 'Knowledge Bus Consolidation',
+      mode: 'sequential',
+      steps: [{
+        agent_id: 'orchestrator',
+        tool_name: 'knowledge_bus_consolidate',
+        arguments: { promote_threshold: 0.70, max_items: 50 },
+      }],
+    },
+  })
 }
