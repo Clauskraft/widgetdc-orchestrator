@@ -22,12 +22,22 @@ export interface KnowledgeEvent {
 }
 
 class KnowledgeBus extends EventEmitter {
-  emit(event: 'knowledge', payload: KnowledgeEvent): boolean {
-    logger.info(
-      { source: payload.source, title: payload.title, score: payload.score },
-      'KnowledgeBus: event received',
-    )
-    return super.emit(event, payload)
+  emit(event: 'knowledge', payload: KnowledgeEvent): boolean
+  emit(event: string | symbol, ...args: unknown[]): boolean
+  emit(event: string | symbol, ...args: unknown[]): boolean {
+    if (event === 'knowledge') {
+      const payload = args[0] as KnowledgeEvent
+      logger.info(
+        { source: payload.source, title: payload.title, score: payload.score },
+        'KnowledgeBus: event received',
+      )
+    }
+    try {
+      return super.emit(event, ...args)
+    } catch (err) {
+      logger.error({ err }, 'KnowledgeBus: handler threw')
+      return false
+    }
   }
 }
 
