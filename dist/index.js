@@ -33870,22 +33870,35 @@ async function validateStartup() {
   const errors = [];
   const warnings = [];
   let validated = 0;
-  for (const tool of TOOL_REGISTRY) {
-    try {
-      const result = await executeToolUnified(tool.name, {}, {
-        call_id: `validator-${tool.name}`,
-        source_protocol: "validator",
-        fold: false
-      });
-      const resultStr = typeof result.result === "string" ? result.result : "";
-      if (resultStr.startsWith("Unknown tool:")) {
-        errors.push(`${tool.name}: no executor case (registry defines it but tool-executor.ts has no case)`);
-        continue;
-      }
+  const results = await Promise.allSettled(
+    TOOL_REGISTRY.map(
+      (tool) => Promise.race([
+        executeToolUnified(tool.name, {}, {
+          call_id: `validator-${tool.name}`,
+          source_protocol: "validator",
+          fold: false
+        }),
+        new Promise(
+          (_, reject) => setTimeout(() => reject(new Error("validator timeout")), 4e3)
+        )
+      ]).then((result) => ({ tool: tool.name, result })).catch((err) => ({ tool: tool.name, error: err instanceof Error ? err.message : String(err) }))
+    )
+  );
+  for (const settled of results) {
+    if (settled.status === "rejected") {
+      warnings.push(`validator internal error`);
+      continue;
+    }
+    const { tool, result, error } = settled.value;
+    if (error) {
+      warnings.push(`${tool}: validation threw (${error.slice(0, 60)})`);
       validated++;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      warnings.push(`${tool.name}: validation threw (${msg.slice(0, 60)})`);
+      continue;
+    }
+    const resultStr = typeof result?.result === "string" ? result.result : "";
+    if (resultStr.startsWith("Unknown tool:")) {
+      errors.push(`${tool}: no executor case (registry defines it but tool-executor.ts has no case)`);
+    } else {
       validated++;
     }
   }

@@ -30,30 +30,44 @@ export async function validateStartup(): Promise<ValidationResult> {
   const warnings: string[] = []
   let validated = 0
 
-  for (const tool of TOOL_REGISTRY) {
-    try {
-      const result = await executeToolUnified(tool.name, {}, {
-        call_id: `validator-${tool.name}`,
-        source_protocol: 'validator',
-        fold: false,
-      })
+  // Run all tools in parallel with a 4s global deadline.
+  // This reduces worst-case validator time from (N × timeout) to 4s regardless of tool count.
+  const results = await Promise.allSettled(
+    TOOL_REGISTRY.map(tool =>
+      Promise.race([
+        executeToolUnified(tool.name, {}, {
+          call_id: `validator-${tool.name}`,
+          source_protocol: 'validator',
+          fold: false,
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('validator timeout')), 4000)
+        ),
+      ]).then(result => ({ tool: tool.name, result }))
+       .catch(err => ({ tool: tool.name, error: err instanceof Error ? err.message : String(err) }))
+    )
+  )
 
-      const resultStr = typeof result.result === 'string' ? result.result : ''
+  for (const settled of results) {
+    if (settled.status === 'rejected') {
+      // Promise.allSettled should never reject, but guard anyway
+      warnings.push(`validator internal error`)
+      continue
+    }
+    const { tool, result, error } = settled.value as { tool: string; result?: { result: unknown }; error?: string }
 
-      // "Unknown tool: X" means no case in switch statement
-      if (resultStr.startsWith('Unknown tool:')) {
-        errors.push(`${tool.name}: no executor case (registry defines it but tool-executor.ts has no case)`)
-        continue
-      }
-
-      // Any other response (including "Error:" validation) proves the case exists
+    if (error) {
+      // Network errors and timeouts during validation are warnings, not failures
+      warnings.push(`${tool}: validation threw (${error.slice(0, 60)})`)
       validated++
-    } catch (err) {
-      // Network errors during validation are warnings, not failures
-      // (tools that call backend may fail if backend is down)
-      const msg = err instanceof Error ? err.message : String(err)
-      warnings.push(`${tool.name}: validation threw (${msg.slice(0, 60)})`)
-      validated++ // Still count it — the case exists, it just threw
+      continue
+    }
+
+    const resultStr = typeof result?.result === 'string' ? result.result : ''
+    if (resultStr.startsWith('Unknown tool:')) {
+      errors.push(`${tool}: no executor case (registry defines it but tool-executor.ts has no case)`)
+    } else {
+      validated++
     }
   }
 
