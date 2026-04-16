@@ -42431,6 +42431,42 @@ function buildKnowledgeBriefing(feed) {
   }
   return result;
 }
+function getCronOptimizationReport() {
+  const reports = [];
+  for (const job of jobs.values()) {
+    if (!job.enabled) continue;
+    const steps = job.chain.steps.length;
+    const mode = job.chain.mode ?? "sequential";
+    const failures = job.consecutive_failures ?? 0;
+    const successHistory = job.last_status && !job.last_status.startsWith("fail");
+    let recommendation = "keep";
+    let reason = "Chain looks optimal";
+    let estimatedSavingMs = 0;
+    if (failures >= 2) {
+      recommendation = "adaptive";
+      reason = `${failures} consecutive failures \u2014 adaptive mode enables per-step retry and fallback`;
+      estimatedSavingMs = 0;
+    } else if (steps >= 2 && mode === "sequential" && successHistory && failures === 0) {
+      recommendation = "parallel";
+      reason = `${steps} sequential steps with 0 failures \u2014 parallel mode can reduce wall-clock time by ~${Math.round((steps - 1) * 0.5 * 1e3)}ms`;
+      estimatedSavingMs = (steps - 1) * 500;
+    } else if (mode === "parallel" && failures >= 1) {
+      recommendation = "sequential";
+      reason = "Parallel mode with failures \u2014 sequential ensures step dependencies are respected";
+    }
+    reports.push({
+      jobId: job.id,
+      jobName: job.name,
+      currentMode: mode,
+      recommendation,
+      reason,
+      estimatedSavingMs,
+      runCount: job.run_count,
+      lastStatus: job.last_status
+    });
+  }
+  return reports.sort((a, b) => b.estimatedSavingMs - a.estimatedSavingMs);
+}
 function registerDefaultLoops() {
   registerCronJob({
     id: "health-pulse",
@@ -43227,6 +43263,18 @@ cronRouter.patch("/:id", (req, res) => {
     return;
   }
   res.json({ success: true, data: { id: req.params.id, enabled } });
+});
+cronRouter.get("/optimize", (_req, res) => {
+  const report = getCronOptimizationReport();
+  const actionable = report.filter((r) => r.recommendation !== "keep");
+  res.json({
+    success: true,
+    data: {
+      recommendations: report,
+      actionable_count: actionable.length,
+      total_estimated_saving_ms: actionable.reduce((s, r) => s + r.estimatedSavingMs, 0)
+    }
+  });
 });
 cronRouter.delete("/:id", (req, res) => {
   const deleted = deleteCronJob(req.params.id);

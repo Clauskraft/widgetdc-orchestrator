@@ -1049,6 +1049,79 @@ function buildKnowledgeBriefing(feed: Record<string, unknown>): string {
   return result
 }
 
+// ─── Cron Chain Optimizer (topic 13/15) ──────────────────────────────────────
+// Analyzes cron job execution history and recommends chain mode + step changes.
+
+export type CronChainRecommendation = 'sequential' | 'parallel' | 'adaptive' | 'keep'
+
+export interface CronOptimizationReport {
+  jobId: string
+  jobName: string
+  currentMode: string
+  recommendation: CronChainRecommendation
+  reason: string
+  /** Estimated latency saving in ms if recommendation is applied */
+  estimatedSavingMs: number
+  runCount: number
+  lastStatus: string | undefined
+}
+
+/**
+ * Analyze all cron jobs and produce per-job recommendations.
+ *
+ * Heuristics:
+ * - Multi-step jobs that always succeed → promote from sequential to parallel
+ * - Jobs with consecutive_failures > 0 → switch to adaptive (fault-tolerant)
+ * - Single-step sequential → keep (no parallelism benefit)
+ * - Already parallel + zero failures → keep
+ */
+export function getCronOptimizationReport(): CronOptimizationReport[] {
+  const reports: CronOptimizationReport[] = []
+
+  for (const job of jobs.values()) {
+    if (!job.enabled) continue
+    const steps = job.chain.steps.length
+    const mode = job.chain.mode ?? 'sequential'
+    const failures = job.consecutive_failures ?? 0
+    const successHistory = job.last_status && !job.last_status.startsWith('fail')
+
+    let recommendation: CronChainRecommendation = 'keep'
+    let reason = 'Chain looks optimal'
+    let estimatedSavingMs = 0
+
+    // Degraded job → switch to adaptive
+    if (failures >= 2) {
+      recommendation = 'adaptive'
+      reason = `${failures} consecutive failures — adaptive mode enables per-step retry and fallback`
+      estimatedSavingMs = 0
+    }
+    // Multi-step sequential with good track record → parallel
+    else if (steps >= 2 && mode === 'sequential' && successHistory && failures === 0) {
+      recommendation = 'parallel'
+      reason = `${steps} sequential steps with 0 failures — parallel mode can reduce wall-clock time by ~${Math.round((steps - 1) * 0.5 * 1000)}ms`
+      estimatedSavingMs = (steps - 1) * 500 // rough estimate: each step saves ~500ms of waiting
+    }
+    // Parallel with failures → sequential (dependencies may have been missed)
+    else if (mode === 'parallel' && failures >= 1) {
+      recommendation = 'sequential'
+      reason = 'Parallel mode with failures — sequential ensures step dependencies are respected'
+    }
+
+    reports.push({
+      jobId: job.id,
+      jobName: job.name,
+      currentMode: mode,
+      recommendation,
+      reason,
+      estimatedSavingMs,
+      runCount: job.run_count,
+      lastStatus: job.last_status,
+    })
+  }
+
+  return reports.sort((a, b) => b.estimatedSavingMs - a.estimatedSavingMs)
+}
+
 /**
  * Register default platform health loops.
  */
