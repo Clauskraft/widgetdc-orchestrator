@@ -26612,10 +26612,34 @@ async function enrichTargetWithRAG(target, edgeGap) {
       }
     } catch {
     }
+    let phantomBomContext = "";
+    try {
+      const bomResult = await callMcpTool({
+        toolName: "capability_match",
+        args: {
+          required_capabilities: [target.metric.split(":").slice(1).join(" ") || target.metric, target.edge, target.category],
+          min_confidence: 0.3,
+          max_results: 8
+        },
+        callId: `hyp-bom-${target.id}-${Date.now()}`
+      });
+      const bomRaw = bomResult.result;
+      if (typeof bomRaw === "string") {
+        phantomBomContext = bomRaw.slice(0, 400);
+      } else if (bomRaw && typeof bomRaw === "object") {
+        const b = bomRaw;
+        const matches = b.matches ?? b.results ?? b.capabilities;
+        if (matches) phantomBomContext = JSON.stringify(matches).slice(0, 400);
+      }
+    } catch {
+    }
     const mergedContext = ragResponse.merged_context + (kgRagContext ? `
 
 [KG-RAG Evidence]
-${kgRagContext.slice(0, 600)}` : "");
+${kgRagContext.slice(0, 600)}` : "") + (phantomBomContext ? `
+
+[PhantomBOM \u2014 Available Capabilities]
+${phantomBomContext}` : "");
     const folded = await foldContext2(
       `[RAG context for ${target.id}]
 ${mergedContext}`,
@@ -26761,38 +26785,36 @@ async function runAutonomousCycle(phase, maxTargets) {
         if (closedRaw) {
           const ids = JSON.parse(closedRaw);
           ids.forEach((id) => closedTargetIds.add(id));
-          logger.info({ count: closedTargetIds.size }, "HyperAgent-Auto: restored closedTargets from Redis");
+          logger.info({ count: closedTargetIds.size }, "HyperAgent-Auto: partial restore from Redis legacy key");
         }
       } catch {
       }
     }
-    if (closedTargetIds.size === 0) {
-      try {
-        const closedResult = await callMcpTool({
-          toolName: "data_graph_read",
-          args: {
-            query: `MATCH (m:HyperAgentMemory {domain: 'targets', key: 'closed-ids'})
-                    RETURN m.value AS value ORDER BY m.updated_at DESC LIMIT 1`,
-            params: {}
-          },
-          callId: `hyp-closed-restore-${Date.now()}`
-        });
-        if (closedResult.status === "success" && closedResult.result) {
-          const outerStr = typeof closedResult.result === "string" ? closedResult.result : JSON.stringify(closedResult.result);
-          const outer = JSON.parse(outerStr);
-          const inner = outer?.result ?? outer;
-          const rows = inner?.results ?? outer?.results;
-          if (Array.isArray(rows) && rows.length > 0) {
-            const rawValue = rows[0]?.value;
-            const ids = typeof rawValue === "string" ? JSON.parse(rawValue) : rawValue;
-            if (Array.isArray(ids)) {
-              ids.forEach((id) => closedTargetIds.add(id));
-              logger.info({ count: closedTargetIds.size }, "HyperAgent-Auto: restored closedTargets from Neo4j");
-            }
+    try {
+      const closedResult = await callMcpTool({
+        toolName: "data_graph_read",
+        args: {
+          query: `MATCH (m:HyperAgentMemory {domain: 'targets', key: 'closed-ids'})
+                  RETURN m.value AS value ORDER BY m.updated_at DESC LIMIT 1`,
+          params: {}
+        },
+        callId: `hyp-closed-restore-${Date.now()}`
+      });
+      if (closedResult.status === "success" && closedResult.result) {
+        const outerStr = typeof closedResult.result === "string" ? closedResult.result : JSON.stringify(closedResult.result);
+        const outer = JSON.parse(outerStr);
+        const inner = outer?.result ?? outer;
+        const rows = inner?.results ?? outer?.results;
+        if (Array.isArray(rows) && rows.length > 0) {
+          const rawValue = rows[0]?.value;
+          const ids = typeof rawValue === "string" ? JSON.parse(rawValue) : rawValue;
+          if (Array.isArray(ids)) {
+            ids.forEach((id) => closedTargetIds.add(id));
+            logger.info({ count: closedTargetIds.size }, "HyperAgent-Auto: authoritative restore from Neo4j closed-ids");
           }
         }
-      } catch {
       }
+    } catch {
     }
   }
   const cycleId = `auto-${uuid23().slice(0, 8)}`;
@@ -26987,6 +27009,24 @@ ${approach.slice(0, 500)}
         logger.info({ cycleId, targets: targetsCompleted }, "HyperAgent-Auto: cycle lesson ingested to SRAG");
       } catch {
         logger.debug("HyperAgent-Auto: SRAG ingest failed (non-blocking)");
+      }
+      try {
+        await callMcpTool({
+          toolName: "knowledge_normalize",
+          args: {
+            source: "phantom_bom",
+            title: `[HyperAgent ${effectivePhase}] ${lessons.slice(0, 2).join(" | ")}`,
+            content: foldedSummary,
+            summary: `Autonomous cycle ${cycleId}: ${targetsCompleted} targets closed, fitness \u0394${fitnessDelta.toFixed(3)}`,
+            score: fitnessDelta > 0.05 ? 0.72 : 0.55,
+            tags: ["hyperagent", "autonomous", effectivePhase, "cycle-lesson"],
+            repo: "widgetdc-orchestrator"
+          },
+          callId: `hyp-normalize-${cycleId}`
+        });
+        logger.info({ cycleId }, "HyperAgent-Auto: lesson pushed through normalization bus");
+      } catch {
+        logger.debug("HyperAgent-Auto: knowledge_normalize failed (non-blocking)");
       }
     }
     const result = {
@@ -27602,6 +27642,26 @@ function parseTranscript(rawContent, transcriptPath) {
     deploy_events: deployEvents
   };
 }
+function extractInsights(messages) {
+  const insights = [];
+  for (const msg of messages) {
+    if (msg.role !== "assistant") continue;
+    const content = msg.text;
+    let score = 0;
+    if (content.length > 500) score += 0.2;
+    if (content.includes("```")) score += 0.3;
+    if (DECISION_KEYWORDS.some((kw) => content.toLowerCase().includes(kw))) score += 0.3;
+    if (NUMERIC_PATTERN.test(content)) score += 0.2;
+    score = Math.min(score, 1);
+    if (score >= 0.6) {
+      const firstSentence = content.match(/^[^.!?\n]+[.!?]/);
+      const title = (firstSentence ? firstSentence[0] : content.slice(0, 80)).slice(0, 80).trim();
+      const summary = content.slice(0, 300).trim();
+      insights.push({ title, summary, score });
+    }
+  }
+  return insights;
+}
 async function foldSession(transcriptPath) {
   let raw;
   try {
@@ -27643,13 +27703,43 @@ ${fold.deploy_events.map((d) => `- ${d}`).join("\n") || "(none)"}
     metadata: fold
   });
   logger.info({ session_id: fold.session_id, commits: fold.commits.length }, "SessionFoldAdapter: emitted to KnowledgeBus");
+  const rawMessages = raw.split("\n").filter(Boolean).flatMap((line) => {
+    try {
+      const obj = JSON.parse(line);
+      const role = obj.message?.role || obj.role;
+      if (role !== "assistant") return [];
+      const content2 = obj.message?.content || obj.content;
+      const text = Array.isArray(content2) ? content2.filter((p) => p.type === "text").map((p) => p.text).join(" ") : String(content2 || "");
+      return text.length > 10 ? [{ role, text }] : [];
+    } catch {
+      return [];
+    }
+  });
+  const insights = extractInsights(rawMessages);
+  for (const insight of insights.slice(0, 5)) {
+    emitKnowledge({
+      source: "session_fold",
+      title: insight.title || `Insight from ${fold.session_id}`,
+      content: insight.summary,
+      summary: insight.summary,
+      score: insight.score,
+      tags: ["session-insight", fold.session_id],
+      repo: "widgetdc-orchestrator"
+    });
+  }
+  if (insights.length > 0) {
+    logger.info({ session_id: fold.session_id, insights: insights.length }, "SessionFoldAdapter: emitted high-value insights");
+  }
   return fold;
 }
+var DECISION_KEYWORDS, NUMERIC_PATTERN;
 var init_session_fold_adapter = __esm({
   "src/knowledge/adapters/session-fold-adapter.ts"() {
     "use strict";
     init_knowledge();
     init_logger();
+    DECISION_KEYWORDS = ["decided", "chosen", "rejected", "because", "tradeoff", "valgt", "besluttet"];
+    NUMERIC_PATTERN = /\b\d+(\.\d+)?%?\b/;
   }
 });
 

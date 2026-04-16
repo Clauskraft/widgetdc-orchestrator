@@ -83,6 +83,37 @@ function parseTranscript(rawContent: string, transcriptPath: string): FoldOutput
   }
 }
 
+// ─── Insight extractor (Inventor session-fold-extractor-v1, score 0.76) ──────
+// Scores assistant messages for knowledge value and surfaces high-signal content.
+
+const DECISION_KEYWORDS = ['decided', 'chosen', 'rejected', 'because', 'tradeoff', 'valgt', 'besluttet']
+const NUMERIC_PATTERN = /\b\d+(\.\d+)?%?\b/
+
+function extractInsights(messages: Array<{ role: string; text: string }>): Array<{ title: string; summary: string; score: number }> {
+  const insights: Array<{ title: string; summary: string; score: number }> = []
+
+  for (const msg of messages) {
+    if (msg.role !== 'assistant') continue
+    const content = msg.text
+    let score = 0
+
+    if (content.length > 500) score += 0.2
+    if (content.includes('```')) score += 0.3
+    if (DECISION_KEYWORDS.some(kw => content.toLowerCase().includes(kw))) score += 0.3
+    if (NUMERIC_PATTERN.test(content)) score += 0.2
+    score = Math.min(score, 1.0)
+
+    if (score >= 0.6) {
+      const firstSentence = content.match(/^[^.!?\n]+[.!?]/)
+      const title = (firstSentence ? firstSentence[0] : content.slice(0, 80)).slice(0, 80).trim()
+      const summary = content.slice(0, 300).trim()
+      insights.push({ title, summary, score })
+    }
+  }
+
+  return insights
+}
+
 export async function foldSession(transcriptPath: string): Promise<FoldOutput> {
   let raw: string
   try {
@@ -127,5 +158,37 @@ ${fold.deploy_events.map(d => `- ${d}`).join('\n') || '(none)'}
   })
 
   logger.info({ session_id: fold.session_id, commits: fold.commits.length }, 'SessionFoldAdapter: emitted to KnowledgeBus')
+
+  // Extract and emit high-value insights as individual KB candidates
+  const rawMessages = raw.split('\n').filter(Boolean).flatMap(line => {
+    try {
+      const obj = JSON.parse(line)
+      const role = obj.message?.role || obj.role
+      if (role !== 'assistant') return []
+      const content = obj.message?.content || obj.content
+      const text = Array.isArray(content)
+        ? content.filter((p: { type: string }) => p.type === 'text').map((p: { text: string }) => p.text).join(' ')
+        : String(content || '')
+      return text.length > 10 ? [{ role, text }] : []
+    } catch { return [] }
+  })
+
+  const insights = extractInsights(rawMessages)
+  for (const insight of insights.slice(0, 5)) { // max 5 insights per session
+    emitKnowledge({
+      source: 'session_fold',
+      title: insight.title || `Insight from ${fold.session_id}`,
+      content: insight.summary,
+      summary: insight.summary,
+      score: insight.score,
+      tags: ['session-insight', fold.session_id],
+      repo: 'widgetdc-orchestrator',
+    })
+  }
+
+  if (insights.length > 0) {
+    logger.info({ session_id: fold.session_id, insights: insights.length }, 'SessionFoldAdapter: emitted high-value insights')
+  }
+
   return fold
 }
