@@ -281,11 +281,7 @@ knowledgeRouter.get('/bus/status', async (_req: Request, res: Response) => {
   ])
 
   const tiers: Record<string, number> = {}
-  const debug: Record<string, unknown> = {}
   if (tierResult.status === 'fulfilled') {
-    debug.tier_status = tierResult.value.status
-    debug.tier_error = tierResult.value.error_message
-    debug.tier_raw = tierResult.value.result
     for (const rec of extractRecords(tierResult.value)) {
       const tier = String(rec.tier ?? 'unknown')
       const cnt = typeof rec.cnt === 'number' ? rec.cnt
@@ -293,8 +289,6 @@ knowledgeRouter.get('/bus/status', async (_req: Request, res: Response) => {
         : parseInt(String(rec.cnt)) || 0
       tiers[tier] = cnt
     }
-  } else {
-    debug.tier_rejected = String(tierResult.reason)
   }
 
   const recentEvents: unknown[] = recentResult.status === 'fulfilled'
@@ -320,7 +314,6 @@ knowledgeRouter.get('/bus/status', async (_req: Request, res: Response) => {
       l2_staged: l2StagingCount,
       recent_events: recentEvents,
       generated_at: new Date().toISOString(),
-      _debug: debug,
     },
   })
 })
