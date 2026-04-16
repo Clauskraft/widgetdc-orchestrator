@@ -8,6 +8,7 @@ import {
   runCronJob,
   setCronJobEnabled,
   deleteCronJob,
+  getCronOptimizationReport,
 } from '../cron-scheduler.js'
 
 export const cronRouter = Router()
@@ -80,6 +81,22 @@ cronRouter.patch('/:id', (req: Request, res: Response) => {
     return
   }
   res.json({ success: true, data: { id: req.params.id, enabled } })
+})
+
+/**
+ * GET /cron/optimize — Chain optimizer: per-job mode recommendations.
+ */
+cronRouter.get('/optimize', (_req: Request, res: Response) => {
+  const report = getCronOptimizationReport()
+  const actionable = report.filter(r => r.recommendation !== 'keep')
+  res.json({
+    success: true,
+    data: {
+      recommendations: report,
+      actionable_count: actionable.length,
+      total_estimated_saving_ms: actionable.reduce((s, r) => s + r.estimatedSavingMs, 0),
+    },
+  })
 })
 
 /**
