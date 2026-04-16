@@ -6465,6 +6465,7 @@ __export(cost_governance_exports, {
   MAX_AGENT_FANOUT_DEBATE: () => MAX_AGENT_FANOUT_DEBATE,
   MAX_AGENT_FANOUT_PARALLEL: () => MAX_AGENT_FANOUT_PARALLEL,
   MAX_RECURSION_DEPTH: () => MAX_RECURSION_DEPTH,
+  chainVerificationGate: () => chainVerificationGate,
   checkModelPolicy: () => checkModelPolicy,
   compactContext: () => compactContext,
   default: () => cost_governance_default,
@@ -6943,6 +6944,28 @@ async function compactContext(context, targetTokens = 4e3, query, domain) {
     "Context compaction via truncation (RLM unavailable)"
   );
   return { compacted, originalTokens, compactedTokens, ratio };
+}
+function chainVerificationGate(stepResults) {
+  const scoredSteps = stepResults.filter((s) => typeof s.quality_score === "number");
+  if (scoredSteps.length === 0) {
+    return { passed: true, avgQualityScore: 0.5, stepCount: 0, lowQualitySteps: 0, verdict: "pass", message: "No scored steps" };
+  }
+  const avgQualityScore = scoredSteps.reduce((sum, s) => sum + (s.quality_score ?? 0), 0) / scoredSteps.length;
+  const lowQualitySteps = scoredSteps.filter((s) => (s.quality_score ?? 0) < 0.4).length;
+  const lowQualityRatio = lowQualitySteps / scoredSteps.length;
+  let verdict;
+  let message;
+  if (avgQualityScore < 0.35) {
+    verdict = "fail";
+    message = `Chain quality below threshold: avg ${avgQualityScore.toFixed(2)} < 0.35`;
+  } else if (avgQualityScore < 0.6 || lowQualityRatio > 0.3) {
+    verdict = "warn";
+    message = `Chain quality degraded: avg ${avgQualityScore.toFixed(2)}, ${lowQualitySteps}/${scoredSteps.length} steps below 0.4`;
+  } else {
+    verdict = "pass";
+    message = `Chain quality OK: avg ${avgQualityScore.toFixed(2)}`;
+  }
+  return { passed: verdict !== "fail", avgQualityScore, stepCount: scoredSteps.length, lowQualitySteps, verdict, message };
 }
 var BUDGET_LANE_MICRO_MAX, BUDGET_LANE_STANDARD_MAX, MAX_RECURSION_DEPTH, MAX_AGENT_FANOUT_PARALLEL, MAX_AGENT_FANOUT_DEBATE, CONTEXT_COMPACTION_THRESHOLD, COST_TRACE_TTL_SECONDS, COST_TRACE_PREFIX, ESCALATION_PREFIX, DAILY_BUDGET_CAP_DKK, cost_governance_default;
 var init_cost_governance = __esm({
@@ -7475,6 +7498,16 @@ async function executeChain(def) {
     execution.steps_completed = results.filter((r) => r.status === "success").length;
     execution.status = failed ? "failed" : "completed";
     execution.final_output = results[results.length - 1]?.output;
+    const verification = chainVerificationGate(results.map((r) => ({
+      quality_score: r.quality_score,
+      status: r.status
+    })));
+    execution.verification = verification;
+    if (verification.verdict === "fail") {
+      logger.warn({ chain: def.name, verification }, "Chain verification gate: FAIL");
+    } else if (verification.verdict === "warn") {
+      logger.warn({ chain: def.name, verification }, "Chain verification gate: WARN");
+    }
     execution.duration_ms = Date.now() - t0;
     execution.completed_at = (/* @__PURE__ */ new Date()).toISOString();
   } catch (err) {

@@ -841,6 +841,55 @@ export async function compactContext(
   return { compacted, originalTokens, compactedTokens, ratio }
 }
 
+// ─── Chain Verification Gate (topic 6/15) ────────────────────────────────────
+
+export interface ChainVerificationResult {
+  passed: boolean
+  avgQualityScore: number
+  stepCount: number
+  lowQualitySteps: number
+  verdict: 'pass' | 'warn' | 'fail'
+  message: string
+}
+
+/**
+ * Post-chain quality gate: evaluates aggregated step quality scores.
+ * - pass:  avgScore >= 0.60
+ * - warn:  avgScore 0.35-0.60 or >30% steps below 0.4
+ * - fail:  avgScore < 0.35
+ *
+ * Called after chain execution completes. Does NOT abort the chain —
+ * result is attached to execution for observability and pheromone signaling.
+ */
+export function chainVerificationGate(
+  stepResults: Array<{ quality_score?: number; status: string }>,
+): ChainVerificationResult {
+  const scoredSteps = stepResults.filter(s => typeof s.quality_score === 'number')
+  if (scoredSteps.length === 0) {
+    return { passed: true, avgQualityScore: 0.5, stepCount: 0, lowQualitySteps: 0, verdict: 'pass', message: 'No scored steps' }
+  }
+
+  const avgQualityScore = scoredSteps.reduce((sum, s) => sum + (s.quality_score ?? 0), 0) / scoredSteps.length
+  const lowQualitySteps = scoredSteps.filter(s => (s.quality_score ?? 0) < 0.4).length
+  const lowQualityRatio = lowQualitySteps / scoredSteps.length
+
+  let verdict: 'pass' | 'warn' | 'fail'
+  let message: string
+
+  if (avgQualityScore < 0.35) {
+    verdict = 'fail'
+    message = `Chain quality below threshold: avg ${avgQualityScore.toFixed(2)} < 0.35`
+  } else if (avgQualityScore < 0.60 || lowQualityRatio > 0.30) {
+    verdict = 'warn'
+    message = `Chain quality degraded: avg ${avgQualityScore.toFixed(2)}, ${lowQualitySteps}/${scoredSteps.length} steps below 0.4`
+  } else {
+    verdict = 'pass'
+    message = `Chain quality OK: avg ${avgQualityScore.toFixed(2)}`
+  }
+
+  return { passed: verdict !== 'fail', avgQualityScore, stepCount: scoredSteps.length, lowQualitySteps, verdict, message }
+}
+
 // ─── Module exports ──────────────────────────────────────────────────────────
 
 export default {
