@@ -33959,7 +33959,10 @@ var init_mcp_caller = __esm({
 var peer_eval_exports = {};
 __export(peer_eval_exports, {
   evaluateStepQuality: () => evaluateStepQuality,
+  getAgentTrustProfile: () => getAgentTrustProfile,
+  getAgentTrustScore: () => getAgentTrustScore,
   getAllFleetLearnings: () => getAllFleetLearnings,
+  getDegradedAgents: () => getDegradedAgents,
   getFleetLearning: () => getFleetLearning,
   getPeerEvalState: () => getPeerEvalState,
   getRecentEvals: () => getRecentEvals,
@@ -33967,7 +33970,8 @@ __export(peer_eval_exports, {
   hookIntoExecution: () => hookIntoExecution,
   initPeerEval: () => initPeerEval,
   isFleetReliable: () => isFleetReliable,
-  runFleetAnalysis: () => runFleetAnalysis
+  runFleetAnalysis: () => runFleetAnalysis,
+  updateAgentTrust: () => updateAgentTrust
 });
 import { v4 as uuid29 } from "uuid";
 function evaluateStepQuality(taskType, success, _inputs, outputs, latencyMs) {
@@ -34081,6 +34085,8 @@ async function hookIntoExecution(agentId, taskId, context) {
     });
   } catch {
   }
+  updateAgentTrust(agentId, qualityScore).catch(() => {
+  });
   updateFleetLearning(evalReport);
   if (evalReport.selfScore >= BROADCAST_THRESHOLD && evalReport.novelty >= NOVELTY_THRESHOLD) {
     await broadcastBestPractice(evalReport);
@@ -34352,14 +34358,86 @@ async function rebuildStateFromRecentEvals(redis2) {
   } catch {
   }
 }
+async function updateAgentTrust(agentId, qualityScore) {
+  if (!agentId) return;
+  const current = trustCache.get(agentId) ?? {
+    agentId,
+    trust: 1,
+    consecutiveLow: 0,
+    lastUpdated: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  let { trust, consecutiveLow } = current;
+  if (qualityScore < TRUST_LOW_THRESHOLD) {
+    consecutiveLow++;
+    const streakPenalty = Math.max(0, consecutiveLow - 2) * 0.02;
+    trust = Math.max(TRUST_MIN, trust - TRUST_DECAY_STEP - streakPenalty);
+  } else if (qualityScore >= TRUST_HIGH_THRESHOLD) {
+    consecutiveLow = 0;
+    trust = Math.min(TRUST_MAX, trust + TRUST_RECOVERY_STEP);
+  } else {
+    consecutiveLow = 0;
+  }
+  const updated = { agentId, trust, consecutiveLow, lastUpdated: (/* @__PURE__ */ new Date()).toISOString() };
+  trustCache.set(agentId, updated);
+  if (consecutiveLow >= 3) {
+    logger.warn(
+      { agentId, trust, consecutiveLow, qualityScore },
+      "PeerEval: agent trust degraded \u2014 consecutive low-quality outputs"
+    );
+  }
+  const redis2 = getRedis();
+  if (redis2) {
+    redis2.hset(
+      `${TRUST_REDIS_PREFIX}${agentId}`,
+      "score",
+      String(trust),
+      "consecutive_low",
+      String(consecutiveLow),
+      "last_updated",
+      updated.lastUpdated
+    ).catch(() => {
+    });
+  }
+}
+function getAgentTrustScore(agentId) {
+  return trustCache.get(agentId)?.trust ?? 1;
+}
+function getAgentTrustProfile(agentId) {
+  return trustCache.get(agentId) ?? null;
+}
+function getDegradedAgents() {
+  return [...trustCache.values()].filter((t) => t.trust < 0.7).sort((a, b) => a.trust - b.trust);
+}
+async function loadTrustScores() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const keys = await redis2.keys(`${TRUST_REDIS_PREFIX}*`);
+    if (!keys.length) return;
+    await Promise.all(keys.map(async (key) => {
+      const raw = await redis2.hgetall(key);
+      if (!raw?.score) return;
+      const agentId = key.replace(TRUST_REDIS_PREFIX, "");
+      trustCache.set(agentId, {
+        agentId,
+        trust: Math.min(TRUST_MAX, Math.max(TRUST_MIN, parseFloat(raw.score) || 1)),
+        consecutiveLow: parseInt(raw.consecutive_low ?? "0", 10) || 0,
+        lastUpdated: raw.last_updated ?? (/* @__PURE__ */ new Date()).toISOString()
+      });
+    }));
+    logger.info({ loaded: trustCache.size }, "PeerEval: trust scores loaded from Redis");
+  } catch (err) {
+    logger.warn({ err: String(err) }, "PeerEval: failed to load trust scores from Redis");
+  }
+}
 async function initPeerEval() {
-  await loadState3();
+  await Promise.all([loadState3(), loadTrustScores()]);
   logger.info(
-    { totalEvals: state3.totalEvals, taskTypes: state3.fleetLearnings.size },
+    { totalEvals: state3.totalEvals, taskTypes: state3.fleetLearnings.size, trustAgents: trustCache.size },
     "PeerEval engine initialized"
   );
 }
-var REDIS_PREFIX10, REDIS_STATE_KEY2, MAX_BEST_PRACTICES, NOVELTY_THRESHOLD, BROADCAST_THRESHOLD, state3;
+var REDIS_PREFIX10, REDIS_STATE_KEY2, MAX_BEST_PRACTICES, NOVELTY_THRESHOLD, BROADCAST_THRESHOLD, state3, TRUST_REDIS_PREFIX, TRUST_LOW_THRESHOLD, TRUST_HIGH_THRESHOLD, TRUST_DECAY_STEP, TRUST_RECOVERY_STEP, TRUST_MIN, TRUST_MAX, trustCache;
 var init_peer_eval = __esm({
   "src/swarm/peer-eval.ts"() {
     "use strict";
@@ -34382,6 +34460,14 @@ var init_peer_eval = __esm({
       fleetLearnings: /* @__PURE__ */ new Map(),
       lastEvalAt: null
     };
+    TRUST_REDIS_PREFIX = "peer-eval:trust:";
+    TRUST_LOW_THRESHOLD = 0.4;
+    TRUST_HIGH_THRESHOLD = 0.65;
+    TRUST_DECAY_STEP = 0.08;
+    TRUST_RECOVERY_STEP = 0.04;
+    TRUST_MIN = 0.1;
+    TRUST_MAX = 1;
+    trustCache = /* @__PURE__ */ new Map();
   }
 });
 

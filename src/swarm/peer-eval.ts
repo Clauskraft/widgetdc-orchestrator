@@ -274,15 +274,18 @@ export async function hookIntoExecution(
     })
   } catch { /* non-blocking */ }
 
-  // ── 4. Update fleet learning ──
+  // ── 4. Update agent trust score (fire-and-forget) ──
+  updateAgentTrust(agentId, qualityScore).catch(() => {})
+
+  // ── 5. Update fleet learning ──
   updateFleetLearning(evalReport)
 
-  // ── 5. Check if this is a best practice worth broadcasting ──
+  // ── 6. Check if this is a best practice worth broadcasting ──
   if (evalReport.selfScore >= BROADCAST_THRESHOLD && evalReport.novelty >= NOVELTY_THRESHOLD) {
     await broadcastBestPractice(evalReport)
   }
 
-  // ── 6. Store in Redis for dashboard access ──
+  // ── 7. Store in Redis for dashboard access ──
   const redis = getRedis()
   if (redis) {
     await redis.zadd(`${REDIS_PREFIX}recent`, Date.now(), JSON.stringify(evalReport))
@@ -625,10 +628,122 @@ async function rebuildStateFromRecentEvals(redis: any): Promise<void> {
   } catch { /* */ }
 }
 
+// ─── Trust Decay (topic 9/15) ────────────────────────────────────────────────
+// Agent trust scores decay when quality drops below threshold.
+// Routing engine reads getAgentTrustScore() to de-prioritize low-trust agents.
+//
+// Redis keys:
+//   peer-eval:trust:<agentId>  HASH  score / consecutive_low / last_updated
+
+const TRUST_REDIS_PREFIX = 'peer-eval:trust:'
+const TRUST_LOW_THRESHOLD  = 0.4   // score below this is "low quality"
+const TRUST_HIGH_THRESHOLD = 0.65  // score above this recovers trust
+const TRUST_DECAY_STEP     = 0.08  // how much trust drops per low-quality output
+const TRUST_RECOVERY_STEP  = 0.04  // how much trust recovers per high-quality output
+const TRUST_MIN            = 0.10  // floor — agent is never permanently banned
+const TRUST_MAX            = 1.00
+
+export interface AgentTrustScore {
+  agentId: string
+  trust: number          // 0.10 – 1.00
+  consecutiveLow: number // streak of low-quality outputs
+  lastUpdated: string
+}
+
+/** In-memory trust cache (read hot-path, write-through to Redis) */
+const trustCache = new Map<string, AgentTrustScore>()
+
+/**
+ * Update trust score after a completed eval.
+ * Called automatically by hookIntoExecution.
+ * Fire-and-forget safe.
+ */
+export async function updateAgentTrust(agentId: string, qualityScore: number): Promise<void> {
+  if (!agentId) return
+  const current = trustCache.get(agentId) ?? {
+    agentId, trust: 1.0, consecutiveLow: 0, lastUpdated: new Date().toISOString(),
+  }
+
+  let { trust, consecutiveLow } = current
+
+  if (qualityScore < TRUST_LOW_THRESHOLD) {
+    consecutiveLow++
+    // Accelerating decay on streaks: -8% per step, +2% extra per streak step beyond 2
+    const streakPenalty = Math.max(0, consecutiveLow - 2) * 0.02
+    trust = Math.max(TRUST_MIN, trust - TRUST_DECAY_STEP - streakPenalty)
+  } else if (qualityScore >= TRUST_HIGH_THRESHOLD) {
+    consecutiveLow = 0
+    trust = Math.min(TRUST_MAX, trust + TRUST_RECOVERY_STEP)
+  } else {
+    // Mid-range: freeze consecutive counter, no change to trust
+    consecutiveLow = 0
+  }
+
+  const updated: AgentTrustScore = { agentId, trust, consecutiveLow, lastUpdated: new Date().toISOString() }
+  trustCache.set(agentId, updated)
+
+  if (consecutiveLow >= 3) {
+    logger.warn({ agentId, trust, consecutiveLow, qualityScore },
+      'PeerEval: agent trust degraded — consecutive low-quality outputs')
+  }
+
+  // Write-through to Redis (fire-and-forget)
+  const redis = getRedis()
+  if (redis) {
+    redis.hset(`${TRUST_REDIS_PREFIX}${agentId}`,
+      'score', String(trust),
+      'consecutive_low', String(consecutiveLow),
+      'last_updated', updated.lastUpdated,
+    ).catch(() => {})
+  }
+}
+
+/**
+ * Read an agent's current trust score (0.10–1.00).
+ * Returns 1.0 for unknown agents (benefit of the doubt).
+ */
+export function getAgentTrustScore(agentId: string): number {
+  return trustCache.get(agentId)?.trust ?? 1.0
+}
+
+/** Retrieve full trust profile (for dashboard / routing). */
+export function getAgentTrustProfile(agentId: string): AgentTrustScore | null {
+  return trustCache.get(agentId) ?? null
+}
+
+/** Return all agents with trust below 0.7 — for drift reports and routing guards. */
+export function getDegradedAgents(): AgentTrustScore[] {
+  return [...trustCache.values()].filter(t => t.trust < 0.70).sort((a, b) => a.trust - b.trust)
+}
+
+/** Restore trust scores from Redis at boot. */
+async function loadTrustScores(): Promise<void> {
+  const redis = getRedis()
+  if (!redis) return
+  try {
+    const keys = await redis.keys(`${TRUST_REDIS_PREFIX}*`)
+    if (!keys.length) return
+    await Promise.all(keys.map(async (key: string) => {
+      const raw = await redis.hgetall(key)
+      if (!raw?.score) return
+      const agentId = key.replace(TRUST_REDIS_PREFIX, '')
+      trustCache.set(agentId, {
+        agentId,
+        trust:          Math.min(TRUST_MAX, Math.max(TRUST_MIN, parseFloat(raw.score) || 1.0)),
+        consecutiveLow: parseInt(raw.consecutive_low ?? '0', 10) || 0,
+        lastUpdated:    raw.last_updated ?? new Date().toISOString(),
+      })
+    }))
+    logger.info({ loaded: trustCache.size }, 'PeerEval: trust scores loaded from Redis')
+  } catch (err) {
+    logger.warn({ err: String(err) }, 'PeerEval: failed to load trust scores from Redis')
+  }
+}
+
 // ─── Init ───────────────────────────────────────────────────────────────────
 
 export async function initPeerEval(): Promise<void> {
-  await loadState()
-  logger.info({ totalEvals: state.totalEvals, taskTypes: state.fleetLearnings.size },
+  await Promise.all([loadState(), loadTrustScores()])
+  logger.info({ totalEvals: state.totalEvals, taskTypes: state.fleetLearnings.size, trustAgents: trustCache.size },
     'PeerEval engine initialized')
 }
