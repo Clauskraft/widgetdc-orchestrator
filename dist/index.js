@@ -27673,6 +27673,65 @@ var init_l4_writer = __esm({
   }
 });
 
+// src/knowledge/auto-tagger.ts
+function autoTag(event) {
+  const newTags = new Set(event.tags);
+  const haystack = `${event.title} ${event.content.slice(0, 3e3)} ${event.summary}`.toLowerCase();
+  for (const [domain, signals] of Object.entries(DOMAIN_SIGNALS)) {
+    if (signals.some((s) => haystack.includes(s))) {
+      newTags.add(domain);
+    }
+  }
+  const srcTags = SOURCE_TAGS[event.source] ?? [];
+  for (const t of srcTags) newTags.add(t);
+  if (event.score !== void 0) {
+    for (const { min, tag } of QUALITY_TAGS) {
+      if (event.score >= min) {
+        newTags.add(tag);
+        break;
+      }
+    }
+  }
+  const repoSlug = event.repo.split("/").pop();
+  if (repoSlug) newTags.add(`repo:${repoSlug}`);
+  return { ...event, tags: [...newTags] };
+}
+var DOMAIN_SIGNALS, SOURCE_TAGS, QUALITY_TAGS;
+var init_auto_tagger = __esm({
+  "src/knowledge/auto-tagger.ts"() {
+    "use strict";
+    DOMAIN_SIGNALS = {
+      "graph": ["neo4j", "cypher", "graph", "node", "relationship", "auradb", "merge"],
+      "rag": ["rag", "retrieval", "embedding", "vector", "semantic", "kg_rag", "srag"],
+      "llm": ["llm", "model", "prompt", "token", "deepseek", "openai", "claude", "groq", "matrix"],
+      "agent": ["agent", "capability", "dispatch", "registry", "fleet", "trust", "peer-eval"],
+      "chain": ["chain", "sequential", "parallel", "debate", "adaptive", "funnel", "loop"],
+      "memory": ["memory", "cortex", "episodic", "context", "compress", "fold", "session"],
+      "pheromone": ["pheromone", "stigmerg", "attraction", "repellent", "trail", "decay"],
+      "cost": ["cost", "usd", "token_count", "budget", "efficiency", "governance"],
+      "knowledge": ["knowledge", "kb", "tier", "l2", "l3", "l4", "ingest", "normali"],
+      "tooling": ["tool", "mcp", "executor", "registry", "call_mcp", "payload"],
+      "phantom": ["phantom", "bom", "component", "vidensarkiv", "awesome-list"],
+      "inventor": ["inventor", "evolution", "mutation", "fitness", "island", "map-elites"],
+      "security": ["auth", "api_key", "bearer", "acl", "governance", "pii", "compliance"],
+      "monitoring": ["health", "metric", "grafana", "alert", "anomaly", "latency", "sla"],
+      "deployment": ["railway", "deploy", "dist", "build", "nixpacks", "ci", "pr", "branch"]
+    };
+    SOURCE_TAGS = {
+      inventor: ["protocol", "evolved", "rl-optimized"],
+      session_fold: ["session-insight", "distilled"],
+      phantom_bom: ["component", "bom"],
+      commit: ["git", "changelog"],
+      manual: ["curated"]
+    };
+    QUALITY_TAGS = [
+      { min: 0.85, tag: "top-tier" },
+      { min: 0.65, tag: "high-quality" },
+      { min: 0.45, tag: "standard" }
+    ];
+  }
+});
+
 // src/knowledge/index.ts
 var knowledge_exports = {};
 __export(knowledge_exports, {
@@ -27715,6 +27774,7 @@ function initKnowledgeBus() {
         score = Math.min(1, Math.max(0, raw > 1 ? raw / 10 : raw));
         event = { ...event, score };
       }
+      event = autoTag(event);
       const tier = routeTier(score);
       if (tier === "l3" || tier === "l4") {
         const dup = await isDuplicate(event.title, event.source);
@@ -27752,6 +27812,7 @@ var init_knowledge = __esm({
     init_l2_writer();
     init_l3_writer();
     init_l4_writer();
+    init_auto_tagger();
     init_agent_judge();
     init_redis();
     init_logger();

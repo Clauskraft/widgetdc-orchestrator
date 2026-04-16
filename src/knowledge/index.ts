@@ -9,6 +9,7 @@ import { routeTier } from './tier-router.js'
 import { writeL2 } from './l2-writer.js'
 import { writeL3 } from './l3-writer.js'
 import { writeL4 } from './l4-writer.js'
+import { autoTag } from './auto-tagger.js'
 import { judgeResponse } from '../llm/agent-judge.js'
 import { getRedis } from '../redis.js'
 import { logger } from '../logger.js'
@@ -66,6 +67,9 @@ export function initKnowledgeBus(): void {
         score = Math.min(1, Math.max(0, raw > 1 ? raw / 10 : raw))
         event = { ...event, score }
       }
+
+      // Auto-enrich tags before tier routing
+      event = autoTag(event)
 
       const tier = routeTier(score)
 
