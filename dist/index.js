@@ -50925,6 +50925,12 @@ SET r.sourceRepo = $sourceRepo,
 RETURN r.runId as runId`;
   await callBackendMcp("graph.write_cypher", {
     query: runCypher,
+    intent: "phantom_bom_ingestion",
+    evidence: "phantom-BOM pipeline output (LLM/Tree-sitter extraction + completeness gate, see PhantomBOMRun.confidenceScore)",
+    verification: "idempotent MERGE by primary key (runId/componentId/providerId/clusterId/external_id); read-back verifies node exists",
+    test_results: "extract/sync endpoint validates round-trip; EvidenceObject records CompletenessGate PASS/FAIL",
+    purpose: `Ingest PhantomBOMRun metadata for ${bom.source_repo} (componentCount=${bom.components.length})`,
+    objective: "Persist BOM run root-node so downstream components/providers/clusters can MERGE with FK to runId",
     params: {
       runId: bom.run_id,
       sourceRepo: bom.source_repo,
@@ -50960,6 +50966,12 @@ MERGE (r)-[:EXTRACTED]->(c)
 RETURN c.componentId as id`;
     await callBackendMcp("graph.write_cypher", {
       query: compCypher,
+      intent: "phantom_bom_ingestion",
+      evidence: "phantom-BOM pipeline output (LLM/Tree-sitter extraction + completeness gate, see PhantomBOMRun.confidenceScore)",
+      verification: "idempotent MERGE by primary key (runId/componentId/providerId/clusterId/external_id); read-back verifies node exists",
+      test_results: "extract/sync endpoint validates round-trip; EvidenceObject records CompletenessGate PASS/FAIL",
+      purpose: `Persist PhantomComponent ${comp.name} extracted from ${bom.source_repo}`,
+      objective: "Store reusable capability component with provenance link to PhantomBOMRun",
       params: {
         componentId: comp.id,
         name: comp.name,
@@ -51260,6 +51272,12 @@ Return: {"name":"...","description":"...","primary_language":"...","license":"..
       }
     }
     await callBackendMcp("graph.write_cypher", {
+      intent: "phantom_bom_ingestion",
+      evidence: "phantom-BOM pipeline output (LLM/Tree-sitter extraction + completeness gate, see PhantomBOMRun.confidenceScore)",
+      verification: "idempotent MERGE by primary key (runId/componentId/providerId/clusterId/external_id); read-back verifies node exists",
+      test_results: "extract/sync endpoint validates round-trip; EvidenceObject records CompletenessGate PASS/FAIL",
+      purpose: `Record CompletenessGate evidence for ${repoUrl}`,
+      objective: "Persist verification audit trail proving BOM extraction passed completeness threshold",
       query: `MERGE (e:EvidenceObject {external_id: $eid})
         SET e.producer = 'phantom_bom_completeness_gate',
             e.subject_ref = $repo,
@@ -51467,6 +51485,12 @@ SET p.name = $name,
 RETURN p.providerId as id`;
   await callBackendMcp("graph.write_cypher", {
     query: cypher,
+    intent: "phantom_bom_ingestion",
+    evidence: "phantom-BOM pipeline output (LLM/Tree-sitter extraction + completeness gate, see PhantomBOMRun.confidenceScore)",
+    verification: "idempotent MERGE by primary key (runId/componentId/providerId/clusterId/external_id); read-back verifies node exists",
+    test_results: "extract/sync endpoint validates round-trip; EvidenceObject records CompletenessGate PASS/FAIL",
+    purpose: `Persist PhantomProvider ${provider.name} discovered in BOM extraction`,
+    objective: "Store external service/API provider node so capabilities can reference it",
     params: {
       providerId: provider.id,
       name: provider.name,
@@ -51559,6 +51583,12 @@ async function generatePhantomClusters() {
       created_at: (/* @__PURE__ */ new Date()).toISOString()
     };
     await callBackendMcp("graph.write_cypher", {
+      intent: "phantom_bom_ingestion",
+      evidence: "phantom-BOM pipeline output (LLM/Tree-sitter extraction + completeness gate, see PhantomBOMRun.confidenceScore)",
+      verification: "idempotent MERGE by primary key (runId/componentId/providerId/clusterId/external_id); read-back verifies node exists",
+      test_results: "extract/sync endpoint validates round-trip; EvidenceObject records CompletenessGate PASS/FAIL",
+      purpose: "Persist PhantomCluster grouping + link member providers",
+      objective: "Store functional clustering so downstream inventor/search can reason over provider groups",
       query: `
 MERGE (cl:PhantomCluster {clusterId: $clusterId})
 SET cl.strategy = $strategy,
