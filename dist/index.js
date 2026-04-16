@@ -17,9 +17,9 @@ var __export = (target, all) => {
 
 // src/tracing.ts
 import { trace, SpanStatusCode } from "@opentelemetry/api";
-async function withMcpSpan(toolName2, callId, fn) {
-  return mcpTracer.startActiveSpan(`mcp.${toolName2}`, async (span) => {
-    span.setAttribute("mcp.tool", toolName2);
+async function withMcpSpan(toolName, callId, fn) {
+  return mcpTracer.startActiveSpan(`mcp.${toolName}`, async (span) => {
+    span.setAttribute("mcp.tool", toolName);
     span.setAttribute("mcp.call_id", callId);
     try {
       const result = await fn(span);
@@ -2306,7 +2306,7 @@ var init_agent_registry = __esm({
       all() {
         return Array.from(registry.values());
       },
-      canCallTool(agentId, toolName2) {
+      canCallTool(agentId, toolName) {
         let entry = registry.get(agentId);
         if (!entry) {
           const autoHandshake = {
@@ -2333,8 +2333,8 @@ var init_agent_registry = __esm({
         if (entry.handshake.status === "offline") return { allowed: false, reason: `Agent '${agentId}' is offline.` };
         const namespaces = entry.handshake.allowed_tool_namespaces;
         if (namespaces.includes("*")) return { allowed: true };
-        const namespace = toolName2.split(".")[0];
-        if (!namespace) return { allowed: false, reason: `Invalid tool name '${toolName2}'. Expected 'namespace.method'.` };
+        const namespace = toolName.split(".")[0];
+        if (!namespace) return { allowed: false, reason: `Invalid tool name '${toolName}'. Expected 'namespace.method'.` };
         if (namespaces.includes(namespace)) return { allowed: true };
         return { allowed: false, reason: `Agent '${agentId}' not authorized for '${namespace}'. Allowed: [${namespaces.join(", ")}]` };
       },
@@ -4993,17 +4993,17 @@ function isoWeek() {
   const week = Math.ceil(((d.getTime() - yearStart.getTime()) / 864e5 + 1) / 7);
   return `${d.getUTCFullYear()}${String(week).padStart(2, "0")}`;
 }
-function recordToolCall(toolName2) {
+function recordToolCall(toolName) {
   const redis2 = getRedis();
   if (!redis2) return;
   const windowKey = `orchestrator:telemetry:window:${isoWeek()}`;
   const now = (/* @__PURE__ */ new Date()).toISOString();
-  redis2.pipeline().zincrby(KEY_CALLS, 1, toolName2).zincrby(windowKey, 1, toolName2).expire(windowKey, WINDOW_TTL).hset(KEY_LAST, toolName2, now).exec().catch((err) => {
+  redis2.pipeline().zincrby(KEY_CALLS, 1, toolName).zincrby(windowKey, 1, toolName).expire(windowKey, WINDOW_TTL).hset(KEY_LAST, toolName, now).exec().catch((err) => {
     const nowMs = Date.now();
-    const last = lastErrorLog.get(toolName2) ?? 0;
+    const last = lastErrorLog.get(toolName) ?? 0;
     if (nowMs - last > ERROR_THROTTLE_MS) {
-      lastErrorLog.set(toolName2, nowMs);
-      logger.warn({ err: String(err), tool: toolName2 }, "telemetry: Redis write failed (throttled)");
+      lastErrorLog.set(toolName, nowMs);
+      logger.warn({ err: String(err), tool: toolName }, "telemetry: Redis write failed (throttled)");
     }
   });
 }
@@ -8068,16 +8068,16 @@ Namespaces: ${namespaces.join(", ")}`,
     channel: "#ops-alerts"
   });
 }
-function notifyToolCall(agentId, toolName2, status, durationMs, errorMessage) {
+function notifyToolCall(agentId, toolName, status, durationMs, errorMessage) {
   const emoji = status === "success" ? ":white_check_mark:" : ":x:";
   const level = status === "success" ? "info" : "error";
   const errorLine = errorMessage ? `
 Error: \`${errorMessage.slice(0, 200)}\`` : "";
   postToSlack({
-    text: `${emoji} \`${agentId}\` called \`${toolName2}\` \u2192 *${status}* (${durationMs}ms)${errorLine}
+    text: `${emoji} \`${agentId}\` called \`${toolName}\` \u2192 *${status}* (${durationMs}ms)${errorLine}
 Orchestrator: \`${config.orchestratorId}\``,
     level,
-    title: `Tool Call: ${toolName2} \u2192 ${status}`,
+    title: `Tool Call: ${toolName} \u2192 ${status}`,
     source: "orchestrator",
     channel: "#ops-alerts"
   });
@@ -20848,12 +20848,12 @@ async function recordAgentResponse(response, latencyMs = 0) {
     logger.warn({ err: String(err), agent_id: response.agent_id }, "Failed to record agent response metrics");
   }
 }
-async function recordToolMetrics(toolName2, durationMs, isError = false) {
+async function recordToolMetrics(toolName, durationMs, isError = false) {
   if (!isRedisEnabled()) return;
   const redis2 = getRedis();
   if (!redis2) return;
   try {
-    const toolKey = `${REDIS_TOOL_PREFIX}${toolName2}`;
+    const toolKey = `${REDIS_TOOL_PREFIX}${toolName}`;
     const now = (/* @__PURE__ */ new Date()).toISOString();
     await redis2.hincrby(toolKey, "call_count", 1);
     if (isError) await redis2.hincrby(toolKey, "error_count", 1);
@@ -20861,7 +20861,7 @@ async function recordToolMetrics(toolName2, durationMs, isError = false) {
     await redis2.hset(toolKey, "last_called_at", now);
     await redis2.expire(toolKey, REDIS_TTL2);
   } catch (err) {
-    logger.warn({ err: String(err), tool: toolName2 }, "Failed to record tool metrics");
+    logger.warn({ err: String(err), tool: toolName }, "Failed to record tool metrics");
   }
 }
 async function getAgentMetrics(agentId) {
@@ -20909,17 +20909,17 @@ async function getAllAgentMetrics() {
     return [];
   }
 }
-async function getToolMetrics(toolName2) {
+async function getToolMetrics(toolName) {
   const redis2 = getRedis();
   if (!redis2 || !isRedisEnabled()) return null;
   try {
-    const toolKey = `${REDIS_TOOL_PREFIX}${toolName2}`;
+    const toolKey = `${REDIS_TOOL_PREFIX}${toolName}`;
     const data = await redis2.hgetall(toolKey);
     if (!data || Object.keys(data).length === 0) return null;
     const callCount = parseInt(data.call_count || "0");
     const totalDuration = parseInt(data.total_duration_ms || "0");
     return {
-      tool_name: toolName2,
+      tool_name: toolName,
       call_count: callCount,
       error_count: parseInt(data.error_count || "0"),
       avg_duration_ms: callCount > 0 ? Math.round(totalDuration / callCount) : 0,
@@ -20927,7 +20927,7 @@ async function getToolMetrics(toolName2) {
       last_called_at: data.last_called_at ?? ""
     };
   } catch (err) {
-    logger.warn({ err: String(err), tool: toolName2 }, "Failed to get tool metrics");
+    logger.warn({ err: String(err), tool: toolName }, "Failed to get tool metrics");
     return null;
   }
 }
@@ -20938,8 +20938,8 @@ async function getTopTools(limit = 10) {
     const toolKeys = await redis2.keys(`${REDIS_TOOL_PREFIX}*`);
     const tools = [];
     for (const key of toolKeys.slice(0, 50)) {
-      const toolName2 = key.replace(REDIS_TOOL_PREFIX, "");
-      const m = await getToolMetrics(toolName2);
+      const toolName = key.replace(REDIS_TOOL_PREFIX, "");
+      const m = await getToolMetrics(toolName);
       if (m) tools.push(m);
     }
     return tools.sort((a, b) => b.call_count - a.call_count).slice(0, limit);
@@ -21736,7 +21736,7 @@ async function mcpCall3(tool, payload) {
   const data = await res.json().catch(() => null);
   return data?.result ?? data;
 }
-async function recordEngagementCost(engagementId, agentId, costDkk, tokensInput, tokensOutput, latencyMs, success, toolName2) {
+async function recordEngagementCost(engagementId, agentId, costDkk, tokensInput, tokensOutput, latencyMs, success, toolName) {
   if (!isRedisEnabled()) return;
   const redis2 = getRedis();
   if (!redis2) return;
@@ -21764,8 +21764,8 @@ async function recordEngagementCost(engagementId, agentId, costDkk, tokensInput,
     await redis2.hset(agentKey, "last_seen", now);
     await redis2.hsetnx(agentKey, "first_seen", now);
     await redis2.expire(agentKey, REDIS_TTL3);
-    if (toolName2) {
-      const toolKey = `${engKey}:tool:${toolName2}`;
+    if (toolName) {
+      const toolKey = `${engKey}:tool:${toolName}`;
       await redis2.hincrby(toolKey, "calls", 1);
       await redis2.hincrby(toolKey, "cost_milli", costMilli);
       await redis2.hincrby(toolKey, "latency_sum_ms", latencyMs);
@@ -21812,12 +21812,12 @@ async function getEngagementCostReport(engagementId) {
     const toolKeys = await redis2.keys(`${engKey}:tool:*`);
     const byTool = {};
     for (const tKey of toolKeys) {
-      const toolName2 = tKey.replace(`${engKey}:tool:`, "");
+      const toolName = tKey.replace(`${engKey}:tool:`, "");
       const tData = await redis2.hgetall(tKey);
       const tCalls = parseInt(tData.calls || "0");
       const tCostMilli = parseInt(tData.cost_milli || "0");
       const tLatencySum = parseInt(tData.latency_sum_ms || "0");
-      byTool[toolName2] = {
+      byTool[toolName] = {
         calls: tCalls,
         cost_dkk: tCostMilli / 1e3,
         avg_ms: tCalls > 0 ? Math.round(tLatencySum / tCalls) : 0
@@ -22770,29 +22770,29 @@ async function getHeatmap() {
   }
   return summaries.sort((a, b) => b.totalStrength - a.totalStrength);
 }
-async function onChainStepSuccess(agentId, toolName2, durationMs, chainMode) {
+async function onChainStepSuccess(agentId, toolName, durationMs, chainMode) {
   await deposit(
     agentId,
     "trail",
-    `chain:${toolName2}`,
+    `chain:${toolName}`,
     Math.min(1, 0.5 + 1e3 / Math.max(durationMs, 100) * 0.5),
     // faster = stronger
-    `${agentId} succeeded at ${toolName2} in ${durationMs}ms`,
+    `${agentId} succeeded at ${toolName} in ${durationMs}ms`,
     { duration_ms: durationMs },
-    [chainMode, toolName2],
+    [chainMode, toolName],
     3600
     // 1h TTL
   );
 }
-async function onChainStepFailure(agentId, toolName2, error) {
+async function onChainStepFailure(agentId, toolName, error) {
   await deposit(
     agentId,
     "repellent",
-    `chain:${toolName2}`,
+    `chain:${toolName}`,
     0.7,
-    `${agentId} failed at ${toolName2}: ${error.slice(0, 100)}`,
+    `${agentId} failed at ${toolName}: ${error.slice(0, 100)}`,
     { failure: 1 },
-    ["error", toolName2],
+    ["error", toolName],
     1800
     // 30min TTL (failures fade faster)
   );
@@ -28361,15 +28361,15 @@ async function scanStaleTools(candidates) {
   try {
     const summary = await computeTelemetry();
     const stale = summary.stale_tools ?? [];
-    for (const toolName2 of stale.slice(0, 10)) {
+    for (const toolName of stale.slice(0, 10)) {
       candidates.push({
-        id: `stale:${toolName2}`,
+        id: `stale:${toolName}`,
         category: "stale-tool",
-        toolName: toolName2,
-        reason: `Tool "${toolName2}" has not been called in 30+ days`,
+        toolName,
+        reason: `Tool "${toolName}" has not been called in 30+ days`,
         evidence: ["0 calls in last 30-day window", "Detected by adoption-telemetry stale scan"],
         riskLevel: "low",
-        suggestedAction: `Verify if "${toolName2}" is still needed. If unused for 60+ days, consider removing from tool registry.`
+        suggestedAction: `Verify if "${toolName}" is still needed. If unused for 60+ days, consider removing from tool registry.`
       });
     }
   } catch (err) {
@@ -29028,14 +29028,14 @@ __export(tool_executor_exports, {
   getTokenSavings: () => getTokenSavings
 });
 import { v4 as uuid25 } from "uuid";
-async function enforceHyperAgentGate(toolName2, opts) {
-  const toolDef = getTool(toolName2);
+async function enforceHyperAgentGate(toolName, opts) {
+  const toolDef = getTool(toolName);
   if (!toolDef) return null;
   if (toolDef.riskLevel === "read_only") return null;
   const requiresPlan = toolDef.riskLevel === "staged_write" || toolDef.riskLevel === "production_write" || toolDef.requiresPlan === true || toolDef.requiresApproval === true;
   if (!requiresPlan) return null;
   if (!opts?.planId) {
-    return `Direct execution blocked: ${toolName2} (risk=${toolDef.riskLevel}) requires HyperAgent plan. Create plan via governance_plan_create, approve it, then execute.`;
+    return `Direct execution blocked: ${toolName} (risk=${toolDef.riskLevel}) requires HyperAgent plan. Create plan via governance_plan_create, approve it, then execute.`;
   }
   const { getPlan: getPlan3 } = await Promise.resolve().then(() => (init_hyperagent(), hyperagent_exports));
   const plan = getPlan3(opts.planId);
@@ -29050,7 +29050,7 @@ async function enforceHyperAgentGate(toolName2, opts) {
 function getTokenSavings() {
   return { totalTokensSaved, totalFoldingCalls, avgSavingsPerFold: totalFoldingCalls > 0 ? Math.round(totalTokensSaved / totalFoldingCalls) : 0 };
 }
-async function saveFullToolOutput(content, toolName2) {
+async function saveFullToolOutput(content, toolName) {
   const redis2 = getRedis();
   if (!redis2) return null;
   const id = uuid25();
@@ -29058,7 +29058,7 @@ async function saveFullToolOutput(content, toolName2) {
     const payload = JSON.stringify({
       $id: `tool-output-${id}`,
       $schema: "https://widgetdc.io/schemas/tool-output/v1",
-      tool_name: toolName2,
+      tool_name: toolName,
       content,
       size_bytes: Buffer.byteLength(content, "utf8"),
       created_at: (/* @__PURE__ */ new Date()).toISOString(),
@@ -29067,17 +29067,17 @@ async function saveFullToolOutput(content, toolName2) {
     await redis2.set(`${TOOL_OUTPUT_PREFIX}${id}`, payload, "EX", TOOL_OUTPUT_TTL_SECONDS);
     return id;
   } catch (err) {
-    logger.debug({ error: String(err), tool: toolName2 }, "Tool output save failed (non-fatal)");
+    logger.debug({ error: String(err), tool: toolName }, "Tool output save failed (non-fatal)");
     return null;
   }
 }
-async function foldToolResult(content, toolName2) {
+async function foldToolResult(content, toolName) {
   const MAX_CHARS = 800;
   const TARGET_CHARS = 500;
   if (content.length <= MAX_CHARS) return content;
   const originalTokens = Math.ceil(content.length / 4);
   totalFoldingCalls++;
-  const fullOutputId = await saveFullToolOutput(content, toolName2);
+  const fullOutputId = await saveFullToolOutput(content, toolName);
   let folded;
   try {
     const parsed = JSON.parse(content);
@@ -29118,7 +29118,7 @@ ${downloadUrl}`;
   const foldedTokens = Math.ceil(folded.length / 4);
   const saved = originalTokens - foldedTokens;
   totalTokensSaved += saved;
-  logger.debug({ tool: toolName2, originalTokens, foldedTokens, saved, full_output_id: fullOutputId }, "Tool result folded");
+  logger.debug({ tool: toolName, originalTokens, foldedTokens, saved, full_output_id: fullOutputId }, "Tool result folded");
   return folded;
 }
 async function executeToolCalls(toolCalls) {
@@ -29154,9 +29154,9 @@ async function executeOne(tc) {
     return buildToolFallback(name, msg);
   }
 }
-function buildToolFallback(toolName2, error) {
+function buildToolFallback(toolName, error) {
   const short = error.length > 200 ? error.slice(0, 200) + "..." : error;
-  switch (toolName2) {
+  switch (toolName) {
     case "search_knowledge":
       return `Knowledge search unavailable (${short}). Try query_graph with a direct Cypher query, or call_mcp_tool with srag.query as a fallback.`;
     case "reason_deeply":
@@ -29167,16 +29167,16 @@ function buildToolFallback(toolName2, error) {
     case "linear_issue_detail":
       return `Linear query failed (${short}). Linear data may be temporarily unavailable.`;
     default:
-      return `Tool "${toolName2}" failed: ${short}`;
+      return `Tool "${toolName}" failed: ${short}`;
   }
 }
-async function executeToolUnified(toolName2, args, opts) {
+async function executeToolUnified(toolName, args, opts) {
   const callId = opts?.call_id ?? uuid25();
   const t0 = Date.now();
   let deprecation_notice;
-  const toolDef = getTool(toolName2);
+  const toolDef = getTool(toolName);
   if (toolDef?.deprecated) {
-    logger.warn({ tool: toolName2 }, `Deprecated tool called: ${toolName2}. ${toolDef.deprecatedMessage ?? ""}`);
+    logger.warn({ tool: toolName }, `Deprecated tool called: ${toolName}. ${toolDef.deprecatedMessage ?? ""}`);
     deprecation_notice = {
       deprecated: true,
       since: toolDef.deprecatedSince,
@@ -29186,16 +29186,16 @@ async function executeToolUnified(toolName2, args, opts) {
     };
   }
   try {
-    const rawResult = await executeToolByName(toolName2, args);
+    const rawResult = await executeToolByName(toolName, args);
     const duration = Date.now() - t0;
     const shouldFold = opts?.fold !== false;
-    const folded = shouldFold ? await foldToolResult(rawResult, toolName2) : rawResult;
-    const resultWithWarning = deprecation_notice ? `[DEPRECATED] ${toolDef?.deprecatedMessage ?? `Tool "${toolName2}" is deprecated.`}${toolDef?.replacedBy ? ` Use "${toolDef.replacedBy}" instead.` : ""}
+    const folded = shouldFold ? await foldToolResult(rawResult, toolName) : rawResult;
+    const resultWithWarning = deprecation_notice ? `[DEPRECATED] ${toolDef?.deprecatedMessage ?? `Tool "${toolName}" is deprecated.`}${toolDef?.replacedBy ? ` Use "${toolDef.replacedBy}" instead.` : ""}
 
 ${folded}` : folded;
     return {
       call_id: callId,
-      tool_name: toolName2,
+      tool_name: toolName,
       status: "success",
       result: resultWithWarning,
       duration_ms: duration,
@@ -29208,7 +29208,7 @@ ${folded}` : folded;
     const msg = err instanceof Error ? err.message : String(err);
     return {
       call_id: callId,
-      tool_name: toolName2,
+      tool_name: toolName,
       status: "error",
       result: null,
       error_message: msg,
@@ -29311,14 +29311,14 @@ ${result.merged_context}`;
       return rows.map((r) => `- [${r.id ?? "?"}] ${r.title ?? "Untitled"} (${r.status ?? "?"})`).join("\n");
     }
     case "call_mcp_tool": {
-      const toolName2 = args.tool_name;
+      const toolName = args.tool_name;
       const payload = args.payload;
       const mcpArgs = payload ?? (() => {
         const { tool_name: _strip, ...rest } = args;
         return rest;
       })();
       const result = await callMcpTool({
-        toolName: toolName2,
+        toolName,
         args: mcpArgs ?? {},
         callId: uuid25(),
         timeoutMs: 3e4
@@ -29815,9 +29815,9 @@ ${s.explanation}`;
       }
     }
     case "forge_tool": {
-      const toolName2 = args.name;
+      const toolName = args.name;
       const purpose = args.purpose;
-      if (!toolName2 || !purpose) return "Error: name and purpose are required";
+      if (!toolName || !purpose) return "Error: name and purpose are required";
       try {
         const { forgeTool: forgeTool2, verifyForgedTool: verifyForgedTool2 } = await Promise.resolve().then(() => (init_skill_forge(), skill_forge_exports));
         const handlerType = args.handler_type ?? "llm-generate";
@@ -29825,16 +29825,16 @@ ${s.explanation}`;
         if (args.backend_tool) config2.backend_tool = args.backend_tool;
         if (args.system_prompt) config2.system_prompt = args.system_prompt;
         if (args.cypher_template) config2.cypher_template = args.cypher_template;
-        const result = await forgeTool2(toolName2, purpose, handlerType, config2);
+        const result = await forgeTool2(toolName, purpose, handlerType, config2);
         if (result.action !== "created") return `Forge: ${result.message}`;
         const shouldVerify = args.verify !== false;
         let verifyMsg = "";
         if (shouldVerify) {
-          const vResult = await verifyForgedTool2(toolName2);
+          const vResult = await verifyForgedTool2(toolName);
           verifyMsg = `
 Verification: ${vResult.verified ? "PASSED" : "FAILED"} \u2014 ${vResult.result}`;
         }
-        return `Forged tool "${toolName2}" (${handlerType}, ${result.duration_ms}ms)${verifyMsg}
+        return `Forged tool "${toolName}" (${handlerType}, ${result.duration_ms}ms)${verifyMsg}
 Description: ${result.tool?.description}`;
       } catch (err) {
         return `Forge failed: ${err}`;
@@ -30125,11 +30125,11 @@ ${formatted}`;
     case "tool_metrics": {
       try {
         const { getToolMetrics: getToolMetrics2, getTopTools: getTopTools2 } = await Promise.resolve().then(() => (init_runtime_analytics(), runtime_analytics_exports));
-        const toolName2 = typeof args.tool_name === "string" ? args.tool_name : void 0;
+        const toolName = typeof args.tool_name === "string" ? args.tool_name : void 0;
         const limit = typeof args.limit === "number" ? Math.min(args.limit, 50) : 10;
-        if (toolName2) {
-          const metrics2 = await getToolMetrics2(toolName2);
-          return metrics2 ? JSON.stringify(metrics2, null, 2) : `No metrics found for tool: ${toolName2}`;
+        if (toolName) {
+          const metrics2 = await getToolMetrics2(toolName);
+          return metrics2 ? JSON.stringify(metrics2, null, 2) : `No metrics found for tool: ${toolName}`;
         }
         const tools = await getTopTools2(limit);
         return JSON.stringify({ tools, count: tools.length }, null, 2);
@@ -31351,7 +31351,7 @@ ${lines.join("\n")}`;
     case "data_integrity_check": {
       const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
       const backendMap = { data_graph_read: "graph.read_cypher", data_graph_stats: "graph.stats", data_integrity_check: "graph.hintegrity_run" };
-      const result = await callMcp3({ toolName: backendMap[toolName] || "graph.read_cypher", args: args ?? {}, callId: `data-${toolName}-${Date.now()}` });
+      const result = await callMcp3({ toolName: backendMap[name] || "graph.read_cypher", args: args ?? {}, callId: `data-${name}-${Date.now()}` });
       return typeof result === "string" ? result : JSON.stringify(result, null, 2);
     }
     case "data_redis_inspect": {
@@ -31369,7 +31369,7 @@ ${lines.join("\n")}`;
     case "system_service_status":
     case "system_metrics_summary": {
       const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
-      const result = await callMcp3({ toolName: "get_platform_health", args: {}, callId: `system-${toolName}-${Date.now()}` });
+      const result = await callMcp3({ toolName: "get_platform_health", args: {}, callId: `system-${name}-${Date.now()}` });
       return typeof result === "string" ? result : JSON.stringify(result, null, 2);
     }
     case "system_logs_summary": {
@@ -31388,7 +31388,7 @@ ${lines.join("\n")}`;
       const agentId = args?.agent_id;
       if (!agentId) throw new Error("agent_id is required");
       const { callMcpTool: callMcp3 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
-      const result = await callMcp3({ toolName: "graph.read_cypher", args: { query: "MATCH (a:Agent {agentId: $id}) RETURN properties(a) as agent", params: { id: agentId } }, callId: `agent-${toolName}-${Date.now()}` });
+      const result = await callMcp3({ toolName: "graph.read_cypher", args: { query: "MATCH (a:Agent {agentId: $id}) RETURN properties(a) as agent", params: { id: agentId } }, callId: `agent-${name}-${Date.now()}` });
       return typeof result === "string" ? result : JSON.stringify(result?.results?.[0]?.agent ?? result, null, 2);
     }
     case "agent_dispatch": {
@@ -31832,7 +31832,7 @@ ${lines.join("\n")}`;
       return JSON.stringify({ patterns, count: patterns.length });
     }
     default:
-      throw new Error(`Unknown tool: ${toolName}`);
+      throw new Error(`Unknown tool: ${name}`);
   }
 }
 var ORCHESTRATOR_TOOLS, totalTokensSaved, totalFoldingCalls, TOOL_OUTPUT_PREFIX, TOOL_OUTPUT_TTL_SECONDS, PUBLIC_URL_BASE;
@@ -42047,14 +42047,14 @@ cockpitRouter.post("/commands/execute", async (req, res) => {
             mcp_backend: mcp.backend.healthy,
             provider_available: providerAvailable > 0,
             harvest_executed: Object.keys(harvestResults ?? {}).length > 0,
-            sync_executed: typeof syncReport?.compound_health_score === "number"
+            sync_executed: typeof syncReport?.compoundScore === "number"
           },
           metrics: {
             domains_harvested: Object.keys(harvestResults ?? {}).length,
             providers_available: providerAvailable,
             providers_total: providers.length,
-            compound_health_score: syncReport?.compound_health_score ?? null,
-            anomaly_active: watcher.activeAnomalies,
+            compound_health_score: syncReport?.compoundScore ?? null,
+            anomaly_active: watcher.activeAnomalies.length,
             write_rejections: writeGate.writesRejected
           },
           harvest: harvestResults,
@@ -45431,21 +45431,21 @@ async function handleToolsList(id, params) {
   };
 }
 async function handleToolsCall(id, params) {
-  const toolName2 = params.name;
+  const toolName = params.name;
   const args = params.arguments ?? {};
-  if (!toolName2) {
+  if (!toolName) {
     return {
       jsonrpc: "2.0",
       id,
       error: { code: -32602, message: "Missing required parameter: name" }
     };
   }
-  const isOrchestratorTool = TOOL_REGISTRY.some((t) => t.name === toolName2);
+  const isOrchestratorTool = TOOL_REGISTRY.some((t) => t.name === toolName);
   if (isOrchestratorTool) {
     try {
       const results = await executeToolCalls([{
         id: uuid35(),
-        function: { name: toolName2, arguments: JSON.stringify(args) }
+        function: { name: toolName, arguments: JSON.stringify(args) }
       }]);
       const result = results[0];
       return {
@@ -45467,7 +45467,7 @@ async function handleToolsCall(id, params) {
       };
     }
   }
-  const backendName = toolName2.startsWith("backend.") ? toolName2.slice(8) : toolName2;
+  const backendName = toolName.startsWith("backend.") ? toolName.slice(8) : toolName;
   try {
     const mcpResult = await callMcpTool({
       toolName: backendName,
@@ -45605,10 +45605,10 @@ function respondLegacyToolResult(res, result) {
   });
 }
 toolGatewayRouter.post("/call", async (req, res) => {
-  const toolName2 = typeof req.body?.tool_name === "string" ? req.body.tool_name : null;
+  const toolName = typeof req.body?.tool_name === "string" ? req.body.tool_name : null;
   const callId = typeof req.body?.call_id === "string" ? req.body.call_id : uuid36();
   const args = req.body?.arguments && typeof req.body.arguments === "object" ? req.body.arguments : {};
-  if (!toolName2) {
+  if (!toolName) {
     res.status(400).json({
       call_id: callId,
       status: "error",
@@ -45619,14 +45619,14 @@ toolGatewayRouter.post("/call", async (req, res) => {
     });
     return;
   }
-  logger.warn({ tool: toolName2, call_id: callId }, "Deprecated /api/tools/call shim used");
-  const result = await executeToolUnified(toolName2, args, {
+  logger.warn({ tool: toolName, call_id: callId }, "Deprecated /api/tools/call shim used");
+  const result = await executeToolUnified(toolName, args, {
     call_id: callId,
     source_protocol: "legacy-rest",
     fold: req.query.fold !== "false"
   });
   if (result.status === "success") {
-    recordToolCall(toolName2);
+    recordToolCall(toolName);
   }
   respondLegacyToolResult(res, result);
 });
@@ -48144,7 +48144,7 @@ abiDocsRouter.post("/try", async (req, res) => {
     }
   });
 });
-function buildExamples(toolName2, schema) {
+function buildExamples(toolName, schema) {
   const props = schema?.properties ?? {};
   const required2 = schema?.required ?? [];
   const minimalArgs = {};
@@ -48158,7 +48158,7 @@ function buildExamples(toolName2, schema) {
     else if (prop.type === "object") minimalArgs[key] = {};
   }
   const examples = [];
-  const curated = CURATED_EXAMPLES[toolName2];
+  const curated = CURATED_EXAMPLES[toolName];
   if (curated) {
     examples.push(...curated);
   } else if (Object.keys(minimalArgs).length > 0) {
@@ -51761,17 +51761,17 @@ init_logger();
 init_config();
 import { Router as Router56 } from "express";
 var linearProxyRouter = Router56();
-async function callBackendMcp2(toolName2, payload) {
+async function callBackendMcp2(toolName, payload) {
   const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${config.backendApiKey}`
     },
-    body: JSON.stringify({ tool: toolName2, payload }),
+    body: JSON.stringify({ tool: toolName, payload }),
     signal: AbortSignal.timeout(15e3)
   });
-  if (!res.ok) throw new Error(`Backend MCP ${toolName2}: ${res.status}`);
+  if (!res.ok) throw new Error(`Backend MCP ${toolName}: ${res.status}`);
   return res.json();
 }
 function normalizeLinearState(raw) {
@@ -52192,7 +52192,7 @@ app.use("/api/graph-hygiene", requireApiKey, graphHygieneRouter);
 app.use("/api/deliverables", requireApiKey, deliverablesRouter);
 app.use("/api/similarity", requireApiKey, similarityRouter);
 app.use("/api/engagements", requireApiKey, engagementsRouter);
-app.use("/api/processes", requireApiKey, processesRouter);
+app.use("/api/processes", requireApiKey, apiRateLimiter, processesRouter);
 app.use("/api/intelligence", requireApiKey, apiRateLimiter, intelligenceRouter);
 app.use("/api/governance", requireApiKey, governanceRouter);
 app.use("/api/osint", requireApiKey, osintRouter);
