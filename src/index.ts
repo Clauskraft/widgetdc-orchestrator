@@ -306,7 +306,7 @@ app.use('/api/graph-hygiene', requireApiKey, graphHygieneRouter)
 app.use('/api/deliverables', requireApiKey, deliverablesRouter)
 app.use('/api/similarity', requireApiKey, similarityRouter)
 app.use('/api/engagements', requireApiKey, engagementsRouter)
-app.use('/api/processes', requireApiKey, processesRouter)
+app.use('/api/processes', requireApiKey, apiRateLimiter, processesRouter)
 app.use('/api/intelligence', requireApiKey, apiRateLimiter, intelligenceRouter)
 app.use('/api/governance', requireApiKey, governanceRouter)
 // LIN-480: OSINT Scanning Pipeline
