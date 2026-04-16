@@ -16,6 +16,7 @@ import { logger } from '../logger.js'
 import { getRedis } from '../redis.js'
 import { resolveRoutingDecision, resolveChainMode } from '../agents/routing-engine.js'
 import { scoreToolOutput } from '../flywheel/quality-scorer.js'
+import { adaptiveTimeout } from '../flywheel/cost-optimizer.js'
 import { depositFeedbackPheromone } from '../swarm/pheromone-layer.js'
 import { hookIntoExecution } from '../swarm/peer-eval.js'
 import { recordToolCall } from '../flywheel/adoption-telemetry.js'
@@ -194,7 +195,7 @@ async function executeStep(step: ChainStep, previousOutput: unknown): Promise<St
           prompt,
           context: args,
           agent_id: step.agent_id,
-        }, step.timeout_ms ?? toolDef?.timeoutMs ?? 30000)
+        }, step.timeout_ms ?? toolDef?.timeoutMs ?? adaptiveTimeout(step.cognitive_action ?? 'unknown', step.agent_id))
         output = result
       } else if (backendToolName === step.tool_name) {
         // Orchestrator-only tool — execute locally through tool executor
@@ -213,7 +214,7 @@ async function executeStep(step: ChainStep, previousOutput: unknown): Promise<St
           toolName: firstTool,
           args,
           callId: uuid(),
-          timeoutMs: step.timeout_ms ?? toolDef?.timeoutMs ?? 30000,
+          timeoutMs: step.timeout_ms ?? toolDef?.timeoutMs ?? adaptiveTimeout(step.tool_name ?? 'unknown', step.agent_id),
         })
         if (result.status !== 'success') {
           throw new Error(result.error_message ?? `Tool ${firstTool} failed: ${result.status}`)
@@ -224,7 +225,7 @@ async function executeStep(step: ChainStep, previousOutput: unknown): Promise<St
           toolName: backendToolName,
           args,
           callId: uuid(),
-          timeoutMs: step.timeout_ms ?? toolDef?.timeoutMs ?? 30000,
+          timeoutMs: step.timeout_ms ?? toolDef?.timeoutMs ?? adaptiveTimeout(step.tool_name ?? 'unknown', step.agent_id),
         })
         if (result.status !== 'success') {
           throw new Error(result.error_message ?? `Tool ${backendToolName} failed: ${result.status}`)

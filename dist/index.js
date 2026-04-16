@@ -2874,6 +2874,196 @@ var init_quality_scorer = __esm({
   }
 });
 
+// src/flywheel/cost-optimizer.ts
+var cost_optimizer_exports = {};
+__export(cost_optimizer_exports, {
+  adaptiveTimeout: () => adaptiveTimeout,
+  getAllCostProfiles: () => getAllCostProfiles,
+  getCostProfile: () => getCostProfile,
+  getCostSummary: () => getCostSummary,
+  loadFromRedis: () => loadFromRedis,
+  selectOptimalAgent: () => selectOptimalAgent,
+  updateCostProfile: () => updateCostProfile
+});
+function profileKey(agentId, taskType) {
+  return `${agentId}:${taskType}`;
+}
+async function updateCostProfile(agentId, taskType, metrics2) {
+  if (!agentId || !taskType) return;
+  const key = profileKey(agentId, taskType);
+  const existing = profiles.get(key);
+  const cost = metrics2.cost_usd ?? 0;
+  const quality = Math.max(0, Math.min(1, metrics2.quality_score));
+  const p = existing ? {
+    ...existing,
+    totalTasks: existing.totalTasks + 1,
+    totalCostUsd: existing.totalCostUsd + cost,
+    totalLatencyMs: existing.totalLatencyMs + metrics2.latency_ms,
+    totalQualityScore: existing.totalQualityScore + quality,
+    recentScores: [...existing.recentScores, quality].slice(-10),
+    lastUpdatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  } : {
+    agentId,
+    taskType,
+    totalTasks: 1,
+    totalCostUsd: cost,
+    totalLatencyMs: metrics2.latency_ms,
+    totalQualityScore: quality,
+    avgCostUsd: cost,
+    avgLatencyMs: metrics2.latency_ms,
+    avgQualityScore: quality,
+    efficiencyRatio: quality / (cost + 1e-3),
+    recentScores: [quality],
+    degraded: false,
+    lastUpdatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  p.avgCostUsd = p.totalCostUsd / p.totalTasks;
+  p.avgLatencyMs = p.totalLatencyMs / p.totalTasks;
+  p.avgQualityScore = p.totalQualityScore / p.totalTasks;
+  p.efficiencyRatio = p.avgQualityScore / (p.avgCostUsd + 1e-3);
+  p.degraded = p.recentScores.length >= 3 && p.recentScores.slice(-3).reduce((s, v) => s + v, 0) / 3 < 0.4;
+  if (!existing && profiles.size >= MAX_PROFILES) {
+    const firstKey = profiles.keys().next().value;
+    if (firstKey) profiles.delete(firstKey);
+  }
+  profiles.set(key, p);
+  if (p.degraded) {
+    logger.warn(
+      { agentId, taskType, recent: p.recentScores.slice(-3) },
+      "[CostOptimizer] Agent quality degradation detected"
+    );
+  }
+  schedulePersist();
+}
+function selectOptimalAgent(taskType, candidates, opts = {}) {
+  const { minQuality = 0.5, maxCostUsd = Infinity } = opts;
+  const eligible = [];
+  for (const agentId of candidates) {
+    const p = profiles.get(profileKey(agentId, taskType));
+    if (!p || p.totalTasks < MIN_SAMPLES_FOR_ROUTING) continue;
+    if (p.avgQualityScore < minQuality) continue;
+    if (p.avgCostUsd > maxCostUsd) continue;
+    if (p.degraded) continue;
+    const confidence = Math.min(0.95, 0.5 + p.totalTasks * 0.02);
+    eligible.push({ agentId, profile: p, confidence });
+  }
+  if (eligible.length === 0) {
+    return { agentId: candidates[0] ?? "default", profile: null, confidence: 0.3 };
+  }
+  eligible.sort((a, b) => b.profile.efficiencyRatio - a.profile.efficiencyRatio);
+  const best = eligible[0];
+  return { agentId: best.agentId, profile: best.profile, confidence: best.confidence };
+}
+function getCostProfile(agentId, taskType) {
+  return profiles.get(profileKey(agentId, taskType)) ?? null;
+}
+function adaptiveTimeout(toolName, agentId) {
+  if (agentId) {
+    const profile = getCostProfile(agentId, toolName);
+    if (profile && profile.totalTasks >= 5 && profile.avgLatencyMs > 0) {
+      const p95 = Math.round(profile.avgLatencyMs * 3);
+      return Math.max(5e3, Math.min(12e4, p95));
+    }
+  }
+  const lower = toolName.toLowerCase();
+  for (const [prefix, ms] of Object.entries(BASELINE_TIMEOUT)) {
+    if (prefix !== "default" && lower.startsWith(prefix)) return ms;
+  }
+  return BASELINE_TIMEOUT.default;
+}
+function getAllCostProfiles() {
+  return [...profiles.values()];
+}
+function getCostSummary() {
+  const all = getAllCostProfiles();
+  const totalCost = all.reduce((s, p) => s + p.totalCostUsd, 0);
+  const totalTasks = all.reduce((s, p) => s + p.totalTasks, 0);
+  const taskTypes = new Set(all.map((p) => p.taskType));
+  return {
+    totalProfiles: all.length,
+    degradedAgents: all.filter((p) => p.degraded).map((p) => p.agentId),
+    topEfficient: [...all].sort((a, b) => b.efficiencyRatio - a.efficiencyRatio).slice(0, 5),
+    avgPlatformCostPerTask: totalTasks > 0 ? totalCost / totalTasks : 0,
+    taskTypesCovered: taskTypes.size
+  };
+}
+function schedulePersist() {
+  if (persistTimer) return;
+  persistTimer = setTimeout(async () => {
+    persistTimer = null;
+    await persistToRedis2();
+  }, 5e3);
+}
+async function persistToRedis2() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const pipeline = redis2.multi();
+    for (const [key, profile] of profiles.entries()) {
+      pipeline.set(`${REDIS_PREFIX}profile:${key}`, JSON.stringify(profile), { EX: 30 * 24 * 3600 });
+    }
+    pipeline.sadd(REDIS_INDEX, ...[...profiles.keys()]);
+    await pipeline.exec();
+  } catch (err) {
+    logger.warn({ error: String(err) }, "[CostOptimizer] Redis persist failed");
+  }
+}
+async function loadFromRedis() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const keys = await redis2.smembers(REDIS_INDEX);
+    if (!keys.length) return;
+    const values = await redis2.mGet(keys.map((k) => `${REDIS_PREFIX}profile:${k}`));
+    let loaded = 0;
+    for (const v of values) {
+      if (!v) continue;
+      try {
+        const p = JSON.parse(v);
+        if (p.agentId && p.taskType) {
+          profiles.set(profileKey(p.agentId, p.taskType), p);
+          loaded++;
+        }
+      } catch {
+      }
+    }
+    logger.info({ loaded }, "[CostOptimizer] Loaded cost profiles from Redis");
+  } catch (err) {
+    logger.warn({ error: String(err) }, "[CostOptimizer] Redis load failed");
+  }
+}
+var REDIS_PREFIX, REDIS_INDEX, MIN_SAMPLES_FOR_ROUTING, MAX_PROFILES, profiles, persistTimer, BASELINE_TIMEOUT;
+var init_cost_optimizer = __esm({
+  "src/flywheel/cost-optimizer.ts"() {
+    "use strict";
+    init_redis();
+    init_logger();
+    REDIS_PREFIX = "orchestrator:cost:";
+    REDIS_INDEX = `${REDIS_PREFIX}index`;
+    MIN_SAMPLES_FOR_ROUTING = 5;
+    MAX_PROFILES = 1e3;
+    profiles = /* @__PURE__ */ new Map();
+    persistTimer = null;
+    BASELINE_TIMEOUT = {
+      graph: 15e3,
+      kg_rag: 2e4,
+      srag: 2e4,
+      adaptive_rag: 2e4,
+      rag_: 2e4,
+      linear: 8e3,
+      "rlm.": 3e4,
+      cognitive: 3e4,
+      reason: 3e4,
+      llm_: 25e3,
+      knowledge_: 12e3,
+      memory_: 1e4,
+      hyperagent: 12e4,
+      inventor: 12e4,
+      default: 3e4
+    };
+  }
+});
+
 // src/flywheel/failure-harvester.ts
 var failure_harvester_exports = {};
 __export(failure_harvester_exports, {
@@ -3173,11 +3363,11 @@ async function deposit(agentId, type, domain, strength, label, metrics2 = {}, ta
   };
   const redis2 = getRedis();
   if (redis2) {
-    const key = `${REDIS_PREFIX}${pheromone.id}`;
+    const key = `${REDIS_PREFIX2}${pheromone.id}`;
     await redis2.set(key, JSON.stringify(pheromone), "EX", ttlSeconds);
     await redis2.zadd(REDIS_INDEX_KEY, pheromone.strength, pheromone.id);
-    await redis2.zadd(`${REDIS_PREFIX}domain:${domain}`, pheromone.strength, pheromone.id);
-    await redis2.zadd(`${REDIS_PREFIX}type:${type}`, pheromone.strength, pheromone.id);
+    await redis2.zadd(`${REDIS_PREFIX2}domain:${domain}`, pheromone.strength, pheromone.id);
+    await redis2.zadd(`${REDIS_PREFIX2}type:${type}`, pheromone.strength, pheromone.id);
   }
   state.totalDeposits++;
   state.activePheromones++;
@@ -3203,7 +3393,7 @@ async function sense(query) {
   let candidateIds;
   if (query.domain) {
     candidateIds = await redis2.zrevrangebyscore(
-      `${REDIS_PREFIX}domain:${query.domain}`,
+      `${REDIS_PREFIX2}domain:${query.domain}`,
       "+inf",
       String(minStrength),
       "LIMIT",
@@ -3212,7 +3402,7 @@ async function sense(query) {
     );
   } else if (query.type) {
     candidateIds = await redis2.zrevrangebyscore(
-      `${REDIS_PREFIX}type:${query.type}`,
+      `${REDIS_PREFIX2}type:${query.type}`,
       "+inf",
       String(minStrength),
       "LIMIT",
@@ -3232,7 +3422,7 @@ async function sense(query) {
   if (candidateIds.length === 0) return [];
   const pipeline = redis2.pipeline();
   for (const id of candidateIds) {
-    pipeline.get(`${REDIS_PREFIX}${id}`);
+    pipeline.get(`${REDIS_PREFIX2}${id}`);
   }
   const results = await pipeline.exec();
   if (!results) return [];
@@ -3254,7 +3444,7 @@ async function sense(query) {
 async function reinforce(pheromoneId, boostFactor = 0.2) {
   const redis2 = getRedis();
   if (!redis2) return false;
-  const key = `${REDIS_PREFIX}${pheromoneId}`;
+  const key = `${REDIS_PREFIX2}${pheromoneId}`;
   const raw = await redis2.get(key);
   if (!raw) return false;
   try {
@@ -3267,7 +3457,7 @@ async function reinforce(pheromoneId, boostFactor = 0.2) {
     await redis2.set(key, JSON.stringify(p), "EX", Math.round(newTtl));
     await redis2.zadd(REDIS_INDEX_KEY, p.strength, pheromoneId);
     if (p.type === "trail" || p.type === "attraction") {
-      await redis2.zadd(`${REDIS_PREFIX}domain:${p.domain}`, p.strength, pheromoneId);
+      await redis2.zadd(`${REDIS_PREFIX2}domain:${p.domain}`, p.strength, pheromoneId);
     }
     state.totalAmplifications++;
     return true;
@@ -3278,7 +3468,7 @@ async function reinforce(pheromoneId, boostFactor = 0.2) {
 async function runDecayCycle() {
   const redis2 = getRedis();
   if (!redis2) return { decayed: 0, evaporated: 0 };
-  const LOCK_KEY = `${REDIS_PREFIX}decay-lock`;
+  const LOCK_KEY = `${REDIS_PREFIX2}decay-lock`;
   const locked = await redis2.set(LOCK_KEY, "1", "EX", 60, "NX");
   if (!locked) return { decayed: 0, evaporated: 0 };
   try {
@@ -3286,7 +3476,7 @@ async function runDecayCycle() {
     let decayed = 0;
     let evaporated = 0;
     for (const id of allIds) {
-      const key = `${REDIS_PREFIX}${id}`;
+      const key = `${REDIS_PREFIX2}${id}`;
       const raw = await redis2.get(key);
       if (!raw) {
         await redis2.zrem(REDIS_INDEX_KEY, id);
@@ -3299,8 +3489,8 @@ async function runDecayCycle() {
         if (p.strength < 0.05) {
           await redis2.del(key);
           await redis2.zrem(REDIS_INDEX_KEY, id);
-          await redis2.zrem(`${REDIS_PREFIX}domain:${p.domain}`, id);
-          await redis2.zrem(`${REDIS_PREFIX}type:${p.type}`, id);
+          await redis2.zrem(`${REDIS_PREFIX2}domain:${p.domain}`, id);
+          await redis2.zrem(`${REDIS_PREFIX2}type:${p.type}`, id);
           evaporated++;
         } else {
           await redis2.set(key, JSON.stringify(p), "KEEPTTL");
@@ -3444,9 +3634,9 @@ async function getHeatmap() {
   const domains = [];
   let cursor = "0";
   do {
-    const [next, found] = await redis2.scan(cursor, "MATCH", `${REDIS_PREFIX}domain:*`, "COUNT", "50");
+    const [next, found] = await redis2.scan(cursor, "MATCH", `${REDIS_PREFIX2}domain:*`, "COUNT", "50");
     cursor = next;
-    for (const k of found) domains.push(k.replace(`${REDIS_PREFIX}domain:`, ""));
+    for (const k of found) domains.push(k.replace(`${REDIS_PREFIX2}domain:`, ""));
   } while (cursor !== "0" && domains.length < 50);
   const summaries = [];
   for (const domain of domains.slice(0, 20)) {
@@ -3678,7 +3868,7 @@ async function initPheromoneLayer() {
     "Pheromone layer initialized"
   );
 }
-var REDIS_PREFIX, REDIS_STATE_KEY, REDIS_INDEX_KEY, DEFAULT_TTL, PERSIST_THRESHOLD, AMPLIFICATION_MULTIPLIER, CYCLE_MS, state, DOMAIN_MAP;
+var REDIS_PREFIX2, REDIS_STATE_KEY, REDIS_INDEX_KEY, DEFAULT_TTL, PERSIST_THRESHOLD, AMPLIFICATION_MULTIPLIER, CYCLE_MS, state, DOMAIN_MAP;
 var init_pheromone_layer = __esm({
   "src/swarm/pheromone-layer.ts"() {
     "use strict";
@@ -3686,7 +3876,7 @@ var init_pheromone_layer = __esm({
     init_mcp_caller();
     init_logger();
     init_sse();
-    REDIS_PREFIX = "pheromone:";
+    REDIS_PREFIX2 = "pheromone:";
     REDIS_STATE_KEY = "pheromone:state";
     REDIS_INDEX_KEY = "pheromone:index";
     DEFAULT_TTL = 3600;
@@ -6266,164 +6456,6 @@ var init_adoption_telemetry = __esm({
   }
 });
 
-// src/flywheel/cost-optimizer.ts
-var cost_optimizer_exports = {};
-__export(cost_optimizer_exports, {
-  getAllCostProfiles: () => getAllCostProfiles,
-  getCostProfile: () => getCostProfile,
-  getCostSummary: () => getCostSummary,
-  loadFromRedis: () => loadFromRedis,
-  selectOptimalAgent: () => selectOptimalAgent,
-  updateCostProfile: () => updateCostProfile
-});
-function profileKey(agentId, taskType) {
-  return `${agentId}:${taskType}`;
-}
-async function updateCostProfile(agentId, taskType, metrics2) {
-  if (!agentId || !taskType) return;
-  const key = profileKey(agentId, taskType);
-  const existing = profiles.get(key);
-  const cost = metrics2.cost_usd ?? 0;
-  const quality = Math.max(0, Math.min(1, metrics2.quality_score));
-  const p = existing ? {
-    ...existing,
-    totalTasks: existing.totalTasks + 1,
-    totalCostUsd: existing.totalCostUsd + cost,
-    totalLatencyMs: existing.totalLatencyMs + metrics2.latency_ms,
-    totalQualityScore: existing.totalQualityScore + quality,
-    recentScores: [...existing.recentScores, quality].slice(-10),
-    lastUpdatedAt: (/* @__PURE__ */ new Date()).toISOString()
-  } : {
-    agentId,
-    taskType,
-    totalTasks: 1,
-    totalCostUsd: cost,
-    totalLatencyMs: metrics2.latency_ms,
-    totalQualityScore: quality,
-    avgCostUsd: cost,
-    avgLatencyMs: metrics2.latency_ms,
-    avgQualityScore: quality,
-    efficiencyRatio: quality / (cost + 1e-3),
-    recentScores: [quality],
-    degraded: false,
-    lastUpdatedAt: (/* @__PURE__ */ new Date()).toISOString()
-  };
-  p.avgCostUsd = p.totalCostUsd / p.totalTasks;
-  p.avgLatencyMs = p.totalLatencyMs / p.totalTasks;
-  p.avgQualityScore = p.totalQualityScore / p.totalTasks;
-  p.efficiencyRatio = p.avgQualityScore / (p.avgCostUsd + 1e-3);
-  p.degraded = p.recentScores.length >= 3 && p.recentScores.slice(-3).reduce((s, v) => s + v, 0) / 3 < 0.4;
-  if (!existing && profiles.size >= MAX_PROFILES) {
-    const firstKey = profiles.keys().next().value;
-    if (firstKey) profiles.delete(firstKey);
-  }
-  profiles.set(key, p);
-  if (p.degraded) {
-    logger.warn(
-      { agentId, taskType, recent: p.recentScores.slice(-3) },
-      "[CostOptimizer] Agent quality degradation detected"
-    );
-  }
-  schedulePersist();
-}
-function selectOptimalAgent(taskType, candidates, opts = {}) {
-  const { minQuality = 0.5, maxCostUsd = Infinity } = opts;
-  const eligible = [];
-  for (const agentId of candidates) {
-    const p = profiles.get(profileKey(agentId, taskType));
-    if (!p || p.totalTasks < MIN_SAMPLES_FOR_ROUTING) continue;
-    if (p.avgQualityScore < minQuality) continue;
-    if (p.avgCostUsd > maxCostUsd) continue;
-    if (p.degraded) continue;
-    const confidence = Math.min(0.95, 0.5 + p.totalTasks * 0.02);
-    eligible.push({ agentId, profile: p, confidence });
-  }
-  if (eligible.length === 0) {
-    return { agentId: candidates[0] ?? "default", profile: null, confidence: 0.3 };
-  }
-  eligible.sort((a, b) => b.profile.efficiencyRatio - a.profile.efficiencyRatio);
-  const best = eligible[0];
-  return { agentId: best.agentId, profile: best.profile, confidence: best.confidence };
-}
-function getCostProfile(agentId, taskType) {
-  return profiles.get(profileKey(agentId, taskType)) ?? null;
-}
-function getAllCostProfiles() {
-  return [...profiles.values()];
-}
-function getCostSummary() {
-  const all = getAllCostProfiles();
-  const totalCost = all.reduce((s, p) => s + p.totalCostUsd, 0);
-  const totalTasks = all.reduce((s, p) => s + p.totalTasks, 0);
-  const taskTypes = new Set(all.map((p) => p.taskType));
-  return {
-    totalProfiles: all.length,
-    degradedAgents: all.filter((p) => p.degraded).map((p) => p.agentId),
-    topEfficient: [...all].sort((a, b) => b.efficiencyRatio - a.efficiencyRatio).slice(0, 5),
-    avgPlatformCostPerTask: totalTasks > 0 ? totalCost / totalTasks : 0,
-    taskTypesCovered: taskTypes.size
-  };
-}
-function schedulePersist() {
-  if (persistTimer) return;
-  persistTimer = setTimeout(async () => {
-    persistTimer = null;
-    await persistToRedis2();
-  }, 5e3);
-}
-async function persistToRedis2() {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  try {
-    const pipeline = redis2.multi();
-    for (const [key, profile] of profiles.entries()) {
-      pipeline.set(`${REDIS_PREFIX2}profile:${key}`, JSON.stringify(profile), { EX: 30 * 24 * 3600 });
-    }
-    pipeline.sadd(REDIS_INDEX, ...[...profiles.keys()]);
-    await pipeline.exec();
-  } catch (err) {
-    logger.warn({ error: String(err) }, "[CostOptimizer] Redis persist failed");
-  }
-}
-async function loadFromRedis() {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  try {
-    const keys = await redis2.smembers(REDIS_INDEX);
-    if (!keys.length) return;
-    const values = await redis2.mGet(keys.map((k) => `${REDIS_PREFIX2}profile:${k}`));
-    let loaded = 0;
-    for (const v of values) {
-      if (!v) continue;
-      try {
-        const p = JSON.parse(v);
-        if (p.agentId && p.taskType) {
-          profiles.set(profileKey(p.agentId, p.taskType), p);
-          loaded++;
-        }
-      } catch {
-      }
-    }
-    logger.info({ loaded }, "[CostOptimizer] Loaded cost profiles from Redis");
-  } catch (err) {
-    logger.warn({ error: String(err) }, "[CostOptimizer] Redis load failed");
-  }
-}
-var REDIS_PREFIX2, REDIS_INDEX, MIN_SAMPLES_FOR_ROUTING, MAX_PROFILES, profiles, persistTimer;
-var init_cost_optimizer = __esm({
-  "src/flywheel/cost-optimizer.ts"() {
-    "use strict";
-    init_redis();
-    init_logger();
-    REDIS_PREFIX2 = "orchestrator:cost:";
-    REDIS_INDEX = `${REDIS_PREFIX2}index`;
-    MIN_SAMPLES_FOR_ROUTING = 5;
-    MAX_PROFILES = 1e3;
-    profiles = /* @__PURE__ */ new Map();
-    persistTimer = null;
-  }
-});
-
 // src/llm/cost-governance.ts
 var cost_governance_exports = {};
 __export(cost_governance_exports, {
@@ -7020,7 +7052,7 @@ async function executeStep(step, previousOutput) {
           prompt,
           context: args,
           agent_id: step.agent_id
-        }, step.timeout_ms ?? toolDef?.timeoutMs ?? 3e4);
+        }, step.timeout_ms ?? toolDef?.timeoutMs ?? adaptiveTimeout(step.cognitive_action ?? "unknown", step.agent_id));
         output = result;
       } else if (backendToolName === step.tool_name) {
         const result = await executeToolUnified(step.tool_name, args, {
@@ -7037,7 +7069,7 @@ async function executeStep(step, previousOutput) {
           toolName: firstTool,
           args,
           callId: uuid7(),
-          timeoutMs: step.timeout_ms ?? toolDef?.timeoutMs ?? 3e4
+          timeoutMs: step.timeout_ms ?? toolDef?.timeoutMs ?? adaptiveTimeout(step.tool_name ?? "unknown", step.agent_id)
         });
         if (result.status !== "success") {
           throw new Error(result.error_message ?? `Tool ${firstTool} failed: ${result.status}`);
@@ -7048,7 +7080,7 @@ async function executeStep(step, previousOutput) {
           toolName: backendToolName,
           args,
           callId: uuid7(),
-          timeoutMs: step.timeout_ms ?? toolDef?.timeoutMs ?? 3e4
+          timeoutMs: step.timeout_ms ?? toolDef?.timeoutMs ?? adaptiveTimeout(step.tool_name ?? "unknown", step.agent_id)
         });
         if (result.status !== "success") {
           throw new Error(result.error_message ?? `Tool ${backendToolName} failed: ${result.status}`);
@@ -7502,6 +7534,7 @@ var init_chain_engine = __esm({
     init_redis();
     init_routing_engine();
     init_quality_scorer();
+    init_cost_optimizer();
     init_pheromone_layer();
     init_peer_eval();
     init_adoption_telemetry();

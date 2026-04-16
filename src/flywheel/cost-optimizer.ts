@@ -154,6 +154,51 @@ export function getCostProfile(agentId: string, taskType: string): CostProfile |
   return profiles.get(profileKey(agentId, taskType)) ?? null
 }
 
+// ─── Adaptive Timeout (topic 5/15) ───────────────────────────────────────────
+
+/** Static baseline timeouts per tool category (ms) */
+const BASELINE_TIMEOUT: Record<string, number> = {
+  graph:         15000,
+  kg_rag:        20000,
+  srag:          20000,
+  adaptive_rag:  20000,
+  rag_:          20000,
+  linear:         8000,
+  'rlm.':        30000,
+  cognitive:     30000,
+  reason:        30000,
+  llm_:          25000,
+  knowledge_:    12000,
+  memory_:       10000,
+  hyperagent:   120000,
+  inventor:     120000,
+  default:       30000,
+}
+
+/**
+ * Return the optimal timeout (ms) for a tool call.
+ * If the cost-optimizer has enough samples for agentId+toolName, uses
+ * p95 latency (avgLatencyMs * 3, min 5s, max 120s).
+ * Falls back to static baseline per tool category.
+ */
+export function adaptiveTimeout(toolName: string, agentId?: string): number {
+  // Try profile-based timeout first
+  if (agentId) {
+    const profile = getCostProfile(agentId, toolName)
+    if (profile && profile.totalTasks >= 5 && profile.avgLatencyMs > 0) {
+      const p95 = Math.round(profile.avgLatencyMs * 3)
+      return Math.max(5000, Math.min(120000, p95))
+    }
+  }
+
+  // Static baseline lookup
+  const lower = toolName.toLowerCase()
+  for (const [prefix, ms] of Object.entries(BASELINE_TIMEOUT)) {
+    if (prefix !== 'default' && lower.startsWith(prefix)) return ms
+  }
+  return BASELINE_TIMEOUT.default
+}
+
 export function getAllCostProfiles(): CostProfile[] {
   return [...profiles.values()]
 }
