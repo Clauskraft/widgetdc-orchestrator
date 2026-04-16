@@ -362,26 +362,32 @@ async function loadTargetRegistry(): Promise<TargetDef[]> {
 
     // Neo4j fallback: query HyperAgentMemory nodes for target registry
     try {
-      const neo4jResult = await callMcpTool({
+      const neo4jToolResult = await callMcpTool({
         toolName: 'graph.read_cypher',
         args: {
           query: `MATCH (m:HyperAgentMemory {domain: 'targets'})
-                  WHERE m.key CONTAINS 'registry'
                   RETURN m.value AS value, m.key AS key
                   ORDER BY m.updated_at DESC LIMIT 1`,
           params: {},
         },
         callId: `hyp-registry-fallback-${Date.now()}`,
       })
-      const neo4jData = neo4jResult as Record<string, unknown>
-      const results = (neo4jData?.results as Array<Record<string, unknown>>) ?? []
-      if (results.length > 0) {
-        const rawValue = results[0]?.value
-        const neo4jKey = results[0]?.key
+      // callMcpTool returns OrchestratorToolResult — unwrap .result (JSON string from backend)
+      const rawResult = neo4jToolResult.result
+      const backendResp = typeof rawResult === 'string' ? JSON.parse(rawResult) : rawResult as Record<string, unknown>
+      const rows = (backendResp?.results as Array<Record<string, unknown>>) ?? []
+      if (rows.length > 0) {
+        const rawValue = rows[0]?.value
+        const neo4jKey = rows[0]?.key
         if (rawValue) {
+          // value is stored as JSON string in Neo4j
           const parsed = typeof rawValue === 'string' ? JSON.parse(rawValue) : rawValue
-          const data = parsed?.categories ? parsed : (parsed?.value ?? parsed)
-          const targets = parseRegistryToTargets(typeof data === 'string' ? JSON.parse(data) : data)
+          // parsed may be {categories: {...}} directly, or wrapped in {value: {categories: {...}}}
+          const inner = (parsed as Record<string, unknown>)?.categories
+            ? parsed as Record<string, unknown>
+            : (parsed as Record<string, unknown>)?.value as Record<string, unknown> ?? parsed
+          const data = typeof inner === 'string' ? JSON.parse(inner) : inner
+          const targets = parseRegistryToTargets(data as Record<string, unknown>)
           if (targets.length > 0) {
             logger.info({ key: neo4jKey, targetCount: targets.length }, 'HyperAgent-Auto: loaded target registry from Neo4j fallback')
             return targets
