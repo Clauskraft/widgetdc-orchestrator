@@ -6592,6 +6592,7 @@ __export(cost_governance_exports, {
   isClaudeEscalationAllowed: () => isClaudeEscalationAllowed,
   recordPriorFailure: () => recordPriorFailure,
   recordWorkflowCost: () => recordWorkflowCost,
+  routeToModelTier: () => routeToModelTier,
   shouldCompactContext: () => shouldCompactContext
 });
 async function getBudgetLane(task, estimatedTokens) {
@@ -7079,7 +7080,64 @@ function chainVerificationGate(stepResults) {
   }
   return { passed: verdict !== "fail", avgQualityScore, stepCount: scoredSteps.length, lowQualitySteps, verdict, message };
 }
-var BUDGET_LANE_MICRO_MAX, BUDGET_LANE_STANDARD_MAX, MAX_RECURSION_DEPTH, MAX_AGENT_FANOUT_PARALLEL, MAX_AGENT_FANOUT_DEBATE, CONTEXT_COMPACTION_THRESHOLD, COST_TRACE_TTL_SECONDS, COST_TRACE_PREFIX, ESCALATION_PREFIX, DAILY_BUDGET_CAP_DKK, cost_governance_default;
+async function routeToModelTier(task, opts = {}) {
+  const {
+    requiredQuality = 0.5,
+    estimatedTokens = 1e3,
+    agentId,
+    agentTrustScore,
+    workflowId
+  } = opts;
+  let tier;
+  if (requiredQuality < 0.4) tier = "fast";
+  else if (requiredQuality <= 0.7) tier = "standard";
+  else tier = "premium";
+  const trust = agentTrustScore ?? 1;
+  if (trust < 0.5 && tier === "fast") {
+    tier = "standard";
+  }
+  if (tier !== "premium" && agentId) {
+    const lowerTierModel = TIER_OPTIONS[tier][0];
+    const failures = await getPriorFailures(lowerTierModel.provider, task).catch(() => 0);
+    if (failures >= 2) {
+      const nextTier = { fast: "standard", standard: "premium", premium: "premium" };
+      tier = nextTier[tier];
+    }
+  }
+  const option = TIER_OPTIONS[tier][0];
+  const estimate = estimateModelCost(option.provider, option.model, estimatedTokens);
+  if (tier === "premium") {
+    const policy = await checkModelPolicy(option.provider, option.model, {
+      isEscalation: true,
+      estimatedTokens,
+      task
+    });
+    if (!policy.pass) {
+      const fallback = TIER_OPTIONS.standard[0];
+      const fallbackEstimate = estimateModelCost(fallback.provider, fallback.model, estimatedTokens);
+      return {
+        tier: "standard",
+        provider: fallback.provider,
+        model: fallback.model,
+        reason: `Premium blocked (${policy.reason}) \u2014 routing to standard`,
+        estimatedCostDKK: fallbackEstimate.totalCostDKK
+      };
+    }
+  }
+  const reason = [
+    `Quality target ${requiredQuality.toFixed(2)} \u2192 ${tier} tier`,
+    trust < 1 ? `agent trust ${trust.toFixed(2)}` : null,
+    workflowId ? `workflow ${workflowId}` : null
+  ].filter(Boolean).join(", ");
+  return {
+    tier,
+    provider: option.provider,
+    model: option.model,
+    reason,
+    estimatedCostDKK: estimate.totalCostDKK
+  };
+}
+var BUDGET_LANE_MICRO_MAX, BUDGET_LANE_STANDARD_MAX, MAX_RECURSION_DEPTH, MAX_AGENT_FANOUT_PARALLEL, MAX_AGENT_FANOUT_DEBATE, CONTEXT_COMPACTION_THRESHOLD, COST_TRACE_TTL_SECONDS, COST_TRACE_PREFIX, ESCALATION_PREFIX, DAILY_BUDGET_CAP_DKK, TIER_OPTIONS, cost_governance_default;
 var init_cost_governance = __esm({
   "src/llm/cost-governance.ts"() {
     "use strict";
@@ -7098,6 +7156,11 @@ var init_cost_governance = __esm({
     COST_TRACE_PREFIX = "orchestrator:cost-trace:";
     ESCALATION_PREFIX = "orchestrator:escalation:";
     DAILY_BUDGET_CAP_DKK = parseFloat(process.env.DAILY_BUDGET_CAP_DKK ?? "100");
+    TIER_OPTIONS = {
+      fast: [{ provider: "deepseek", model: "deepseek-chat" }, { provider: "groq", model: "llama-3.1-8b-instant" }],
+      standard: [{ provider: "deepseek", model: "deepseek-reasoner" }, { provider: "gemini", model: "gemini-2.0-flash-lite" }],
+      premium: [{ provider: "anthropic", model: "claude-sonnet-4-6" }, { provider: "openai", model: "gpt-4o" }]
+    };
     cost_governance_default = {
       // Constants
       MAX_RECURSION_DEPTH,
