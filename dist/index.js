@@ -51105,8 +51105,8 @@ Import and call the local function directly instead of via MCP bridge:
     title: `PhantomBOM: ${discovery.toolName} not in backend catalogue`,
     content,
     summary: `Tool ${discovery.toolName} used via callMcpTool but missing from backend \u2014 use local import`,
-    score: 0.8,
-    // Known-good pattern → L3 tier directly
+    score: discovery.confidence !== void 0 ? Math.min(0.95, discovery.confidence / 100) : 0.75,
+    // default: L3 tier if confidence unknown
     tags: ["phantom-bom", "tool-routing", discovery.toolName, discovery.repo, ...discovery.tags],
     repo: discovery.repo,
     metadata: discovery
