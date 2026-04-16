@@ -25974,10 +25974,6 @@ async function updateEdgeScores(currentScores, closedTargets) {
 }
 async function loadTargetRegistry() {
   const redis2 = getRedis();
-  if (!redis2) {
-    logger.warn("HyperAgent-Auto: no Redis connection for target registry");
-    return [];
-  }
   try {
     const keyPatterns = [
       "wm:HYPERAGENT:target-registry-v2.2",
@@ -25995,6 +25991,10 @@ async function loadTargetRegistry() {
     ];
     const diagnostics = {};
     for (const key of keyPatterns) {
+      if (!redis2) {
+        diagnostics[key] = "NO_REDIS";
+        continue;
+      }
       const raw = await redis2.get(key);
       if (!raw) {
         diagnostics[key] = "NOT_FOUND";
@@ -26030,7 +26030,38 @@ async function loadTargetRegistry() {
         diagnostics[key] += ` ERROR=${err instanceof Error ? err.message : String(err)}`;
       }
     }
-    logger.warn({ diagnostics }, "HyperAgent-Auto: no target registry found in any key pattern");
+    logger.warn({ diagnostics }, "HyperAgent-Auto: no target registry found in Redis \u2014 trying Neo4j fallback");
+    try {
+      const neo4jResult = await callMcpTool({
+        toolName: "graph.read_cypher",
+        args: {
+          query: `MATCH (m:HyperAgentMemory {domain: 'targets'})
+                  WHERE m.key CONTAINS 'registry'
+                  RETURN m.value AS value, m.key AS key
+                  ORDER BY m.updated_at DESC LIMIT 1`,
+          params: {}
+        },
+        callId: `hyp-registry-fallback-${Date.now()}`
+      });
+      const neo4jData = neo4jResult;
+      const results = neo4jData?.results ?? [];
+      if (results.length > 0) {
+        const rawValue = results[0]?.value;
+        const neo4jKey = results[0]?.key;
+        if (rawValue) {
+          const parsed = typeof rawValue === "string" ? JSON.parse(rawValue) : rawValue;
+          const data = parsed?.categories ? parsed : parsed?.value ?? parsed;
+          const targets = parseRegistryToTargets(typeof data === "string" ? JSON.parse(data) : data);
+          if (targets.length > 0) {
+            logger.info({ key: neo4jKey, targetCount: targets.length }, "HyperAgent-Auto: loaded target registry from Neo4j fallback");
+            return targets;
+          }
+        }
+      }
+    } catch (neo4jErr) {
+      logger.warn({ err: neo4jErr instanceof Error ? neo4jErr.message : String(neo4jErr) }, "HyperAgent-Auto: Neo4j fallback also failed");
+    }
+    logger.warn({ diagnostics }, "HyperAgent-Auto: no target registry found in any source");
     return [];
   } catch (err) {
     logger.warn({ err: err instanceof Error ? err.message : String(err) }, "HyperAgent-Auto: failed to load target registry from Redis");
@@ -53189,7 +53220,7 @@ async function boot() {
   await hydrateMessages();
   await hydrateCronJobs();
   registerDefaultLoops();
-  await initAnomalyWatcher();
+  await initAnomalyWatcher().catch((err) => logger.warn({ err: String(err) }, "initAnomalyWatcher failed (non-fatal)"));
   await initPheromoneLayer().catch((err) => logger.warn({ err: String(err) }, "initPheromoneLayer failed (non-fatal)"));
   await initPeerEval().catch((err) => logger.warn({ err: String(err) }, "initPeerEval failed (non-fatal)"));
   loadBenchmarkRuns().catch((err) => {
