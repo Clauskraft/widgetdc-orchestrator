@@ -28,6 +28,8 @@ export async function initRedis(): Promise<void> {
   try {
     redis = new Redis(redisUrl, {
       maxRetriesPerRequest: 3,
+      connectTimeout: 5000,  // 5s TCP connect timeout
+      commandTimeout: 8000,  // 8s per-command timeout
       retryStrategy(times) {
         if (times > 5) return null // stop retrying after 5 attempts
         return Math.min(times * 200, 2000)
@@ -35,10 +37,19 @@ export async function initRedis(): Promise<void> {
       lazyConnect: true,
     })
 
-    await redis.connect()
+    // Race connect() against a 7s deadline — broken sockets can hang indefinitely
+    await Promise.race([
+      redis.connect(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Redis connect timeout after 7s')), 7000)
+      ),
+    ])
     logger.info('Redis connected — agent registry persistence enabled')
   } catch (err) {
     logger.warn({ err: String(err) }, 'Redis connection failed — falling back to in-memory only')
+    if (redis) {
+      try { redis.disconnect() } catch { /* ignore */ }
+    }
     redis = null
   }
 }

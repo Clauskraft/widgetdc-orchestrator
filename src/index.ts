@@ -585,14 +585,15 @@ async function boot() {
   const { validateOrThrow } = await import('./startup-validator.js')
   await validateOrThrow()
 
+  // initRedis() races against 7s timeout internally — never hangs boot
   await initRedis()
-  await AgentRegistry.hydrate()
+  await AgentRegistry.hydrate().catch(err => logger.warn({ err: String(err) }, 'AgentRegistry hydrate failed (non-fatal)'))
   seedAgents()
   // LIN-594: Load persisted forged tools from Redis
   import('./llm/skill-forge.js').then(m => m.loadForgedTools()).catch(() => {})
-  await hydrateMessages()
-  await hydrateCronJobs()
-  registerDefaultLoops()
+  await hydrateMessages().catch(err => logger.warn({ err: String(err) }, 'hydrateMessages failed (non-fatal)'))
+  await hydrateCronJobs().catch(err => logger.warn({ err: String(err) }, 'hydrateCronJobs failed (non-fatal)'))
+  try { registerDefaultLoops() } catch (err) { logger.warn({ err: String(err) }, 'registerDefaultLoops failed (non-fatal)') }
   // Initialize proactive anomaly watcher (loads state from Redis — non-fatal: broken socket can throw)
   await initAnomalyWatcher().catch(err => logger.warn({ err: String(err) }, 'initAnomalyWatcher failed (non-fatal)'))
   // Initialize pheromone layer + peer-eval fleet learning (non-fatal — KB already wired above)

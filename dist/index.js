@@ -237,16 +237,31 @@ async function initRedis() {
   try {
     redis = new Redis(redisUrl, {
       maxRetriesPerRequest: 3,
+      connectTimeout: 5e3,
+      // 5s TCP connect timeout
+      commandTimeout: 8e3,
+      // 8s per-command timeout
       retryStrategy(times) {
         if (times > 5) return null;
         return Math.min(times * 200, 2e3);
       },
       lazyConnect: true
     });
-    await redis.connect();
+    await Promise.race([
+      redis.connect(),
+      new Promise(
+        (_, reject) => setTimeout(() => reject(new Error("Redis connect timeout after 7s")), 7e3)
+      )
+    ]);
     logger.info("Redis connected \u2014 agent registry persistence enabled");
   } catch (err) {
     logger.warn({ err: String(err) }, "Redis connection failed \u2014 falling back to in-memory only");
+    if (redis) {
+      try {
+        redis.disconnect();
+      } catch {
+      }
+    }
     redis = null;
   }
 }
@@ -53462,13 +53477,17 @@ async function boot() {
   const { validateOrThrow: validateOrThrow2 } = await Promise.resolve().then(() => (init_startup_validator(), startup_validator_exports));
   await validateOrThrow2();
   await initRedis();
-  await AgentRegistry.hydrate();
+  await AgentRegistry.hydrate().catch((err) => logger.warn({ err: String(err) }, "AgentRegistry hydrate failed (non-fatal)"));
   seedAgents();
   Promise.resolve().then(() => (init_skill_forge(), skill_forge_exports)).then((m) => m.loadForgedTools()).catch(() => {
   });
-  await hydrateMessages();
-  await hydrateCronJobs();
-  registerDefaultLoops();
+  await hydrateMessages().catch((err) => logger.warn({ err: String(err) }, "hydrateMessages failed (non-fatal)"));
+  await hydrateCronJobs().catch((err) => logger.warn({ err: String(err) }, "hydrateCronJobs failed (non-fatal)"));
+  try {
+    registerDefaultLoops();
+  } catch (err) {
+    logger.warn({ err: String(err) }, "registerDefaultLoops failed (non-fatal)");
+  }
   await initAnomalyWatcher().catch((err) => logger.warn({ err: String(err) }, "initAnomalyWatcher failed (non-fatal)"));
   await initPheromoneLayer().catch((err) => logger.warn({ err: String(err) }, "initPheromoneLayer failed (non-fatal)"));
   await initPeerEval().catch((err) => logger.warn({ err: String(err) }, "initPeerEval failed (non-fatal)"));
