@@ -729,6 +729,112 @@ export async function runPheromoneCron(): Promise<{
   return { decayed, evaporated, persisted, amplified }
 }
 
+// ─── Stigmergic Feedback (Inventor stigmergic-feedback-v1, score 0.82) ───────
+//
+// Closes the loop between scoreToolOutput() quality signals and pheromone
+// deposits. Called fire-and-forget from chain-engine after each tool step.
+
+const DOMAIN_MAP: Array<[RegExp, string]> = [
+  [/^graph\.|^data_graph/, 'graph-queries'],
+  [/^kg_rag|^srag|^rag_|^adaptive_rag/, 'knowledge-retrieval'],
+  [/^linear\.|^linear_/, 'project-management'],
+  [/^rlm\.|^cognitive|^reason|^llm_/, 'reasoning'],
+  [/^knowledge_|^memory_|^fact_/, 'knowledge-bus'],
+  [/^agent_|^hyperagent/, 'agent-coordination'],
+]
+
+function toolDomain(toolName: string): string {
+  for (const [pattern, domain] of DOMAIN_MAP) {
+    if (pattern.test(toolName)) return domain
+  }
+  return 'general-tools'
+}
+
+/**
+ * Fire-and-forget: deposit ATTRACTION (score>=0.80) or REPELLENT (score<=0.35)
+ * pheromone based on tool output quality. Deduplicates within 5-min window.
+ * 3+ repellents on same tool within 1h → triggers failure harvest.
+ */
+export function depositFeedbackPheromone(
+  toolName: string,
+  agentId: string,
+  qualityScore: number,
+  durationMs: number,
+): void {
+  // Fire-and-forget: errors must not propagate to chain execution
+  _depositFeedbackPheromoneAsync(toolName, agentId, qualityScore, durationMs).catch(() => {})
+}
+
+async function _depositFeedbackPheromoneAsync(
+  toolName: string,
+  agentId: string,
+  qualityScore: number,
+  durationMs: number,
+): Promise<void> {
+  if (qualityScore > 0.35 && qualityScore < 0.80) return // noise band — skip
+
+  const redis = getRedis()
+  const domain = toolDomain(toolName)
+  const type: PheromoneType = qualityScore >= 0.80 ? 'attraction' : 'repellent'
+  const dedupKey = `pheromone:dedup:tool:${toolName}:${type}`
+
+  if (redis) {
+    // Dedup: if same tool+type pheromone deposited within 5 min → reinforce instead
+    const existing = await redis.get(dedupKey).catch(() => null)
+    if (existing) {
+      await reinforce(existing, 0.1).catch(() => {})
+      return
+    }
+  }
+
+  if (type === 'attraction') {
+    const ph = await deposit(
+      type,
+      agentId,
+      domain,
+      qualityScore,
+      `Quality ${qualityScore.toFixed(2)} on ${toolName} (${durationMs}ms)`,
+      { quality_score: qualityScore, duration_ms: durationMs },
+      [toolName, 'quality-feedback'],
+      7200, // 2h TTL
+    )
+    if (redis) {
+      await redis.set(dedupKey, ph.id, 'EX', 300).catch(() => {})
+    }
+  } else {
+    // REPELLENT
+    const strength = Math.round((1 - qualityScore) * 1000) / 1000
+    const ph = await deposit(
+      type,
+      agentId,
+      `${domain}:failure`,
+      strength,
+      `Low quality ${qualityScore.toFixed(2)} on ${toolName} (${durationMs}ms)`,
+      { quality_score: qualityScore, duration_ms: durationMs },
+      [toolName, 'quality-feedback', 'failure'],
+      2700, // 45min TTL
+    )
+    if (redis) {
+      await redis.set(dedupKey, ph.id, 'EX', 300).catch(() => {})
+    }
+
+    // Failure escalation: 3+ repellents on same tool within 1h
+    const counterKey = `pheromone:repellent:count:tool:${toolName}`
+    if (redis) {
+      const count = await redis.incr(counterKey).catch(() => 0)
+      if (count === 1) await redis.expire(counterKey, 3600).catch(() => {})
+      if (count >= 3) {
+        await redis.del(counterKey).catch(() => {})
+        // Async import to avoid circular dep at module load time
+        import('../flywheel/failure-harvester.js')
+          .then(m => m.runFailureHarvest())
+          .catch(() => {})
+        logger.warn({ toolName, repellentCount: count }, 'Stigmergic escalation: 3+ repellents → failure harvest')
+      }
+    }
+  }
+}
+
 // ─── Init ───────────────────────────────────────────────────────────────────
 
 export async function initPheromoneLayer(): Promise<void> {
