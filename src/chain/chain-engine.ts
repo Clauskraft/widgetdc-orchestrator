@@ -15,6 +15,7 @@ import { broadcastMessage } from '../chat-broadcaster.js'
 import { logger } from '../logger.js'
 import { getRedis } from '../redis.js'
 import { resolveRoutingDecision, resolveChainMode } from '../agents/routing-engine.js'
+import { scoreToolOutput } from '../flywheel/quality-scorer.js'
 import { hookIntoExecution } from '../swarm/peer-eval.js'
 import { recordToolCall } from '../flywheel/adoption-telemetry.js'
 import { runFailureHarvest } from '../flywheel/failure-harvester.js'
@@ -248,12 +249,12 @@ async function executeStep(step: ChainStep, previousOutput: unknown): Promise<St
       success: true,
       inputs: step.arguments,
       outputs: typeof output === 'object' && output !== null ? output as Record<string, unknown> : { result: output },
-      metrics: { latency_ms: successResult.duration_ms, quality_score: 0.75 },
+      metrics: { latency_ms: successResult.duration_ms, quality_score: scoreToolOutput(output, step.tool_name ?? step.cognitive_action ?? 'unknown', successResult.duration_ms) },
     }).catch(() => {}) // non-blocking
     // Cost optimizer: track per-agent cost/quality/latency profiles
     updateCostProfile(step.agent_id, step.tool_name ?? step.cognitive_action ?? 'unknown', {
       latency_ms: successResult.duration_ms,
-      quality_score: 0.75,
+      quality_score: scoreToolOutput(output, step.tool_name ?? step.cognitive_action ?? 'unknown', successResult.duration_ms),
       cost_usd: 0,
     }).catch(() => {}) // non-blocking
     // Adoption telemetry: capture chain-internal tool calls (bypass HTTP layer)
