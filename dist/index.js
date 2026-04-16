@@ -33809,6 +33809,7 @@ var init_mcp_caller = __esm({
 // src/swarm/peer-eval.ts
 var peer_eval_exports = {};
 __export(peer_eval_exports, {
+  evaluateStepQuality: () => evaluateStepQuality,
   getAllFleetLearnings: () => getAllFleetLearnings,
   getFleetLearning: () => getFleetLearning,
   getPeerEvalState: () => getPeerEvalState,
@@ -33820,9 +33821,35 @@ __export(peer_eval_exports, {
   runFleetAnalysis: () => runFleetAnalysis
 });
 import { v4 as uuid29 } from "uuid";
+function evaluateStepQuality(taskType, success, _inputs, outputs, latencyMs) {
+  if (!success) return 0.1;
+  let score = 0.5;
+  const out = outputs;
+  if (latencyMs > 3e4) score -= 0.2;
+  else if (latencyMs > 1e4) score -= 0.1;
+  if (out && (out.error || out.err)) return Math.max(0.1, score - 0.3);
+  if (out === null || out === void 0) return 0.1;
+  const outStr = typeof outputs === "string" ? outputs : JSON.stringify(outputs ?? "");
+  if (outStr.length > 1024) score += 0.2;
+  const tt = taskType.toLowerCase();
+  if (tt.startsWith("graph")) {
+    const records = Array.isArray(out?.records) ? out.records : Array.isArray(out) ? out : [];
+    score += records.length > 0 ? Math.min(0.3, records.length * 0.03) : -0.1;
+  } else if (tt.startsWith("kg_rag") || tt.startsWith("srag") || tt.startsWith("rag")) {
+    const results = Array.isArray(out?.results) ? out.results : [];
+    if (results.length > 0) {
+      const avgScore = results.reduce((s, r) => s + (typeof r.score === "number" ? r.score : 0.5), 0) / results.length;
+      score += 0.1 + 0.2 * avgScore;
+    } else score -= 0.1;
+  } else if (tt.startsWith("rlm") || tt.startsWith("cognitive") || tt.startsWith("reason")) {
+    const reasoning = String(out?.reasoning ?? out?.analysis ?? out?.result ?? "");
+    score += reasoning.length > 200 ? 0.25 : reasoning.length > 50 ? 0.1 : -0.1;
+  }
+  return Math.round(Math.max(0, Math.min(1, score)) * 1e3) / 1e3;
+}
 async function hookIntoExecution(agentId, taskId, context) {
   const t0 = Date.now();
-  const qualityScore = context.metrics?.quality_score ?? (context.success ? 0.7 : 0.2);
+  const qualityScore = context.metrics?.quality_score ?? evaluateStepQuality(context.taskType, context.success, context.inputs, context.outputs, context.metrics?.latency_ms ?? 1e3);
   const latencyMs = context.metrics?.latency_ms ?? 1e3;
   const latencyPenalty = latencyMs > 1e4 ? 0.1 : 0;
   const selfScore = Math.max(0, Math.min(1, qualityScore - latencyPenalty));

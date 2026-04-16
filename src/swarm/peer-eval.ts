@@ -109,6 +109,55 @@ let state: PeerEvalState = {
 // ─── Core: Self-Assessment Hook ─────────────────────────────────────────────
 
 /**
+ * Discriminative per-task-type quality scorer for peer evaluation.
+ * Used as fallback when no quality_score is provided in metrics.
+ * Supplements scoreToolOutput() with structural output analysis.
+ */
+export function evaluateStepQuality(
+  taskType: string,
+  success: boolean,
+  _inputs: unknown,
+  outputs: unknown,
+  latencyMs: number,
+): number {
+  if (!success) return 0.1
+
+  let score = 0.5
+  const out = outputs as Record<string, unknown> | null
+
+  // Latency penalty
+  if (latencyMs > 30000) score -= 0.2
+  else if (latencyMs > 10000) score -= 0.1
+
+  // Output error presence
+  if (out && (out.error || out.err)) return Math.max(0.1, score - 0.3)
+  if (out === null || out === undefined) return 0.1
+
+  // Output size bonus
+  const outStr = typeof outputs === 'string' ? outputs : JSON.stringify(outputs ?? '')
+  if (outStr.length > 1024) score += 0.2
+
+  // Task-type specific
+  const tt = taskType.toLowerCase()
+  if (tt.startsWith('graph')) {
+    const records = Array.isArray(out?.records) ? out.records as unknown[] :
+                    Array.isArray(out) ? out as unknown[] : []
+    score += records.length > 0 ? Math.min(0.3, records.length * 0.03) : -0.1
+  } else if (tt.startsWith('kg_rag') || tt.startsWith('srag') || tt.startsWith('rag')) {
+    const results = Array.isArray(out?.results) ? out.results as Record<string, unknown>[] : []
+    if (results.length > 0) {
+      const avgScore = results.reduce((s, r) => s + (typeof r.score === 'number' ? r.score : 0.5), 0) / results.length
+      score += 0.1 + 0.2 * avgScore
+    } else score -= 0.1
+  } else if (tt.startsWith('rlm') || tt.startsWith('cognitive') || tt.startsWith('reason')) {
+    const reasoning = String(out?.reasoning ?? out?.analysis ?? out?.result ?? '')
+    score += reasoning.length > 200 ? 0.25 : reasoning.length > 50 ? 0.1 : -0.1
+  }
+
+  return Math.round(Math.max(0, Math.min(1, score)) * 1000) / 1000
+}
+
+/**
  * Primary hook — called after every chain step or agent task completion.
  * This is the main entry point for the PeerEval system.
  */
@@ -129,8 +178,9 @@ export async function hookIntoExecution(
 ): Promise<EvalReport> {
   const t0 = Date.now()
 
-  // Calculate self-score based on available metrics
-  const qualityScore = context.metrics?.quality_score ?? (context.success ? 0.7 : 0.2)
+  // Calculate self-score: use provided quality_score, fallback to evaluateStepQuality()
+  const qualityScore = context.metrics?.quality_score
+    ?? evaluateStepQuality(context.taskType, context.success, context.inputs, context.outputs, context.metrics?.latency_ms ?? 1000)
   const latencyMs = context.metrics?.latency_ms ?? 1000
   const latencyPenalty = latencyMs > 10000 ? 0.1 : 0
   const selfScore = Math.max(0, Math.min(1, qualityScore - latencyPenalty))
