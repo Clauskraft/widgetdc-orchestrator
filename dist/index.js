@@ -26032,26 +26032,27 @@ async function loadTargetRegistry() {
     }
     logger.warn({ diagnostics }, "HyperAgent-Auto: no target registry found in Redis \u2014 trying Neo4j fallback");
     try {
-      const neo4jResult = await callMcpTool({
+      const neo4jToolResult = await callMcpTool({
         toolName: "graph.read_cypher",
         args: {
           query: `MATCH (m:HyperAgentMemory {domain: 'targets'})
-                  WHERE m.key CONTAINS 'registry'
                   RETURN m.value AS value, m.key AS key
                   ORDER BY m.updated_at DESC LIMIT 1`,
           params: {}
         },
         callId: `hyp-registry-fallback-${Date.now()}`
       });
-      const neo4jData = neo4jResult;
-      const results = neo4jData?.results ?? [];
-      if (results.length > 0) {
-        const rawValue = results[0]?.value;
-        const neo4jKey = results[0]?.key;
+      const rawResult = neo4jToolResult.result;
+      const backendResp = typeof rawResult === "string" ? JSON.parse(rawResult) : rawResult;
+      const rows = backendResp?.results ?? [];
+      if (rows.length > 0) {
+        const rawValue = rows[0]?.value;
+        const neo4jKey = rows[0]?.key;
         if (rawValue) {
           const parsed = typeof rawValue === "string" ? JSON.parse(rawValue) : rawValue;
-          const data = parsed?.categories ? parsed : parsed?.value ?? parsed;
-          const targets = parseRegistryToTargets(typeof data === "string" ? JSON.parse(data) : data);
+          const inner = parsed?.categories ? parsed : parsed?.value ?? parsed;
+          const data = typeof inner === "string" ? JSON.parse(inner) : inner;
+          const targets = parseRegistryToTargets(data);
           if (targets.length > 0) {
             logger.info({ key: neo4jKey, targetCount: targets.length }, "HyperAgent-Auto: loaded target registry from Neo4j fallback");
             return targets;
