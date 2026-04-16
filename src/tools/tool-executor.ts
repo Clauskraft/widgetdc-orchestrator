@@ -1538,16 +1538,45 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
 
     case 'tool_metrics': {
       try {
-        const { getToolMetrics, getTopTools } = await import('../analytics/runtime-analytics.js')
+        const { computeTelemetry } = await import('../flywheel/adoption-telemetry.js')
         const toolName = typeof args.tool_name === 'string' ? args.tool_name : undefined
         const limit = typeof args.limit === 'number' ? Math.min(args.limit, 50) : 10
 
+        const summary = await computeTelemetry()
+
         if (toolName) {
-          const metrics = await getToolMetrics(toolName)
-          return metrics ? JSON.stringify(metrics, null, 2) : `No metrics found for tool: ${toolName}`
+          const t = summary.tools.find(x => x.tool === toolName)
+          if (!t || t.lifetime_calls === 0) return `No metrics found for tool: ${toolName}`
+          return JSON.stringify({
+            tool_name: t.tool,
+            namespace: t.namespace,
+            call_count: t.lifetime_calls,
+            weekly_calls: t.weekly_calls,
+            last_called_at: t.last_called ?? '',
+            stale: t.stale,
+            advanced: t.advanced,
+          }, null, 2)
         }
-        const tools = await getTopTools(limit)
-        return JSON.stringify({ tools, count: tools.length }, null, 2)
+
+        const top = summary.tools
+          .filter(t => t.lifetime_calls > 0)
+          .sort((a, b) => b.lifetime_calls - a.lifetime_calls)
+          .slice(0, limit)
+          .map(t => ({
+            tool_name: t.tool,
+            namespace: t.namespace,
+            call_count: t.lifetime_calls,
+            weekly_calls: t.weekly_calls,
+            last_called_at: t.last_called ?? '',
+          }))
+        return JSON.stringify({
+          tools: top,
+          count: top.length,
+          total_tools: summary.total_tools,
+          tools_called_ever: summary.tools_called_ever,
+          tools_called_this_week: summary.tools_called_this_week,
+          utilisation_rate_pct: summary.kpis.utilisation_rate_pct,
+        }, null, 2)
       } catch (err) {
         return `Tool metrics failed: ${err instanceof Error ? err.message : String(err)}`
       }
