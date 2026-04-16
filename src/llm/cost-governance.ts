@@ -890,6 +890,116 @@ export function chainVerificationGate(
   return { passed: verdict !== 'fail', avgQualityScore, stepCount: scoredSteps.length, lowQualitySteps, verdict, message }
 }
 
+// ─── LLM Cost Router (topic 14/15) ───────────────────────────────────────────
+// Quality-driven model tier selection.
+// Routes to the cheapest model that can meet the required quality bar,
+// using historical peer-eval quality signals from cost-optimizer profiles.
+
+export type ModelTier = 'fast' | 'standard' | 'premium'
+
+export interface ModelTierRoute {
+  tier: ModelTier
+  provider: string
+  model: string
+  reason: string
+  /** Estimated cost in DKK for the given token count */
+  estimatedCostDKK: number
+}
+
+/** Provider/model pairs per tier (ordered cheapest-first within tier) */
+const TIER_OPTIONS: Record<ModelTier, Array<{ provider: string; model: string }>> = {
+  fast:     [{ provider: 'deepseek', model: 'deepseek-chat' }, { provider: 'groq', model: 'llama-3.1-8b-instant' }],
+  standard: [{ provider: 'deepseek', model: 'deepseek-reasoner' }, { provider: 'gemini', model: 'gemini-2.0-flash-lite' }],
+  premium:  [{ provider: 'anthropic', model: 'claude-sonnet-4-6' }, { provider: 'openai', model: 'gpt-4o' }],
+}
+
+/**
+ * Route to the cheapest model tier that meets the required quality bar.
+ *
+ * Decision logic:
+ * - requiredQuality < 0.40  → fast tier (simple lookup, formatting)
+ * - requiredQuality 0.40-0.70 → standard tier (analysis, reasoning)
+ * - requiredQuality > 0.70  → premium tier (complex synthesis, high stakes)
+ * - If agentTrustScore < 0.5 (from peer-eval trust-decay): skip fast, use standard minimum
+ * - If priorFailures > 0 at lower tier: escalate to next tier
+ */
+export async function routeToModelTier(
+  task: string,
+  opts: {
+    requiredQuality?: number
+    estimatedTokens?: number
+    agentId?: string
+    agentTrustScore?: number
+    workflowId?: string
+  } = {},
+): Promise<ModelTierRoute> {
+  const {
+    requiredQuality = 0.50,
+    estimatedTokens = 1000,
+    agentId,
+    agentTrustScore,
+    workflowId,
+  } = opts
+
+  // Determine base tier from required quality
+  let tier: ModelTier
+  if (requiredQuality < 0.40) tier = 'fast'
+  else if (requiredQuality <= 0.70) tier = 'standard'
+  else tier = 'premium'
+
+  // Low-trust agent → skip fast tier minimum
+  const trust = agentTrustScore ?? 1.0
+  if (trust < 0.50 && tier === 'fast') {
+    tier = 'standard'
+  }
+
+  // Prior failure escalation: check if the lower tier has failures
+  if (tier !== 'premium' && agentId) {
+    const lowerTierModel = TIER_OPTIONS[tier][0]
+    const failures = await getPriorFailures(lowerTierModel.provider, task).catch(() => 0)
+    if (failures >= 2) {
+      const nextTier: Record<ModelTier, ModelTier> = { fast: 'standard', standard: 'premium', premium: 'premium' }
+      tier = nextTier[tier]
+    }
+  }
+
+  const option = TIER_OPTIONS[tier][0]!
+  const estimate = estimateModelCost(option.provider, option.model, estimatedTokens)
+
+  // Policy gate — check daily budget before confirming premium
+  if (tier === 'premium') {
+    const policy = await checkModelPolicy(option.provider, option.model, {
+      isEscalation: true, estimatedTokens, task,
+    })
+    if (!policy.pass) {
+      // Fall back to standard if premium is blocked
+      const fallback = TIER_OPTIONS.standard[0]!
+      const fallbackEstimate = estimateModelCost(fallback.provider, fallback.model, estimatedTokens)
+      return {
+        tier: 'standard',
+        provider: fallback.provider,
+        model: fallback.model,
+        reason: `Premium blocked (${policy.reason}) — routing to standard`,
+        estimatedCostDKK: fallbackEstimate.totalCostDKK,
+      }
+    }
+  }
+
+  const reason = [
+    `Quality target ${requiredQuality.toFixed(2)} → ${tier} tier`,
+    trust < 1.0 ? `agent trust ${trust.toFixed(2)}` : null,
+    workflowId ? `workflow ${workflowId}` : null,
+  ].filter(Boolean).join(', ')
+
+  return {
+    tier,
+    provider: option.provider,
+    model: option.model,
+    reason,
+    estimatedCostDKK: estimate.totalCostDKK,
+  }
+}
+
 // ─── Module exports ──────────────────────────────────────────────────────────
 
 export default {
