@@ -430,11 +430,21 @@ function validateBeforeMerge(query, params, force) {
       // ends mid-condition
       /RETURN\s*$/i,
       // RETURN with nothing after
-      /,\s*$/,
+      /,\s*$/
       // trailing comma
-      /['"][^'"]{0,50}$/
-      // unterminated string literal
+      // Unclosed string literal: a quote that has NO matching close quote before end-of-query.
+      // Uses a simple odd-count heuristic (works for standard Cypher without escaped quotes).
+      // Note: /['"][^'"]{0,50}$/ was too broad — it false-positives on closed strings followed
+      // by Cypher keywords, e.g. n.agentId = 'knowledge-bus' RETURN n.slug
     ];
+    const singleQuoteCount = (trimmed.match(/'/g) ?? []).length;
+    const doubleQuoteCount = (trimmed.match(/"/g) ?? []).length;
+    if (singleQuoteCount % 2 !== 0 || doubleQuoteCount % 2 !== 0) {
+      metrics.writes_rejected++;
+      const reason = `Cypher query has unclosed string literal (single_quotes=${singleQuoteCount} double_quotes=${doubleQuoteCount}): "${trimmed.slice(-40)}"`;
+      logger.warn({ preview: trimmed.slice(-60) }, `Write REJECTED: ${reason}`);
+      return { allowed: false, reason };
+    }
     for (const pattern of truncationSignals) {
       if (pattern.test(trimmed)) {
         metrics.writes_rejected++;
