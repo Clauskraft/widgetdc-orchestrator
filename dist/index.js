@@ -2874,6 +2874,825 @@ var init_quality_scorer = __esm({
   }
 });
 
+// src/flywheel/failure-harvester.ts
+var failure_harvester_exports = {};
+__export(failure_harvester_exports, {
+  buildFailureSummary: () => buildFailureSummary,
+  harvestFailures: () => harvestFailures,
+  runFailureHarvest: () => runFailureHarvest
+});
+import { v4 as uuid5 } from "uuid";
+function sanitizeErrorMessage(msg) {
+  return msg.replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]").replace(/api[_-]?key[=:]\s*\S+/gi, "api_key=[REDACTED]").replace(/password[=:]\s*\S+/gi, "password=[REDACTED]").replace(/token[=:]\s*\S+/gi, "token=[REDACTED]").replace(/https?:\/\/[^\s"']+[?&][^\s"']*/g, (url) => {
+    try {
+      const u = new URL(url);
+      u.search = "[REDACTED]";
+      return u.toString();
+    } catch {
+      return url;
+    }
+  });
+}
+function categorizeFailure(error) {
+  const lower = error.toLowerCase();
+  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) return "timeout";
+  if (lower.includes("502") || lower.includes("bad gateway") || lower.includes("econnrefused")) return "502";
+  if (lower.includes("401") || lower.includes("403") || lower.includes("unauthorized") || lower.includes("forbidden")) return "auth";
+  if (lower.includes("validation") || lower.includes("invalid") || lower.includes("required")) return "validation";
+  if (lower.includes("mcp") || lower.includes("tool_not_found") || lower.includes("tool call")) return "mcp_error";
+  return "unknown";
+}
+async function harvestFailures(windowHours = 24) {
+  const redis2 = getRedis();
+  if (!redis2) {
+    logger.warn("Failure harvester: Redis not available");
+    return [];
+  }
+  const events = [];
+  const cutoff = new Date(Date.now() - windowHours * 36e5).toISOString();
+  try {
+    let cursor = "0";
+    do {
+      const [nextCursor, fields] = await redis2.hscan("orchestrator:chains", cursor, "COUNT", 200);
+      cursor = nextCursor;
+      for (let i = 0; i < fields.length; i += 2) {
+        const execId = fields[i];
+        const json = fields[i + 1];
+        try {
+          const exec = JSON.parse(json);
+          if (exec.status !== "failed") continue;
+          if (exec.started_at < cutoff) continue;
+          const failedSteps = exec.results?.filter((r) => r.status === "error") ?? [];
+          const errorMsg = exec.error ?? failedSteps.map((s) => String(s.output)).join("; ") ?? "unknown";
+          events.push({
+            $id: `failure-event:${uuid5()}`,
+            execution_id: execId,
+            chain_name: exec.name,
+            category: categorizeFailure(errorMsg),
+            error_message: sanitizeErrorMessage(errorMsg).slice(0, 500),
+            affected_tool: failedSteps[0]?.action ?? null,
+            affected_agent: failedSteps[0]?.agent_id ?? null,
+            timestamp: exec.started_at
+          });
+        } catch {
+        }
+      }
+    } while (cursor !== "0");
+    logger.info({ harvested: events.length, window_hours: windowHours }, "Failure harvester scan complete");
+  } catch (err) {
+    logger.error({ err: String(err) }, "Failure harvester scan failed");
+  }
+  return events;
+}
+async function persistToGraph(events) {
+  let persisted = 0;
+  for (const evt of events) {
+    try {
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `
+            MERGE (f:FailureEvent {execution_id: $execution_id})
+            SET f.chain_name = $chain_name,
+                f.category = $category,
+                f.error_message = $error_message,
+                f.affected_tool = $affected_tool,
+                f.affected_agent = $affected_agent,
+                f.timestamp = datetime($timestamp),
+                f.harvested_at = datetime()
+          `,
+          params: {
+            execution_id: evt.execution_id,
+            chain_name: evt.chain_name,
+            category: evt.category,
+            error_message: evt.error_message,
+            affected_tool: evt.affected_tool ?? "",
+            affected_agent: evt.affected_agent ?? "",
+            timestamp: evt.timestamp
+          }
+        },
+        callId: uuid5(),
+        timeoutMs: 1e4
+      });
+      persisted++;
+    } catch (err) {
+      logger.warn({ err: String(err), execution_id: evt.execution_id }, "Failed to persist failure event");
+    }
+  }
+  if (persisted > 0) {
+    try {
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `
+            MATCH (f:FailureEvent) WHERE f.affected_tool <> ''
+            MATCH (t:Tool {name: f.affected_tool})
+            MERGE (f)-[:AFFECTED_TOOL]->(t)
+          `,
+          params: {}
+        },
+        callId: uuid5(),
+        timeoutMs: 1e4
+      });
+      await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: {
+          query: `
+            MATCH (f:FailureEvent) WHERE f.affected_agent <> ''
+            MATCH (a:Agent {id: f.affected_agent})
+            MERGE (f)-[:AFFECTED_AGENT]->(a)
+          `,
+          params: {}
+        },
+        callId: uuid5(),
+        timeoutMs: 1e4
+      });
+    } catch {
+    }
+  }
+  return persisted;
+}
+function buildFailureSummary(events, windowHours = 24) {
+  const byCategory = {
+    timeout: 0,
+    "502": 0,
+    auth: 0,
+    validation: 0,
+    mcp_error: 0,
+    unknown: 0
+  };
+  const toolCounts = /* @__PURE__ */ new Map();
+  const agentCounts = /* @__PURE__ */ new Map();
+  for (const evt of events) {
+    byCategory[evt.category]++;
+    if (evt.affected_tool) toolCounts.set(evt.affected_tool, (toolCounts.get(evt.affected_tool) ?? 0) + 1);
+    if (evt.affected_agent) agentCounts.set(evt.affected_agent, (agentCounts.get(evt.affected_agent) ?? 0) + 1);
+  }
+  const topTools = [...toolCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([tool, count]) => ({ tool, count }));
+  const topAgents = [...agentCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([agent, count]) => ({ agent, count }));
+  return {
+    $id: `failure-summary:${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}`,
+    total_failures: events.length,
+    by_category: byCategory,
+    top_tools: topTools,
+    top_agents: topAgents,
+    recent: events.slice(-20),
+    harvested_at: (/* @__PURE__ */ new Date()).toISOString(),
+    window_hours: windowHours
+  };
+}
+async function runFailureHarvest(windowHours = 24) {
+  const events = await harvestFailures(windowHours);
+  const persisted = await persistToGraph(events);
+  const summary = buildFailureSummary(events, windowHours);
+  const redis2 = getRedis();
+  if (redis2) {
+    await redis2.set("orchestrator:failure-summary", JSON.stringify(summary), "EX", 3600).catch(() => {
+    });
+  }
+  broadcastSSE("failure-harvest", summary);
+  logger.info({
+    total: events.length,
+    persisted,
+    categories: summary.by_category
+  }, "Failure harvest cycle complete");
+  return summary;
+}
+var init_failure_harvester = __esm({
+  "src/flywheel/failure-harvester.ts"() {
+    "use strict";
+    init_redis();
+    init_mcp_caller();
+    init_logger();
+    init_sse();
+  }
+});
+
+// src/swarm/pheromone-layer.ts
+var pheromone_layer_exports = {};
+__export(pheromone_layer_exports, {
+  amplify: () => amplify,
+  deposit: () => deposit,
+  depositFeedbackPheromone: () => depositFeedbackPheromone,
+  getHeatmap: () => getHeatmap,
+  getPheromoneState: () => getPheromoneState,
+  getTrailSummary: () => getTrailSummary,
+  initPheromoneLayer: () => initPheromoneLayer,
+  onAnomaly: () => onAnomaly,
+  onChainStepFailure: () => onChainStepFailure,
+  onChainStepSuccess: () => onChainStepSuccess,
+  onExternalSignal: () => onExternalSignal,
+  onInventorTrial: () => onInventorTrial,
+  persistToGraph: () => persistToGraph2,
+  reinforce: () => reinforce,
+  runDecayCycle: () => runDecayCycle,
+  runPheromoneCron: () => runPheromoneCron,
+  sense: () => sense
+});
+import { v4 as uuid6 } from "uuid";
+function adaptiveDecayFactor(p) {
+  const now = Date.now();
+  const depositedMs = new Date(p.depositedAt).getTime();
+  const ageCycles = (now - depositedMs) / CYCLE_MS;
+  const quality = p.quality_score ?? 0.5;
+  let baseFactor;
+  switch (p.type) {
+    case "attraction":
+      baseFactor = quality > 0.7 ? 0.95 : quality < 0.4 ? 0.65 : 0.85;
+      break;
+    case "repellent":
+      baseFactor = 0.88;
+      break;
+    case "trail": {
+      const reinfluence = Math.min(p.reinforcements / 10, 1);
+      baseFactor = 0.8 + 0.15 * reinfluence;
+      break;
+    }
+    case "external":
+      baseFactor = 0.6;
+      break;
+    case "amplification":
+      baseFactor = 0.98;
+      break;
+    default:
+      baseFactor = 0.85;
+  }
+  const agePenalty = p.type !== "amplification" && ageCycles > 5 ? Math.min((ageCycles - 5) * 5e-3, 0.1) : 0;
+  return Math.round(Math.max(0.5, Math.min(0.99, baseFactor - agePenalty)) * 1e3) / 1e3;
+}
+function adaptiveReinforcementTTLBonus(p) {
+  const quality = p.quality_score ?? 0.5;
+  switch (p.type) {
+    case "attraction":
+      return (quality > 0.7 ? 1200 : 600) * 1e3;
+    case "repellent":
+      return 300 * 1e3;
+    case "trail":
+      return (900 + p.reinforcements * 60) * 1e3;
+    case "external":
+      return 150 * 1e3;
+    case "amplification":
+      return 1800 * 1e3;
+    default:
+      return 600 * 1e3;
+  }
+}
+async function deposit(agentId, type, domain, strength, label, metrics2 = {}, tags = [], ttlSeconds = DEFAULT_TTL) {
+  const pheromone = {
+    id: `ph-${uuid6().slice(0, 12)}`,
+    type,
+    agentId,
+    domain,
+    strength: Math.max(0, Math.min(1, strength)),
+    label,
+    metrics: metrics2,
+    tags: [...tags, type, domain],
+    depositedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    ttlSeconds,
+    reinforcements: 0
+  };
+  const redis2 = getRedis();
+  if (redis2) {
+    const key = `${REDIS_PREFIX}${pheromone.id}`;
+    await redis2.set(key, JSON.stringify(pheromone), "EX", ttlSeconds);
+    await redis2.zadd(REDIS_INDEX_KEY, pheromone.strength, pheromone.id);
+    await redis2.zadd(`${REDIS_PREFIX}domain:${domain}`, pheromone.strength, pheromone.id);
+    await redis2.zadd(`${REDIS_PREFIX}type:${type}`, pheromone.strength, pheromone.id);
+  }
+  state.totalDeposits++;
+  state.activePheromones++;
+  if (type !== "amplification") {
+    tryActiveAmplification(domain).catch(() => {
+    });
+  }
+  broadcastSSE("pheromone", {
+    event: "deposit",
+    pheromone: { id: pheromone.id, type, domain, strength: pheromone.strength, agentId }
+  });
+  logger.debug(
+    { id: pheromone.id, type, domain, strength: pheromone.strength, agentId },
+    "Pheromone deposited"
+  );
+  return pheromone;
+}
+async function sense(query) {
+  const redis2 = getRedis();
+  if (!redis2) return [];
+  const limit = query.limit ?? 20;
+  const minStrength = query.minStrength ?? 0.1;
+  let candidateIds;
+  if (query.domain) {
+    candidateIds = await redis2.zrevrangebyscore(
+      `${REDIS_PREFIX}domain:${query.domain}`,
+      "+inf",
+      String(minStrength),
+      "LIMIT",
+      "0",
+      String(limit * 2)
+    );
+  } else if (query.type) {
+    candidateIds = await redis2.zrevrangebyscore(
+      `${REDIS_PREFIX}type:${query.type}`,
+      "+inf",
+      String(minStrength),
+      "LIMIT",
+      "0",
+      String(limit * 2)
+    );
+  } else {
+    candidateIds = await redis2.zrevrangebyscore(
+      REDIS_INDEX_KEY,
+      "+inf",
+      String(minStrength),
+      "LIMIT",
+      "0",
+      String(limit * 2)
+    );
+  }
+  if (candidateIds.length === 0) return [];
+  const pipeline = redis2.pipeline();
+  for (const id of candidateIds) {
+    pipeline.get(`${REDIS_PREFIX}${id}`);
+  }
+  const results = await pipeline.exec();
+  if (!results) return [];
+  const pheromones = [];
+  for (const [err, raw] of results) {
+    if (err || !raw) continue;
+    try {
+      const p = JSON.parse(raw);
+      if (query.tags && query.tags.length > 0) {
+        if (!query.tags.some((t) => p.tags.includes(t))) continue;
+      }
+      if (query.type && !query.domain && p.type !== query.type) continue;
+      pheromones.push(p);
+    } catch {
+    }
+  }
+  return pheromones.slice(0, limit);
+}
+async function reinforce(pheromoneId, boostFactor = 0.2) {
+  const redis2 = getRedis();
+  if (!redis2) return false;
+  const key = `${REDIS_PREFIX}${pheromoneId}`;
+  const raw = await redis2.get(key);
+  if (!raw) return false;
+  try {
+    const p = JSON.parse(raw);
+    p.strength = Math.min(1, p.strength + boostFactor);
+    p.reinforcements++;
+    const bonusMs = adaptiveReinforcementTTLBonus(p);
+    const newTtl = Math.min(p.ttlSeconds + bonusMs / 1e3, 86400);
+    p.ttlSeconds = newTtl;
+    await redis2.set(key, JSON.stringify(p), "EX", Math.round(newTtl));
+    await redis2.zadd(REDIS_INDEX_KEY, p.strength, pheromoneId);
+    if (p.type === "trail" || p.type === "attraction") {
+      await redis2.zadd(`${REDIS_PREFIX}domain:${p.domain}`, p.strength, pheromoneId);
+    }
+    state.totalAmplifications++;
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function runDecayCycle() {
+  const redis2 = getRedis();
+  if (!redis2) return { decayed: 0, evaporated: 0 };
+  const LOCK_KEY = `${REDIS_PREFIX}decay-lock`;
+  const locked = await redis2.set(LOCK_KEY, "1", "EX", 60, "NX");
+  if (!locked) return { decayed: 0, evaporated: 0 };
+  try {
+    const allIds = await redis2.zrangebyscore(REDIS_INDEX_KEY, "0", "+inf");
+    let decayed = 0;
+    let evaporated = 0;
+    for (const id of allIds) {
+      const key = `${REDIS_PREFIX}${id}`;
+      const raw = await redis2.get(key);
+      if (!raw) {
+        await redis2.zrem(REDIS_INDEX_KEY, id);
+        evaporated++;
+        continue;
+      }
+      try {
+        const p = JSON.parse(raw);
+        p.strength *= adaptiveDecayFactor(p);
+        if (p.strength < 0.05) {
+          await redis2.del(key);
+          await redis2.zrem(REDIS_INDEX_KEY, id);
+          await redis2.zrem(`${REDIS_PREFIX}domain:${p.domain}`, id);
+          await redis2.zrem(`${REDIS_PREFIX}type:${p.type}`, id);
+          evaporated++;
+        } else {
+          await redis2.set(key, JSON.stringify(p), "KEEPTTL");
+          await redis2.zadd(REDIS_INDEX_KEY, p.strength, id);
+          decayed++;
+        }
+      } catch {
+        await redis2.zrem(REDIS_INDEX_KEY, id);
+        evaporated++;
+      }
+    }
+    state.totalDecays++;
+    state.activePheromones = Math.max(0, state.activePheromones - evaporated);
+    state.lastDecayAt = (/* @__PURE__ */ new Date()).toISOString();
+    logger.info({ decayed, evaporated, remaining: state.activePheromones }, "Pheromone decay cycle");
+    return { decayed, evaporated };
+  } finally {
+    await redis2.del(LOCK_KEY).catch(() => {
+    });
+  }
+}
+async function amplify(domain, contributingPheromones, label) {
+  if (contributingPheromones.length < 2) return null;
+  const strengths = contributingPheromones.map((p) => p.strength);
+  const geoMean = Math.pow(strengths.reduce((a, b) => a * b, 1), 1 / strengths.length);
+  const compoundStrength = Math.min(1, geoMean * AMPLIFICATION_MULTIPLIER);
+  const allTags = [...new Set(contributingPheromones.flatMap((p) => p.tags))];
+  const allMetrics = {};
+  for (const p of contributingPheromones) {
+    for (const [k, v] of Object.entries(p.metrics)) {
+      allMetrics[`${p.type}_${k}`] = v;
+    }
+  }
+  allMetrics.contributing_count = contributingPheromones.length;
+  allMetrics.compound_strength = compoundStrength;
+  const amplified = await deposit(
+    "flywheel-coordinator",
+    "amplification",
+    domain,
+    compoundStrength,
+    label,
+    allMetrics,
+    [...allTags, "cross-pillar", "compound"],
+    7200
+    // 2h TTL for compound signals
+  );
+  for (const p of contributingPheromones) {
+    await reinforce(p.id, 0.1);
+  }
+  return amplified;
+}
+async function tryActiveAmplification(domain) {
+  const existing = await sense({ domain, limit: 20, minStrength: 0.3 });
+  const types = new Set(existing.map((p) => p.type));
+  if (types.size >= 2 && !types.has("amplification")) {
+    const byType = /* @__PURE__ */ new Map();
+    for (const p of existing) {
+      const current = byType.get(p.type);
+      if (!current || p.strength > current.strength) byType.set(p.type, p);
+    }
+    const contributors = [...byType.values()];
+    if (contributors.length >= 2) {
+      await amplify(domain, contributors, `Cross-pillar: ${[...types].join("+")} on ${domain}`);
+    }
+  }
+}
+async function persistToGraph2() {
+  const strong = await sense({ minStrength: PERSIST_THRESHOLD, limit: 50 });
+  let persisted = 0;
+  for (const p of strong) {
+    try {
+      await callMcpTool({
+        toolName: "memory_store",
+        args: {
+          agent_id: "pheromone-layer",
+          key: `trail:${p.domain}:${p.id}`,
+          value: JSON.stringify({
+            type: p.type,
+            domain: p.domain,
+            strength: p.strength,
+            label: p.label,
+            metrics: p.metrics,
+            reinforcements: p.reinforcements,
+            agentId: p.agentId
+          }),
+          metadata: {
+            pheromone_type: p.type,
+            domain: p.domain,
+            strength: p.strength,
+            reinforcements: p.reinforcements
+          }
+        },
+        callId: `ph-persist-${p.id}`
+      });
+      try {
+        const verify2 = await callMcpTool({
+          toolName: "memory_retrieve",
+          args: { agent_id: "pheromone-layer", key: `trail:${p.domain}:${p.id}` },
+          callId: `ph-verify-${p.id}`
+        });
+        if (verify2) persisted++;
+        else logger.warn({ id: p.id }, "Pheromone persist verification failed");
+      } catch {
+        logger.warn({ id: p.id }, "Pheromone persist verification error");
+      }
+    } catch {
+    }
+  }
+  state.lastPersistAt = (/* @__PURE__ */ new Date()).toISOString();
+  logger.info({ persisted, total: strong.length }, "Pheromone trails persisted to memory");
+  return persisted;
+}
+async function getTrailSummary(domain) {
+  const trails = await sense({ domain, limit: 50 });
+  if (trails.length === 0) return null;
+  const totalStrength = trails.reduce((sum, p) => sum + p.strength, 0);
+  const avgStrength = totalStrength / trails.length;
+  const typeCounts = /* @__PURE__ */ new Map();
+  for (const p of trails) {
+    typeCounts.set(p.type, (typeCounts.get(p.type) ?? 0) + p.strength);
+  }
+  const strongestType = [...typeCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "trail";
+  const agentStrength = /* @__PURE__ */ new Map();
+  for (const p of trails) {
+    agentStrength.set(p.agentId, (agentStrength.get(p.agentId) ?? 0) + p.strength);
+  }
+  const topContributors = [...agentStrength.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([id]) => id);
+  return {
+    trailId: `trail:${domain}`,
+    domain,
+    totalStrength,
+    pheromoneCount: trails.length,
+    avgStrength,
+    topContributors,
+    strongestType
+  };
+}
+async function getHeatmap() {
+  const redis2 = getRedis();
+  if (!redis2) return [];
+  const domains = [];
+  let cursor = "0";
+  do {
+    const [next, found] = await redis2.scan(cursor, "MATCH", `${REDIS_PREFIX}domain:*`, "COUNT", "50");
+    cursor = next;
+    for (const k of found) domains.push(k.replace(`${REDIS_PREFIX}domain:`, ""));
+  } while (cursor !== "0" && domains.length < 50);
+  const summaries = [];
+  for (const domain of domains.slice(0, 20)) {
+    const summary = await getTrailSummary(domain);
+    if (summary) summaries.push(summary);
+  }
+  return summaries.sort((a, b) => b.totalStrength - a.totalStrength);
+}
+async function onChainStepSuccess(agentId, toolName, durationMs, chainMode) {
+  await deposit(
+    agentId,
+    "trail",
+    `chain:${toolName}`,
+    Math.min(1, 0.5 + 1e3 / Math.max(durationMs, 100) * 0.5),
+    // faster = stronger
+    `${agentId} succeeded at ${toolName} in ${durationMs}ms`,
+    { duration_ms: durationMs },
+    [chainMode, toolName],
+    3600
+    // 1h TTL
+  );
+}
+async function onChainStepFailure(agentId, toolName, error) {
+  await deposit(
+    agentId,
+    "repellent",
+    `chain:${toolName}`,
+    0.7,
+    `${agentId} failed at ${toolName}: ${error.slice(0, 100)}`,
+    { failure: 1 },
+    ["error", toolName],
+    1800
+    // 30min TTL (failures fade faster)
+  );
+}
+async function onInventorTrial(nodeId, score, experiment, island) {
+  if (score >= 0.7) {
+    await deposit(
+      "inventor",
+      "attraction",
+      `inventor:${experiment}`,
+      score,
+      `Inventor trial ${nodeId} scored ${(score * 100).toFixed(1)}% on island ${island}`,
+      { score, island },
+      ["inventor", experiment, `island-${island}`],
+      7200
+      // 2h for good trials
+    );
+  } else if (score < 0.3) {
+    await deposit(
+      "inventor",
+      "repellent",
+      `inventor:${experiment}`,
+      0.3 + (0.3 - score),
+      // worse score = stronger repellent
+      `Inventor trial ${nodeId} scored poorly: ${(score * 100).toFixed(1)}%`,
+      { score, island },
+      ["inventor", experiment, `island-${island}`],
+      900
+      // 15min for bad trials
+    );
+  }
+}
+async function onAnomaly(type, valence, source, severity) {
+  const pType = valence === "positive" ? "attraction" : "repellent";
+  const strength = severity === "critical" ? 0.9 : severity === "warning" ? 0.6 : 0.3;
+  const ttl = valence === "positive" ? 7200 : 1800;
+  await deposit(
+    "anomaly-watcher",
+    pType,
+    `anomaly:${type}`,
+    strength,
+    `Anomaly ${type} (${valence}) from ${source} [${severity}]`,
+    {},
+    [valence, severity, source, type],
+    ttl
+  );
+}
+async function onExternalSignal(source, domain, label, strength, metrics2 = {}) {
+  await deposit(
+    source,
+    "external",
+    `external:${domain}`,
+    strength,
+    label,
+    metrics2,
+    ["external", source, domain],
+    14400
+    // 4h for external signals
+  );
+}
+function getPheromoneState() {
+  return { ...state };
+}
+async function persistPheromoneState() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const count = await redis2.zcard(REDIS_INDEX_KEY);
+    state.activePheromones = count;
+    await redis2.set(REDIS_STATE_KEY, JSON.stringify(state));
+  } catch {
+  }
+}
+async function loadPheromoneState() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const raw = await redis2.get(REDIS_STATE_KEY);
+    if (raw) {
+      state = { ...state, ...JSON.parse(raw) };
+      logger.info(
+        { totalDeposits: state.totalDeposits, activePheromones: state.activePheromones },
+        "Pheromone layer: restored state from Redis"
+      );
+    }
+  } catch {
+  }
+}
+async function runPheromoneCron() {
+  const { decayed, evaporated } = await runDecayCycle();
+  const persisted = await persistToGraph2();
+  let amplified = 0;
+  try {
+    const heatmap = await getHeatmap();
+    for (const trail of heatmap) {
+      if (trail.pheromoneCount >= 3 && trail.avgStrength >= 0.5) {
+        const pheromonesInDomain = await sense({ domain: trail.domain, minStrength: 0.4, limit: 5 });
+        const uniqueTypes = new Set(pheromonesInDomain.map((p) => p.type));
+        if (uniqueTypes.size >= 2) {
+          await amplify(
+            trail.domain,
+            pheromonesInDomain,
+            `Cross-pillar convergence in ${trail.domain}: ${[...uniqueTypes].join("+")}`
+          );
+          amplified++;
+        }
+      }
+    }
+  } catch {
+  }
+  await persistPheromoneState();
+  broadcastSSE("pheromone", {
+    event: "cron_complete",
+    decayed,
+    evaporated,
+    persisted,
+    amplified,
+    activePheromones: state.activePheromones
+  });
+  return { decayed, evaporated, persisted, amplified };
+}
+function toolDomain(toolName) {
+  for (const [pattern, domain] of DOMAIN_MAP) {
+    if (pattern.test(toolName)) return domain;
+  }
+  return "general-tools";
+}
+function depositFeedbackPheromone(toolName, agentId, qualityScore, durationMs) {
+  _depositFeedbackPheromoneAsync(toolName, agentId, qualityScore, durationMs).catch(() => {
+  });
+}
+async function _depositFeedbackPheromoneAsync(toolName, agentId, qualityScore, durationMs) {
+  if (qualityScore > 0.35 && qualityScore < 0.8) return;
+  const redis2 = getRedis();
+  const domain = toolDomain(toolName);
+  const type = qualityScore >= 0.8 ? "attraction" : "repellent";
+  const dedupKey = `pheromone:dedup:tool:${toolName}:${type}`;
+  if (redis2) {
+    const existing = await redis2.get(dedupKey).catch(() => null);
+    if (existing) {
+      await reinforce(existing, 0.1).catch(() => {
+      });
+      return;
+    }
+  }
+  if (type === "attraction") {
+    const ph = await deposit(
+      type,
+      agentId,
+      domain,
+      qualityScore,
+      `Quality ${qualityScore.toFixed(2)} on ${toolName} (${durationMs}ms)`,
+      { quality_score: qualityScore, duration_ms: durationMs },
+      [toolName, "quality-feedback"],
+      7200
+      // 2h TTL
+    );
+    if (redis2) {
+      await redis2.set(dedupKey, ph.id, "EX", 300).catch(() => {
+      });
+    }
+  } else {
+    const strength = Math.round((1 - qualityScore) * 1e3) / 1e3;
+    const ph = await deposit(
+      type,
+      agentId,
+      `${domain}:failure`,
+      strength,
+      `Low quality ${qualityScore.toFixed(2)} on ${toolName} (${durationMs}ms)`,
+      { quality_score: qualityScore, duration_ms: durationMs },
+      [toolName, "quality-feedback", "failure"],
+      2700
+      // 45min TTL
+    );
+    if (redis2) {
+      await redis2.set(dedupKey, ph.id, "EX", 300).catch(() => {
+      });
+    }
+    const counterKey = `pheromone:repellent:count:tool:${toolName}`;
+    if (redis2) {
+      const count = await redis2.incr(counterKey).catch(() => 0);
+      if (count === 1) await redis2.expire(counterKey, 3600).catch(() => {
+      });
+      if (count >= 3) {
+        await redis2.del(counterKey).catch(() => {
+        });
+        Promise.resolve().then(() => (init_failure_harvester(), failure_harvester_exports)).then((m) => m.runFailureHarvest()).catch(() => {
+        });
+        logger.warn({ toolName, repellentCount: count }, "Stigmergic escalation: 3+ repellents \u2192 failure harvest");
+      }
+    }
+  }
+}
+async function initPheromoneLayer() {
+  await loadPheromoneState();
+  logger.info(
+    { totalDeposits: state.totalDeposits, activePheromones: state.activePheromones },
+    "Pheromone layer initialized"
+  );
+}
+var REDIS_PREFIX, REDIS_STATE_KEY, REDIS_INDEX_KEY, DEFAULT_TTL, PERSIST_THRESHOLD, AMPLIFICATION_MULTIPLIER, CYCLE_MS, state, DOMAIN_MAP;
+var init_pheromone_layer = __esm({
+  "src/swarm/pheromone-layer.ts"() {
+    "use strict";
+    init_redis();
+    init_mcp_caller();
+    init_logger();
+    init_sse();
+    REDIS_PREFIX = "pheromone:";
+    REDIS_STATE_KEY = "pheromone:state";
+    REDIS_INDEX_KEY = "pheromone:index";
+    DEFAULT_TTL = 3600;
+    PERSIST_THRESHOLD = 0.7;
+    AMPLIFICATION_MULTIPLIER = 1.5;
+    CYCLE_MS = 15 * 60 * 1e3;
+    state = {
+      totalDeposits: 0,
+      totalDecays: 0,
+      totalAmplifications: 0,
+      activePheromones: 0,
+      trailCount: 0,
+      lastDecayAt: null,
+      lastPersistAt: null
+    };
+    DOMAIN_MAP = [
+      [/^graph\.|^data_graph/, "graph-queries"],
+      [/^kg_rag|^srag|^rag_|^adaptive_rag/, "knowledge-retrieval"],
+      [/^linear\.|^linear_/, "project-management"],
+      [/^rlm\.|^cognitive|^reason|^llm_/, "reasoning"],
+      [/^knowledge_|^memory_|^fact_/, "knowledge-bus"],
+      [/^agent_|^hyperagent/, "agent-coordination"]
+    ];
+  }
+});
+
 // src/tools/tool-registry.ts
 var tool_registry_exports = {};
 __export(tool_registry_exports, {
@@ -5427,200 +6246,6 @@ var init_adoption_telemetry = __esm({
   }
 });
 
-// src/flywheel/failure-harvester.ts
-var failure_harvester_exports = {};
-__export(failure_harvester_exports, {
-  buildFailureSummary: () => buildFailureSummary,
-  harvestFailures: () => harvestFailures,
-  runFailureHarvest: () => runFailureHarvest
-});
-import { v4 as uuid5 } from "uuid";
-function sanitizeErrorMessage(msg) {
-  return msg.replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]").replace(/api[_-]?key[=:]\s*\S+/gi, "api_key=[REDACTED]").replace(/password[=:]\s*\S+/gi, "password=[REDACTED]").replace(/token[=:]\s*\S+/gi, "token=[REDACTED]").replace(/https?:\/\/[^\s"']+[?&][^\s"']*/g, (url) => {
-    try {
-      const u = new URL(url);
-      u.search = "[REDACTED]";
-      return u.toString();
-    } catch {
-      return url;
-    }
-  });
-}
-function categorizeFailure(error) {
-  const lower = error.toLowerCase();
-  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) return "timeout";
-  if (lower.includes("502") || lower.includes("bad gateway") || lower.includes("econnrefused")) return "502";
-  if (lower.includes("401") || lower.includes("403") || lower.includes("unauthorized") || lower.includes("forbidden")) return "auth";
-  if (lower.includes("validation") || lower.includes("invalid") || lower.includes("required")) return "validation";
-  if (lower.includes("mcp") || lower.includes("tool_not_found") || lower.includes("tool call")) return "mcp_error";
-  return "unknown";
-}
-async function harvestFailures(windowHours = 24) {
-  const redis2 = getRedis();
-  if (!redis2) {
-    logger.warn("Failure harvester: Redis not available");
-    return [];
-  }
-  const events = [];
-  const cutoff = new Date(Date.now() - windowHours * 36e5).toISOString();
-  try {
-    let cursor = "0";
-    do {
-      const [nextCursor, fields] = await redis2.hscan("orchestrator:chains", cursor, "COUNT", 200);
-      cursor = nextCursor;
-      for (let i = 0; i < fields.length; i += 2) {
-        const execId = fields[i];
-        const json = fields[i + 1];
-        try {
-          const exec = JSON.parse(json);
-          if (exec.status !== "failed") continue;
-          if (exec.started_at < cutoff) continue;
-          const failedSteps = exec.results?.filter((r) => r.status === "error") ?? [];
-          const errorMsg = exec.error ?? failedSteps.map((s) => String(s.output)).join("; ") ?? "unknown";
-          events.push({
-            $id: `failure-event:${uuid5()}`,
-            execution_id: execId,
-            chain_name: exec.name,
-            category: categorizeFailure(errorMsg),
-            error_message: sanitizeErrorMessage(errorMsg).slice(0, 500),
-            affected_tool: failedSteps[0]?.action ?? null,
-            affected_agent: failedSteps[0]?.agent_id ?? null,
-            timestamp: exec.started_at
-          });
-        } catch {
-        }
-      }
-    } while (cursor !== "0");
-    logger.info({ harvested: events.length, window_hours: windowHours }, "Failure harvester scan complete");
-  } catch (err) {
-    logger.error({ err: String(err) }, "Failure harvester scan failed");
-  }
-  return events;
-}
-async function persistToGraph(events) {
-  let persisted = 0;
-  for (const evt of events) {
-    try {
-      await callMcpTool({
-        toolName: "graph.write_cypher",
-        args: {
-          query: `
-            MERGE (f:FailureEvent {execution_id: $execution_id})
-            SET f.chain_name = $chain_name,
-                f.category = $category,
-                f.error_message = $error_message,
-                f.affected_tool = $affected_tool,
-                f.affected_agent = $affected_agent,
-                f.timestamp = datetime($timestamp),
-                f.harvested_at = datetime()
-          `,
-          params: {
-            execution_id: evt.execution_id,
-            chain_name: evt.chain_name,
-            category: evt.category,
-            error_message: evt.error_message,
-            affected_tool: evt.affected_tool ?? "",
-            affected_agent: evt.affected_agent ?? "",
-            timestamp: evt.timestamp
-          }
-        },
-        callId: uuid5(),
-        timeoutMs: 1e4
-      });
-      persisted++;
-    } catch (err) {
-      logger.warn({ err: String(err), execution_id: evt.execution_id }, "Failed to persist failure event");
-    }
-  }
-  if (persisted > 0) {
-    try {
-      await callMcpTool({
-        toolName: "graph.write_cypher",
-        args: {
-          query: `
-            MATCH (f:FailureEvent) WHERE f.affected_tool <> ''
-            MATCH (t:Tool {name: f.affected_tool})
-            MERGE (f)-[:AFFECTED_TOOL]->(t)
-          `,
-          params: {}
-        },
-        callId: uuid5(),
-        timeoutMs: 1e4
-      });
-      await callMcpTool({
-        toolName: "graph.write_cypher",
-        args: {
-          query: `
-            MATCH (f:FailureEvent) WHERE f.affected_agent <> ''
-            MATCH (a:Agent {id: f.affected_agent})
-            MERGE (f)-[:AFFECTED_AGENT]->(a)
-          `,
-          params: {}
-        },
-        callId: uuid5(),
-        timeoutMs: 1e4
-      });
-    } catch {
-    }
-  }
-  return persisted;
-}
-function buildFailureSummary(events, windowHours = 24) {
-  const byCategory = {
-    timeout: 0,
-    "502": 0,
-    auth: 0,
-    validation: 0,
-    mcp_error: 0,
-    unknown: 0
-  };
-  const toolCounts = /* @__PURE__ */ new Map();
-  const agentCounts = /* @__PURE__ */ new Map();
-  for (const evt of events) {
-    byCategory[evt.category]++;
-    if (evt.affected_tool) toolCounts.set(evt.affected_tool, (toolCounts.get(evt.affected_tool) ?? 0) + 1);
-    if (evt.affected_agent) agentCounts.set(evt.affected_agent, (agentCounts.get(evt.affected_agent) ?? 0) + 1);
-  }
-  const topTools = [...toolCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([tool, count]) => ({ tool, count }));
-  const topAgents = [...agentCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([agent, count]) => ({ agent, count }));
-  return {
-    $id: `failure-summary:${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}`,
-    total_failures: events.length,
-    by_category: byCategory,
-    top_tools: topTools,
-    top_agents: topAgents,
-    recent: events.slice(-20),
-    harvested_at: (/* @__PURE__ */ new Date()).toISOString(),
-    window_hours: windowHours
-  };
-}
-async function runFailureHarvest(windowHours = 24) {
-  const events = await harvestFailures(windowHours);
-  const persisted = await persistToGraph(events);
-  const summary = buildFailureSummary(events, windowHours);
-  const redis2 = getRedis();
-  if (redis2) {
-    await redis2.set("orchestrator:failure-summary", JSON.stringify(summary), "EX", 3600).catch(() => {
-    });
-  }
-  broadcastSSE("failure-harvest", summary);
-  logger.info({
-    total: events.length,
-    persisted,
-    categories: summary.by_category
-  }, "Failure harvest cycle complete");
-  return summary;
-}
-var init_failure_harvester = __esm({
-  "src/flywheel/failure-harvester.ts"() {
-    "use strict";
-    init_redis();
-    init_mcp_caller();
-    init_logger();
-    init_sse();
-  }
-});
-
 // src/flywheel/cost-optimizer.ts
 var cost_optimizer_exports = {};
 __export(cost_optimizer_exports, {
@@ -5732,7 +6357,7 @@ async function persistToRedis2() {
   try {
     const pipeline = redis2.multi();
     for (const [key, profile] of profiles.entries()) {
-      pipeline.set(`${REDIS_PREFIX}profile:${key}`, JSON.stringify(profile), { EX: 30 * 24 * 3600 });
+      pipeline.set(`${REDIS_PREFIX2}profile:${key}`, JSON.stringify(profile), { EX: 30 * 24 * 3600 });
     }
     pipeline.sadd(REDIS_INDEX, ...[...profiles.keys()]);
     await pipeline.exec();
@@ -5746,7 +6371,7 @@ async function loadFromRedis() {
   try {
     const keys = await redis2.smembers(REDIS_INDEX);
     if (!keys.length) return;
-    const values = await redis2.mGet(keys.map((k) => `${REDIS_PREFIX}profile:${k}`));
+    const values = await redis2.mGet(keys.map((k) => `${REDIS_PREFIX2}profile:${k}`));
     let loaded = 0;
     for (const v of values) {
       if (!v) continue;
@@ -5764,14 +6389,14 @@ async function loadFromRedis() {
     logger.warn({ error: String(err) }, "[CostOptimizer] Redis load failed");
   }
 }
-var REDIS_PREFIX, REDIS_INDEX, MIN_SAMPLES_FOR_ROUTING, MAX_PROFILES, profiles, persistTimer;
+var REDIS_PREFIX2, REDIS_INDEX, MIN_SAMPLES_FOR_ROUTING, MAX_PROFILES, profiles, persistTimer;
 var init_cost_optimizer = __esm({
   "src/flywheel/cost-optimizer.ts"() {
     "use strict";
     init_redis();
     init_logger();
-    REDIS_PREFIX = "orchestrator:cost:";
-    REDIS_INDEX = `${REDIS_PREFIX}index`;
+    REDIS_PREFIX2 = "orchestrator:cost:";
+    REDIS_INDEX = `${REDIS_PREFIX2}index`;
     MIN_SAMPLES_FOR_ROUTING = 5;
     MAX_PROFILES = 1e3;
     profiles = /* @__PURE__ */ new Map();
@@ -6326,7 +6951,7 @@ __export(chain_engine_exports, {
   getExecution: () => getExecution,
   listExecutions: () => listExecutions
 });
-import { v4 as uuid6 } from "uuid";
+import { v4 as uuid7 } from "uuid";
 function persistExecution(exec) {
   executions.set(exec.execution_id, exec);
   const redis2 = getRedis();
@@ -6344,7 +6969,7 @@ function listExecutions() {
   return Array.from(executions.values()).sort((a, b) => b.started_at.localeCompare(a.started_at)).slice(0, 50);
 }
 async function executeStep(step, previousOutput) {
-  const stepId = step.id ?? uuid6().slice(0, 8);
+  const stepId = step.id ?? uuid7().slice(0, 8);
   const t0 = Date.now();
   const prevStr = typeof previousOutput === "string" ? previousOutput : JSON.stringify(previousOutput ?? "");
   try {
@@ -6379,7 +7004,7 @@ async function executeStep(step, previousOutput) {
         output = result;
       } else if (backendToolName === step.tool_name) {
         const result = await executeToolUnified(step.tool_name, args, {
-          call_id: uuid6(),
+          call_id: uuid7(),
           fold: false
         });
         if (result.error) {
@@ -6391,7 +7016,7 @@ async function executeStep(step, previousOutput) {
         const result = await callMcpTool({
           toolName: firstTool,
           args,
-          callId: uuid6(),
+          callId: uuid7(),
           timeoutMs: step.timeout_ms ?? toolDef?.timeoutMs ?? 3e4
         });
         if (result.status !== "success") {
@@ -6402,7 +7027,7 @@ async function executeStep(step, previousOutput) {
         const result = await callMcpTool({
           toolName: backendToolName,
           args,
-          callId: uuid6(),
+          callId: uuid7(),
           timeoutMs: step.timeout_ms ?? toolDef?.timeoutMs ?? 3e4
         });
         if (result.status !== "success") {
@@ -6429,12 +7054,14 @@ async function executeStep(step, previousOutput) {
       metrics: { latency_ms: successResult.duration_ms, quality_score: scoreToolOutput(output, step.tool_name ?? step.cognitive_action ?? "unknown", successResult.duration_ms) }
     }).catch(() => {
     });
+    const _qualityScore = scoreToolOutput(output, step.tool_name ?? step.cognitive_action ?? "unknown", successResult.duration_ms);
     updateCostProfile(step.agent_id, step.tool_name ?? step.cognitive_action ?? "unknown", {
       latency_ms: successResult.duration_ms,
-      quality_score: scoreToolOutput(output, step.tool_name ?? step.cognitive_action ?? "unknown", successResult.duration_ms),
+      quality_score: _qualityScore,
       cost_usd: 0
     }).catch(() => {
     });
+    depositFeedbackPheromone(step.tool_name ?? step.cognitive_action ?? "unknown", step.agent_id, _qualityScore, successResult.duration_ms);
     recordToolCall(step.tool_name ?? step.cognitive_action ?? "chain-step");
     return successResult;
   } catch (err) {
@@ -6458,7 +7085,7 @@ async function executeStep(step, previousOutput) {
             strategy: "error-pattern-extraction",
             target_length: 300
           },
-          callId: uuid6(),
+          callId: uuid7(),
           timeoutMs: 5e3
         });
         if (folded.status === "success") {
@@ -6587,7 +7214,7 @@ async function loadFunnelState(executionId) {
   }
 }
 async function runFunnel(steps, entryStage = "signal", preloadedContext, executionId) {
-  const execId = executionId ?? uuid6();
+  const execId = executionId ?? uuid7();
   const entryIndex = FUNNEL_STAGES.indexOf(entryStage);
   let state4 = await loadFunnelState(execId);
   if (!state4) {
@@ -6699,8 +7326,8 @@ async function resolveAutoSteps(def) {
   return { steps: resolvedSteps, routingDecisions, workflowEnvelope };
 }
 async function executeChain(def) {
-  const executionId = uuid6();
-  const chainId = def.chain_id ?? uuid6().slice(0, 12);
+  const executionId = uuid7();
+  const chainId = def.chain_id ?? uuid7().slice(0, 12);
   const t0 = Date.now();
   const currentDepth = def.recursion_depth ?? 0;
   const depthCheck = enforceMaxRecursionDepth(currentDepth);
@@ -6855,6 +7482,7 @@ var init_chain_engine = __esm({
     init_redis();
     init_routing_engine();
     init_quality_scorer();
+    init_pheromone_layer();
     init_peer_eval();
     init_adoption_telemetry();
     init_failure_harvester();
@@ -6883,7 +7511,7 @@ var init_chain_engine = __esm({
 });
 
 // src/chain/verification-gate.ts
-import { v4 as uuid7 } from "uuid";
+import { v4 as uuid8 } from "uuid";
 async function verifyChainOutput(chainOutput, config2) {
   const maxRetries = config2.max_retries ?? 3;
   const start = Date.now();
@@ -6929,7 +7557,7 @@ async function runChecksParallel(checks, chainOutput) {
         const result = await callMcpTool({
           toolName: check.tool_name,
           args,
-          callId: `verify-${uuid7().substring(0, 8)}`,
+          callId: `verify-${uuid8().substring(0, 8)}`,
           timeoutMs: 15e3
         });
         let passed = true;
@@ -7204,7 +7832,7 @@ __export(hyperagent_exports, {
   rejectPlan: () => rejectPlan,
   validateWebhookSignature: () => validateWebhookSignature
 });
-import { v4 as uuid8 } from "uuid";
+import { v4 as uuid9 } from "uuid";
 import * as crypto2 from "crypto";
 function onPlanEvent(fn) {
   planEventSubscribers.add(fn);
@@ -7305,7 +7933,7 @@ async function createPlan(goal, sessionId, profileId = "read_only", opts) {
     logger.info({ sessionId, requested: profileId }, "HyperAgent: auto-downgraded to read_only due to consecutive failures");
   }
   const profile = POLICY_PROFILES[effectiveProfileId] ?? POLICY_PROFILES.read_only;
-  const planId = `hyp-${uuid8().slice(0, 12)}`;
+  const planId = `hyp-${uuid9().slice(0, 12)}`;
   let steps = [];
   try {
     const cogResult = await callCognitiveRaw("plan", {
@@ -8089,18 +8717,18 @@ __export(document_intelligence_exports, {
   batchIngest: () => batchIngest,
   ingestDocument: () => ingestDocument
 });
-import { v4 as uuid9 } from "uuid";
+import { v4 as uuid10 } from "uuid";
 async function persistResult(result) {
   const redis2 = getRedis();
   if (!redis2) return;
   try {
-    await redis2.set(`${REDIS_PREFIX2}${result.$id}`, JSON.stringify(result), "EX", 604800);
+    await redis2.set(`${REDIS_PREFIX3}${result.$id}`, JSON.stringify(result), "EX", 604800);
   } catch {
   }
 }
 async function ingestDocument(req) {
   const t0 = Date.now();
-  const ingestionId = `widgetdc:ingestion:${uuid9()}`;
+  const ingestionId = `widgetdc:ingestion:${uuid10()}`;
   logger.info({
     id: ingestionId,
     filename: req.filename,
@@ -8168,7 +8796,7 @@ async function ingestDocument(req) {
             source: req.source_url ?? req.filename,
             domain: req.domain ?? "general"
           },
-          callId: uuid9(),
+          callId: uuid10(),
           timeoutMs: 2e4
         });
       } catch {
@@ -8244,7 +8872,7 @@ async function tryMercuryExtract(prompt) {
     const result = await callMcpTool({
       toolName: "llm.generate",
       args: { prompt },
-      callId: uuid9(),
+      callId: uuid10(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return null;
@@ -8310,7 +8938,7 @@ MERGE (n)-[:EXTRACTED_FROM]->(d)`,
             filename: req.filename
           }
         },
-        callId: uuid9(),
+        callId: uuid10(),
         timeoutMs: 1e4
       });
       merged++;
@@ -8327,7 +8955,7 @@ MERGE (n)-[:EXTRACTED_FROM]->(d)`,
 MERGE (a)-[:${rel.type.replace(/[^A-Z_]/g, "_")}]->(b)`,
           params: { from: rel.from, to: rel.to }
         },
-        callId: uuid9(),
+        callId: uuid10(),
         timeoutMs: 5e3
       });
     } catch {
@@ -8347,7 +8975,7 @@ async function batchIngest(documents) {
   }
   return results;
 }
-var REDIS_PREFIX2;
+var REDIS_PREFIX3;
 var init_document_intelligence = __esm({
   "src/engagement/document-intelligence.ts"() {
     "use strict";
@@ -8356,7 +8984,7 @@ var init_document_intelligence = __esm({
     init_llm_proxy();
     init_logger();
     init_redis();
-    REDIS_PREFIX2 = "orchestrator:ingestion:";
+    REDIS_PREFIX3 = "orchestrator:ingestion:";
   }
 });
 
@@ -8457,7 +9085,7 @@ var graph_hygiene_cron_exports = {};
 __export(graph_hygiene_cron_exports, {
   runGraphHygiene: () => runGraphHygiene
 });
-import { v4 as uuid10 } from "uuid";
+import { v4 as uuid11 } from "uuid";
 function neo4jInt(val) {
   if (typeof val === "number") return val;
   if (val && typeof val === "object" && "low" in val) return val.low;
@@ -8467,7 +9095,7 @@ async function queryMetric(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid10(),
+    callId: uuid11(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -8578,7 +9206,7 @@ SET s.orphan_ratio = $orphan_ratio,
         _force: true
         // Infrastructure write — bypass validation
       },
-      callId: uuid10(),
+      callId: uuid11(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -8591,7 +9219,7 @@ SET s.orphan_ratio = $orphan_ratio,
         query: `MATCH (s:GraphHealthSnapshot) WHERE s.timestamp < datetime() - duration('P90D') DETACH DELETE s`,
         _force: true
       },
-      callId: uuid10(),
+      callId: uuid11(),
       timeoutMs: 1e4
     });
   } catch {
@@ -8638,7 +9266,7 @@ __export(similarity_engine_exports, {
   findSimilarClients: () => findSimilarClients,
   getClientDetails: () => getClientDetails
 });
-import { v4 as uuid11 } from "uuid";
+import { v4 as uuid12 } from "uuid";
 async function findSimilarClients(req) {
   const t0 = Date.now();
   const maxResults = Math.min(Math.max(req.max_results ?? 5, 1), 20);
@@ -8687,7 +9315,7 @@ RETURN n.id AS id, labels(n) AS labels, coalesce(n.name, n.title) AS name
 LIMIT 1`,
         params: { q: query }
       },
-      callId: uuid11(),
+      callId: uuid12(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -8736,7 +9364,7 @@ RETURN other.id AS client_id,
     const result = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params: { sourceId: nodeId, relTypes } },
-      callId: uuid11(),
+      callId: uuid12(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return [];
@@ -8782,7 +9410,7 @@ async function computeSemanticSimilarity(query, maxResults) {
     const result = await callMcpTool({
       toolName: "srag.query",
       args: { query },
-      callId: uuid11(),
+      callId: uuid12(),
       timeoutMs: 2e4
     });
     if (result.status !== "success") return [];
@@ -8841,7 +9469,7 @@ RETURN n AS client,
        collect(DISTINCT {rel: type(r), target: coalesce(related.name, related.title), target_type: labels(related)[0]}) AS relationships`,
         params: { id: clientId }
       },
-      callId: uuid11(),
+      callId: uuid12(),
       timeoutMs: 1e4
     });
     if (result.status === "success") {
@@ -8874,12 +9502,12 @@ var init_similarity_engine = __esm({
 });
 
 // src/engagement/engagement-lineage.ts
-import { v4 as uuid12 } from "uuid";
+import { v4 as uuid13 } from "uuid";
 async function readRows(query, params) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query, params },
-    callId: uuid12(),
+    callId: uuid13(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -8925,7 +9553,7 @@ FOREACH (_ IN CASE WHEN $derivedFromPath IS NULL OR $derivedFromPath = '' THEN [
         },
         _force: true
       },
-      callId: uuid12(),
+      callId: uuid13(),
       timeoutMs: 15e3
     });
   } catch (err) {
@@ -8971,7 +9599,7 @@ FOREACH (_ IN CASE WHEN $sourceDeliverableId IS NULL OR $sourceDeliverableId = '
         },
         _force: true
       },
-      callId: uuid12(),
+      callId: uuid13(),
       timeoutMs: 15e3
     });
   } catch (err) {
@@ -9041,7 +9669,7 @@ __export(deliverable_engine_exports, {
   getDeliverable: () => getDeliverable,
   listDeliverables: () => listDeliverables
 });
-import { v4 as uuid13 } from "uuid";
+import { v4 as uuid14 } from "uuid";
 async function persist(d) {
   deliverableCache.set(d.$id, d);
   if (deliverableCache.size > CACHE_MAX_SIZE) {
@@ -9052,7 +9680,7 @@ async function persist(d) {
   const redis2 = getRedis();
   if (!redis2) return;
   try {
-    await redis2.set(`${REDIS_PREFIX3}${d.$id}`, JSON.stringify(d), "EX", TTL_SECONDS2);
+    await redis2.set(`${REDIS_PREFIX4}${d.$id}`, JSON.stringify(d), "EX", TTL_SECONDS2);
     await redis2.sadd(REDIS_INDEX2, d.$id);
   } catch {
   }
@@ -9062,7 +9690,7 @@ async function getDeliverable(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX3}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX4}${id}`);
     if (raw) {
       const d = JSON.parse(raw);
       deliverableCache.set(id, d);
@@ -9093,7 +9721,7 @@ async function generateDeliverable(req) {
   }
   activeGenerations++;
   const t0 = Date.now();
-  const deliverableId = `widgetdc:deliverable:${uuid13()}`;
+  const deliverableId = `widgetdc:deliverable:${uuid14()}`;
   const format = req.format ?? "markdown";
   const maxSections = Math.min(Math.max(req.max_sections ?? 5, 2), 8);
   const deliverable = {
@@ -9406,7 +10034,7 @@ async function renderPDF(deliverable) {
         content: deliverable.markdown,
         template: deliverable.type
       },
-      callId: uuid13(),
+      callId: uuid14(),
       timeoutMs: 45e3
     });
     if (result.status === "success" && result.result) {
@@ -9418,7 +10046,7 @@ async function renderPDF(deliverable) {
     deliverable.format = "markdown";
   }
 }
-var REDIS_PREFIX3, REDIS_INDEX2, TTL_SECONDS2, deliverableCache, CACHE_MAX_SIZE, activeGenerations, MAX_CONCURRENT, TYPE_PROMPTS;
+var REDIS_PREFIX4, REDIS_INDEX2, TTL_SECONDS2, deliverableCache, CACHE_MAX_SIZE, activeGenerations, MAX_CONCURRENT, TYPE_PROMPTS;
 var init_deliverable_engine = __esm({
   "src/engagement/deliverable-engine.ts"() {
     "use strict";
@@ -9428,7 +10056,7 @@ var init_deliverable_engine = __esm({
     init_redis();
     init_logger();
     init_engagement_lineage();
-    REDIS_PREFIX3 = "orchestrator:deliverable:";
+    REDIS_PREFIX4 = "orchestrator:deliverable:";
     REDIS_INDEX2 = "orchestrator:deliverables:index";
     TTL_SECONDS2 = 604800;
     deliverableCache = /* @__PURE__ */ new Map();
@@ -9610,7 +10238,7 @@ __export(osint_scanner_exports, {
   getOsintStatus: () => getOsintStatus,
   runOsintScan: () => runOsintScan
 });
-import { v4 as uuid14 } from "uuid";
+import { v4 as uuid15 } from "uuid";
 async function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -9635,7 +10263,7 @@ async function checkToolAvailability() {
     const result = await callMcpTool({
       toolName: "the_snout.domain_intel",
       args: { domain: "borger.dk", type: "basic" },
-      callId: uuid14(),
+      callId: uuid15(),
       timeoutMs: 1e4
     });
     return result.status === "success";
@@ -9652,7 +10280,7 @@ async function scanCTForDomain(domain, toolsAvailable) {
       const result = await callMcpTool({
         toolName: "the_snout.ct_transparency",
         args: { domain },
-        callId: uuid14(),
+        callId: uuid15(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (result.status === "success" && result.result) {
@@ -9667,7 +10295,7 @@ async function scanCTForDomain(domain, toolsAvailable) {
       const fallbackResult = await callMcpTool({
         toolName: "the_snout.domain_intel",
         args: { domain, type: "ct" },
-        callId: uuid14(),
+        callId: uuid15(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (fallbackResult.status === "success" && fallbackResult.result) {
@@ -9712,7 +10340,7 @@ async function scanDMARCForDomain(domain, toolsAvailable) {
       const result = await callMcpTool({
         toolName: "the_snout.domain_intel",
         args: { domain, type: "dmarc" },
-        callId: uuid14(),
+        callId: uuid15(),
         timeoutMs: DOMAIN_TIMEOUT_MS
       });
       if (result.status === "success" && result.result) {
@@ -9795,7 +10423,7 @@ async function ingestCTResults(ctResults) {
             },
             _force: true
           },
-          callId: uuid14(),
+          callId: uuid15(),
           timeoutMs: 15e3
         });
         if (result.status === "success") {
@@ -9858,7 +10486,7 @@ async function ingestDMARCResults(dmarcResults) {
             },
             _force: true
           },
-          callId: uuid14(),
+          callId: uuid15(),
           timeoutMs: 15e3
         });
         if (result.status === "success") {
@@ -9893,7 +10521,7 @@ async function persistScanResult(result) {
   }
 }
 async function runOsintScan(options) {
-  const scanId = uuid14();
+  const scanId = uuid15();
   const startedAt2 = (/* @__PURE__ */ new Date()).toISOString();
   const t0 = Date.now();
   const domains = options?.domains ?? [...DK_PUBLIC_DOMAINS];
@@ -10038,12 +10666,12 @@ __export(evolution_loop_exports, {
   getEvolutionStatus: () => getEvolutionStatus,
   runEvolutionLoop: () => runEvolutionLoop
 });
-import { v4 as uuid15 } from "uuid";
+import { v4 as uuid16 } from "uuid";
 async function persistCycle(cycle) {
   const redis2 = getRedis();
   if (!redis2) return;
   try {
-    await redis2.set(`${REDIS_PREFIX4}${cycle.cycle_id}`, JSON.stringify(cycle), "EX", REDIS_TTL);
+    await redis2.set(`${REDIS_PREFIX5}${cycle.cycle_id}`, JSON.stringify(cycle), "EX", REDIS_TTL);
     await redis2.lpush(REDIS_HISTORY_KEY, JSON.stringify(cycle));
     await redis2.ltrim(REDIS_HISTORY_KEY, 0, 19);
     await redis2.expire(REDIS_HISTORY_KEY, REDIS_TTL);
@@ -10087,7 +10715,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (n) RETURN labels(n)[0] AS label, count(*) AS count ORDER BY count DESC LIMIT 15"
       },
-      callId: uuid15(),
+      callId: uuid16(),
       timeoutMs: 1e4
     }),
     callMcpTool({
@@ -10095,7 +10723,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (f:FailureMemory) WHERE f.last_seen > datetime() - duration('P7D') RETURN f.category AS category, f.pattern AS pattern, f.hit_count AS hits ORDER BY f.hit_count DESC LIMIT 10"
       },
-      callId: uuid15(),
+      callId: uuid16(),
       timeoutMs: 1e4
     }),
     callMcpTool({
@@ -10103,7 +10731,7 @@ async function stageObserve(focusArea) {
       args: {
         query: "MATCH (l:Lesson) WHERE l.created_at > datetime() - duration('P7D') RETURN l.agent_id AS agent, l.lesson AS lesson, l.context AS context ORDER BY l.created_at DESC LIMIT 10"
       },
-      callId: uuid15(),
+      callId: uuid16(),
       timeoutMs: 1e4
     })
   ]);
@@ -10159,7 +10787,7 @@ async function stageOrient(observeResult, focusArea) {
         RETURN labels(b)[0] AS label, coalesce(b.name, b.title, b.id) AS name, b.status AS status, b.quality_score AS quality
         ORDER BY coalesce(b.quality_score, 0) ASC LIMIT 10`
     },
-    callId: uuid15(),
+    callId: uuid16(),
     timeoutMs: 1e4
   });
   const blocks = blocksResult.status === "success" ? Array.isArray(blocksResult.result) ? blocksResult.result : blocksResult.result?.results ?? [] : [];
@@ -10287,7 +10915,7 @@ async function stageLearn(cycleId, observeResult, orientResult, actResult) {
         verification: "Read-back via MATCH (e:EvolutionEvent {cycle_id: $cycle_id}) RETURN e",
         test_results: `pass_rate=${actResult.executed > 0 ? (actResult.passed / actResult.executed).toFixed(2) : "0"} confidence=${observeResult.confidence}`
       },
-      callId: uuid15(),
+      callId: uuid16(),
       timeoutMs: 15e3
     });
     if (writeResult.status === "success") {
@@ -10323,7 +10951,7 @@ async function stageLearn(cycleId, observeResult, orientResult, actResult) {
           verification: "Read-back via MATCH (l:Lesson {source_id: $source_id}) RETURN l",
           test_results: `passed=${actResult.passed} failed=${actResult.failed} cycle=${cycleId}`
         },
-        callId: uuid15(),
+        callId: uuid16(),
         timeoutMs: 1e4
       });
       if (lessonResult.status === "success") {
@@ -10340,7 +10968,7 @@ async function runEvolutionLoop(opts) {
     throw new Error("Evolution loop already running. Only 1 concurrent cycle allowed.");
   }
   isRunning = true;
-  const cycleId = uuid15();
+  const cycleId = uuid16();
   const startedAt2 = (/* @__PURE__ */ new Date()).toISOString();
   const t0 = Date.now();
   const focusArea = opts?.focus_area?.slice(0, 200);
@@ -10472,7 +11100,7 @@ async function getEvolutionHistory(limit = 10) {
     return lastCycle ? [lastCycle] : [];
   }
 }
-var isRunning, currentStage, lastCycle, totalCycles, STAGE_TIMEOUT_MS, TOTAL_TIMEOUT_MS, REDIS_PREFIX4, REDIS_HISTORY_KEY, REDIS_TTL;
+var isRunning, currentStage, lastCycle, totalCycles, STAGE_TIMEOUT_MS, TOTAL_TIMEOUT_MS, REDIS_PREFIX5, REDIS_HISTORY_KEY, REDIS_TTL;
 var init_evolution_loop = __esm({
   "src/intelligence/evolution-loop.ts"() {
     "use strict";
@@ -10487,7 +11115,7 @@ var init_evolution_loop = __esm({
     totalCycles = 0;
     STAGE_TIMEOUT_MS = 5 * 60 * 1e3;
     TOTAL_TIMEOUT_MS = 20 * 60 * 1e3;
-    REDIS_PREFIX4 = "orchestrator:evolution:";
+    REDIS_PREFIX5 = "orchestrator:evolution:";
     REDIS_HISTORY_KEY = "orchestrator:evolution:history";
     REDIS_TTL = 7 * 86400;
   }
@@ -18810,7 +19438,7 @@ var moa_router_exports = {};
 __export(moa_router_exports, {
   routeMoA: () => routeMoA
 });
-import { v4 as uuid16 } from "uuid";
+import { v4 as uuid17 } from "uuid";
 async function classifyQuery2(query, provider) {
   try {
     const result = await chatLLM({
@@ -18857,7 +19485,7 @@ function selectAgents(domains, maxAgents) {
 }
 async function dispatchAgents(query, agents) {
   const chainDef = {
-    name: `moa-${uuid16().slice(0, 8)}`,
+    name: `moa-${uuid17().slice(0, 8)}`,
     mode: "parallel",
     steps: agents.map((a) => ({
       agent_id: a.agent_id,
@@ -18912,7 +19540,7 @@ async function routeMoA(request) {
   const t0 = Date.now();
   const provider = request.provider ?? "deepseek";
   const maxAgents = request.max_agents ?? 3;
-  const taskId = `moa-${uuid16()}`;
+  const taskId = `moa-${uuid17()}`;
   const board = createBlackboard(taskId);
   const classification = await classifyQuery2(request.query, provider);
   await board.write("observations", {
@@ -19170,7 +19798,7 @@ __export(skill_forge_exports, {
   loadForgedTools: () => loadForgedTools,
   verifyForgedTool: () => verifyForgedTool
 });
-import { v4 as uuid17 } from "uuid";
+import { v4 as uuid18 } from "uuid";
 function getForgedTools() {
   return [...FORGED_TOOLS.values()];
 }
@@ -19257,7 +19885,7 @@ Handler type: ${handlerType}` }
   }
   const namespace = name.split("_")[0] || "custom";
   const spec2 = {
-    id: uuid17(),
+    id: uuid18(),
     name,
     namespace,
     description,
@@ -19272,7 +19900,7 @@ Handler type: ${handlerType}` }
   const redis2 = getRedis();
   if (redis2) {
     try {
-      await redis2.set(`${REDIS_PREFIX5}${name}`, JSON.stringify(spec2), "EX", 86400 * 30);
+      await redis2.set(`${REDIS_PREFIX6}${name}`, JSON.stringify(spec2), "EX", 86400 * 30);
     } catch {
     }
   }
@@ -19293,7 +19921,7 @@ async function verifyForgedTool(name) {
       const result = await callMcpTool({
         toolName: spec2.handler_config.backend_tool,
         args: {},
-        callId: uuid17(),
+        callId: uuid18(),
         timeoutMs: 1e4
       });
       testResult = result.status === "success" ? "Backend tool reachable" : `Backend error: ${result.error_message}`;
@@ -19302,7 +19930,7 @@ async function verifyForgedTool(name) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: "RETURN 1 AS test" },
-        callId: uuid17(),
+        callId: uuid18(),
         timeoutMs: 5e3
       });
       testResult = result.status === "success" ? "Cypher engine reachable" : `Cypher error: ${result.error_message}`;
@@ -19315,7 +19943,7 @@ async function verifyForgedTool(name) {
     const redis2 = getRedis();
     if (redis2) {
       try {
-        await redis2.set(`${REDIS_PREFIX5}${name}`, JSON.stringify(spec2), "EX", 86400 * 30);
+        await redis2.set(`${REDIS_PREFIX6}${name}`, JSON.stringify(spec2), "EX", 86400 * 30);
       } catch {
       }
     }
@@ -19334,7 +19962,7 @@ async function executeForgedTool(name, args) {
         const result = await callMcpTool({
           toolName: spec2.handler_config.backend_tool,
           args,
-          callId: uuid17(),
+          callId: uuid18(),
           timeoutMs: 3e4
         });
         return result.status === "success" ? JSON.stringify(result.result, null, 2).slice(0, 1e3) : `Error: ${result.error_message}`;
@@ -19344,7 +19972,7 @@ async function executeForgedTool(name, args) {
         const result = await callMcpTool({
           toolName: "graph.read_cypher",
           args: { query: spec2.handler_config.cypher_template, params: args },
-          callId: uuid17(),
+          callId: uuid18(),
           timeoutMs: 15e3
         });
         return result.status === "success" ? JSON.stringify(result.result, null, 2).slice(0, 1e3) : `Error: ${result.error_message}`;
@@ -19373,7 +20001,7 @@ async function loadForgedTools() {
   const redis2 = getRedis();
   if (!redis2) return 0;
   try {
-    const keys = await redis2.keys(`${REDIS_PREFIX5}*`);
+    const keys = await redis2.keys(`${REDIS_PREFIX6}*`);
     let loaded = 0;
     for (const key of keys) {
       const raw = await redis2.get(key);
@@ -19389,7 +20017,7 @@ async function loadForgedTools() {
     return 0;
   }
 }
-var FORGED_TOOLS, REDIS_PREFIX5;
+var FORGED_TOOLS, REDIS_PREFIX6;
 var init_skill_forge = __esm({
   "src/llm/skill-forge.ts"() {
     "use strict";
@@ -19398,7 +20026,7 @@ var init_skill_forge = __esm({
     init_redis();
     init_logger();
     FORGED_TOOLS = /* @__PURE__ */ new Map();
-    REDIS_PREFIX5 = "forge:";
+    REDIS_PREFIX6 = "forge:";
   }
 });
 
@@ -19415,13 +20043,13 @@ __export(engagement_engine_exports, {
   matchPrecedents: () => matchPrecedents,
   recordOutcome: () => recordOutcome
 });
-import { v4 as uuid18 } from "uuid";
+import { v4 as uuid19 } from "uuid";
 async function saveEngagement(e) {
   engagementCache.set(e.$id, e);
   const redis2 = getRedis();
   if (redis2) {
     try {
-      await redis2.set(`${REDIS_PREFIX6}${e.$id}`, JSON.stringify(e), "EX", TTL_SECONDS4);
+      await redis2.set(`${REDIS_PREFIX7}${e.$id}`, JSON.stringify(e), "EX", TTL_SECONDS4);
       await redis2.zadd(REDIS_INDEX3, Date.now(), e.$id);
     } catch (err) {
       logger.warn({ error: String(err) }, "Engagement: Redis save failed");
@@ -19434,7 +20062,7 @@ async function getEngagement(id) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX6}${id}`);
+    const raw = await redis2.get(`${REDIS_PREFIX7}${id}`);
     if (!raw) return null;
     const e = JSON.parse(raw);
     engagementCache.set(id, e);
@@ -19492,7 +20120,7 @@ MERGE (eng)-[:USES_METHODOLOGY]->(m)`,
         },
         _force: true
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -19528,7 +20156,7 @@ SET eng.status = 'completed'`,
         },
         _force: true
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -19551,7 +20179,7 @@ async function indexEngagementForPrecedent(e) {
         orgId: "default",
         _force: true
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 15e3
     });
   } catch (err) {
@@ -19561,7 +20189,7 @@ async function indexEngagementForPrecedent(e) {
 async function createEngagement(req) {
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const e = {
-    $id: `eng-${uuid18()}`,
+    $id: `eng-${uuid19()}`,
     $schema: "https://widgetdc.io/schemas/engagement/v1",
     client: req.client.slice(0, 120),
     domain: req.domain.slice(0, 60),
@@ -19641,7 +20269,7 @@ ORDER BY
 LIMIT ${Math.floor(limit)}`,
         params: { domain: req.domain }
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return [];
@@ -19690,7 +20318,7 @@ async function queryKgRag(query, maxEvidence = 10) {
     const result = await callMcpTool({
       toolName: "kg_rag.query",
       args: { question: query, max_evidence: maxEvidence },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 45e3
     });
     if (result.status !== "success") return { answer: "", sources: [] };
@@ -19719,7 +20347,7 @@ async function foldContext(text, query, maxTokens = 1500) {
         max_tokens: maxTokens,
         domain: "consulting"
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 2e4
     });
     if (result.status !== "success") return null;
@@ -19754,7 +20382,7 @@ async function proposeViaConsensus(engagementId, req, planSummary) {
           budget_dkk: req.budget_dkk ?? 0
         }
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 15e3
     });
     if (result.status !== "success") return { proposalId: null, quorum: 0 };
@@ -19780,7 +20408,7 @@ async function voteOnConsensus(proposalId, decision, confidence, reasoning) {
         confidence: Math.min(1, Math.max(0, confidence)),
         reasoning: reasoning.slice(0, 500)
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 1e4
     });
     if (result.status !== "success") return false;
@@ -19801,7 +20429,7 @@ async function planViaRlmMission(engagementId, req, maxSteps = 3) {
         maxSteps,
         maxDepth: 2
       },
-      callId: uuid18(),
+      callId: uuid19(),
       timeoutMs: 2e4
     });
     if (startResult.status !== "success") return { missionId: null, insights: [], stepsExecuted: 0 };
@@ -19815,7 +20443,7 @@ async function planViaRlmMission(engagementId, req, maxSteps = 3) {
       const stepResult = await callMcpTool({
         toolName: "rlm.execute_step",
         args: { missionId },
-        callId: uuid18(),
+        callId: uuid19(),
         timeoutMs: 6e4
       });
       if (stepResult.status !== "success") break;
@@ -19893,7 +20521,7 @@ async function enforceConsensusGate(engagementId, req) {
 }
 async function generatePlan(req) {
   const t0 = Date.now();
-  const engagementId = req.engagement_id ?? `eng-${uuid18()}`;
+  const engagementId = req.engagement_id ?? `eng-${uuid19()}`;
   enforceInputSanityGate(req);
   const highStakes = isHighStakesPlan(req);
   const complex = req.duration_weeks > GATE_DURATION_WEEKS;
@@ -20075,7 +20703,7 @@ Return ONLY JSON matching the schema, no prose.`;
       const r = await callMcpTool({
         toolName: "llm.generate",
         args: { prompt: mercuryPrompt },
-        callId: uuid18(),
+        callId: uuid19(),
         timeoutMs: 3e4
       });
       if (r.status === "success") {
@@ -20208,7 +20836,7 @@ async function recordOutcome(req) {
   const redis2 = getRedis();
   if (redis2) {
     try {
-      await redis2.set(`${REDIS_PREFIX6}outcome:${req.engagement_id}`, JSON.stringify(outcome), "EX", TTL_SECONDS4);
+      await redis2.set(`${REDIS_PREFIX7}outcome:${req.engagement_id}`, JSON.stringify(outcome), "EX", TTL_SECONDS4);
     } catch {
     }
   }
@@ -20243,7 +20871,7 @@ async function getOutcome(engagementId) {
   const redis2 = getRedis();
   if (!redis2) return null;
   try {
-    const raw = await redis2.get(`${REDIS_PREFIX6}outcome:${engagementId}`);
+    const raw = await redis2.get(`${REDIS_PREFIX7}outcome:${engagementId}`);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -20259,7 +20887,7 @@ async function getPlan2(engagementId) {
     return null;
   }
 }
-var REDIS_PREFIX6, REDIS_INDEX3, REDIS_PLAN_PREFIX, TTL_SECONDS4, engagementCache, STALE_PRECEDENT_DAYS, GATE_BUDGET_DKK, GATE_TEAM_SIZE, GATE_DURATION_WEEKS, GATE_REQUIRE_CONSENSUS, GATE_CONSENSUS_TIMEOUT_MS, GATE_MAX_BUDGET_DKK, GATE_MAX_TEAM_SIZE, GATE_MAX_DURATION_WEEKS, GATE_MIN_OBJECTIVE_LEN, PlanGateRejection;
+var REDIS_PREFIX7, REDIS_INDEX3, REDIS_PLAN_PREFIX, TTL_SECONDS4, engagementCache, STALE_PRECEDENT_DAYS, GATE_BUDGET_DKK, GATE_TEAM_SIZE, GATE_DURATION_WEEKS, GATE_REQUIRE_CONSENSUS, GATE_CONSENSUS_TIMEOUT_MS, GATE_MAX_BUDGET_DKK, GATE_MAX_TEAM_SIZE, GATE_MAX_DURATION_WEEKS, GATE_MIN_OBJECTIVE_LEN, PlanGateRejection;
 var init_engagement_engine = __esm({
   "src/engagement/engagement-engine.ts"() {
     "use strict";
@@ -20269,7 +20897,7 @@ var init_engagement_engine = __esm({
     init_redis();
     init_logger();
     init_adaptive_rag();
-    REDIS_PREFIX6 = "orchestrator:engagement:";
+    REDIS_PREFIX7 = "orchestrator:engagement:";
     REDIS_INDEX3 = "orchestrator:engagements:index";
     REDIS_PLAN_PREFIX = "orchestrator:engagement:plan:";
     TTL_SECONDS4 = 60 * 60 * 24 * 30;
@@ -20308,7 +20936,7 @@ __export(working_memory_exports, {
   retrieveMemory: () => retrieveMemory,
   storeMemory: () => storeMemory
 });
-async function storeMemory(agentId, key, value, ttlSeconds = DEFAULT_TTL) {
+async function storeMemory(agentId, key, value, ttlSeconds = DEFAULT_TTL2) {
   const redis2 = getRedis();
   const redisKey = `${PREFIX}${agentId}:${key}`;
   const entry = {
@@ -20373,14 +21001,14 @@ async function clearAgentMemory(agentId) {
     return 0;
   }
 }
-var PREFIX, DEFAULT_TTL;
+var PREFIX, DEFAULT_TTL2;
 var init_working_memory = __esm({
   "src/memory/working-memory.ts"() {
     "use strict";
     init_redis();
     init_logger();
     PREFIX = "wm:";
-    DEFAULT_TTL = 86400;
+    DEFAULT_TTL2 = 86400;
   }
 });
 
@@ -22792,550 +23420,6 @@ var init_multi_agent_pr_reviewer = __esm({
       readability: "Review for code readability: naming, comments, function length, complexity, consistency, idiomatic patterns.",
       architecture: "Review for architectural concerns: coupling, cohesion, layering violations, dependency direction, design patterns.",
       testing: "Review for test coverage: unit tests, edge cases, error paths, integration tests, mock quality, assertions."
-    };
-  }
-});
-
-// src/swarm/pheromone-layer.ts
-var pheromone_layer_exports = {};
-__export(pheromone_layer_exports, {
-  amplify: () => amplify,
-  deposit: () => deposit,
-  getHeatmap: () => getHeatmap,
-  getPheromoneState: () => getPheromoneState,
-  getTrailSummary: () => getTrailSummary,
-  initPheromoneLayer: () => initPheromoneLayer,
-  onAnomaly: () => onAnomaly,
-  onChainStepFailure: () => onChainStepFailure,
-  onChainStepSuccess: () => onChainStepSuccess,
-  onExternalSignal: () => onExternalSignal,
-  onInventorTrial: () => onInventorTrial,
-  persistToGraph: () => persistToGraph2,
-  reinforce: () => reinforce,
-  runDecayCycle: () => runDecayCycle,
-  runPheromoneCron: () => runPheromoneCron,
-  sense: () => sense
-});
-import { v4 as uuid19 } from "uuid";
-function adaptiveDecayFactor(p) {
-  const now = Date.now();
-  const depositedMs = new Date(p.depositedAt).getTime();
-  const ageCycles = (now - depositedMs) / CYCLE_MS;
-  const quality = p.quality_score ?? 0.5;
-  let baseFactor;
-  switch (p.type) {
-    case "attraction":
-      baseFactor = quality > 0.7 ? 0.95 : quality < 0.4 ? 0.65 : 0.85;
-      break;
-    case "repellent":
-      baseFactor = 0.88;
-      break;
-    case "trail": {
-      const reinfluence = Math.min(p.reinforcements / 10, 1);
-      baseFactor = 0.8 + 0.15 * reinfluence;
-      break;
-    }
-    case "external":
-      baseFactor = 0.6;
-      break;
-    case "amplification":
-      baseFactor = 0.98;
-      break;
-    default:
-      baseFactor = 0.85;
-  }
-  const agePenalty = p.type !== "amplification" && ageCycles > 5 ? Math.min((ageCycles - 5) * 5e-3, 0.1) : 0;
-  return Math.round(Math.max(0.5, Math.min(0.99, baseFactor - agePenalty)) * 1e3) / 1e3;
-}
-function adaptiveReinforcementTTLBonus(p) {
-  const quality = p.quality_score ?? 0.5;
-  switch (p.type) {
-    case "attraction":
-      return (quality > 0.7 ? 1200 : 600) * 1e3;
-    case "repellent":
-      return 300 * 1e3;
-    case "trail":
-      return (900 + p.reinforcements * 60) * 1e3;
-    case "external":
-      return 150 * 1e3;
-    case "amplification":
-      return 1800 * 1e3;
-    default:
-      return 600 * 1e3;
-  }
-}
-async function deposit(agentId, type, domain, strength, label, metrics2 = {}, tags = [], ttlSeconds = DEFAULT_TTL2) {
-  const pheromone = {
-    id: `ph-${uuid19().slice(0, 12)}`,
-    type,
-    agentId,
-    domain,
-    strength: Math.max(0, Math.min(1, strength)),
-    label,
-    metrics: metrics2,
-    tags: [...tags, type, domain],
-    depositedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    ttlSeconds,
-    reinforcements: 0
-  };
-  const redis2 = getRedis();
-  if (redis2) {
-    const key = `${REDIS_PREFIX7}${pheromone.id}`;
-    await redis2.set(key, JSON.stringify(pheromone), "EX", ttlSeconds);
-    await redis2.zadd(REDIS_INDEX_KEY, pheromone.strength, pheromone.id);
-    await redis2.zadd(`${REDIS_PREFIX7}domain:${domain}`, pheromone.strength, pheromone.id);
-    await redis2.zadd(`${REDIS_PREFIX7}type:${type}`, pheromone.strength, pheromone.id);
-  }
-  state.totalDeposits++;
-  state.activePheromones++;
-  if (type !== "amplification") {
-    tryActiveAmplification(domain).catch(() => {
-    });
-  }
-  broadcastSSE("pheromone", {
-    event: "deposit",
-    pheromone: { id: pheromone.id, type, domain, strength: pheromone.strength, agentId }
-  });
-  logger.debug(
-    { id: pheromone.id, type, domain, strength: pheromone.strength, agentId },
-    "Pheromone deposited"
-  );
-  return pheromone;
-}
-async function sense(query) {
-  const redis2 = getRedis();
-  if (!redis2) return [];
-  const limit = query.limit ?? 20;
-  const minStrength = query.minStrength ?? 0.1;
-  let candidateIds;
-  if (query.domain) {
-    candidateIds = await redis2.zrevrangebyscore(
-      `${REDIS_PREFIX7}domain:${query.domain}`,
-      "+inf",
-      String(minStrength),
-      "LIMIT",
-      "0",
-      String(limit * 2)
-    );
-  } else if (query.type) {
-    candidateIds = await redis2.zrevrangebyscore(
-      `${REDIS_PREFIX7}type:${query.type}`,
-      "+inf",
-      String(minStrength),
-      "LIMIT",
-      "0",
-      String(limit * 2)
-    );
-  } else {
-    candidateIds = await redis2.zrevrangebyscore(
-      REDIS_INDEX_KEY,
-      "+inf",
-      String(minStrength),
-      "LIMIT",
-      "0",
-      String(limit * 2)
-    );
-  }
-  if (candidateIds.length === 0) return [];
-  const pipeline = redis2.pipeline();
-  for (const id of candidateIds) {
-    pipeline.get(`${REDIS_PREFIX7}${id}`);
-  }
-  const results = await pipeline.exec();
-  if (!results) return [];
-  const pheromones = [];
-  for (const [err, raw] of results) {
-    if (err || !raw) continue;
-    try {
-      const p = JSON.parse(raw);
-      if (query.tags && query.tags.length > 0) {
-        if (!query.tags.some((t) => p.tags.includes(t))) continue;
-      }
-      if (query.type && !query.domain && p.type !== query.type) continue;
-      pheromones.push(p);
-    } catch {
-    }
-  }
-  return pheromones.slice(0, limit);
-}
-async function reinforce(pheromoneId, boostFactor = 0.2) {
-  const redis2 = getRedis();
-  if (!redis2) return false;
-  const key = `${REDIS_PREFIX7}${pheromoneId}`;
-  const raw = await redis2.get(key);
-  if (!raw) return false;
-  try {
-    const p = JSON.parse(raw);
-    p.strength = Math.min(1, p.strength + boostFactor);
-    p.reinforcements++;
-    const bonusMs = adaptiveReinforcementTTLBonus(p);
-    const newTtl = Math.min(p.ttlSeconds + bonusMs / 1e3, 86400);
-    p.ttlSeconds = newTtl;
-    await redis2.set(key, JSON.stringify(p), "EX", Math.round(newTtl));
-    await redis2.zadd(REDIS_INDEX_KEY, p.strength, pheromoneId);
-    if (p.type === "trail" || p.type === "attraction") {
-      await redis2.zadd(`${REDIS_PREFIX7}domain:${p.domain}`, p.strength, pheromoneId);
-    }
-    state.totalAmplifications++;
-    return true;
-  } catch {
-    return false;
-  }
-}
-async function runDecayCycle() {
-  const redis2 = getRedis();
-  if (!redis2) return { decayed: 0, evaporated: 0 };
-  const LOCK_KEY = `${REDIS_PREFIX7}decay-lock`;
-  const locked = await redis2.set(LOCK_KEY, "1", "EX", 60, "NX");
-  if (!locked) return { decayed: 0, evaporated: 0 };
-  try {
-    const allIds = await redis2.zrangebyscore(REDIS_INDEX_KEY, "0", "+inf");
-    let decayed = 0;
-    let evaporated = 0;
-    for (const id of allIds) {
-      const key = `${REDIS_PREFIX7}${id}`;
-      const raw = await redis2.get(key);
-      if (!raw) {
-        await redis2.zrem(REDIS_INDEX_KEY, id);
-        evaporated++;
-        continue;
-      }
-      try {
-        const p = JSON.parse(raw);
-        p.strength *= adaptiveDecayFactor(p);
-        if (p.strength < 0.05) {
-          await redis2.del(key);
-          await redis2.zrem(REDIS_INDEX_KEY, id);
-          await redis2.zrem(`${REDIS_PREFIX7}domain:${p.domain}`, id);
-          await redis2.zrem(`${REDIS_PREFIX7}type:${p.type}`, id);
-          evaporated++;
-        } else {
-          await redis2.set(key, JSON.stringify(p), "KEEPTTL");
-          await redis2.zadd(REDIS_INDEX_KEY, p.strength, id);
-          decayed++;
-        }
-      } catch {
-        await redis2.zrem(REDIS_INDEX_KEY, id);
-        evaporated++;
-      }
-    }
-    state.totalDecays++;
-    state.activePheromones = Math.max(0, state.activePheromones - evaporated);
-    state.lastDecayAt = (/* @__PURE__ */ new Date()).toISOString();
-    logger.info({ decayed, evaporated, remaining: state.activePheromones }, "Pheromone decay cycle");
-    return { decayed, evaporated };
-  } finally {
-    await redis2.del(LOCK_KEY).catch(() => {
-    });
-  }
-}
-async function amplify(domain, contributingPheromones, label) {
-  if (contributingPheromones.length < 2) return null;
-  const strengths = contributingPheromones.map((p) => p.strength);
-  const geoMean = Math.pow(strengths.reduce((a, b) => a * b, 1), 1 / strengths.length);
-  const compoundStrength = Math.min(1, geoMean * AMPLIFICATION_MULTIPLIER);
-  const allTags = [...new Set(contributingPheromones.flatMap((p) => p.tags))];
-  const allMetrics = {};
-  for (const p of contributingPheromones) {
-    for (const [k, v] of Object.entries(p.metrics)) {
-      allMetrics[`${p.type}_${k}`] = v;
-    }
-  }
-  allMetrics.contributing_count = contributingPheromones.length;
-  allMetrics.compound_strength = compoundStrength;
-  const amplified = await deposit(
-    "flywheel-coordinator",
-    "amplification",
-    domain,
-    compoundStrength,
-    label,
-    allMetrics,
-    [...allTags, "cross-pillar", "compound"],
-    7200
-    // 2h TTL for compound signals
-  );
-  for (const p of contributingPheromones) {
-    await reinforce(p.id, 0.1);
-  }
-  return amplified;
-}
-async function tryActiveAmplification(domain) {
-  const existing = await sense({ domain, limit: 20, minStrength: 0.3 });
-  const types = new Set(existing.map((p) => p.type));
-  if (types.size >= 2 && !types.has("amplification")) {
-    const byType = /* @__PURE__ */ new Map();
-    for (const p of existing) {
-      const current = byType.get(p.type);
-      if (!current || p.strength > current.strength) byType.set(p.type, p);
-    }
-    const contributors = [...byType.values()];
-    if (contributors.length >= 2) {
-      await amplify(domain, contributors, `Cross-pillar: ${[...types].join("+")} on ${domain}`);
-    }
-  }
-}
-async function persistToGraph2() {
-  const strong = await sense({ minStrength: PERSIST_THRESHOLD, limit: 50 });
-  let persisted = 0;
-  for (const p of strong) {
-    try {
-      await callMcpTool({
-        toolName: "memory_store",
-        args: {
-          agent_id: "pheromone-layer",
-          key: `trail:${p.domain}:${p.id}`,
-          value: JSON.stringify({
-            type: p.type,
-            domain: p.domain,
-            strength: p.strength,
-            label: p.label,
-            metrics: p.metrics,
-            reinforcements: p.reinforcements,
-            agentId: p.agentId
-          }),
-          metadata: {
-            pheromone_type: p.type,
-            domain: p.domain,
-            strength: p.strength,
-            reinforcements: p.reinforcements
-          }
-        },
-        callId: `ph-persist-${p.id}`
-      });
-      try {
-        const verify2 = await callMcpTool({
-          toolName: "memory_retrieve",
-          args: { agent_id: "pheromone-layer", key: `trail:${p.domain}:${p.id}` },
-          callId: `ph-verify-${p.id}`
-        });
-        if (verify2) persisted++;
-        else logger.warn({ id: p.id }, "Pheromone persist verification failed");
-      } catch {
-        logger.warn({ id: p.id }, "Pheromone persist verification error");
-      }
-    } catch {
-    }
-  }
-  state.lastPersistAt = (/* @__PURE__ */ new Date()).toISOString();
-  logger.info({ persisted, total: strong.length }, "Pheromone trails persisted to memory");
-  return persisted;
-}
-async function getTrailSummary(domain) {
-  const trails = await sense({ domain, limit: 50 });
-  if (trails.length === 0) return null;
-  const totalStrength = trails.reduce((sum, p) => sum + p.strength, 0);
-  const avgStrength = totalStrength / trails.length;
-  const typeCounts = /* @__PURE__ */ new Map();
-  for (const p of trails) {
-    typeCounts.set(p.type, (typeCounts.get(p.type) ?? 0) + p.strength);
-  }
-  const strongestType = [...typeCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "trail";
-  const agentStrength = /* @__PURE__ */ new Map();
-  for (const p of trails) {
-    agentStrength.set(p.agentId, (agentStrength.get(p.agentId) ?? 0) + p.strength);
-  }
-  const topContributors = [...agentStrength.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([id]) => id);
-  return {
-    trailId: `trail:${domain}`,
-    domain,
-    totalStrength,
-    pheromoneCount: trails.length,
-    avgStrength,
-    topContributors,
-    strongestType
-  };
-}
-async function getHeatmap() {
-  const redis2 = getRedis();
-  if (!redis2) return [];
-  const domains = [];
-  let cursor = "0";
-  do {
-    const [next, found] = await redis2.scan(cursor, "MATCH", `${REDIS_PREFIX7}domain:*`, "COUNT", "50");
-    cursor = next;
-    for (const k of found) domains.push(k.replace(`${REDIS_PREFIX7}domain:`, ""));
-  } while (cursor !== "0" && domains.length < 50);
-  const summaries = [];
-  for (const domain of domains.slice(0, 20)) {
-    const summary = await getTrailSummary(domain);
-    if (summary) summaries.push(summary);
-  }
-  return summaries.sort((a, b) => b.totalStrength - a.totalStrength);
-}
-async function onChainStepSuccess(agentId, toolName, durationMs, chainMode) {
-  await deposit(
-    agentId,
-    "trail",
-    `chain:${toolName}`,
-    Math.min(1, 0.5 + 1e3 / Math.max(durationMs, 100) * 0.5),
-    // faster = stronger
-    `${agentId} succeeded at ${toolName} in ${durationMs}ms`,
-    { duration_ms: durationMs },
-    [chainMode, toolName],
-    3600
-    // 1h TTL
-  );
-}
-async function onChainStepFailure(agentId, toolName, error) {
-  await deposit(
-    agentId,
-    "repellent",
-    `chain:${toolName}`,
-    0.7,
-    `${agentId} failed at ${toolName}: ${error.slice(0, 100)}`,
-    { failure: 1 },
-    ["error", toolName],
-    1800
-    // 30min TTL (failures fade faster)
-  );
-}
-async function onInventorTrial(nodeId, score, experiment, island) {
-  if (score >= 0.7) {
-    await deposit(
-      "inventor",
-      "attraction",
-      `inventor:${experiment}`,
-      score,
-      `Inventor trial ${nodeId} scored ${(score * 100).toFixed(1)}% on island ${island}`,
-      { score, island },
-      ["inventor", experiment, `island-${island}`],
-      7200
-      // 2h for good trials
-    );
-  } else if (score < 0.3) {
-    await deposit(
-      "inventor",
-      "repellent",
-      `inventor:${experiment}`,
-      0.3 + (0.3 - score),
-      // worse score = stronger repellent
-      `Inventor trial ${nodeId} scored poorly: ${(score * 100).toFixed(1)}%`,
-      { score, island },
-      ["inventor", experiment, `island-${island}`],
-      900
-      // 15min for bad trials
-    );
-  }
-}
-async function onAnomaly(type, valence, source, severity) {
-  const pType = valence === "positive" ? "attraction" : "repellent";
-  const strength = severity === "critical" ? 0.9 : severity === "warning" ? 0.6 : 0.3;
-  const ttl = valence === "positive" ? 7200 : 1800;
-  await deposit(
-    "anomaly-watcher",
-    pType,
-    `anomaly:${type}`,
-    strength,
-    `Anomaly ${type} (${valence}) from ${source} [${severity}]`,
-    {},
-    [valence, severity, source, type],
-    ttl
-  );
-}
-async function onExternalSignal(source, domain, label, strength, metrics2 = {}) {
-  await deposit(
-    source,
-    "external",
-    `external:${domain}`,
-    strength,
-    label,
-    metrics2,
-    ["external", source, domain],
-    14400
-    // 4h for external signals
-  );
-}
-function getPheromoneState() {
-  return { ...state };
-}
-async function persistPheromoneState() {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  try {
-    const count = await redis2.zcard(REDIS_INDEX_KEY);
-    state.activePheromones = count;
-    await redis2.set(REDIS_STATE_KEY, JSON.stringify(state));
-  } catch {
-  }
-}
-async function loadPheromoneState() {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  try {
-    const raw = await redis2.get(REDIS_STATE_KEY);
-    if (raw) {
-      state = { ...state, ...JSON.parse(raw) };
-      logger.info(
-        { totalDeposits: state.totalDeposits, activePheromones: state.activePheromones },
-        "Pheromone layer: restored state from Redis"
-      );
-    }
-  } catch {
-  }
-}
-async function runPheromoneCron() {
-  const { decayed, evaporated } = await runDecayCycle();
-  const persisted = await persistToGraph2();
-  let amplified = 0;
-  try {
-    const heatmap = await getHeatmap();
-    for (const trail of heatmap) {
-      if (trail.pheromoneCount >= 3 && trail.avgStrength >= 0.5) {
-        const pheromonesInDomain = await sense({ domain: trail.domain, minStrength: 0.4, limit: 5 });
-        const uniqueTypes = new Set(pheromonesInDomain.map((p) => p.type));
-        if (uniqueTypes.size >= 2) {
-          await amplify(
-            trail.domain,
-            pheromonesInDomain,
-            `Cross-pillar convergence in ${trail.domain}: ${[...uniqueTypes].join("+")}`
-          );
-          amplified++;
-        }
-      }
-    }
-  } catch {
-  }
-  await persistPheromoneState();
-  broadcastSSE("pheromone", {
-    event: "cron_complete",
-    decayed,
-    evaporated,
-    persisted,
-    amplified,
-    activePheromones: state.activePheromones
-  });
-  return { decayed, evaporated, persisted, amplified };
-}
-async function initPheromoneLayer() {
-  await loadPheromoneState();
-  logger.info(
-    { totalDeposits: state.totalDeposits, activePheromones: state.activePheromones },
-    "Pheromone layer initialized"
-  );
-}
-var REDIS_PREFIX7, REDIS_STATE_KEY, REDIS_INDEX_KEY, DEFAULT_TTL2, PERSIST_THRESHOLD, AMPLIFICATION_MULTIPLIER, CYCLE_MS, state;
-var init_pheromone_layer = __esm({
-  "src/swarm/pheromone-layer.ts"() {
-    "use strict";
-    init_redis();
-    init_mcp_caller();
-    init_logger();
-    init_sse();
-    REDIS_PREFIX7 = "pheromone:";
-    REDIS_STATE_KEY = "pheromone:state";
-    REDIS_INDEX_KEY = "pheromone:index";
-    DEFAULT_TTL2 = 3600;
-    PERSIST_THRESHOLD = 0.7;
-    AMPLIFICATION_MULTIPLIER = 1.5;
-    CYCLE_MS = 15 * 60 * 1e3;
-    state = {
-      totalDeposits: 0,
-      totalDecays: 0,
-      totalAmplifications: 0,
-      activePheromones: 0,
-      trailCount: 0,
-      lastDecayAt: null,
-      lastPersistAt: null
     };
   }
 });
@@ -26513,9 +26597,28 @@ async function enrichTargetWithRAG(target, edgeGap) {
       forceChannels: edgeGap > 1 ? ["graphrag", "srag", "cypher"] : ["graphrag", "srag"]
       // Low-gap: skip cypher overhead
     });
+    let kgRagContext = "";
+    try {
+      const kgResult = await callMcpTool({
+        toolName: "kg_rag.query",
+        args: { question: ragQuery, max_evidence: 12 },
+        callId: `hyp-kgrag-${target.id}-${Date.now()}`
+      });
+      const kgRaw = kgResult.result;
+      if (typeof kgRaw === "string") kgRagContext = kgRaw;
+      else if (kgRaw && typeof kgRaw === "object") {
+        const k = kgRaw;
+        kgRagContext = k.answer ?? k.response ?? k.result ?? "";
+      }
+    } catch {
+    }
+    const mergedContext = ragResponse.merged_context + (kgRagContext ? `
+
+[KG-RAG Evidence]
+${kgRagContext.slice(0, 600)}` : "");
     const folded = await foldContext2(
       `[RAG context for ${target.id}]
-${ragResponse.merged_context}`,
+${mergedContext}`,
       1500
     );
     logger.info({
@@ -26623,12 +26726,19 @@ async function emitReward(targetId, success, edgeDelta) {
 }
 async function foldContext2(text, budget = 2e3) {
   try {
-    const result = await callMcpTool({
+    const toolResult = await callMcpTool({
       toolName: "context_fold",
       args: { text, budget, domain: "platform-operations", query: "autonomous execution status" },
       callId: `hyp-fold-${Date.now()}`
     });
-    return typeof result === "string" ? result : JSON.stringify(result);
+    const raw = toolResult.result;
+    if (typeof raw === "string" && raw.length > 0) return raw;
+    if (raw && typeof raw === "object") {
+      const r = raw;
+      const folded = r.folded_text ?? r.text ?? r.result ?? r.answer;
+      if (typeof folded === "string" && folded.length > 0) return folded;
+    }
+    return text.slice(0, budget * 4);
   } catch {
     return text.slice(0, budget * 4);
   }
@@ -26837,12 +26947,15 @@ ${approach.slice(0, 500)}
       await callMcpTool({
         toolName: "graph.write_cypher",
         args: {
-          query: `CREATE (l:Lesson {
-            id: $lessonId, type: 'autonomous_cycle', agentId: 'hyperagent-auto',
-            phase: $phase, summary: $summary, targetsCompleted: $completed,
-            targetsFailed: $failed, fitnessDelta: $fitnessDelta,
-            discoveredIssues: $discoveredIssues, timestamp: datetime()
-          })`,
+          query: `MERGE (l:Lesson {id: $lessonId})
+            SET l.type = 'autonomous_cycle', l.agentId = 'hyperagent-auto',
+                l.phase = $phase, l.summary = $summary,
+                l.targetsCompleted = $completed, l.targetsFailed = $failed,
+                l.fitnessDelta = $fitnessDelta, l.discoveredIssues = $discoveredIssues,
+                l.updatedAt = datetime()
+            WITH l
+            MERGE (a:Agent {id: 'hyperagent-auto'})
+            MERGE (a)-[:LEARNED]->(l)`,
           params: {
             lessonId: `lesson-${cycleId}`,
             phase: effectivePhase,
@@ -26856,7 +26969,25 @@ ${approach.slice(0, 500)}
         callId: `hyp-lesson-${cycleId}`
       });
     } catch {
-      logger.debug("HyperAgent-Auto: lesson persistence failed (non-blocking)");
+      logger.debug("HyperAgent-Auto: lesson Neo4j persistence failed (non-blocking)");
+    }
+    if (targetsCompleted > 0) {
+      try {
+        await callMcpTool({
+          toolName: "knowledge_ingest",
+          args: {
+            title: `HyperAgent cycle ${cycleId} \u2014 ${effectivePhase}`,
+            content: foldedSummary,
+            tags: ["hyperagent", "autonomous", effectivePhase, "lessons"],
+            source: "hyperagent-auto",
+            score: fitnessDelta > 0.05 ? 0.8 : 0.6
+          },
+          callId: `hyp-srag-ingest-${cycleId}`
+        });
+        logger.info({ cycleId, targets: targetsCompleted }, "HyperAgent-Auto: cycle lesson ingested to SRAG");
+      } catch {
+        logger.debug("HyperAgent-Auto: SRAG ingest failed (non-blocking)");
+      }
     }
     const result = {
       cycleId,

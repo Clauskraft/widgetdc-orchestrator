@@ -16,6 +16,7 @@ import { logger } from '../logger.js'
 import { getRedis } from '../redis.js'
 import { resolveRoutingDecision, resolveChainMode } from '../agents/routing-engine.js'
 import { scoreToolOutput } from '../flywheel/quality-scorer.js'
+import { depositFeedbackPheromone } from '../swarm/pheromone-layer.js'
 import { hookIntoExecution } from '../swarm/peer-eval.js'
 import { recordToolCall } from '../flywheel/adoption-telemetry.js'
 import { runFailureHarvest } from '../flywheel/failure-harvester.js'
@@ -252,11 +253,14 @@ async function executeStep(step: ChainStep, previousOutput: unknown): Promise<St
       metrics: { latency_ms: successResult.duration_ms, quality_score: scoreToolOutput(output, step.tool_name ?? step.cognitive_action ?? 'unknown', successResult.duration_ms) },
     }).catch(() => {}) // non-blocking
     // Cost optimizer: track per-agent cost/quality/latency profiles
+    const _qualityScore = scoreToolOutput(output, step.tool_name ?? step.cognitive_action ?? 'unknown', successResult.duration_ms)
     updateCostProfile(step.agent_id, step.tool_name ?? step.cognitive_action ?? 'unknown', {
       latency_ms: successResult.duration_ms,
-      quality_score: scoreToolOutput(output, step.tool_name ?? step.cognitive_action ?? 'unknown', successResult.duration_ms),
+      quality_score: _qualityScore,
       cost_usd: 0,
     }).catch(() => {}) // non-blocking
+    // Stigmergic feedback: deposit ATTRACTION/REPELLENT pheromone from quality signal
+    depositFeedbackPheromone(step.tool_name ?? step.cognitive_action ?? 'unknown', step.agent_id, _qualityScore, successResult.duration_ms)
     // Adoption telemetry: capture chain-internal tool calls (bypass HTTP layer)
     recordToolCall(step.tool_name ?? step.cognitive_action ?? 'chain-step')
 
