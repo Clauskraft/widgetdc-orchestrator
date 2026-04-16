@@ -192,3 +192,94 @@ function buildSummary(tools: ToolTelemetry[]): TelemetrySummary {
 function pct(n: number, d: number): number {
   return d === 0 ? 0 : Math.round((n / d) * 1000) / 10
 }
+
+// ─── Adoption Gap Detector (topic 8/15) ──────────────────────────────────────
+// Surfaces high-value tools that are underused, with specific remediation hints.
+
+export type GapType = 'zero-call' | 'stale' | 'low-frequency'
+
+export interface AdoptionGap {
+  tool: string
+  namespace: string
+  gap_type: GapType
+  priority: 'high' | 'medium' | 'low'
+  suggestion: string
+  last_called: string | null
+  lifetime_calls: number
+}
+
+/** Tool-specific onboarding suggestions keyed by namespace prefix */
+const NAMESPACE_SUGGESTIONS: Record<string, string> = {
+  intelligence: 'Wire into the intelligence-loop cron chain — high-signal tools benefit from scheduled activation',
+  knowledge:    'Emit a KnowledgeBus event after each session fold to trigger this tool organically',
+  graph:        'Add to graph-steward agent capabilities; graph tools thrive on regular reconciliation calls',
+  cognitive:    'Include in the reason_deeply fallback path so it activates on complex queries',
+  swarm:        'Hook into peer-eval.hookIntoExecution so pheromone/eval tools fire on every chain step',
+  llm:          'Add as a cost-governance step in chain-engine.ts to surface cost data automatically',
+  default:      'Register in agent-seeds.ts capabilities list so agents can discover and call this tool',
+}
+
+function suggestionFor(tool: string, namespace: string): string {
+  for (const [prefix, hint] of Object.entries(NAMESPACE_SUGGESTIONS)) {
+    if (prefix !== 'default' && (namespace.startsWith(prefix) || tool.startsWith(prefix))) return hint
+  }
+  return NAMESPACE_SUGGESTIONS.default!
+}
+
+function priorityFor(t: ToolTelemetry): AdoptionGap['priority'] {
+  if (t.advanced) return 'high'
+  if (t.namespace === 'intelligence') return 'high'
+  if (t.lifetime_calls === 0) return 'medium'
+  return 'low'
+}
+
+/**
+ * Identify tools with an adoption gap — zero calls, stale, or low-frequency
+ * relative to platform average — sorted by priority then namespace.
+ *
+ * Uses the last computed telemetry snapshot; pass a pre-fetched summary to
+ * avoid a redundant Redis round-trip when called right after computeTelemetry().
+ */
+export async function detectAdoptionGaps(
+  summary?: TelemetrySummary,
+): Promise<AdoptionGap[]> {
+  const s = summary ?? await computeTelemetry()
+  const avgWeekly = s.tools.reduce((acc, t) => acc + t.weekly_calls, 0) / (s.total_tools || 1)
+  const lowThreshold = Math.max(1, avgWeekly * 0.2) // bottom 20% of average
+
+  const gaps: AdoptionGap[] = []
+
+  for (const t of s.tools) {
+    let gap_type: GapType | null = null
+
+    if (t.lifetime_calls === 0) {
+      gap_type = 'zero-call'
+    } else if (t.stale) {
+      gap_type = 'stale'
+    } else if (t.weekly_calls < lowThreshold && (t.advanced || t.namespace === 'intelligence')) {
+      gap_type = 'low-frequency'
+    }
+
+    if (!gap_type) continue
+
+    gaps.push({
+      tool: t.tool,
+      namespace: t.namespace,
+      gap_type,
+      priority: priorityFor(t),
+      suggestion: suggestionFor(t.tool, t.namespace),
+      last_called: t.last_called,
+      lifetime_calls: t.lifetime_calls,
+    })
+  }
+
+  // Sort: high priority first, then zero-call before stale before low-frequency
+  const ORDER: Record<string, number> = { 'zero-call': 0, stale: 1, 'low-frequency': 2 }
+  const PRIO:  Record<string, number> = { high: 0, medium: 1, low: 2 }
+  gaps.sort((a, b) =>
+    PRIO[a.priority]! - PRIO[b.priority]! ||
+    ORDER[a.gap_type]! - ORDER[b.gap_type]!
+  )
+
+  return gaps
+}

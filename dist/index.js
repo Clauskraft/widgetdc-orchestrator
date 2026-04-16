@@ -6333,6 +6333,7 @@ var init_tool_registry = __esm({
 var adoption_telemetry_exports = {};
 __export(adoption_telemetry_exports, {
   computeTelemetry: () => computeTelemetry,
+  detectAdoptionGaps: () => detectAdoptionGaps,
   recordToolCall: () => recordToolCall
 });
 function isoWeek() {
@@ -6437,7 +6438,51 @@ function buildSummary(tools) {
 function pct(n, d) {
   return d === 0 ? 0 : Math.round(n / d * 1e3) / 10;
 }
-var KEY_CALLS, KEY_LAST, WINDOW_TTL, STALE_MS, ADVANCED_TOOLS, lastErrorLog, ERROR_THROTTLE_MS;
+function suggestionFor(tool, namespace) {
+  for (const [prefix, hint] of Object.entries(NAMESPACE_SUGGESTIONS)) {
+    if (prefix !== "default" && (namespace.startsWith(prefix) || tool.startsWith(prefix))) return hint;
+  }
+  return NAMESPACE_SUGGESTIONS.default;
+}
+function priorityFor(t) {
+  if (t.advanced) return "high";
+  if (t.namespace === "intelligence") return "high";
+  if (t.lifetime_calls === 0) return "medium";
+  return "low";
+}
+async function detectAdoptionGaps(summary) {
+  const s = summary ?? await computeTelemetry();
+  const avgWeekly = s.tools.reduce((acc, t) => acc + t.weekly_calls, 0) / (s.total_tools || 1);
+  const lowThreshold = Math.max(1, avgWeekly * 0.2);
+  const gaps = [];
+  for (const t of s.tools) {
+    let gap_type = null;
+    if (t.lifetime_calls === 0) {
+      gap_type = "zero-call";
+    } else if (t.stale) {
+      gap_type = "stale";
+    } else if (t.weekly_calls < lowThreshold && (t.advanced || t.namespace === "intelligence")) {
+      gap_type = "low-frequency";
+    }
+    if (!gap_type) continue;
+    gaps.push({
+      tool: t.tool,
+      namespace: t.namespace,
+      gap_type,
+      priority: priorityFor(t),
+      suggestion: suggestionFor(t.tool, t.namespace),
+      last_called: t.last_called,
+      lifetime_calls: t.lifetime_calls
+    });
+  }
+  const ORDER = { "zero-call": 0, stale: 1, "low-frequency": 2 };
+  const PRIO = { high: 0, medium: 1, low: 2 };
+  gaps.sort(
+    (a, b) => PRIO[a.priority] - PRIO[b.priority] || ORDER[a.gap_type] - ORDER[b.gap_type]
+  );
+  return gaps;
+}
+var KEY_CALLS, KEY_LAST, WINDOW_TTL, STALE_MS, ADVANCED_TOOLS, lastErrorLog, ERROR_THROTTLE_MS, NAMESPACE_SUGGESTIONS;
 var init_adoption_telemetry = __esm({
   "src/flywheel/adoption-telemetry.ts"() {
     "use strict";
@@ -6453,6 +6498,15 @@ var init_adoption_telemetry = __esm({
     );
     lastErrorLog = /* @__PURE__ */ new Map();
     ERROR_THROTTLE_MS = 5 * 60 * 1e3;
+    NAMESPACE_SUGGESTIONS = {
+      intelligence: "Wire into the intelligence-loop cron chain \u2014 high-signal tools benefit from scheduled activation",
+      knowledge: "Emit a KnowledgeBus event after each session fold to trigger this tool organically",
+      graph: "Add to graph-steward agent capabilities; graph tools thrive on regular reconciliation calls",
+      cognitive: "Include in the reason_deeply fallback path so it activates on complex queries",
+      swarm: "Hook into peer-eval.hookIntoExecution so pheromone/eval tools fire on every chain step",
+      llm: "Add as a cost-governance step in chain-engine.ts to surface cost data automatically",
+      default: "Register in agent-seeds.ts capabilities list so agents can discover and call this tool"
+    };
   }
 });
 
@@ -41088,6 +41142,24 @@ adoptionRouter.get("/telemetry", async (_req, res) => {
   } catch (err) {
     logger.error({ err: String(err) }, "adoption telemetry compute failed");
     res.status(500).json({ success: false, error: { code: "TELEMETRY_ERROR", message: String(err) } });
+  }
+});
+adoptionRouter.get("/gaps", async (_req, res) => {
+  try {
+    const summary = await computeTelemetry();
+    const gaps = await detectAdoptionGaps(summary);
+    res.json({
+      success: true,
+      data: {
+        gaps,
+        total: gaps.length,
+        high_priority: gaps.filter((g) => g.priority === "high").length,
+        generated_at: summary.generated_at
+      }
+    });
+  } catch (err) {
+    logger.error({ err: String(err) }, "adoption gap detection failed");
+    res.status(500).json({ success: false, error: { code: "GAP_DETECTION_ERROR", message: String(err) } });
   }
 });
 adoptionRouter.post("/skills/recommend", async (req, res) => {
