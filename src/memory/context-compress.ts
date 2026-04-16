@@ -36,6 +36,155 @@ interface CompressResult {
 const DEFAULT_MAX_TOKENS = 2000
 const AVG_CHARS_PER_TOKEN = 4
 
+// ─── Smart Compaction Trigger (topic 10/15) ──────────────────────────────────
+// Evaluates whether compression should fire, and which strategy to use.
+// Replaces ad-hoc "length > threshold" guards scattered across the codebase.
+
+export interface CompactionDecision {
+  /** Should we compress now? */
+  compact: boolean
+  /** Recommended strategy if compact=true */
+  strategy: CompressionStrategy
+  /** Estimated token count of the input */
+  estimatedTokens: number
+  /** 0–1: fraction of content that appears repetitive */
+  repetitionRatio: number
+  /** Human-readable reason for the decision */
+  reason: string
+}
+
+/** Signals that push toward more aggressive compression */
+interface CompactionHints {
+  /** Current chain step depth — deeper = more likely to compact */
+  chainDepth?: number
+  /** Is RLM available for fold compression? */
+  rlmAvailable?: boolean
+  /** Max tokens budget for the downstream call */
+  maxTokensBudget?: number
+}
+
+const COMPACT_SOFT_LIMIT = 1500   // tokens — start considering compaction
+const COMPACT_HARD_LIMIT = 3000   // tokens — always compact
+const REPETITION_TRIGGER  = 0.30  // 30% repetition → compact regardless of size
+
+/**
+ * Estimate repetition ratio: what fraction of 80-char content windows appear
+ * more than once? Fast O(n) pass with a rolling hash set.
+ */
+function estimateRepetition(content: string): number {
+  const WINDOW = 80
+  if (content.length < WINDOW * 2) return 0
+
+  const seen = new Set<string>()
+  let duplicates = 0
+  const total = Math.floor(content.length / WINDOW)
+
+  for (let i = 0; i < total; i++) {
+    const chunk = content.slice(i * WINDOW, i * WINDOW + WINDOW)
+    const key = chunk.toLowerCase().replace(/\s+/g, ' ')
+    if (seen.has(key)) duplicates++
+    else seen.add(key)
+  }
+
+  return duplicates / total
+}
+
+/**
+ * Decide whether to compress a context payload and which strategy to use.
+ *
+ * Decision logic (in priority order):
+ * 1. Above hard limit (3000 tokens) → always compact, use hybrid
+ * 2. Repetition >30% → dedupe (even if small)
+ * 3. Above soft limit (1500 tokens) + chainDepth >= 3 → fold (deep chains drift)
+ * 4. Above soft limit + RLM unavailable → truncate
+ * 5. Above soft limit → fold
+ * 6. Below soft limit → no compaction
+ */
+export function shouldCompact(content: string, hints?: CompactionHints): CompactionDecision {
+  const estimatedTokens = Math.round(content.length / AVG_CHARS_PER_TOKEN)
+  const repetitionRatio = estimateRepetition(content)
+  const rlmOk = hints?.rlmAvailable !== false  // default: assume available
+  const chainDepth = hints?.chainDepth ?? 0
+  const budget = hints?.maxTokensBudget ?? COMPACT_HARD_LIMIT
+
+  // Always compact if over budget
+  if (estimatedTokens > budget || estimatedTokens > COMPACT_HARD_LIMIT) {
+    return {
+      compact: true,
+      strategy: 'hybrid',
+      estimatedTokens,
+      repetitionRatio,
+      reason: `Over hard limit (${estimatedTokens} tokens > ${Math.min(budget, COMPACT_HARD_LIMIT)} budget)`,
+    }
+  }
+
+  // High repetition → dedupe first, regardless of size
+  if (repetitionRatio >= REPETITION_TRIGGER) {
+    return {
+      compact: true,
+      strategy: 'dedupe',
+      estimatedTokens,
+      repetitionRatio,
+      reason: `High repetition ratio (${(repetitionRatio * 100).toFixed(0)}% duplicate windows)`,
+    }
+  }
+
+  if (estimatedTokens > COMPACT_SOFT_LIMIT) {
+    if (!rlmOk) {
+      return {
+        compact: true,
+        strategy: 'truncate',
+        estimatedTokens,
+        repetitionRatio,
+        reason: `Over soft limit (${estimatedTokens} tokens), RLM unavailable — using truncate`,
+      }
+    }
+    if (chainDepth >= 3) {
+      return {
+        compact: true,
+        strategy: 'fold',
+        estimatedTokens,
+        repetitionRatio,
+        reason: `Over soft limit at chain depth ${chainDepth} — folding to prevent context drift`,
+      }
+    }
+    return {
+      compact: true,
+      strategy: 'fold',
+      estimatedTokens,
+      repetitionRatio,
+      reason: `Over soft limit (${estimatedTokens} tokens) — semantic fold recommended`,
+    }
+  }
+
+  return {
+    compact: false,
+    strategy: 'truncate',
+    estimatedTokens,
+    repetitionRatio,
+    reason: `Within limits (${estimatedTokens} tokens, ${(repetitionRatio * 100).toFixed(0)}% repetition)`,
+  }
+}
+
+/**
+ * Convenience: evaluate and compress in one call.
+ * Returns original content if compaction is not needed.
+ */
+export async function compactIfNeeded(
+  content: string,
+  hints?: CompactionHints,
+): Promise<{ content: string; compacted: boolean; decision: CompactionDecision }> {
+  const decision = shouldCompact(content, hints)
+  if (!decision.compact) {
+    return { content, compacted: false, decision }
+  }
+  const result = await compressContext(content, {
+    strategy: decision.strategy,
+    maxTokens: hints?.maxTokensBudget ?? DEFAULT_MAX_TOKENS,
+  })
+  return { content: result.content, compacted: true, decision }
+}
+
 /**
  * Compress context using the specified strategy.
  */
