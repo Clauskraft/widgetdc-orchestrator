@@ -19566,9 +19566,9 @@ async function generatePlan(req) {
   let consensusProposalId = "";
   let consensusQuorum = 0;
   if (highStakes) {
-    const gate2 = await enforceConsensusGate(engagementId, req);
-    consensusProposalId = gate2.proposalId;
-    consensusQuorum = gate2.quorum;
+    const gate = await enforceConsensusGate(engagementId, req);
+    consensusProposalId = gate.proposalId;
+    consensusQuorum = gate.quorum;
     logger.info({ engagementId, proposalId: consensusProposalId, quorum: consensusQuorum }, "EIE gate: consensus opened");
   }
   let rlmMissionId = null;
@@ -26483,26 +26483,26 @@ function checkPhaseGate() {
     return { shouldAdvance: false, nextPhase: currentPhase, reason: "Already at max phase", details: { phase: currentPhase } };
   }
   const nextPhase = phases[currentIdx + 1];
-  const gate2 = PHASE_GATES[nextPhase];
+  const gate = PHASE_GATES[nextPhase];
   const details = {
     currentPhase,
     nextPhase,
     minEdge,
-    requiredMinEdge: gate2.minEdge,
+    requiredMinEdge: gate.minEdge,
     totalCycles: totalCycles2,
-    requiredMinCycles: gate2.minCycles,
+    requiredMinCycles: gate.minCycles,
     policy: PHASE_POLICY[nextPhase]
   };
-  if (minEdge < gate2.minEdge) {
-    return { shouldAdvance: false, nextPhase, reason: `Min edge ${minEdge.toFixed(1)} < gate ${gate2.minEdge}`, details };
+  if (minEdge < gate.minEdge) {
+    return { shouldAdvance: false, nextPhase, reason: `Min edge ${minEdge.toFixed(1)} < gate ${gate.minEdge}`, details };
   }
-  if (totalCycles2 < gate2.minCycles) {
-    return { shouldAdvance: false, nextPhase, reason: `Cycles ${totalCycles2} < required ${gate2.minCycles}`, details };
+  if (totalCycles2 < gate.minCycles) {
+    return { shouldAdvance: false, nextPhase, reason: `Cycles ${totalCycles2} < required ${gate.minCycles}`, details };
   }
   return {
     shouldAdvance: true,
     nextPhase,
-    reason: `Min edge ${minEdge.toFixed(1)} >= ${gate2.minEdge}, cycles ${totalCycles2} >= ${gate2.minCycles}. Ready to advance to ${nextPhase} (policy: ${PHASE_POLICY[nextPhase]})`,
+    reason: `Min edge ${minEdge.toFixed(1)} >= ${gate.minEdge}, cycles ${totalCycles2} >= ${gate.minCycles}. Ready to advance to ${nextPhase} (policy: ${PHASE_POLICY[nextPhase]})`,
     details
   };
 }
@@ -48778,12 +48778,12 @@ hyperagentAutoRouter.post("/phase/advance", (_req, res) => {
   });
 });
 hyperagentAutoRouter.get("/phase/gate", (_req, res) => {
-  const gate2 = checkPhaseGate();
+  const gate = checkPhaseGate();
   const status = getAutonomousStatus();
   res.json({
     success: true,
     currentPhase: status.currentPhase,
-    ...gate2,
+    ...gate,
     currentFitness: status.fitnessScore,
     edgeScores: status.edgeScores
   });
@@ -50789,6 +50789,58 @@ function runRepomix(repoUrl) {
   const text = typeof raw === "string" ? raw : raw.toString("utf8");
   return text.substring(0, REPOMIX_MAX_CHARS);
 }
+function isAwesomeList(repoUrl) {
+  const name = (repoUrl.split("/").pop() ?? "").toLowerCase().replace(/\.git$/, "");
+  return /^awesome[-_]/.test(name) || name.includes("-awesome-") || name.endsWith("-awesome");
+}
+function buildAwesomeExtractionPrompt(repoUrl, packedRepo) {
+  return `You are a pattern-stealing software intelligence analyst. This is an AWESOME-LIST: a curated markdown catalog of projects, ideas, or patterns.
+
+Your job is NOT to extract verbatim code. Your job is to STEAL THE CORE IDEAS \u2014 distill each listed entry into a reusable pattern that a downstream platform could learn from and adapt. Think: "what is the stealable insight", not "what is the library".
+
+CRITICAL: Your entire response must be valid JSON only. No markdown, no explanation, no prose. Start with { and end with }.
+
+Repository: ${repoUrl}
+
+LIST CONTENTS (packed by repomix):
+${packedRepo}
+
+Return EXACTLY this JSON structure:
+
+{
+  "repo_meta": {
+    "name": "short list name",
+    "description": "1-2 sentences on the domain this list curates",
+    "primary_language": "markdown",
+    "license": "license name or unknown",
+    "topics": ["topic1", "topic2"]
+  },
+  "confidence_score": 85,
+  "summary": "2-3 sentences on what patterns/ideas this list surfaces that are worth stealing",
+  "components": [
+    {
+      "name": "pattern name (short, descriptive \u2014 NOT the verbatim project name)",
+      "type": "pattern",
+      "description": "the STEALABLE CORE IDEA in one sentence \u2014 the insight, architecture, or technique a new implementation could adopt",
+      "source_file": "https://\u2026 provenance URL if present in the list, else null",
+      "capabilities": ["what this pattern enables", "downstream use"],
+      "dependencies": ["conceptual prerequisites, NOT verbatim libraries"],
+      "confidence": 85,
+      "tags": ["domain tag", "pattern-family tag"]
+    }
+  ]
+}
+
+RULES:
+- type MUST be "pattern" for every component \u2014 this list is a pattern catalog.
+- description is the IDEA, not a project blurb. One sentence, re-implementable.
+- name should be a GENERIC pattern name when possible (e.g. "Sliding-window context compression" not "Compressor-2024"). If a verbatim name carries the idea, keep it.
+- capabilities describe what the pattern DOES, not what the project claims.
+- Extract 10-30 patterns. Prioritize the ones that transfer to multi-agent / RAG / MCP / knowledge-graph platforms.
+- confidence_score: 80+ if pattern is clear, 70-79 if curated with prose, <70 if guessing.
+
+Return ONLY valid JSON.`;
+}
 function buildExtractionPrompt(repoUrl, packedRepo) {
   return `You are a software intelligence analyst. Analyze this repository and extract a structured Bill of Materials (BOM).
 
@@ -51170,6 +51222,7 @@ async function extractPhantomBOM(repoUrl, sourceType = "git", runId) {
   const id = runId ?? `pbom-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
   runState.set(id, { status: "running", startedAt: (/* @__PURE__ */ new Date()).toISOString() });
   logger.info({ runId: id, repoUrl }, "PhantomBOM extraction started");
+  let gate = { completeness: 100, matched: 0, missed: [], total: 0 };
   try {
     let astResult = null;
     try {
@@ -51221,7 +51274,9 @@ Return: {"name":"...","description":"...","primary_language":"...","license":"..
       logger.info({ runId: id }, "No Tree-sitter results \u2014 falling back to LLM extraction");
       const packedRepo = runRepomix(repoUrl);
       logger.info({ runId: id, chars: packedRepo.length }, "Repomix packed repo");
-      const prompt = buildExtractionPrompt(repoUrl, packedRepo);
+      const awesomeMode = isAwesomeList(repoUrl);
+      const prompt = awesomeMode ? buildAwesomeExtractionPrompt(repoUrl, packedRepo) : buildExtractionPrompt(repoUrl, packedRepo);
+      if (awesomeMode) logger.info({ runId: id, repoUrl }, "Awesome-list detected \u2014 using pattern-steal prompt");
       let lastError2 = null;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
@@ -51237,19 +51292,22 @@ Return: {"name":"...","description":"...","primary_language":"...","license":"..
         }
       }
       if (!extracted) throw lastError2 ?? new Error("LLM extraction failed after 3 attempts");
-      const modules = extractModuleStructure(repoUrl);
-      const gate2 = checkCompleteness(extracted.components, modules);
+      if (awesomeMode) {
+        logger.info({ runId: id, components: extracted.components.length }, "Awesome-list mode: skipping module-based completeness gate");
+      }
+      const modules = awesomeMode ? [] : extractModuleStructure(repoUrl);
+      gate = awesomeMode ? { completeness: 100, matched: extracted.components.length, missed: [], total: extracted.components.length } : checkCompleteness(extracted.components, modules);
       logger.info({
         runId: id,
-        completeness: gate2.completeness,
-        matched: gate2.matched,
-        missed: gate2.missed,
-        total: gate2.total
+        completeness: gate.completeness,
+        matched: gate.matched,
+        missed: gate.missed,
+        total: gate.total
       }, "Completeness gate check");
-      if (gate2.completeness < 80 && gate2.missed.length > 0) {
-        logger.info({ runId: id, missed: gate2.missed }, "Completeness < 80% \u2014 re-extraction");
+      if (gate.completeness < 80 && gate.missed.length > 0) {
+        logger.info({ runId: id, missed: gate.missed }, "Completeness < 80% \u2014 re-extraction");
         try {
-          const recoveryPrompt = buildRecoveryPrompt(repoUrl, packedRepo, gate2.missed);
+          const recoveryPrompt = buildRecoveryPrompt(repoUrl, packedRepo, gate.missed);
           const recoveryRaw = await callDeepSeekLlm(recoveryPrompt);
           const recoveryParsed = parseLlmBom(recoveryRaw, repoUrl);
           const existingNames = new Set(extracted.components.map((c) => c.name.toLowerCase()));
@@ -51262,7 +51320,7 @@ Return: {"name":"...","description":"...","primary_language":"...","license":"..
           const newGate = checkCompleteness(extracted.components, modules);
           logger.info({
             runId: id,
-            completeness_before: gate2.completeness,
+            completeness_before: gate.completeness,
             completeness_after: newGate.completeness,
             added: recoveryParsed.components.length
           }, "Completeness gate recovery complete");
