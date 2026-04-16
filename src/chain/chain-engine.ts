@@ -14,7 +14,7 @@ import { callCognitive } from '../cognitive-proxy.js'
 import { broadcastMessage } from '../chat-broadcaster.js'
 import { logger } from '../logger.js'
 import { getRedis } from '../redis.js'
-import { resolveRoutingDecision } from '../agents/routing-engine.js'
+import { resolveRoutingDecision, resolveChainMode } from '../agents/routing-engine.js'
 import { hookIntoExecution } from '../swarm/peer-eval.js'
 import { recordToolCall } from '../flywheel/adoption-telemetry.js'
 import { runFailureHarvest } from '../flywheel/failure-harvester.js'
@@ -693,6 +693,18 @@ export async function executeChain(def: ChainDefinition): Promise<ChainExecution
     started_at: new Date().toISOString(),
   }
   persistExecution(execution)
+
+  // Complexity escalation: auto-upgrade mode based on query when mode is 'sequential' and query is provided
+  // Implements Inventor complexity-routing-v2 decision table (score 0.78)
+  if (def.mode === 'sequential' && def.query) {
+    const escalation = resolveChainMode(def.query)
+    if (escalation.mode !== 'sequential') {
+      logger.info({ chain: def.name, escalation }, 'Complexity escalation: upgrading chain mode')
+      def = { ...def, mode: escalation.mode }
+      execution.mode = escalation.mode
+      ;(execution as any).complexity_escalation = escalation
+    }
+  }
 
   logger.info({ execution_id: executionId, chain: def.name, mode: def.mode, steps: def.steps.length, recursion_depth: currentDepth }, 'Chain execution started')
 

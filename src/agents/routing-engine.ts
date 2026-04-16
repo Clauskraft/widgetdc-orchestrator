@@ -286,6 +286,111 @@ export function getRecentRoutingDecisions(): RoutingDecision[] {
   return [...recentRoutingDecisions]
 }
 
+// ─── Complexity Escalation (Inventor complexity-routing-v2, score 0.78) ─────
+//
+// Decision table: given a query, determine the optimal chain mode and token
+// budget. Target: push platform complexity KPI from 1.26 toward 3.0.
+//
+// Escalation triggers (ordered, first match wins):
+//   1. Ambiguity > 0.70  → adaptive   (multi-perspective verification)
+//   2. Debate signals     → debate     (two agents argue, third synthesizes)
+//   3. Multi-task signals → parallel   (independent sub-tasks fan-out)
+//   4. Default            → sequential (simple pipeline)
+
+export type EscalatedChainMode = 'sequential' | 'parallel' | 'debate' | 'adaptive'
+
+export interface ComplexityEscalation {
+  mode: EscalatedChainMode
+  ambiguityScore: number
+  complexityBand: 'low' | 'medium' | 'high'
+  tokenBudget: number
+  escalationReason: string
+  verificationStepsRecommended: number
+}
+
+/** Signals that a query contains multiple independent sub-tasks */
+const PARALLEL_SIGNALS = [
+  'and also', 'as well as', 'additionally', 'in parallel',
+  'at the same time', 'simultaneously', 'both', 'all of the following',
+]
+
+/** Signals that a query requires argumentative evaluation */
+const DEBATE_SIGNALS = [
+  'compare', 'evaluate', 'pros and cons', 'trade-off', 'tradeoff',
+  'best approach', 'vs', 'versus', 'which is better', 'should we',
+  'recommend', 'decision', 'choose between', 'assess',
+]
+
+/** High-entropy words that raise the ambiguity score */
+const AMBIGUITY_SIGNALS = [
+  'might', 'could', 'unclear', 'unsure', 'complex', 'complicated',
+  'depends', 'multiple', 'various', 'several', 'ambiguous',
+  'uncertain', 'explore', 'investigate', 'analyze', 'deep',
+  'comprehensive', 'thorough', 'all aspects', 'fully',
+]
+
+function scoreAmbiguity(message: string): number {
+  const text = message.toLowerCase()
+  const wordCount = text.split(/\s+/).length
+  const hits = AMBIGUITY_SIGNALS.filter(s => text.includes(s)).length
+  // Normalize: 3+ hits in a short message → near 1.0; scale down for long messages
+  const rawScore = Math.min(hits / Math.max(wordCount / 15, 1), 1.0)
+  return Math.round(rawScore * 100) / 100
+}
+
+export function resolveChainMode(message: string): ComplexityEscalation {
+  const text = message.toLowerCase()
+  const ambiguityScore = scoreAmbiguity(message)
+
+  // Threshold 1: high ambiguity → adaptive
+  if (ambiguityScore >= 0.70) {
+    return {
+      mode: 'adaptive',
+      ambiguityScore,
+      complexityBand: 'high',
+      tokenBudget: 2000,
+      escalationReason: `Ambiguity score ${ambiguityScore} ≥ 0.70 — adaptive multi-perspective verification`,
+      verificationStepsRecommended: 3,
+    }
+  }
+
+  // Threshold 2: debate signals → debate
+  const hasDebateSignal = DEBATE_SIGNALS.some(s => text.includes(s))
+  if (hasDebateSignal) {
+    return {
+      mode: 'debate',
+      ambiguityScore,
+      complexityBand: ambiguityScore >= 0.40 ? 'high' : 'medium',
+      tokenBudget: 1500,
+      escalationReason: `Debate signals detected — two-agent argument + synthesis`,
+      verificationStepsRecommended: 2,
+    }
+  }
+
+  // Threshold 3: parallel sub-tasks → parallel
+  const hasParallelSignal = PARALLEL_SIGNALS.some(s => text.includes(s))
+  if (hasParallelSignal) {
+    return {
+      mode: 'parallel',
+      ambiguityScore,
+      complexityBand: 'medium',
+      tokenBudget: 1000,
+      escalationReason: `Parallel sub-task signals detected — fan-out execution`,
+      verificationStepsRecommended: 1,
+    }
+  }
+
+  // Default: sequential
+  return {
+    mode: 'sequential',
+    ambiguityScore,
+    complexityBand: ambiguityScore >= 0.25 ? 'medium' : 'low',
+    tokenBudget: 500,
+    escalationReason: 'No escalation triggers — single-pass sequential chain',
+    verificationStepsRecommended: 0,
+  }
+}
+
 export function buildRoutingDashboardData(recentExecutions: ExecutionLike[]): {
   recentDecisions: RoutingDecision[]
   topTrustProfiles: AgentTrustProfile[]

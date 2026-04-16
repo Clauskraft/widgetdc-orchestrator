@@ -2545,6 +2545,57 @@ function resolveRoutingDecision(input) {
 function getRecentRoutingDecisions() {
   return [...recentRoutingDecisions];
 }
+function scoreAmbiguity(message) {
+  const text = message.toLowerCase();
+  const wordCount = text.split(/\s+/).length;
+  const hits = AMBIGUITY_SIGNALS.filter((s) => text.includes(s)).length;
+  const rawScore = Math.min(hits / Math.max(wordCount / 15, 1), 1);
+  return Math.round(rawScore * 100) / 100;
+}
+function resolveChainMode(message) {
+  const text = message.toLowerCase();
+  const ambiguityScore = scoreAmbiguity(message);
+  if (ambiguityScore >= 0.7) {
+    return {
+      mode: "adaptive",
+      ambiguityScore,
+      complexityBand: "high",
+      tokenBudget: 2e3,
+      escalationReason: `Ambiguity score ${ambiguityScore} \u2265 0.70 \u2014 adaptive multi-perspective verification`,
+      verificationStepsRecommended: 3
+    };
+  }
+  const hasDebateSignal = DEBATE_SIGNALS.some((s) => text.includes(s));
+  if (hasDebateSignal) {
+    return {
+      mode: "debate",
+      ambiguityScore,
+      complexityBand: ambiguityScore >= 0.4 ? "high" : "medium",
+      tokenBudget: 1500,
+      escalationReason: `Debate signals detected \u2014 two-agent argument + synthesis`,
+      verificationStepsRecommended: 2
+    };
+  }
+  const hasParallelSignal = PARALLEL_SIGNALS.some((s) => text.includes(s));
+  if (hasParallelSignal) {
+    return {
+      mode: "parallel",
+      ambiguityScore,
+      complexityBand: "medium",
+      tokenBudget: 1e3,
+      escalationReason: `Parallel sub-task signals detected \u2014 fan-out execution`,
+      verificationStepsRecommended: 1
+    };
+  }
+  return {
+    mode: "sequential",
+    ambiguityScore,
+    complexityBand: ambiguityScore >= 0.25 ? "medium" : "low",
+    tokenBudget: 500,
+    escalationReason: "No escalation triggers \u2014 single-pass sequential chain",
+    verificationStepsRecommended: 0
+  };
+}
 function buildRoutingDashboardData(recentExecutions) {
   const allProfiles = Object.keys(CAPABILITY_CANDIDATES).flatMap((capability) => {
     const profiles2 = getCandidateAgents(capability).map((agentId) => buildTrustProfile(agentId, capability, recentExecutions));
@@ -2555,7 +2606,7 @@ function buildRoutingDashboardData(recentExecutions) {
     topTrustProfiles: allProfiles
   };
 }
-var CAPABILITY_CANDIDATES, CAPABILITY_META, recentRoutingDecisions;
+var CAPABILITY_CANDIDATES, CAPABILITY_META, recentRoutingDecisions, PARALLEL_SIGNALS, DEBATE_SIGNALS, AMBIGUITY_SIGNALS;
 var init_routing_engine = __esm({
   "src/agents/routing-engine.ts"() {
     "use strict";
@@ -2610,6 +2661,54 @@ var init_routing_engine = __esm({
       }
     };
     recentRoutingDecisions = [];
+    PARALLEL_SIGNALS = [
+      "and also",
+      "as well as",
+      "additionally",
+      "in parallel",
+      "at the same time",
+      "simultaneously",
+      "both",
+      "all of the following"
+    ];
+    DEBATE_SIGNALS = [
+      "compare",
+      "evaluate",
+      "pros and cons",
+      "trade-off",
+      "tradeoff",
+      "best approach",
+      "vs",
+      "versus",
+      "which is better",
+      "should we",
+      "recommend",
+      "decision",
+      "choose between",
+      "assess"
+    ];
+    AMBIGUITY_SIGNALS = [
+      "might",
+      "could",
+      "unclear",
+      "unsure",
+      "complex",
+      "complicated",
+      "depends",
+      "multiple",
+      "various",
+      "several",
+      "ambiguous",
+      "uncertain",
+      "explore",
+      "investigate",
+      "analyze",
+      "deep",
+      "comprehensive",
+      "thorough",
+      "all aspects",
+      "fully"
+    ];
   }
 });
 
@@ -6474,6 +6573,15 @@ async function executeChain(def) {
     started_at: (/* @__PURE__ */ new Date()).toISOString()
   };
   persistExecution(execution);
+  if (def.mode === "sequential" && def.query) {
+    const escalation = resolveChainMode(def.query);
+    if (escalation.mode !== "sequential") {
+      logger.info({ chain: def.name, escalation }, "Complexity escalation: upgrading chain mode");
+      def = { ...def, mode: escalation.mode };
+      execution.mode = escalation.mode;
+      execution.complexity_escalation = escalation;
+    }
+  }
   logger.info({ execution_id: executionId, chain: def.name, mode: def.mode, steps: def.steps.length, recursion_depth: currentDepth }, "Chain execution started");
   broadcastMessage({
     from: "Orchestrator",
@@ -25913,7 +26021,7 @@ function computePriority(target, edgeScores) {
   return W_EDGE_GAP * edgeGapNorm + W_TARGET_GAP * target.targetGapNorm + W_DEPENDENCY * (1 / (1 + target.deps)) - W_EFFORT * target.effortNorm;
 }
 function rankTargets(targets, edgeScores) {
-  return targets.filter((t) => t.status === "open").map((t) => ({ target: t, priority: computePriority(t, edgeScores) })).sort((a, b) => b.priority - a.priority).map((x) => x.target);
+  return targets.filter((t) => t.status === "open" && !closedTargetIds.has(t.id)).map((t) => ({ target: t, priority: computePriority(t, edgeScores) })).sort((a, b) => b.priority - a.priority).map((x) => x.target);
 }
 async function observeEdgeScores() {
   const redis2 = getRedis();
@@ -26048,7 +26156,7 @@ async function loadTargetRegistry() {
     logger.warn({ diagnostics }, "HyperAgent-Auto: no target registry found in Redis \u2014 trying Neo4j fallback");
     try {
       const neo4jToolResult = await callMcpTool({
-        toolName: "graph.read_cypher",
+        toolName: "data_graph_read",
         args: {
           query: `MATCH (m:HyperAgentMemory {domain: 'targets'})
                   RETURN m.value AS value, m.key AS key
@@ -26057,20 +26165,26 @@ async function loadTargetRegistry() {
         },
         callId: `hyp-registry-fallback-${Date.now()}`
       });
-      const rawResult = neo4jToolResult.result;
-      const backendResp = typeof rawResult === "string" ? JSON.parse(rawResult) : rawResult;
-      const rows = backendResp?.results ?? [];
-      if (rows.length > 0) {
-        const rawValue = rows[0]?.value;
-        const neo4jKey = rows[0]?.key;
-        if (rawValue) {
-          const parsed = typeof rawValue === "string" ? JSON.parse(rawValue) : rawValue;
-          const inner = parsed?.categories ? parsed : parsed?.value ?? parsed;
-          const data = typeof inner === "string" ? JSON.parse(inner) : inner;
-          const targets = parseRegistryToTargets(data);
-          if (targets.length > 0) {
-            logger.info({ key: neo4jKey, targetCount: targets.length }, "HyperAgent-Auto: loaded target registry from Neo4j fallback");
-            return targets;
+      if (neo4jToolResult.status !== "success" || !neo4jToolResult.result) {
+        logger.warn({ status: neo4jToolResult.status, err: neo4jToolResult.error_message }, "HyperAgent-Auto: Neo4j fallback call failed");
+      } else {
+        const rawResult = neo4jToolResult.result;
+        const outerStr = typeof rawResult === "string" ? rawResult : JSON.stringify(rawResult);
+        const outer = JSON.parse(outerStr);
+        const inner = outer?.result ?? outer;
+        const rows = inner?.results ?? outer?.results;
+        logger.info({ rowCount: rows?.length ?? 0, outerKeys: Object.keys(outer) }, "HyperAgent-Auto: Neo4j fallback raw response");
+        if (Array.isArray(rows) && rows.length > 0) {
+          const rawValue = rows[0]?.value;
+          const neo4jKey = rows[0]?.key;
+          if (rawValue) {
+            const parsed = typeof rawValue === "string" ? JSON.parse(rawValue) : rawValue;
+            const data = parsed?.categories ? parsed : parsed?.value ?? parsed;
+            const targets = parseRegistryToTargets(typeof data === "string" ? JSON.parse(data) : data);
+            if (targets.length > 0) {
+              logger.info({ key: neo4jKey, targetCount: targets.length }, "HyperAgent-Auto: loaded target registry from Neo4j fallback");
+              return targets;
+            }
           }
         }
       }
@@ -26322,6 +26436,12 @@ async function runAutonomousCycle(phase, maxTargets) {
           totalCycles2 = parseInt(stored, 10) || 0;
           logger.info({ totalCycles: totalCycles2 }, "HyperAgent-Auto: restored totalCycles from Redis");
         }
+        const closedRaw = await redisRestore.get("hyperagent:closedTargets");
+        if (closedRaw) {
+          const ids = JSON.parse(closedRaw);
+          ids.forEach((id) => closedTargetIds.add(id));
+          logger.info({ count: closedTargetIds.size }, "HyperAgent-Auto: restored closedTargets from Redis");
+        }
       } catch {
       }
     }
@@ -26390,6 +26510,7 @@ ${approach.slice(0, 500)}
           if (execution.status === "completed") {
             targetsCompleted++;
             target.status = "closed";
+            closedTargetIds.add(target.id);
             closedTargets.push(target);
             stream("target_complete", {
               targetId: target.id,
@@ -26708,7 +26829,7 @@ async function listCrossRepoMemory() {
   if (!redis2) return [];
   return redis2.smembers(`${MEMORY_PREFIX}:domains`);
 }
-var CHAIN_MODE_MATRIX, W_EDGE_GAP, W_TARGET_GAP, W_DEPENDENCY, W_EFFORT, LEARNING_RATE, TARGET_EDGE_SCORE, PHASE_GATES, PHASE_POLICY, CYCLE_BATCH_SIZE, isRunning2, currentPhase, currentTarget, currentStep, totalCycles2, lastCycle2, edgeWeights, discoveredIssues, MAX_DISCOVERED_ISSUES, DEFAULT_EDGE_SCORES, EDGE_SCORES_REDIS_KEY, SCORE_PER_TARGET, MEMORY_PREFIX, MEMORY_TTL;
+var CHAIN_MODE_MATRIX, W_EDGE_GAP, W_TARGET_GAP, W_DEPENDENCY, W_EFFORT, LEARNING_RATE, TARGET_EDGE_SCORE, PHASE_GATES, PHASE_POLICY, CYCLE_BATCH_SIZE, isRunning2, currentPhase, currentTarget, currentStep, totalCycles2, lastCycle2, closedTargetIds, edgeWeights, discoveredIssues, MAX_DISCOVERED_ISSUES, DEFAULT_EDGE_SCORES, EDGE_SCORES_REDIS_KEY, SCORE_PER_TARGET, MEMORY_PREFIX, MEMORY_TTL;
 var init_hyperagent_autonomous = __esm({
   "src/hyperagent/hyperagent-autonomous.ts"() {
     "use strict";
@@ -26765,6 +26886,7 @@ var init_hyperagent_autonomous = __esm({
     currentStep = "idle";
     totalCycles2 = 0;
     lastCycle2 = null;
+    closedTargetIds = /* @__PURE__ */ new Set();
     edgeWeights = {
       Husker: 1 / 6,
       Laerer: 1 / 6,
