@@ -37,6 +37,7 @@ export interface FailureEvent {
   affected_tool: string | null
   affected_agent: string | null
   timestamp: string
+  remediation_hint: string
 }
 
 export interface FailureSummary {
@@ -60,6 +61,26 @@ function categorizeFailure(error: string): FailureCategory {
   if (lower.includes('validation') || lower.includes('invalid') || lower.includes('required')) return 'validation'
   if (lower.includes('mcp') || lower.includes('tool_not_found') || lower.includes('tool call')) return 'mcp_error'
   return 'unknown'
+}
+
+// ─── Remediation hints ───────────────────────────────────────────────────────
+
+function remediationSuggestion(category: FailureCategory, toolName: string, _errorMessage: string): string {
+  switch (category) {
+    case 'timeout':
+      return `Increase timeout_ms for '${toolName}' (currently may be hitting the 10s default). Check backend health at /health or Railway logs for slow queries.`
+    case '502':
+      return `Backend gateway unreachable. Check Railway service health for backend-production-d3da and verify Redis connection string in orchestrator env vars.`
+    case 'auth':
+      return `Authentication failed on '${toolName}'. Verify BACKEND_API_KEY env var in Railway orchestrator service matches the backend's expected key (currently 'Heravej_22').`
+    case 'validation':
+      return `Validation error on '${toolName}'. Log the exact args shape sent and compare against the tool registry schema in src/tools/tool-registry.ts.`
+    case 'mcp_error':
+      return `MCP routing error on '${toolName}'. Ensure payload format is {tool, payload} not {tool, args} — check src/mcp-caller.ts and tool registry backendTool mapping.`
+    case 'unknown':
+    default:
+      return `Unknown failure on '${toolName}'. Check Railway logs for full stack trace and confirm the service is healthy at ${process.env.BACKEND_URL ?? 'backend-production-d3da'}/health.`
+  }
 }
 
 // ─── Harvester ──────────────────────────────────────────────────────────────
@@ -112,15 +133,18 @@ export async function harvestFailures(windowHours = 24): Promise<FailureEvent[]>
           const failedSteps = exec.results?.filter(r => r.status === 'error') ?? []
           const errorMsg = exec.error ?? failedSteps.map(s => String(s.output)).join('; ') ?? 'unknown'
 
+          const category = categorizeFailure(errorMsg)
+          const affectedTool = failedSteps[0]?.action ?? null
           events.push({
             $id: `failure-event:${uuid()}`,
             execution_id: execId,
             chain_name: exec.name,
-            category: categorizeFailure(errorMsg),
+            category,
             error_message: sanitizeErrorMessage(errorMsg).slice(0, 500),
-            affected_tool: failedSteps[0]?.action ?? null,
+            affected_tool: affectedTool,
             affected_agent: failedSteps[0]?.agent_id ?? null,
             timestamp: exec.started_at,
+            remediation_hint: remediationSuggestion(category, affectedTool ?? 'unknown', errorMsg),
           })
         } catch {
           // Skip malformed entries

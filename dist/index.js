@@ -2902,6 +2902,23 @@ function categorizeFailure(error) {
   if (lower.includes("mcp") || lower.includes("tool_not_found") || lower.includes("tool call")) return "mcp_error";
   return "unknown";
 }
+function remediationSuggestion(category, toolName, _errorMessage) {
+  switch (category) {
+    case "timeout":
+      return `Increase timeout_ms for '${toolName}' (currently may be hitting the 10s default). Check backend health at /health or Railway logs for slow queries.`;
+    case "502":
+      return `Backend gateway unreachable. Check Railway service health for backend-production-d3da and verify Redis connection string in orchestrator env vars.`;
+    case "auth":
+      return `Authentication failed on '${toolName}'. Verify BACKEND_API_KEY env var in Railway orchestrator service matches the backend's expected key (currently 'Heravej_22').`;
+    case "validation":
+      return `Validation error on '${toolName}'. Log the exact args shape sent and compare against the tool registry schema in src/tools/tool-registry.ts.`;
+    case "mcp_error":
+      return `MCP routing error on '${toolName}'. Ensure payload format is {tool, payload} not {tool, args} \u2014 check src/mcp-caller.ts and tool registry backendTool mapping.`;
+    case "unknown":
+    default:
+      return `Unknown failure on '${toolName}'. Check Railway logs for full stack trace and confirm the service is healthy at ${process.env.BACKEND_URL ?? "backend-production-d3da"}/health.`;
+  }
+}
 async function harvestFailures(windowHours = 24) {
   const redis2 = getRedis();
   if (!redis2) {
@@ -2924,15 +2941,18 @@ async function harvestFailures(windowHours = 24) {
           if (exec.started_at < cutoff) continue;
           const failedSteps = exec.results?.filter((r) => r.status === "error") ?? [];
           const errorMsg = exec.error ?? failedSteps.map((s) => String(s.output)).join("; ") ?? "unknown";
+          const category = categorizeFailure(errorMsg);
+          const affectedTool = failedSteps[0]?.action ?? null;
           events.push({
             $id: `failure-event:${uuid5()}`,
             execution_id: execId,
             chain_name: exec.name,
-            category: categorizeFailure(errorMsg),
+            category,
             error_message: sanitizeErrorMessage(errorMsg).slice(0, 500),
-            affected_tool: failedSteps[0]?.action ?? null,
+            affected_tool: affectedTool,
             affected_agent: failedSteps[0]?.agent_id ?? null,
-            timestamp: exec.started_at
+            timestamp: exec.started_at,
+            remediation_hint: remediationSuggestion(category, affectedTool ?? "unknown", errorMsg)
           });
         } catch {
         }
