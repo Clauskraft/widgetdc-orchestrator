@@ -368,9 +368,12 @@ async function loadTargetRegistry(): Promise<TargetDef[]> {
       const neo4jToolResult = await callMcpTool({
         toolName: 'data_graph_read',
         args: {
-          query: `MATCH (m:HyperAgentMemory {domain: 'targets'})
+          // Pin exact registry key — do NOT use ORDER BY updated_at here: closed-ids node
+          // (domain='targets', key='closed-ids') is updated on every cycle and would shadow
+          // the registry node (key='full-registry-v2.2') once any targets are closed.
+          query: `MATCH (m:HyperAgentMemory {domain: 'targets', key: 'full-registry-v2.2'})
                   RETURN m.value AS value, m.key AS key
-                  ORDER BY m.updated_at DESC LIMIT 1`,
+                  LIMIT 1`,
           params: {},
         },
         callId: `hyp-registry-fallback-${Date.now()}`,
@@ -1181,8 +1184,8 @@ export function getAutonomousStatus(): AutonomousStatus {
     lastCycle,
     edgeScores: edges,
     fitnessScore: computeFitness(edges),
-    targetsRemaining: 72 - (lastCycle?.targetsCompleted ?? 0),
-    targetsCompleted: lastCycle?.targetsCompleted ?? 0,
+    targetsRemaining: 72 - closedTargetIds.size,
+    targetsCompleted: closedTargetIds.size,
   }
 }
 
