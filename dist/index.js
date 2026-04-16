@@ -43370,12 +43370,18 @@ knowledgeRouter.get("/bus/status", async (_req, res) => {
     })
   ]);
   const tiers = {};
+  const debug = {};
   if (tierResult.status === "fulfilled") {
+    debug.tier_status = tierResult.value.status;
+    debug.tier_error = tierResult.value.error_message;
+    debug.tier_raw = tierResult.value.result;
     for (const rec of extractRecords2(tierResult.value)) {
       const tier = String(rec.tier ?? "unknown");
       const cnt = typeof rec.cnt === "number" ? rec.cnt : typeof rec.cnt?.low === "number" ? rec.cnt.low : parseInt(String(rec.cnt)) || 0;
       tiers[tier] = cnt;
     }
+  } else {
+    debug.tier_rejected = String(tierResult.reason);
   }
   const recentEvents = recentResult.status === "fulfilled" ? extractRecords2(recentResult.value) : [];
   let l2StagingCount = 0;
@@ -43395,7 +43401,8 @@ knowledgeRouter.get("/bus/status", async (_req, res) => {
       total_persisted: total,
       l2_staged: l2StagingCount,
       recent_events: recentEvents,
-      generated_at: (/* @__PURE__ */ new Date()).toISOString()
+      generated_at: (/* @__PURE__ */ new Date()).toISOString(),
+      _debug: debug
     }
   });
 });
