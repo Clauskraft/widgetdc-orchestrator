@@ -28,6 +28,13 @@ interface McpCallOptions {
 const MAX_RETRIES = 2
 const RETRY_DELAY_MS = 1000
 
+// ─── Startup Validator Mode ─────────────────────────────────────────────────
+// When true, callMcpTool returns a bypass response immediately.
+// Prevents 67 parallel tool validations at boot from hitting rate limits.
+// Set via setValidatorMode() in startup-validator.ts.
+let _validatorMode = false
+export function setValidatorMode(on: boolean): void { _validatorMode = on }
+
 // ─── Rate-Limit Backpressure ────────────────────────────────────────────────
 // Adaptive throttle: when 429s spike, introduce increasing delay before calls.
 // Prevents thundering-herd retry storms like the CANVAS 820-call cascade.
@@ -239,6 +246,21 @@ const LOCAL_TOOLS = new Set([
 ])
 
 export async function callMcpTool(opts: McpCallOptions): Promise<OrchestratorToolResult> {
+  // Startup validator bypass — validator only checks case existence, not actual execution.
+  // Prevents 67 parallel backend calls at boot from hitting rate limits.
+  if (_validatorMode) {
+    return {
+      call_id: opts.callId,
+      status: 'success',
+      result: 'validator-bypass',
+      error_message: null,
+      error_code: null,
+      duration_ms: 0,
+      trace_id: null,
+      completed_at: new Date().toISOString(),
+    }
+  }
+
   // Local-first: if tool has a local executor case, run it locally (avoids 404 on backend)
   // Strip namespace prefix (e.g. "knowledge.knowledge_normalize" → "knowledge_normalize") for LOCAL_TOOLS lookup
   const baseToolName = opts.toolName.includes('.') ? opts.toolName.split('.').pop()! : opts.toolName

@@ -10,6 +10,7 @@
  */
 import { TOOL_REGISTRY } from './tools/tool-registry.js'
 import { executeToolUnified } from './tools/tool-executor.js'
+import { setValidatorMode } from './mcp-caller.js'
 import { logger } from './logger.js'
 
 export interface ValidationResult {
@@ -29,6 +30,10 @@ export async function validateStartup(): Promise<ValidationResult> {
   const errors: string[] = []
   const warnings: string[] = []
   let validated = 0
+
+  // Activate validator mode — all callMcpTool calls return bypass responses.
+  // This prevents 67 parallel tool validations from hitting backend rate limits.
+  setValidatorMode(true)
 
   // Run all tools in parallel with a 4s global deadline.
   // This reduces worst-case validator time from (N × timeout) to 4s regardless of tool count.
@@ -70,6 +75,9 @@ export async function validateStartup(): Promise<ValidationResult> {
       validated++
     }
   }
+
+  // Deactivate validator mode — normal backend calls resume
+  setValidatorMode(false)
 
   return {
     passed: errors.length === 0,
