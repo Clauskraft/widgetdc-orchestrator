@@ -924,13 +924,13 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
   defineTool({
     name: 'tool_metrics',
     namespace: 'analytics',
-    description: 'Get metrics for a specific tool (or top N tools): call count, error rate, avg duration. Phantom Week 4.',
+    description: 'Get call counts, weekly usage, last-called, and utilisation KPIs for a specific tool or the top N tools. Backed by orchestrator:telemetry adoption hooks.',
     input: z.object({
-      tool_name: z.string().optional().describe('Tool name (omit for top 10 tools)'),
-      limit: z.number().optional().describe('Max tools to return (default 10)'),
+      tool_name: z.string().optional().describe('Tool name (omit for top N tools)'),
+      limit: z.number().optional().describe('Max tools to return (default 10, max 50)'),
     }),
     timeoutMs: 10000,
-    outputDescription: 'ToolMetrics or ToolMetrics[] for top tools',
+    outputDescription: 'Single-tool telemetry (tool_name, namespace, call_count, weekly_calls, last_called_at, stale, advanced) or top-tools summary with KPIs',
   }),
 
   // ─── prompts.* — Prompt Library (Phantom Week 5) ────────────────

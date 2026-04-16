@@ -3490,13 +3490,13 @@ var init_tool_registry = __esm({
       defineTool({
         name: "tool_metrics",
         namespace: "analytics",
-        description: "Get metrics for a specific tool (or top N tools): call count, error rate, avg duration. Phantom Week 4.",
+        description: "Get call counts, weekly usage, last-called, and utilisation KPIs for a specific tool or the top N tools. Backed by orchestrator:telemetry adoption hooks.",
         input: z.object({
-          tool_name: z.string().optional().describe("Tool name (omit for top 10 tools)"),
-          limit: z.number().optional().describe("Max tools to return (default 10)")
+          tool_name: z.string().optional().describe("Tool name (omit for top N tools)"),
+          limit: z.number().optional().describe("Max tools to return (default 10, max 50)")
         }),
         timeoutMs: 1e4,
-        outputDescription: "ToolMetrics or ToolMetrics[] for top tools"
+        outputDescription: "Single-tool telemetry (tool_name, namespace, call_count, weekly_calls, last_called_at, stale, advanced) or top-tools summary with KPIs"
       }),
       // ─── prompts.* — Prompt Library (Phantom Week 5) ────────────────
       defineTool({
@@ -4984,6 +4984,11 @@ var init_tool_registry = __esm({
 });
 
 // src/flywheel/adoption-telemetry.ts
+var adoption_telemetry_exports = {};
+__export(adoption_telemetry_exports, {
+  computeTelemetry: () => computeTelemetry,
+  recordToolCall: () => recordToolCall
+});
 function isoWeek() {
   const now = /* @__PURE__ */ new Date();
   const d = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
@@ -30124,15 +30129,38 @@ ${formatted}`;
     }
     case "tool_metrics": {
       try {
-        const { getToolMetrics: getToolMetrics2, getTopTools: getTopTools2 } = await Promise.resolve().then(() => (init_runtime_analytics(), runtime_analytics_exports));
+        const { computeTelemetry: computeTelemetry2 } = await Promise.resolve().then(() => (init_adoption_telemetry(), adoption_telemetry_exports));
         const toolName = typeof args.tool_name === "string" ? args.tool_name : void 0;
         const limit = typeof args.limit === "number" ? Math.min(args.limit, 50) : 10;
+        const summary = await computeTelemetry2();
         if (toolName) {
-          const metrics2 = await getToolMetrics2(toolName);
-          return metrics2 ? JSON.stringify(metrics2, null, 2) : `No metrics found for tool: ${toolName}`;
+          const t = summary.tools.find((x) => x.tool === toolName);
+          if (!t || t.lifetime_calls === 0) return `No metrics found for tool: ${toolName}`;
+          return JSON.stringify({
+            tool_name: t.tool,
+            namespace: t.namespace,
+            call_count: t.lifetime_calls,
+            weekly_calls: t.weekly_calls,
+            last_called_at: t.last_called ?? "",
+            stale: t.stale,
+            advanced: t.advanced
+          }, null, 2);
         }
-        const tools = await getTopTools2(limit);
-        return JSON.stringify({ tools, count: tools.length }, null, 2);
+        const top = summary.tools.filter((t) => t.lifetime_calls > 0).sort((a, b) => b.lifetime_calls - a.lifetime_calls).slice(0, limit).map((t) => ({
+          tool_name: t.tool,
+          namespace: t.namespace,
+          call_count: t.lifetime_calls,
+          weekly_calls: t.weekly_calls,
+          last_called_at: t.last_called ?? ""
+        }));
+        return JSON.stringify({
+          tools: top,
+          count: top.length,
+          total_tools: summary.total_tools,
+          tools_called_ever: summary.tools_called_ever,
+          tools_called_this_week: summary.tools_called_this_week,
+          utilisation_rate_pct: summary.kpis.utilisation_rate_pct
+        }, null, 2);
       } catch (err) {
         return `Tool metrics failed: ${err instanceof Error ? err.message : String(err)}`;
       }
