@@ -9983,7 +9983,13 @@ async function stageLearn(cycleId, observeResult, orientResult, actResult) {
           failed: actResult.failed,
           confidence: observeResult.confidence,
           estimated_impact: orientResult.estimated_impact
-        }
+        },
+        intent: "Record OODA evolution cycle outcome",
+        purpose: "Persist EvolutionEvent for cross-session learning and trend analysis",
+        objective: "Maintain EvolutionEvent history to track platform improvement over time",
+        evidence: `Cycle ${cycleId}: ${actResult.passed}/${actResult.executed} improvements passed`,
+        verification: "Read-back via MATCH (e:EvolutionEvent {cycle_id: $cycle_id}) RETURN e",
+        test_results: `pass_rate=${actResult.executed > 0 ? (actResult.passed / actResult.executed).toFixed(2) : "0"} confidence=${observeResult.confidence}`
       },
       callId: uuid15(),
       timeoutMs: 15e3
@@ -10013,7 +10019,13 @@ async function stageLearn(cycleId, observeResult, orientResult, actResult) {
             lesson: lessonText,
             context: `OODA cycle: ${observeResult.priority_areas.join(", ")}`,
             cycle_id: cycleId
-          }
+          },
+          intent: "Persist evolution cycle lesson for agent learning",
+          purpose: "Build lesson history for continuous platform improvement",
+          objective: "Record what was learned in this OODA cycle",
+          evidence: lessonText,
+          verification: "Read-back via MATCH (l:Lesson {source_id: $source_id}) RETURN l",
+          test_results: `passed=${actResult.passed} failed=${actResult.failed} cycle=${cycleId}`
         },
         callId: uuid15(),
         timeoutMs: 1e4
@@ -24630,7 +24642,13 @@ SET s.scanned_at = datetime(), s.duration_ms = $duration,
           warning: summary.warning,
           info: summary.info,
           total: summary.total
-        }
+        },
+        intent: "Persist loose-end scan summary to graph for trend tracking",
+        purpose: "Maintain LooseEndScan history to detect recurring platform issues",
+        objective: "Record scan outcome for cross-session analysis",
+        evidence: `Scan ${scanId}: ${summary.total} items (critical=${summary.critical} warning=${summary.warning} info=${summary.info})`,
+        verification: "Read-back via MATCH (s:LooseEndScan {id: $id}) RETURN s",
+        test_results: `duration_ms=${scanResult.duration_ms} total=${summary.total}`
       },
       callId: uuid21(),
       timeoutMs: 1e4

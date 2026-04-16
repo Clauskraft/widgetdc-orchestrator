@@ -23,7 +23,15 @@
       "Bash(railway variables:*)",
       "WebFetch(domain:gist.github.com)",
       "WebFetch(domain:flowbite.com)",
-      "WebFetch(domain:ishadeed.com)"
+      "WebFetch(domain:ishadeed.com)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(f\\\\\"H: uptime={d.get\\('uptime_seconds'\\)}s redis={d.get\\('redis_enabled'\\)}\\\\\"\\)\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); s=d.get\\('data',d\\); print\\(f\\\\\"E: totalEvals={s.get\\('totalEvals'\\)}\\\\\"\\)\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); r=json.loads\\(d.get\\('data',{}\\).get\\('result','{}'\\)\\); print\\(f\\\\\"P: totalDeposits={r.get\\('totalDeposits'\\)} active={r.get\\('activePheromones'\\)}\\\\\"\\)\")",
+      "Bash(mkdir -p .git/cleanup-patches)",
+      "Bash(git -C .deploy-process-workspace diff cc-v4/src/routes/_authenticated/obsidian.tsx)",
+      "Bash(ls -d .worktrees)",
+      "Bash(ls -d worktrees)",
+      "Bash(ls -d C:/Users/claus/Projetcs/widgetdc-orchestrator-*)"
     ]
   }
 }
