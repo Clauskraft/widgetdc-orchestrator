@@ -744,6 +744,35 @@ export async function runAutonomousCycle(
         }
       } catch { /* non-blocking */ }
     }
+
+    // Neo4j fallback for closedTargetIds (survives Railway LB + Redis eviction)
+    if (closedTargetIds.size === 0) {
+      try {
+        const closedResult = await callMcpTool({
+          toolName: 'data_graph_read',
+          args: {
+            query: `MATCH (m:HyperAgentMemory {domain: 'targets', key: 'closed-ids'})
+                    RETURN m.value AS value ORDER BY m.updated_at DESC LIMIT 1`,
+            params: {},
+          },
+          callId: `hyp-closed-restore-${Date.now()}`,
+        })
+        if (closedResult.status === 'success' && closedResult.result) {
+          const outerStr = typeof closedResult.result === 'string' ? closedResult.result : JSON.stringify(closedResult.result)
+          const outer = JSON.parse(outerStr) as Record<string, unknown>
+          const inner = (outer?.result as Record<string, unknown>) ?? outer
+          const rows = (inner?.results ?? outer?.results) as Array<Record<string, unknown>> | undefined
+          if (Array.isArray(rows) && rows.length > 0) {
+            const rawValue = rows[0]?.value
+            const ids = typeof rawValue === 'string' ? JSON.parse(rawValue) as string[] : rawValue as string[]
+            if (Array.isArray(ids)) {
+              ids.forEach(id => closedTargetIds.add(id))
+              logger.info({ count: closedTargetIds.size }, 'HyperAgent-Auto: restored closedTargets from Neo4j')
+            }
+          }
+        }
+      } catch { /* non-blocking */ }
+    }
   }
 
   const cycleId = `auto-${uuid().slice(0, 8)}`
@@ -847,12 +876,9 @@ export async function runAutonomousCycle(
             // Evaluate and persist KPI
             await evaluatePlan(execution.execution_id, plan.planId, 80, 'hyperagent-auto')
 
-            // Persist closed target set to Redis (best-effort — guards against re-processing same target)
+            // Persist closed target IDs to Neo4j + Redis (Neo4j survives Railway redeploy/LB)
             try {
-              const redis = getRedis()
-              if (redis) {
-                await redis.set('hyperagent:closedTargets', JSON.stringify([...closedTargetIds]), 'EX', MEMORY_TTL)
-              }
+              await persistCrossRepoMemory('targets', 'closed-ids', [...closedTargetIds], 'hyperagent-auto')
             } catch { /* non-blocking */ }
 
             lessons.push(`Target ${target.id} closed via ${chainMode} (conf=${confidence.toFixed(2)}, rag=${ragResultCount})`)
