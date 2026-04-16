@@ -247,3 +247,142 @@ knowledgeRouter.get('/briefing', async (_req: Request, res: Response) => {
     res.status(500).json({ error: 'Failed to read briefing from cache' })
   }
 })
+
+/* ─── KB Status: GET /api/knowledge/bus/status ────────────────────────────── */
+
+/**
+ * Returns KnowledgeBus tier counts from Neo4j + L2 staging count from Redis.
+ * Used by agents and dashboards to see KB health at a glance.
+ */
+knowledgeRouter.get('/bus/status', async (_req: Request, res: Response) => {
+  const [tierResult, recentResult] = await Promise.allSettled([
+    callMcp('graph.read_cypher', {
+      query: 'MATCH (n:KnowledgeCandidate) RETURN n.tier AS tier, count(n) AS cnt ORDER BY n.tier',
+    }),
+    callMcp('graph.read_cypher', {
+      query: 'MATCH (n:KnowledgeCandidate) RETURN n.title AS title, n.tier AS tier, n.score AS score, n.source AS source, n.created_at AS created_at ORDER BY n.created_at DESC LIMIT 10',
+    }),
+  ])
+
+  const tiers: Record<string, number> = {}
+  if (tierResult.status === 'fulfilled' && tierResult.value.ok) {
+    const data = tierResult.value.data as Record<string, unknown> | undefined
+    const records = Array.isArray(data)
+      ? data
+      : Array.isArray((data as Record<string, unknown>)?.results)
+        ? (data as Record<string, unknown>).results as unknown[]
+        : []
+    for (const rec of records as Array<Record<string, unknown>>) {
+      const tier = String(rec.tier ?? 'unknown')
+      const cnt = typeof rec.cnt === 'number' ? rec.cnt
+        : typeof (rec.cnt as Record<string, unknown>)?.low === 'number' ? (rec.cnt as Record<string, unknown>).low as number
+        : parseInt(String(rec.cnt)) || 0
+      tiers[tier] = cnt
+    }
+  }
+
+  const recentEvents: unknown[] = []
+  if (recentResult.status === 'fulfilled' && recentResult.value.ok) {
+    const data = recentResult.value.data as Record<string, unknown> | undefined
+    const records = Array.isArray(data)
+      ? data
+      : Array.isArray((data as Record<string, unknown>)?.results)
+        ? (data as Record<string, unknown>).results as unknown[]
+        : []
+    recentEvents.push(...(records as unknown[]))
+  }
+
+  // L2 staging count from Redis
+  let l2StagingCount = 0
+  const redis = getRedis()
+  if (redis) {
+    try {
+      const keys = await redis.keys('knowledge:staging:*')
+      l2StagingCount = keys.length
+    } catch { /* non-critical */ }
+  }
+
+  const total = Object.values(tiers).reduce((s, n) => s + n, 0)
+  res.json({
+    success: true,
+    data: {
+      tiers,
+      total_persisted: total,
+      l2_staged: l2StagingCount,
+      recent_events: recentEvents,
+      generated_at: new Date().toISOString(),
+    },
+  })
+})
+
+/* ─── KB Emit: POST /api/knowledge/bus/emit ───────────────────────────────── */
+
+/**
+ * Inject a KnowledgeEvent directly into the KnowledgeBus.
+ * Agents and crons can POST here to contribute knowledge without going through tool-executor.
+ *
+ * Body: { source, title, content, summary, score?, tags?, repo? }
+ */
+knowledgeRouter.post('/bus/emit', async (req: Request, res: Response) => {
+  const { source, title, content, summary, score, tags, repo } = req.body as Record<string, unknown>
+
+  if (!source || !title || !content || !summary) {
+    res.status(400).json({ success: false, error: 'source, title, content, summary are required' })
+    return
+  }
+
+  try {
+    const { emitKnowledge } = await import('../knowledge/index.js')
+    emitKnowledge({
+      source: source as 'inventor' | 'session_fold' | 'phantom_bom' | 'commit' | 'manual',
+      title: String(title),
+      content: String(content),
+      summary: String(summary),
+      score: typeof score === 'number' ? score : undefined,
+      tags: Array.isArray(tags) ? tags as string[] : [],
+      repo: String(repo ?? 'widgetdc-orchestrator'),
+    })
+
+    const tierHint = typeof score === 'number'
+      ? (score >= 0.85 ? 'L4 (skill candidate)' : score >= 0.70 ? 'L3 (AgentMemory)' : 'L2 (staging)')
+      : 'auto-scored by PRISM'
+
+    logger.info({ title, source, score }, 'KnowledgeBus HTTP emit received')
+    res.json({ success: true, tier_hint: tierHint, title })
+  } catch (err) {
+    logger.error({ err: String(err) }, 'KnowledgeBus HTTP emit failed')
+    res.status(500).json({ success: false, error: String(err) })
+  }
+})
+
+/* ─── KB Fold: POST /api/knowledge/bus/fold ──────────────────────────────── */
+
+/**
+ * Fold a session transcript into the KnowledgeBus.
+ * Body: { session_id } — session_id is the transcript filename without .jsonl
+ */
+knowledgeRouter.post('/bus/fold', async (req: Request, res: Response) => {
+  const { session_id } = req.body as Record<string, unknown>
+  if (!session_id) {
+    res.status(400).json({ success: false, error: 'session_id is required' })
+    return
+  }
+  try {
+    const { foldSession } = await import('../knowledge/adapters/session-fold-adapter.js')
+    // Support both full paths and bare session IDs
+    const path = String(session_id).includes('/') || String(session_id).includes('\\')
+      ? String(session_id)
+      : `${process.env.HOME ?? process.env.USERPROFILE ?? '/tmp'}/.claude/projects/${String(session_id)}.jsonl`
+    const fold = await foldSession(path)
+    res.json({
+      success: true,
+      session_id: fold.session_id,
+      commits: fold.commits.length,
+      open_tasks: fold.open_tasks.length,
+      decisions: fold.decisions.length,
+      linear_refs: fold.linear_refs,
+    })
+  } catch (err) {
+    res.status(500).json({ success: false, error: String(err) })
+  }
+})

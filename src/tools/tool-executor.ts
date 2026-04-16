@@ -2429,6 +2429,22 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
           timestamp: new Date().toISOString(),
         })
 
+        // Emit to KnowledgeBus — hyperagent cycle results as platform intelligence
+        if (cycle.targetsCompleted > 0 || cycle.newIssuesDiscovered.length > 0) {
+          try {
+            const { emitKnowledge } = await import('../knowledge/index.js')
+            emitKnowledge({
+              source: 'manual',
+              title: `HyperAgent cycle ${cycle.phase}: ${cycle.targetsCompleted}/${cycle.targetsAttempted} targets`,
+              content: `## HyperAgent Autonomous Cycle\n\nPhase: ${cycle.phase}\nCycle ID: ${cycle.cycleId}\nTargets: ${cycle.targetsCompleted}/${cycle.targetsAttempted} completed, ${cycle.targetsFailed} failed\nFitness delta: ${cycle.fitnessScoreDelta?.toFixed(3) ?? 'n/a'}\nNew issues: ${cycle.newIssuesDiscovered.length}\nDuration: ${cycle.durationMs}ms\nCaller: ${callerRepo}`,
+              summary: `HyperAgent ${cycle.phase}: ${cycle.targetsCompleted} targets fixed, ${cycle.newIssuesDiscovered.length} new issues, fitness Δ${cycle.fitnessScoreDelta?.toFixed(3) ?? 'n/a'}`,
+              score: cycle.fitnessScoreDelta && cycle.fitnessScoreDelta > 0.05 ? 0.72 : 0.55,
+              tags: ['hyperagent', 'autonomous', cycle.phase, callerRepo],
+              repo: callerRepo !== 'unknown' ? callerRepo : 'widgetdc-orchestrator',
+            })
+          } catch { /* KB emission is non-fatal */ }
+        }
+
         return JSON.stringify({
           cycleId: cycle.cycleId,
           phase: cycle.phase,
@@ -2633,9 +2649,39 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
         const { emitKnowledge } = await import('../knowledge/index.js')
         const { foldSession } = await import('../knowledge/adapters/session-fold-adapter.js')
 
-        if (args.source === 'session_fold' && args.session_id) {
-          const fold = await foldSession(args.session_id as string)
-          return `Session fold emitted to KnowledgeBus: ${fold.commits.length} commits, ${fold.open_tasks.length} open tasks, ${fold.decisions.length} decisions`
+        if (args.source === 'session_fold') {
+          // If session_id is provided, fold that specific transcript
+          // If omitted (cron case), find the most recent transcript in the Claude projects dir
+          let transcriptPath: string
+          if (args.session_id) {
+            transcriptPath = String(args.session_id)
+          } else {
+            const fs = await import('node:fs')
+            const path = await import('node:path')
+            const baseDir = process.env.USERPROFILE
+              ? `${process.env.USERPROFILE}\\.claude\\projects`
+              : `${process.env.HOME}/.claude/projects`
+            // Find all .jsonl files recursively (max depth 2)
+            const projects = fs.readdirSync(baseDir).filter(d => {
+              try { return fs.statSync(path.join(baseDir, d)).isDirectory() } catch { return false }
+            })
+            let newest = { mtime: 0, path: '' }
+            for (const proj of projects) {
+              const projDir = path.join(baseDir, proj)
+              try {
+                const files = fs.readdirSync(projDir).filter(f => f.endsWith('.jsonl'))
+                for (const f of files) {
+                  const fp = path.join(projDir, f)
+                  const mtime = fs.statSync(fp).mtimeMs
+                  if (mtime > newest.mtime) newest = { mtime, path: fp }
+                }
+              } catch { /* skip inaccessible dirs */ }
+            }
+            if (!newest.path) return 'knowledge_normalize: no transcript files found'
+            transcriptPath = newest.path
+          }
+          const fold = await foldSession(transcriptPath)
+          return `Session fold emitted to KnowledgeBus: ${fold.commits.length} commits, ${fold.open_tasks.length} open tasks, ${fold.decisions.length} decisions (path: ${transcriptPath.split(/[/\\]/).slice(-2).join('/')})`
         }
 
         emitKnowledge({
@@ -2647,12 +2693,78 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
           tags: (args.tags as string[]) ?? [],
           repo: (args.repo as string) ?? 'widgetdc-orchestrator',
         })
-        const tier = args.score !== undefined
-          ? (args.score >= 0.85 ? 'L4 (skill candidate)' : args.score >= 0.70 ? 'L3 (AgentMemory)' : 'L2 (staging)')
+        const scoreNum = typeof args.score === 'number' ? args.score : -1
+        const tier = scoreNum >= 0
+          ? (scoreNum >= 0.85 ? 'L4 (skill candidate)' : scoreNum >= 0.70 ? 'L3 (AgentMemory)' : 'L2 (staging)')
           : 'auto-scored'
         return `KnowledgeEvent emitted: "${args.title as string}" → ${tier}`
       } catch (err) {
         return `knowledge_normalize failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'knowledge_l4_sync': {
+      // Reads unsynced L4 KnowledgeCandidates from Neo4j and creates Linear issues for skill promotion
+      try {
+        const maxItems = (args.max_items as number) ?? 10
+        const readResult = await callMcpTool({
+          toolName: 'graph.read_cypher',
+          args: {
+            query: `MATCH (n:KnowledgeCandidate)
+WHERE n.tier = 'L4' AND (n.synced_to_skill = false OR n.synced_to_skill IS NULL)
+RETURN n.event_id AS id, n.title AS title, n.slug AS slug, n.summary AS summary,
+       n.source AS source, n.score AS score, n.created_at AS created_at
+ORDER BY n.score DESC LIMIT ${maxItems}`,
+          },
+          callId: v4(),
+        })
+        if (readResult.status !== 'success') {
+          return `knowledge_l4_sync: graph read failed: ${readResult.error_message}`
+        }
+        const rawData = readResult.result as Record<string, unknown> | undefined
+        const records: Array<Record<string, unknown>> = Array.isArray(rawData?.results)
+          ? rawData.results as Array<Record<string, unknown>>
+          : Array.isArray(rawData) ? rawData as Array<Record<string, unknown>> : []
+
+        if (records.length === 0) return 'knowledge_l4_sync: no unsynced L4 candidates found'
+
+        let synced = 0
+        for (const rec of records) {
+          const title = String(rec.title ?? rec.slug ?? rec.id ?? 'Unknown skill candidate')
+          const summary = String(rec.summary ?? '')
+          const score = typeof rec.score === 'number' ? rec.score : 0
+          const source = String(rec.source ?? 'unknown')
+          const id = String(rec.id ?? '')
+
+          // Create Linear issue for skill promotion review
+          await callMcpTool({
+            toolName: 'linear.save_issue',
+            args: {
+              title: `[KB L4] Promote skill candidate: ${title}`,
+              team: 'Linear-clauskraft',
+              description: `## L4 Skill Candidate\n\nA KnowledgeCandidate node has been promoted to L4 tier (score: ${score.toFixed(2)}) and is ready for skill file promotion.\n\n**Source:** ${source}\n**Event ID:** ${id}\n\n### Summary\n${summary}\n\n### Action Required\nReview and promote to a skill file in the WidgeTDC skill corpus.`,
+              priority: 3,
+              labels: ['knowledge-bus', 'skill-promotion'],
+            },
+            callId: uuid(),
+          })
+
+          // Mark as synced in Neo4j
+          await callMcpTool({
+            toolName: 'graph.write_cypher',
+            args: {
+              query: `MATCH (n:KnowledgeCandidate {event_id: $id}) SET n.synced_to_skill = true, n.synced_at = datetime()`,
+              params: { id },
+              intent: `Mark L4 skill candidate ${title} as synced`,
+              evidence: `Linear issue created for promotion, score=${score}`,
+            },
+            callId: uuid(),
+          })
+          synced++
+        }
+        return `knowledge_l4_sync: ${synced} L4 candidates → Linear issues created`
+      } catch (err) {
+        return `knowledge_l4_sync failed: ${err instanceof Error ? err.message : String(err)}`
       }
     }
 

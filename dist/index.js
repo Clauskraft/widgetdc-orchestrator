@@ -31470,6 +31470,29 @@ ${lines.join("\n")}`;
           fitness_delta: cycle.fitnessScoreDelta,
           timestamp: (/* @__PURE__ */ new Date()).toISOString()
         });
+        if (cycle.targetsCompleted > 0 || cycle.newIssuesDiscovered.length > 0) {
+          try {
+            const { emitKnowledge: emitKnowledge2 } = await Promise.resolve().then(() => (init_knowledge(), knowledge_exports));
+            emitKnowledge2({
+              source: "manual",
+              title: `HyperAgent cycle ${cycle.phase}: ${cycle.targetsCompleted}/${cycle.targetsAttempted} targets`,
+              content: `## HyperAgent Autonomous Cycle
+
+Phase: ${cycle.phase}
+Cycle ID: ${cycle.cycleId}
+Targets: ${cycle.targetsCompleted}/${cycle.targetsAttempted} completed, ${cycle.targetsFailed} failed
+Fitness delta: ${cycle.fitnessScoreDelta?.toFixed(3) ?? "n/a"}
+New issues: ${cycle.newIssuesDiscovered.length}
+Duration: ${cycle.durationMs}ms
+Caller: ${callerRepo}`,
+              summary: `HyperAgent ${cycle.phase}: ${cycle.targetsCompleted} targets fixed, ${cycle.newIssuesDiscovered.length} new issues, fitness \u0394${cycle.fitnessScoreDelta?.toFixed(3) ?? "n/a"}`,
+              score: cycle.fitnessScoreDelta && cycle.fitnessScoreDelta > 0.05 ? 0.72 : 0.55,
+              tags: ["hyperagent", "autonomous", cycle.phase, callerRepo],
+              repo: callerRepo !== "unknown" ? callerRepo : "widgetdc-orchestrator"
+            });
+          } catch {
+          }
+        }
         return JSON.stringify({
           cycleId: cycle.cycleId,
           phase: cycle.phase,
@@ -31662,9 +31685,39 @@ ${lines.join("\n")}`;
       try {
         const { emitKnowledge: emitKnowledge2 } = await Promise.resolve().then(() => (init_knowledge(), knowledge_exports));
         const { foldSession: foldSession2 } = await Promise.resolve().then(() => (init_session_fold_adapter(), session_fold_adapter_exports));
-        if (args.source === "session_fold" && args.session_id) {
-          const fold = await foldSession2(args.session_id);
-          return `Session fold emitted to KnowledgeBus: ${fold.commits.length} commits, ${fold.open_tasks.length} open tasks, ${fold.decisions.length} decisions`;
+        if (args.source === "session_fold") {
+          let transcriptPath;
+          if (args.session_id) {
+            transcriptPath = String(args.session_id);
+          } else {
+            const fs3 = await import("node:fs");
+            const path4 = await import("node:path");
+            const baseDir = process.env.USERPROFILE ? `${process.env.USERPROFILE}\\.claude\\projects` : `${process.env.HOME}/.claude/projects`;
+            const projects = fs3.readdirSync(baseDir).filter((d) => {
+              try {
+                return fs3.statSync(path4.join(baseDir, d)).isDirectory();
+              } catch {
+                return false;
+              }
+            });
+            let newest = { mtime: 0, path: "" };
+            for (const proj of projects) {
+              const projDir = path4.join(baseDir, proj);
+              try {
+                const files = fs3.readdirSync(projDir).filter((f) => f.endsWith(".jsonl"));
+                for (const f of files) {
+                  const fp = path4.join(projDir, f);
+                  const mtime = fs3.statSync(fp).mtimeMs;
+                  if (mtime > newest.mtime) newest = { mtime, path: fp };
+                }
+              } catch {
+              }
+            }
+            if (!newest.path) return "knowledge_normalize: no transcript files found";
+            transcriptPath = newest.path;
+          }
+          const fold = await foldSession2(transcriptPath);
+          return `Session fold emitted to KnowledgeBus: ${fold.commits.length} commits, ${fold.open_tasks.length} open tasks, ${fold.decisions.length} decisions (path: ${transcriptPath.split(/[/\\]/).slice(-2).join("/")})`;
         }
         emitKnowledge2({
           source: args.source ?? "manual",
@@ -31675,10 +31728,77 @@ ${lines.join("\n")}`;
           tags: args.tags ?? [],
           repo: args.repo ?? "widgetdc-orchestrator"
         });
-        const tier = args.score !== void 0 ? args.score >= 0.85 ? "L4 (skill candidate)" : args.score >= 0.7 ? "L3 (AgentMemory)" : "L2 (staging)" : "auto-scored";
+        const scoreNum = typeof args.score === "number" ? args.score : -1;
+        const tier = scoreNum >= 0 ? scoreNum >= 0.85 ? "L4 (skill candidate)" : scoreNum >= 0.7 ? "L3 (AgentMemory)" : "L2 (staging)" : "auto-scored";
         return `KnowledgeEvent emitted: "${args.title}" \u2192 ${tier}`;
       } catch (err) {
         return `knowledge_normalize failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "knowledge_l4_sync": {
+      try {
+        const maxItems = args.max_items ?? 10;
+        const readResult = await callMcpTool({
+          toolName: "graph.read_cypher",
+          args: {
+            query: `MATCH (n:KnowledgeCandidate)
+WHERE n.tier = 'L4' AND (n.synced_to_skill = false OR n.synced_to_skill IS NULL)
+RETURN n.event_id AS id, n.title AS title, n.slug AS slug, n.summary AS summary,
+       n.source AS source, n.score AS score, n.created_at AS created_at
+ORDER BY n.score DESC LIMIT ${maxItems}`
+          },
+          callId: v4()
+        });
+        if (readResult.status !== "success") {
+          return `knowledge_l4_sync: graph read failed: ${readResult.error_message}`;
+        }
+        const rawData = readResult.result;
+        const records = Array.isArray(rawData?.results) ? rawData.results : Array.isArray(rawData) ? rawData : [];
+        if (records.length === 0) return "knowledge_l4_sync: no unsynced L4 candidates found";
+        let synced = 0;
+        for (const rec of records) {
+          const title = String(rec.title ?? rec.slug ?? rec.id ?? "Unknown skill candidate");
+          const summary = String(rec.summary ?? "");
+          const score = typeof rec.score === "number" ? rec.score : 0;
+          const source = String(rec.source ?? "unknown");
+          const id = String(rec.id ?? "");
+          await callMcpTool({
+            toolName: "linear.save_issue",
+            args: {
+              title: `[KB L4] Promote skill candidate: ${title}`,
+              team: "Linear-clauskraft",
+              description: `## L4 Skill Candidate
+
+A KnowledgeCandidate node has been promoted to L4 tier (score: ${score.toFixed(2)}) and is ready for skill file promotion.
+
+**Source:** ${source}
+**Event ID:** ${id}
+
+### Summary
+${summary}
+
+### Action Required
+Review and promote to a skill file in the WidgeTDC skill corpus.`,
+              priority: 3,
+              labels: ["knowledge-bus", "skill-promotion"]
+            },
+            callId: uuid28()
+          });
+          await callMcpTool({
+            toolName: "graph.write_cypher",
+            args: {
+              query: `MATCH (n:KnowledgeCandidate {event_id: $id}) SET n.synced_to_skill = true, n.synced_at = datetime()`,
+              params: { id },
+              intent: `Mark L4 skill candidate ${title} as synced`,
+              evidence: `Linear issue created for promotion, score=${score}`
+            },
+            callId: uuid28()
+          });
+          synced++;
+        }
+        return `knowledge_l4_sync: ${synced} L4 candidates \u2192 Linear issues created`;
+      } catch (err) {
+        return `knowledge_l4_sync failed: ${err instanceof Error ? err.message : String(err)}`;
       }
     }
     case "knowledge_bus_consolidate": {
@@ -41964,6 +42084,41 @@ function registerDefaultLoops() {
       }]
     }
   });
+  registerCronJob({
+    id: "knowledge-bus-session-fold",
+    name: "Knowledge Bus Session Fold (Auto-fold recent sessions)",
+    schedule: "0 */6 * * *",
+    // every 6h
+    enabled: true,
+    chain: {
+      name: "KB Session Fold",
+      mode: "sequential",
+      steps: [{
+        agent_id: "orchestrator",
+        tool_name: "knowledge_normalize",
+        arguments: {
+          source: "session_fold"
+          // session_id left blank — tool-executor picks latest transcript automatically
+        }
+      }]
+    }
+  });
+  registerCronJob({
+    id: "knowledge-bus-l4-sync",
+    name: "Knowledge Bus L4 Sync (Promote skill candidates to Linear)",
+    schedule: "30 4 * * *",
+    // 04:30 UTC daily
+    enabled: true,
+    chain: {
+      name: "KB L4 Sync",
+      mode: "sequential",
+      steps: [{
+        agent_id: "orchestrator",
+        tool_name: "knowledge_l4_sync",
+        arguments: { max_items: 10 }
+      }]
+    }
+  });
 }
 
 // src/routes/cron.ts
@@ -43160,6 +43315,99 @@ knowledgeRouter.get("/briefing", async (_req, res) => {
   } catch (err) {
     logger.warn({ err: String(err) }, "Redis read failed for knowledge briefing");
     res.status(500).json({ error: "Failed to read briefing from cache" });
+  }
+});
+knowledgeRouter.get("/bus/status", async (_req, res) => {
+  const [tierResult, recentResult] = await Promise.allSettled([
+    callMcp2("graph.read_cypher", {
+      query: "MATCH (n:KnowledgeCandidate) RETURN n.tier AS tier, count(n) AS cnt ORDER BY n.tier"
+    }),
+    callMcp2("graph.read_cypher", {
+      query: "MATCH (n:KnowledgeCandidate) RETURN n.title AS title, n.tier AS tier, n.score AS score, n.source AS source, n.created_at AS created_at ORDER BY n.created_at DESC LIMIT 10"
+    })
+  ]);
+  const tiers = {};
+  if (tierResult.status === "fulfilled" && tierResult.value.ok) {
+    const data = tierResult.value.data;
+    const records = Array.isArray(data) ? data : Array.isArray(data?.results) ? data.results : [];
+    for (const rec of records) {
+      const tier = String(rec.tier ?? "unknown");
+      const cnt = typeof rec.cnt === "number" ? rec.cnt : typeof rec.cnt?.low === "number" ? rec.cnt.low : parseInt(String(rec.cnt)) || 0;
+      tiers[tier] = cnt;
+    }
+  }
+  const recentEvents = [];
+  if (recentResult.status === "fulfilled" && recentResult.value.ok) {
+    const data = recentResult.value.data;
+    const records = Array.isArray(data) ? data : Array.isArray(data?.results) ? data.results : [];
+    recentEvents.push(...records);
+  }
+  let l2StagingCount = 0;
+  const redis2 = getRedis();
+  if (redis2) {
+    try {
+      const keys = await redis2.keys("knowledge:staging:*");
+      l2StagingCount = keys.length;
+    } catch {
+    }
+  }
+  const total = Object.values(tiers).reduce((s, n) => s + n, 0);
+  res.json({
+    success: true,
+    data: {
+      tiers,
+      total_persisted: total,
+      l2_staged: l2StagingCount,
+      recent_events: recentEvents,
+      generated_at: (/* @__PURE__ */ new Date()).toISOString()
+    }
+  });
+});
+knowledgeRouter.post("/bus/emit", async (req, res) => {
+  const { source, title, content, summary, score, tags, repo } = req.body;
+  if (!source || !title || !content || !summary) {
+    res.status(400).json({ success: false, error: "source, title, content, summary are required" });
+    return;
+  }
+  try {
+    const { emitKnowledge: emitKnowledge2 } = await Promise.resolve().then(() => (init_knowledge(), knowledge_exports));
+    emitKnowledge2({
+      source,
+      title: String(title),
+      content: String(content),
+      summary: String(summary),
+      score: typeof score === "number" ? score : void 0,
+      tags: Array.isArray(tags) ? tags : [],
+      repo: String(repo ?? "widgetdc-orchestrator")
+    });
+    const tierHint = typeof score === "number" ? score >= 0.85 ? "L4 (skill candidate)" : score >= 0.7 ? "L3 (AgentMemory)" : "L2 (staging)" : "auto-scored by PRISM";
+    logger.info({ title, source, score }, "KnowledgeBus HTTP emit received");
+    res.json({ success: true, tier_hint: tierHint, title });
+  } catch (err) {
+    logger.error({ err: String(err) }, "KnowledgeBus HTTP emit failed");
+    res.status(500).json({ success: false, error: String(err) });
+  }
+});
+knowledgeRouter.post("/bus/fold", async (req, res) => {
+  const { session_id } = req.body;
+  if (!session_id) {
+    res.status(400).json({ success: false, error: "session_id is required" });
+    return;
+  }
+  try {
+    const { foldSession: foldSession2 } = await Promise.resolve().then(() => (init_session_fold_adapter(), session_fold_adapter_exports));
+    const path4 = String(session_id).includes("/") || String(session_id).includes("\\") ? String(session_id) : `${process.env.HOME ?? process.env.USERPROFILE ?? "/tmp"}/.claude/projects/${String(session_id)}.jsonl`;
+    const fold = await foldSession2(path4);
+    res.json({
+      success: true,
+      session_id: fold.session_id,
+      commits: fold.commits.length,
+      open_tasks: fold.open_tasks.length,
+      decisions: fold.decisions.length,
+      linear_refs: fold.linear_refs
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: String(err) });
   }
 });
 

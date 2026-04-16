@@ -1884,4 +1884,41 @@ export function registerDefaultLoops(): void {
       }],
     },
   })
+
+  // Knowledge Bus Session Fold — every 6h: scan recent transcripts → KB
+  registerCronJob({
+    id: 'knowledge-bus-session-fold',
+    name: 'Knowledge Bus Session Fold (Auto-fold recent sessions)',
+    schedule: '0 */6 * * *',  // every 6h
+    enabled: true,
+    chain: {
+      name: 'KB Session Fold',
+      mode: 'sequential',
+      steps: [{
+        agent_id: 'orchestrator',
+        tool_name: 'knowledge_normalize',
+        arguments: {
+          source: 'session_fold',
+          // session_id left blank — tool-executor picks latest transcript automatically
+        },
+      }],
+    },
+  })
+
+  // Knowledge Bus L4 Sync — nightly: create Linear issues for unsynced L4 skill candidates
+  registerCronJob({
+    id: 'knowledge-bus-l4-sync',
+    name: 'Knowledge Bus L4 Sync (Promote skill candidates to Linear)',
+    schedule: '30 4 * * *',  // 04:30 UTC daily
+    enabled: true,
+    chain: {
+      name: 'KB L4 Sync',
+      mode: 'sequential',
+      steps: [{
+        agent_id: 'orchestrator',
+        tool_name: 'knowledge_l4_sync',
+        arguments: { max_items: 10 },
+      }],
+    },
+  })
 }
