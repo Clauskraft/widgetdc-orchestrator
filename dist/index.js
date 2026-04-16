@@ -47656,7 +47656,7 @@ intelligenceRouter.post("/adaptive-rag/retrain", async (_req, res) => {
 });
 intelligenceRouter.post("/extract-test", async (req, res) => {
   const { callMcpTool: callMcpTool2 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
-  const { v4: uuid39 } = await import("uuid");
+  const { v4: uuid42 } = await import("uuid");
   const content = req.body?.content ?? "CSRD regulation, ATP pension fund, GRI framework";
   try {
     const llmResult = await callMcpTool2({
@@ -47666,7 +47666,7 @@ intelligenceRouter.post("/extract-test", async (req, res) => {
 
 Content: ${content.slice(0, 2e3)}`
       },
-      callId: uuid39(),
+      callId: uuid42(),
       timeoutMs: 3e4
     });
     const raw = llmResult.result;
@@ -52214,6 +52214,205 @@ prometheusMetricsRouter.get("/api/grafana/prometheus", async (_req, res) => {
 // src/index.ts
 init_pheromone_layer();
 init_peer_eval();
+
+// src/knowledge/knowledge-bus.ts
+init_logger();
+import { EventEmitter } from "node:events";
+import { v4 as uuid39 } from "uuid";
+var KnowledgeBus = class extends EventEmitter {
+  emit(event, ...args) {
+    if (event === "knowledge") {
+      const payload = args[0];
+      logger.info(
+        { source: payload.source, title: payload.title, score: payload.score },
+        "KnowledgeBus: event received"
+      );
+    }
+    try {
+      return super.emit(event, ...args);
+    } catch (err) {
+      logger.error({ err }, "KnowledgeBus: handler threw");
+      return false;
+    }
+  }
+};
+var knowledgeBus = new KnowledgeBus();
+knowledgeBus.setMaxListeners(50);
+function onKnowledge(handler) {
+  knowledgeBus.on("knowledge", handler);
+}
+
+// src/knowledge/tier-router.ts
+var TIER_THRESHOLDS = {
+  L4_MIN: 0.85,
+  // shared skill file — all repos
+  L3_MIN: 0.7
+  // Neo4j AgentMemory — runtime agents
+};
+function routeTier(score) {
+  if (score === void 0 || Number.isNaN(score) || score < TIER_THRESHOLDS.L3_MIN) return "l2";
+  if (score < TIER_THRESHOLDS.L4_MIN) return "l3";
+  return "l4";
+}
+
+// src/knowledge/l2-writer.ts
+init_redis();
+init_logger();
+var L2_TTL = 7 * 24 * 60 * 60;
+var KEY_PREFIX = "knowledge:staging:";
+async function writeL2(event) {
+  const redis2 = getRedis();
+  if (!redis2) {
+    logger.warn({ event_id: event.event_id }, "KnowledgeBus L2: Redis unavailable, skipping staging");
+    return;
+  }
+  const key = `${KEY_PREFIX}${event.event_id}`;
+  await redis2.set(key, JSON.stringify(event), "EX", L2_TTL);
+  logger.info({ key, title: event.title, score: event.score }, "KnowledgeBus L2: staged");
+}
+
+// src/knowledge/l3-writer.ts
+init_mcp_caller();
+init_logger();
+import { v4 as uuid40 } from "uuid";
+async function writeL3(event) {
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (n:KnowledgeCandidate {event_id: $event_id})
+SET n.source = $source,
+    n.title = $title,
+    n.summary = $summary,
+    n.content = $content,
+    n.score = $score,
+    n.tags = $tags,
+    n.repo = $repo,
+    n.tier = 'L3',
+    n.created_at = $created_at,
+    n.destructiveHint = false,
+    n.contains_pii = false,
+    n.confidence_score = $score,
+    n.agentId = 'knowledge-bus'
+RETURN n.event_id`,
+        params: {
+          event_id: event.event_id,
+          source: event.source,
+          title: event.title,
+          summary: event.summary,
+          content: event.content.slice(0, 4e3),
+          score: event.score ?? 0,
+          tags: event.tags.join(","),
+          repo: event.repo,
+          created_at: event.created_at
+        },
+        intent: `Persist L3 knowledge candidate from ${event.source}: ${event.title}`,
+        evidence: `PRISM score ${event.score}, source ${event.source}, repo ${event.repo}`
+      },
+      callId: uuid40()
+    });
+    logger.info({ event_id: event.event_id, title: event.title }, "KnowledgeBus L3: written to Neo4j");
+  } catch (err) {
+    logger.error({ err: String(err), event_id: event.event_id }, "KnowledgeBus L3: write failed");
+  }
+}
+
+// src/knowledge/l4-writer.ts
+init_mcp_caller();
+init_logger();
+import { v4 as uuid41 } from "uuid";
+async function writeL4(event) {
+  try {
+    const slug = event.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (n:KnowledgeCandidate {event_id: $event_id})
+SET n.source = $source,
+    n.title = $title,
+    n.slug = $slug,
+    n.summary = $summary,
+    n.content = $content,
+    n.score = $score,
+    n.tags = $tags,
+    n.repo = $repo,
+    n.tier = 'L4',
+    n.synced_to_skill = false,
+    n.created_at = $created_at,
+    n.destructiveHint = false,
+    n.contains_pii = false,
+    n.confidence_score = $score,
+    n.agentId = 'knowledge-bus'
+RETURN n.slug`,
+        params: {
+          event_id: event.event_id,
+          source: event.source,
+          title: event.title,
+          slug,
+          summary: event.summary,
+          content: event.content.slice(0, 8e3),
+          score: event.score ?? 0,
+          tags: event.tags.join(","),
+          repo: event.repo,
+          created_at: event.created_at
+        },
+        intent: `Promote L4 skill candidate from ${event.source}: ${event.title}`,
+        evidence: `PRISM score ${event.score} >= 0.85 threshold, source ${event.source}`
+      },
+      callId: uuid41()
+    });
+    logger.info(
+      { event_id: event.event_id, slug, title: event.title },
+      "KnowledgeBus L4: candidate written to Neo4j \u2014 pending local sync"
+    );
+  } catch (err) {
+    logger.error({ err: String(err), event_id: event.event_id }, "KnowledgeBus L4: write failed");
+  }
+}
+
+// src/knowledge/index.ts
+init_agent_judge();
+init_logger();
+var initialized = false;
+function initKnowledgeBus() {
+  if (initialized) return;
+  initialized = true;
+  onKnowledge(async (event) => {
+    try {
+      let score = event.score;
+      if (score === void 0) {
+        const judgeResult = await judgeResponse(
+          `Evaluate this agent knowledge/protocol for quality and reusability: ${event.title}`,
+          event.content.slice(0, 2e3),
+          `Source: ${event.source}. Tags: ${event.tags.join(", ")}. Repo: ${event.repo}.`,
+          "deepseek"
+        );
+        const raw = judgeResult.score.aggregate;
+        score = Math.min(1, Math.max(0, raw > 1 ? raw / 10 : raw));
+        event = { ...event, score };
+      }
+      const tier = routeTier(score);
+      logger.info({ title: event.title, score, tier }, "KnowledgeBus: routing event");
+      if (tier === "l4") {
+        await writeL4(event);
+        await writeL3(event);
+      } else if (tier === "l3") {
+        await writeL3(event);
+      } else {
+        await writeL2(event);
+      }
+    } catch (err) {
+      logger.error({ err: String(err), event_id: event.event_id }, "KnowledgeBus: routing error \u2014 event dropped to L2");
+      try {
+        await writeL2(event);
+      } catch {
+      }
+    }
+  });
+  logger.info("KnowledgeBus: initialized (bus \u2192 router \u2192 L2/L3/L4 writers)");
+}
+
+// src/index.ts
 var __dirname4 = path3.dirname(fileURLToPath3(import.meta.url));
 var app = express();
 app.set("trust proxy", 1);
@@ -52580,6 +52779,7 @@ async function boot() {
   await initAnomalyWatcher();
   await initPheromoneLayer();
   await initPeerEval();
+  initKnowledgeBus();
   loadBenchmarkRuns().catch((err) => {
     logger.warn({ err: String(err) }, "Benchmark run hydration failed (non-critical)");
   });

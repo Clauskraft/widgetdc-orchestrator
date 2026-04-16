@@ -105,6 +105,7 @@ import { linearProxyRouter } from './routes/linear-proxy.js'
 import { prometheusMetricsRouter } from './routes/prometheus-metrics.js'
 import { initPheromoneLayer, getPheromoneState } from './swarm/pheromone-layer.js'
 import { initPeerEval, getPeerEvalState } from './swarm/peer-eval.js'
+import { initKnowledgeBus } from './knowledge/index.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -594,6 +595,8 @@ async function boot() {
   // Initialize pheromone layer + peer-eval fleet learning
   await initPheromoneLayer()
   await initPeerEval()
+  // Wire KnowledgeBus → tier router → L2/L3/L4 writers (after Redis is ready)
+  initKnowledgeBus()
   // Load persisted benchmark runs from Redis (non-blocking)
   loadBenchmarkRuns().catch(err => {
     logger.warn({ err: String(err) }, 'Benchmark run hydration failed (non-critical)')
