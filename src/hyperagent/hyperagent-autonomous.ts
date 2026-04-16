@@ -553,9 +553,29 @@ async function enrichTargetWithRAG(target: TargetDef, edgeGap: number): Promise<
         : ['graphrag', 'srag'],            // Low-gap: skip cypher overhead
     })
 
-    // Fold the merged RAG context to fit in planner's context window
+    // Augment with kg_rag.query — graph-grounded multi-hop evidence
+    let kgRagContext = ''
+    try {
+      const kgResult = await callMcpTool({
+        toolName: 'kg_rag.query',
+        args: { question: ragQuery, max_evidence: 12 },
+        callId: `hyp-kgrag-${target.id}-${Date.now()}`,
+      })
+      const kgRaw = kgResult.result
+      if (typeof kgRaw === 'string') kgRagContext = kgRaw
+      else if (kgRaw && typeof kgRaw === 'object') {
+        const k = kgRaw as Record<string, unknown>
+        kgRagContext = (k.answer ?? k.response ?? k.result ?? '') as string
+      }
+    } catch {
+      // non-blocking
+    }
+
+    // Fold the merged RAG context (graphrag + srag + kg_rag) to fit in planner window
+    const mergedContext = ragResponse.merged_context +
+      (kgRagContext ? `\n\n[KG-RAG Evidence]\n${kgRagContext.slice(0, 600)}` : '')
     const folded = await foldContext(
-      `[RAG context for ${target.id}]\n${ragResponse.merged_context}`,
+      `[RAG context for ${target.id}]\n${mergedContext}`,
       1500,
     )
 
@@ -702,14 +722,23 @@ async function emitReward(targetId: string, success: boolean, edgeDelta: number)
 
 async function foldContext(text: string, budget: number = 2000): Promise<string> {
   try {
-    const result = await callMcpTool({
+    const toolResult = await callMcpTool({
       toolName: 'context_fold',
       args: { text, budget, domain: 'platform-operations', query: 'autonomous execution status' },
       callId: `hyp-fold-${Date.now()}`,
     })
-    return typeof result === 'string' ? result : JSON.stringify(result)
+    // callMcpTool returns OrchestratorToolResult — folded text is in .result
+    const raw = toolResult.result
+    if (typeof raw === 'string' && raw.length > 0) return raw
+    // context_fold may return JSON with .folded_text or .text
+    if (raw && typeof raw === 'object') {
+      const r = raw as Record<string, unknown>
+      const folded = r.folded_text ?? r.text ?? r.result ?? r.answer
+      if (typeof folded === 'string' && folded.length > 0) return folded
+    }
+    // fallback: truncate original
+    return text.slice(0, budget * 4)
   } catch {
-    // Fallback: truncate
     return text.slice(0, budget * 4)
   }
 }
@@ -963,17 +992,20 @@ export async function runAutonomousCycle(
 
     const foldedSummary = await foldContext(cycleSummary, 1000)
 
-    // Persist lesson to Neo4j
+    // Persist lesson to Neo4j (MERGE so redeploys don't duplicate)
     try {
       await callMcpTool({
         toolName: 'graph.write_cypher',
         args: {
-          query: `CREATE (l:Lesson {
-            id: $lessonId, type: 'autonomous_cycle', agentId: 'hyperagent-auto',
-            phase: $phase, summary: $summary, targetsCompleted: $completed,
-            targetsFailed: $failed, fitnessDelta: $fitnessDelta,
-            discoveredIssues: $discoveredIssues, timestamp: datetime()
-          })`,
+          query: `MERGE (l:Lesson {id: $lessonId})
+            SET l.type = 'autonomous_cycle', l.agentId = 'hyperagent-auto',
+                l.phase = $phase, l.summary = $summary,
+                l.targetsCompleted = $completed, l.targetsFailed = $failed,
+                l.fitnessDelta = $fitnessDelta, l.discoveredIssues = $discoveredIssues,
+                l.updatedAt = datetime()
+            WITH l
+            MERGE (a:Agent {id: 'hyperagent-auto'})
+            MERGE (a)-[:LEARNED]->(l)`,
           params: {
             lessonId: `lesson-${cycleId}`,
             phase: effectivePhase,
@@ -987,7 +1019,27 @@ export async function runAutonomousCycle(
         callId: `hyp-lesson-${cycleId}`,
       })
     } catch {
-      logger.debug('HyperAgent-Auto: lesson persistence failed (non-blocking)')
+      logger.debug('HyperAgent-Auto: lesson Neo4j persistence failed (non-blocking)')
+    }
+
+    // Push lesson back to SRAG vector store so future enrichments find it
+    if (targetsCompleted > 0) {
+      try {
+        await callMcpTool({
+          toolName: 'knowledge_ingest',
+          args: {
+            title: `HyperAgent cycle ${cycleId} — ${effectivePhase}`,
+            content: foldedSummary,
+            tags: ['hyperagent', 'autonomous', effectivePhase, 'lessons'],
+            source: 'hyperagent-auto',
+            score: fitnessDelta > 0.05 ? 0.8 : 0.6,
+          },
+          callId: `hyp-srag-ingest-${cycleId}`,
+        })
+        logger.info({ cycleId, targets: targetsCompleted }, 'HyperAgent-Auto: cycle lesson ingested to SRAG')
+      } catch {
+        logger.debug('HyperAgent-Auto: SRAG ingest failed (non-blocking)')
+      }
     }
 
     // ── Step 6: STREAM final results
