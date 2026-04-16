@@ -387,7 +387,49 @@ RETURN c.componentId as id`
         runId: bom.run_id,
       },
     })
+
+    // Auto-embed: non-blocking fire-and-forget vidensarkiv.add per component.
+    // vidensarkiv.add creates a searchable VectorDocument (with embedding) linked
+    // back to this PhantomComponent by componentId. After success, clear
+    // needsEmbedding flag so the backfill cron skips it.
+    //
+    // Errors are swallowed — extraction must not fail on embedding hiccups.
+    autoEmbedComponent(comp, bom).catch((err) => {
+      logger.warn({ runId: bom.run_id, componentId: comp.id, err: String(err) }, 'Auto-embed failed (non-blocking)')
+    })
   }
+}
+
+async function autoEmbedComponent(comp: PhantomComponent, bom: PhantomBOM): Promise<void> {
+  const content = [
+    `${comp.name}: ${comp.description ?? ''}`,
+    comp.capabilities?.length ? `Capabilities: ${comp.capabilities.join(', ')}` : null,
+    comp.tags?.length ? `Tags: ${comp.tags.join(', ')}` : null,
+  ].filter(Boolean).join('\n')
+
+  await callBackendMcp('vidensarkiv.add', {
+    content,
+    metadata: {
+      source: 'phantom-bom',
+      type: comp.type,
+      name: comp.name,
+      componentId: comp.id,
+      sourceRepo: bom.source_repo,
+      runId: bom.run_id,
+    },
+  })
+
+  // Clear the queue flag so future backfill scans skip this component.
+  await callBackendMcp('graph.write_cypher', {
+    query: 'MATCH (c:PhantomComponent {componentId: $cid}) SET c.needsEmbedding = false, c.embeddedAt = datetime() RETURN c.componentId',
+    params: { cid: comp.id },
+    intent: 'phantom_bom_ingestion',
+    purpose: `Mark PhantomComponent ${comp.name} as embedded after vidensarkiv.add succeeded`,
+    objective: 'Remove component from needsEmbedding backfill queue',
+    evidence: 'autoEmbedComponent completed successfully for this componentId',
+    verification: 'idempotent SET on existing node; no-op if component already cleared',
+    test_results: 'vidensarkiv.add returned success for content+metadata',
+  })
 }
 
 // ─── Completeness Gate (P1 Fix LIN-763) ────────────────────────────────────
