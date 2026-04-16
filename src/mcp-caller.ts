@@ -232,6 +232,8 @@ const LOCAL_TOOLS = new Set([
   'inventor_best', 'inventor_stop', 'inventor_history',
   // Run evolution
   'run_evolution',
+  // Knowledge Bus
+  'knowledge_normalize', 'knowledge_bus_consolidate',
   // Infrastructure
   'grafana_dashboard', 'railway_deploy', 'railway_env',
 ])

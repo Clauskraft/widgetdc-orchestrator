@@ -32954,6 +32954,9 @@ var init_mcp_caller = __esm({
       "inventor_history",
       // Run evolution
       "run_evolution",
+      // Knowledge Bus
+      "knowledge_normalize",
+      "knowledge_bus_consolidate",
       // Infrastructure
       "grafana_dashboard",
       "railway_deploy",
