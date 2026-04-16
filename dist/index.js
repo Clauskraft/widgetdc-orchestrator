@@ -27170,7 +27170,8 @@ RULES:
         { role: "user", content: basePrompt }
       ],
       model: "deepseek-chat",
-      max_tokens: 4e3,
+      max_tokens: 1500,
+      // reduced from 4000 — 4000 tokens routinely exceeded 60s AbortSignal timeout
       temperature: 0.7
     });
     if (!llmResult || !llmResult.content) {
@@ -27279,8 +27280,32 @@ async function runEngineer(node, config2) {
         tokensUsed: 0
       };
     }
+    const { judgeResponse: judgeResponse2 } = await Promise.resolve().then(() => (init_agent_judge(), agent_judge_exports));
+    const judgeResult = await judgeResponse2(
+      `Evaluate this solution for the task: ${config2.taskDescription.slice(0, 400)}`,
+      node.artifact.slice(0, 3e3),
+      `Score for evolutionary optimization fitness. Reward: correct approach, complete implementation, efficient solution, novelty vs prior attempts.`,
+      "deepseek"
+    );
+    const js = judgeResult.score;
+    const directScore = Math.min(1, Math.max(0, js.aggregate > 1 ? js.aggregate / 10 : js.aggregate));
+    return {
+      nodeId: node.id,
+      success: directScore > 0.3,
+      score: directScore,
+      metrics: {
+        precision: js.precision / 10,
+        reasoning: js.reasoning / 10,
+        information: js.information / 10,
+        safety: js.safety / 10,
+        methodology: js.methodology / 10
+      },
+      output: js.explanation,
+      durationMs: Date.now() - t0,
+      tokensUsed: 0
+    };
     const result = await callMcpTool({
-      toolName: "judge_response",
+      toolName: "judge_response_DISABLED",
       args: {
         query: `Evaluate this solution for the task: ${config2.taskDescription.slice(0, 400)}`,
         response: node.artifact.slice(0, 3e3),
@@ -27324,8 +27349,8 @@ async function runEngineer(node, config2) {
         prismScores = parsed.scores;
         rawAggregate = parsed.aggregate;
       } else {
-        const directScore = Number(resultObj.aggregate ?? resultObj.score ?? resultObj.overall ?? NaN);
-        rawAggregate = isNaN(directScore) ? 5 : directScore;
+        const directScore2 = Number(resultObj.aggregate ?? resultObj.score ?? resultObj.overall ?? NaN);
+        rawAggregate = isNaN(directScore2) ? 5 : directScore2;
       }
     }
     const score = Math.min(1, Math.max(0, rawAggregate > 1 ? rawAggregate / 10 : rawAggregate));

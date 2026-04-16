@@ -248,7 +248,7 @@ RULES:
         { role: 'user', content: basePrompt },
       ],
       model: 'deepseek-chat',
-      max_tokens: 4000,
+      max_tokens: 1500,  // reduced from 4000 — 4000 tokens routinely exceeded 60s AbortSignal timeout
       temperature: 0.7,
     })
     if (!llmResult || !llmResult.content) {
@@ -349,9 +349,35 @@ async function runEngineer(
       }
     }
 
-    // Non-circle-packing tasks: use LLM-based judge_response (existing behavior)
+    // Non-circle-packing tasks: call judgeResponse directly (local fn — NOT via MCP bridge)
+    // Fix: callMcpTool routed to backend which doesn't have judge_response → always returned default 0.5
+    const { judgeResponse } = await import('../llm/agent-judge.js')
+    const judgeResult = await judgeResponse(
+      `Evaluate this solution for the task: ${config.taskDescription.slice(0, 400)}`,
+      node.artifact.slice(0, 3000),
+      `Score for evolutionary optimization fitness. Reward: correct approach, complete implementation, efficient solution, novelty vs prior attempts.`,
+      'deepseek',
+    )
+    const js = judgeResult.score
+    const directScore = Math.min(1, Math.max(0, js.aggregate > 1 ? js.aggregate / 10 : js.aggregate))
+    return {
+      nodeId: node.id,
+      success: directScore > 0.3,
+      score: directScore,
+      metrics: {
+        precision: js.precision / 10,
+        reasoning: js.reasoning / 10,
+        information: js.information / 10,
+        safety: js.safety / 10,
+        methodology: js.methodology / 10,
+      },
+      output: js.explanation,
+      durationMs: Date.now() - t0,
+      tokensUsed: 0,
+    }
+    // Legacy MCP-based scoring path (dead code — kept for reference):
     const result = await callMcpTool({
-      toolName: 'judge_response',
+      toolName: 'judge_response_DISABLED',
       args: {
         query: `Evaluate this solution for the task: ${config.taskDescription.slice(0, 400)}`,
         response: node.artifact.slice(0, 3000),
