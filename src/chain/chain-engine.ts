@@ -29,6 +29,7 @@ import {
   estimateTokenCount,
   shouldCompactContext,
   compactContext,
+  chainVerificationGate,
 } from '../llm/cost-governance.js'
 import { getTool, type CanonicalTool } from '../tools/tool-registry.js'
 import { executeToolUnified } from '../tools/tool-executor.js'
@@ -774,6 +775,18 @@ export async function executeChain(def: ChainDefinition): Promise<ChainExecution
     execution.steps_completed = results.filter(r => r.status === 'success').length
     execution.status = failed ? 'failed' : 'completed'
     execution.final_output = results[results.length - 1]?.output
+
+    // Chain verification gate: attach quality verdict to execution for observability
+    const verification = chainVerificationGate(results.map(r => ({
+      quality_score: (r as unknown as Record<string, unknown>).quality_score as number | undefined,
+      status: r.status,
+    })))
+    ;(execution as unknown as Record<string, unknown>).verification = verification
+    if (verification.verdict === 'fail') {
+      logger.warn({ chain: def.name, verification }, 'Chain verification gate: FAIL')
+    } else if (verification.verdict === 'warn') {
+      logger.warn({ chain: def.name, verification }, 'Chain verification gate: WARN')
+    }
     execution.duration_ms = Date.now() - t0
     execution.completed_at = new Date().toISOString()
   } catch (err) {
