@@ -32500,11 +32500,12 @@ async function ensureAuditLessonsRead() {
   }
 }
 async function callMcpTool(opts) {
-  if (LOCAL_TOOLS.has(opts.toolName)) {
+  const baseToolName = opts.toolName.includes(".") ? opts.toolName.split(".").pop() : opts.toolName;
+  if (LOCAL_TOOLS.has(opts.toolName) || LOCAL_TOOLS.has(baseToolName)) {
     const t0 = Date.now();
     try {
       const { executeToolUnified: executeToolUnified2 } = await Promise.resolve().then(() => (init_tool_executor(), tool_executor_exports));
-      const result = await executeToolUnified2(opts.toolName, opts.args, { call_id: opts.callId, fold: false });
+      const result = await executeToolUnified2(baseToolName, opts.args, { call_id: opts.callId, fold: false });
       return {
         call_id: opts.callId,
         status: result.error ? "error" : "success",

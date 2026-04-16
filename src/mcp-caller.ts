@@ -240,11 +240,13 @@ const LOCAL_TOOLS = new Set([
 
 export async function callMcpTool(opts: McpCallOptions): Promise<OrchestratorToolResult> {
   // Local-first: if tool has a local executor case, run it locally (avoids 404 on backend)
-  if (LOCAL_TOOLS.has(opts.toolName)) {
+  // Strip namespace prefix (e.g. "knowledge.knowledge_normalize" → "knowledge_normalize") for LOCAL_TOOLS lookup
+  const baseToolName = opts.toolName.includes('.') ? opts.toolName.split('.').pop()! : opts.toolName
+  if (LOCAL_TOOLS.has(opts.toolName) || LOCAL_TOOLS.has(baseToolName)) {
     const t0 = Date.now()
     try {
       const { executeToolUnified } = await import('./tools/tool-executor.js')
-      const result = await executeToolUnified(opts.toolName, opts.args, { call_id: opts.callId, fold: false })
+      const result = await executeToolUnified(baseToolName, opts.args, { call_id: opts.callId, fold: false })
       return {
         call_id: opts.callId,
         status: result.error ? 'error' : 'success',
