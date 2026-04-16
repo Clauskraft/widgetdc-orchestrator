@@ -3570,6 +3570,37 @@ var init_tool_registry = __esm({
         timeoutMs: 1e4,
         outputDescription: "KnowledgeDocument[] sorted by word_count descending"
       }),
+      // ─── knowledge.* — KnowledgeBus Manual Trigger (Knowledge Bus) ──
+      defineTool({
+        name: "knowledge_normalize",
+        namespace: "knowledge",
+        description: "Emit a knowledge event to the normalization bus. Routes to L2/L3/L4 based on PRISM score. Use for manual promotion of protocols, patterns, or improvements.",
+        input: z.object({
+          source: z.enum(["inventor", "session_fold", "phantom_bom", "commit", "manual"]).default("manual").describe("Origin of the knowledge event"),
+          title: z.string().describe("Human-readable title for the skill"),
+          content: z.string().describe("Full protocol/skill content in markdown"),
+          summary: z.string().describe("One-line description"),
+          score: z.number().min(0).max(1).optional().describe("Pre-computed PRISM score \u2014 omit to auto-score"),
+          tags: z.array(z.string()).default([]).describe("Classification tags"),
+          repo: z.string().default("widgetdc-orchestrator").describe("Source repo"),
+          session_id: z.string().optional().describe("For source=session_fold: path to JSONL transcript")
+        }),
+        timeoutMs: 3e4,
+        outputDescription: "Confirmation of emitted KnowledgeEvent with tier routing (L2/L3/L4)"
+      }),
+      defineTool({
+        name: "knowledge_bus_consolidate",
+        namespace: "knowledge",
+        description: "Promote L2 staged knowledge events to L3 AgentMemory if score meets threshold. Runs daily via cron.",
+        input: z.object({
+          promote_threshold: z.number().default(0.7),
+          max_items: z.number().default(50)
+        }),
+        timeoutMs: 12e4,
+        authRequired: true,
+        availableVia: ["openai", "openapi", "mcp"],
+        outputDescription: "Summary of staged events evaluated and count promoted to L3"
+      }),
       // ─── compliance.* — EU AI Act Compliance (Phantom Week 6, V1) ──
       defineTool({
         name: "compliance_gap_audit",
@@ -26684,6 +26715,373 @@ var init_hyperagent_autonomous = __esm({
   }
 });
 
+// src/knowledge/knowledge-bus.ts
+import { EventEmitter } from "node:events";
+import { v4 as uuid24 } from "uuid";
+function emitKnowledge(event) {
+  knowledgeBus.emit("knowledge", {
+    ...event,
+    event_id: event.event_id ?? uuid24(),
+    created_at: event.created_at ?? (/* @__PURE__ */ new Date()).toISOString()
+  });
+}
+function onKnowledge(handler) {
+  knowledgeBus.on("knowledge", handler);
+}
+var KnowledgeBus, knowledgeBus;
+var init_knowledge_bus = __esm({
+  "src/knowledge/knowledge-bus.ts"() {
+    "use strict";
+    init_logger();
+    KnowledgeBus = class extends EventEmitter {
+      emit(event, ...args) {
+        if (event === "knowledge") {
+          const payload = args[0];
+          logger.info(
+            { source: payload.source, title: payload.title, score: payload.score },
+            "KnowledgeBus: event received"
+          );
+        }
+        try {
+          return super.emit(event, ...args);
+        } catch (err) {
+          logger.error({ err }, "KnowledgeBus: handler threw");
+          return false;
+        }
+      }
+    };
+    knowledgeBus = new KnowledgeBus();
+    knowledgeBus.setMaxListeners(50);
+  }
+});
+
+// src/knowledge/tier-router.ts
+function routeTier(score) {
+  if (score === void 0 || Number.isNaN(score) || score < TIER_THRESHOLDS.L3_MIN) return "l2";
+  if (score < TIER_THRESHOLDS.L4_MIN) return "l3";
+  return "l4";
+}
+var TIER_THRESHOLDS;
+var init_tier_router = __esm({
+  "src/knowledge/tier-router.ts"() {
+    "use strict";
+    TIER_THRESHOLDS = {
+      L4_MIN: 0.85,
+      // shared skill file — all repos
+      L3_MIN: 0.7
+      // Neo4j AgentMemory — runtime agents
+    };
+  }
+});
+
+// src/knowledge/l2-writer.ts
+var l2_writer_exports = {};
+__export(l2_writer_exports, {
+  listL2: () => listL2,
+  writeL2: () => writeL2
+});
+async function writeL2(event) {
+  const redis2 = getRedis();
+  if (!redis2) {
+    logger.warn({ event_id: event.event_id }, "KnowledgeBus L2: Redis unavailable, skipping staging");
+    return;
+  }
+  const key = `${KEY_PREFIX}${event.event_id}`;
+  await redis2.set(key, JSON.stringify(event), "EX", L2_TTL);
+  logger.info({ key, title: event.title, score: event.score }, "KnowledgeBus L2: staged");
+}
+async function listL2() {
+  const redis2 = getRedis();
+  if (!redis2) return [];
+  const keys = await redis2.keys(`${KEY_PREFIX}*`);
+  if (keys.length === 0) return [];
+  const raws = await redis2.mget(...keys);
+  return raws.filter((r) => typeof r === "string" && r.length > 0).map((r) => JSON.parse(r));
+}
+var L2_TTL, KEY_PREFIX;
+var init_l2_writer = __esm({
+  "src/knowledge/l2-writer.ts"() {
+    "use strict";
+    init_redis();
+    init_logger();
+    L2_TTL = 7 * 24 * 60 * 60;
+    KEY_PREFIX = "knowledge:staging:";
+  }
+});
+
+// src/knowledge/l3-writer.ts
+var l3_writer_exports = {};
+__export(l3_writer_exports, {
+  writeL3: () => writeL3
+});
+import { v4 as uuid25 } from "uuid";
+async function writeL3(event) {
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (n:KnowledgeCandidate {event_id: $event_id})
+SET n.source = $source,
+    n.title = $title,
+    n.summary = $summary,
+    n.content = $content,
+    n.score = $score,
+    n.tags = $tags,
+    n.repo = $repo,
+    n.tier = 'L3',
+    n.created_at = $created_at,
+    n.destructiveHint = false,
+    n.contains_pii = false,
+    n.confidence_score = $score,
+    n.agentId = 'knowledge-bus'
+RETURN n.event_id`,
+        params: {
+          event_id: event.event_id,
+          source: event.source,
+          title: event.title,
+          summary: event.summary,
+          content: event.content.slice(0, 4e3),
+          score: event.score ?? 0,
+          tags: event.tags.join(","),
+          repo: event.repo,
+          created_at: event.created_at
+        },
+        intent: `Persist L3 knowledge candidate from ${event.source}: ${event.title}`,
+        evidence: `PRISM score ${event.score}, source ${event.source}, repo ${event.repo}`
+      },
+      callId: uuid25()
+    });
+    logger.info({ event_id: event.event_id, title: event.title }, "KnowledgeBus L3: written to Neo4j");
+  } catch (err) {
+    logger.error({ err: String(err), event_id: event.event_id }, "KnowledgeBus L3: write failed");
+  }
+}
+var init_l3_writer = __esm({
+  "src/knowledge/l3-writer.ts"() {
+    "use strict";
+    init_mcp_caller();
+    init_logger();
+  }
+});
+
+// src/knowledge/l4-writer.ts
+import { v4 as uuid26 } from "uuid";
+async function writeL4(event) {
+  try {
+    const slug = event.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      args: {
+        query: `MERGE (n:KnowledgeCandidate {event_id: $event_id})
+SET n.source = $source,
+    n.title = $title,
+    n.slug = $slug,
+    n.summary = $summary,
+    n.content = $content,
+    n.score = $score,
+    n.tags = $tags,
+    n.repo = $repo,
+    n.tier = 'L4',
+    n.synced_to_skill = false,
+    n.created_at = $created_at,
+    n.destructiveHint = false,
+    n.contains_pii = false,
+    n.confidence_score = $score,
+    n.agentId = 'knowledge-bus'
+RETURN n.slug`,
+        params: {
+          event_id: event.event_id,
+          source: event.source,
+          title: event.title,
+          slug,
+          summary: event.summary,
+          content: event.content.slice(0, 8e3),
+          score: event.score ?? 0,
+          tags: event.tags.join(","),
+          repo: event.repo,
+          created_at: event.created_at
+        },
+        intent: `Promote L4 skill candidate from ${event.source}: ${event.title}`,
+        evidence: `PRISM score ${event.score} >= 0.85 threshold, source ${event.source}`
+      },
+      callId: uuid26()
+    });
+    logger.info(
+      { event_id: event.event_id, slug, title: event.title },
+      "KnowledgeBus L4: candidate written to Neo4j \u2014 pending local sync"
+    );
+  } catch (err) {
+    logger.error({ err: String(err), event_id: event.event_id }, "KnowledgeBus L4: write failed");
+  }
+}
+var init_l4_writer = __esm({
+  "src/knowledge/l4-writer.ts"() {
+    "use strict";
+    init_mcp_caller();
+    init_logger();
+  }
+});
+
+// src/knowledge/index.ts
+var knowledge_exports = {};
+__export(knowledge_exports, {
+  emitKnowledge: () => emitKnowledge,
+  initKnowledgeBus: () => initKnowledgeBus,
+  onKnowledge: () => onKnowledge
+});
+function initKnowledgeBus() {
+  if (initialized) return;
+  initialized = true;
+  onKnowledge(async (event) => {
+    try {
+      let score = event.score;
+      if (score === void 0) {
+        const judgeResult = await judgeResponse(
+          `Evaluate this agent knowledge/protocol for quality and reusability: ${event.title}`,
+          event.content.slice(0, 2e3),
+          `Source: ${event.source}. Tags: ${event.tags.join(", ")}. Repo: ${event.repo}.`,
+          "deepseek"
+        );
+        const raw = judgeResult.score.aggregate;
+        score = Math.min(1, Math.max(0, raw > 1 ? raw / 10 : raw));
+        event = { ...event, score };
+      }
+      const tier = routeTier(score);
+      logger.info({ title: event.title, score, tier }, "KnowledgeBus: routing event");
+      if (tier === "l4") {
+        await writeL4(event);
+        await writeL3(event);
+      } else if (tier === "l3") {
+        await writeL3(event);
+      } else {
+        await writeL2(event);
+      }
+    } catch (err) {
+      logger.error({ err: String(err), event_id: event.event_id }, "KnowledgeBus: routing error \u2014 event dropped to L2");
+      try {
+        await writeL2(event);
+      } catch {
+      }
+    }
+  });
+  logger.info("KnowledgeBus: initialized (bus \u2192 router \u2192 L2/L3/L4 writers)");
+}
+var initialized;
+var init_knowledge = __esm({
+  "src/knowledge/index.ts"() {
+    "use strict";
+    init_knowledge_bus();
+    init_tier_router();
+    init_l2_writer();
+    init_l3_writer();
+    init_l4_writer();
+    init_agent_judge();
+    init_logger();
+    init_knowledge_bus();
+    initialized = false;
+  }
+});
+
+// src/knowledge/adapters/session-fold-adapter.ts
+var session_fold_adapter_exports = {};
+__export(session_fold_adapter_exports, {
+  foldSession: () => foldSession
+});
+import * as fs from "node:fs";
+function parseTranscript(rawContent, transcriptPath) {
+  const lines = rawContent.split("\n").filter(Boolean);
+  const messages = [];
+  for (const [idx, line] of lines.entries()) {
+    try {
+      const obj = JSON.parse(line);
+      const role = obj.message?.role || obj.role;
+      if (role !== "user" && role !== "assistant") continue;
+      const content = obj.message?.content || obj.content;
+      const text = Array.isArray(content) ? content.filter((p) => p.type === "text").map((p) => p.text).join(" ") : String(content || "");
+      if (text.trim().length > 10) messages.push({ role, text, idx });
+    } catch {
+      continue;
+    }
+  }
+  const commits = [...new Set(messages.flatMap(
+    (m) => [...m.text.matchAll(/\b([a-f0-9]{7,12})\b/g)].map((x) => x[1]).filter((h) => /^[a-f0-9]+$/.test(h) && h.length >= 7)
+  ))].slice(0, 20);
+  const prs = [...new Set(messages.flatMap(
+    (m) => [...m.text.matchAll(/PR\s*#?(\d+)/gi)].map((x) => x[1])
+  ))];
+  const linearRefs = [...new Set(messages.flatMap(
+    (m) => [...m.text.matchAll(/LIN-(\d+)/gi)].map((x) => `LIN-${x[1]}`)
+  ))];
+  const deployEvents = messages.filter((m) => /railway up|deployed|live.*uptime|deploy.*complete/i.test(m.text)).map((m) => m.text.slice(0, 200)).slice(0, 5);
+  const tagged = new Set(messages.filter(
+    (m) => commits.some((c) => m.text.includes(c)) || prs.some((p) => m.text.includes(`#${p}`)) || linearRefs.some((r) => m.text.includes(r))
+  ).map((m) => m.idx));
+  const untagged = messages.filter((m) => !tagged.has(m.idx));
+  const openTasks = untagged.filter((m) => /TODO|FIXME|open|uafsluttet|mangler|Actions?\s+[A-F]|ikke.*håndteret/i.test(m.text)).map((m) => ({ text: m.text.slice(0, 300), source: m.role })).slice(0, 10);
+  const decisions = messages.filter((m) => /besluttet|approved|confirmed|merged|✅|oprettet|persisteret|fixed|deployet/i.test(m.text)).map((m) => ({ text: m.text.slice(0, 300), source: m.role })).slice(0, 10);
+  return {
+    session_id: transcriptPath.split("/").pop()?.replace(".jsonl", "") ?? "unknown",
+    folded_at: (/* @__PURE__ */ new Date()).toISOString(),
+    transcript_lines: lines.length,
+    commits,
+    prs,
+    open_tasks: openTasks,
+    decisions,
+    linear_refs: linearRefs,
+    deploy_events: deployEvents
+  };
+}
+async function foldSession(transcriptPath) {
+  let raw;
+  try {
+    raw = await fs.promises.readFile(transcriptPath, "utf8");
+  } catch {
+    throw new Error(`Transcript not found: ${transcriptPath}`);
+  }
+  const fold = parseTranscript(raw, transcriptPath);
+  const content = `## Session Fold \u2014 ${fold.session_id}
+
+**Folded:** ${fold.folded_at}
+**Lines:** ${fold.transcript_lines}
+
+### Commits
+${fold.commits.map((c) => `- \`${c}\``).join("\n") || "(none)"}
+
+### PRs
+${fold.prs.map((p) => `- PR #${p}`).join("\n") || "(none)"}
+
+### Linear Refs
+${fold.linear_refs.join(", ") || "(none)"}
+
+### Open Tasks
+${fold.open_tasks.map((t) => `- ${t.text}`).join("\n") || "(none)"}
+
+### Key Decisions
+${fold.decisions.map((d) => `- ${d.text}`).join("\n") || "(none)"}
+
+### Deploy Events
+${fold.deploy_events.map((d) => `- ${d}`).join("\n") || "(none)"}
+`;
+  emitKnowledge({
+    source: "session_fold",
+    title: `Session Fold: ${fold.session_id}`,
+    content,
+    summary: `Session ${fold.session_id}: ${fold.commits.length} commits, ${fold.open_tasks.length} open tasks, ${fold.decisions.length} decisions`,
+    tags: ["session-fold", fold.session_id, ...fold.linear_refs],
+    repo: "widgetdc-orchestrator",
+    metadata: fold
+  });
+  logger.info({ session_id: fold.session_id, commits: fold.commits.length }, "SessionFoldAdapter: emitted to KnowledgeBus");
+  return fold;
+}
+var init_session_fold_adapter = __esm({
+  "src/knowledge/adapters/session-fold-adapter.ts"() {
+    "use strict";
+    init_knowledge();
+    init_logger();
+  }
+});
+
 // src/intelligence/inventor-sampler.ts
 function createSampler(config2) {
   switch (config2.algorithm) {
@@ -26870,6 +27268,33 @@ var init_inventor_sampler = __esm({
   }
 });
 
+// src/knowledge/adapters/inventor-adapter.ts
+function emitInventorResult(experimentName, bestNode, totalSteps) {
+  if (!bestNode.artifact || bestNode.score < 0.5) return;
+  emitKnowledge({
+    source: "inventor",
+    title: `Inventor: ${experimentName}`,
+    content: typeof bestNode.artifact === "string" ? bestNode.artifact : JSON.stringify(bestNode.artifact, null, 2),
+    summary: `Evolved protocol from ${experimentName} (${totalSteps} steps, score ${bestNode.score.toFixed(2)})`,
+    score: bestNode.score,
+    tags: ["inventor", "evolved", experimentName],
+    repo: "widgetdc-orchestrator",
+    metadata: {
+      experimentName,
+      nodeId: bestNode.id,
+      totalSteps,
+      metrics: bestNode.metrics,
+      analysis: bestNode.analysis
+    }
+  });
+}
+var init_inventor_adapter = __esm({
+  "src/knowledge/adapters/inventor-adapter.ts"() {
+    "use strict";
+    init_knowledge();
+  }
+});
+
 // src/intelligence/circle-packing-evaluator.ts
 var circle_packing_evaluator_exports = {};
 __export(circle_packing_evaluator_exports, {
@@ -27028,7 +27453,7 @@ __export(inventor_loop_exports, {
   runInventor: () => runInventor,
   stopInventor: () => stopInventor
 });
-import { v4 as uuid24 } from "uuid";
+import { v4 as uuid27 } from "uuid";
 function stream2(event, data) {
   broadcastSSE("inventor", { event, ...data, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
 }
@@ -27465,7 +27890,7 @@ async function runStep(config2) {
     cognitionItems,
     config2
   );
-  const nodeId = `inv-${uuid24().slice(0, 8)}`;
+  const nodeId = `inv-${uuid27().slice(0, 8)}`;
   const parentId = parentNodes.length > 0 ? parentNodes[0].id : null;
   const node = {
     id: nodeId,
@@ -27726,7 +28151,7 @@ async function runInventor(config2, resume = false) {
   });
   if (config2.initialArtifact && nodes.size === 0) {
     const seedNode = {
-      id: `inv-seed-${uuid24().slice(0, 8)}`,
+      id: `inv-seed-${uuid27().slice(0, 8)}`,
       parentId: null,
       artifact: config2.initialArtifact,
       taskDescription: config2.taskDescription,
@@ -27805,6 +28230,16 @@ async function runInventor(config2, resume = false) {
       }
     } catch (histErr) {
       logger.error({ error: histErr }, "Inventor: failed to persist history");
+    }
+    if (!abortRequested) {
+      try {
+        const best = getBestNode();
+        if (best && currentConfig) {
+          emitInventorResult(currentConfig.experimentName, best, results.length);
+        }
+      } catch (emitErr) {
+        logger.error({ error: emitErr }, "Inventor: failed to emit to KnowledgeBus");
+      }
     }
     isRunning3 = false;
     currentConfig = null;
@@ -27893,6 +28328,7 @@ var init_inventor_loop = __esm({
     init_inventor_sampler();
     init_pheromone_layer();
     init_peer_eval();
+    init_inventor_adapter();
     isRunning3 = false;
     currentConfig = null;
     currentStep2 = 0;
@@ -27920,7 +28356,7 @@ __export(agentic_runner_exports, {
 });
 import { spawn } from "child_process";
 import path from "path";
-import fs from "fs";
+import fs2 from "fs";
 function resolveAgenticKitDir() {
   const candidates = [
     // Railway production: repo root /agentic-kit/
@@ -27931,7 +28367,7 @@ function resolveAgenticKitDir() {
     "C:\\Users\\claus\\Projetcs\\widgetdc-orchestrator\\agentic-kit"
   ];
   for (const dir of candidates) {
-    if (fs.existsSync(path.join(dir, "run_mcp.py"))) {
+    if (fs2.existsSync(path.join(dir, "run_mcp.py"))) {
       return dir;
     }
   }
@@ -28023,7 +28459,7 @@ async function checkAgenticKitHealth() {
   } catch {
     return { available: false, error: `Python '${pythonPath}' not found or not executable` };
   }
-  if (!fs.existsSync(path.join(AGENTIC_KIT_DIR, "run_mcp.py"))) {
+  if (!fs2.existsSync(path.join(AGENTIC_KIT_DIR, "run_mcp.py"))) {
     return { available: false, error: `run_mcp.py not found in ${AGENTIC_KIT_DIR}` };
   }
   const missing = [];
@@ -29060,7 +29496,7 @@ __export(tool_executor_exports, {
   executeToolUnified: () => executeToolUnified,
   getTokenSavings: () => getTokenSavings
 });
-import { v4 as uuid25 } from "uuid";
+import { v4 as uuid28 } from "uuid";
 async function enforceHyperAgentGate(toolName, opts) {
   const toolDef = getTool(toolName);
   if (!toolDef) return null;
@@ -29086,7 +29522,7 @@ function getTokenSavings() {
 async function saveFullToolOutput(content, toolName) {
   const redis2 = getRedis();
   if (!redis2) return null;
-  const id = uuid25();
+  const id = uuid28();
   try {
     const payload = JSON.stringify({
       $id: `tool-output-${id}`,
@@ -29204,7 +29640,7 @@ function buildToolFallback(toolName, error) {
   }
 }
 async function executeToolUnified(toolName, args, opts) {
-  const callId = opts?.call_id ?? uuid25();
+  const callId = opts?.call_id ?? uuid28();
   const t0 = Date.now();
   let deprecation_notice;
   const toolDef = getTool(toolName);
@@ -29314,7 +29750,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher, params: args.params ?? {} },
-        callId: uuid25(),
+        callId: uuid28(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Graph query failed: ${result.error_message}`;
@@ -29335,7 +29771,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query: cypher },
-        callId: uuid25(),
+        callId: uuid28(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Task query failed: ${result.error_message}`;
@@ -29353,7 +29789,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName,
         args: mcpArgs ?? {},
-        callId: uuid25(),
+        callId: uuid28(),
         timeoutMs: 3e4
       });
       if (result.status !== "success") return `MCP tool failed: ${result.error_message}`;
@@ -29361,8 +29797,8 @@ ${result.merged_context}`;
     }
     case "get_platform_health": {
       const [backendHealth, graphHealth] = await Promise.allSettled([
-        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid25(), timeoutMs: 1e4 }),
-        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid25(), timeoutMs: 1e4 })
+        callMcpTool({ toolName: "graph.health", args: {}, callId: uuid28(), timeoutMs: 1e4 }),
+        callMcpTool({ toolName: "graph.stats", args: {}, callId: uuid28(), timeoutMs: 1e4 })
       ]);
       const parts = [];
       if (backendHealth.status === "fulfilled" && backendHealth.value.status === "success") {
@@ -29378,7 +29814,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: args.query },
-        callId: uuid25(),
+        callId: uuid28(),
         timeoutMs: 2e4
       });
       if (result.status !== "success") return `Document search failed: ${result.error_message}`;
@@ -29396,7 +29832,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issues",
         args: payload,
-        callId: uuid25(),
+        callId: uuid28(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear query failed: ${result.error_message}`;
@@ -29412,7 +29848,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.issue_get",
         args: { identifier },
-        callId: uuid25(),
+        callId: uuid28(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear issue lookup failed: ${result.error_message}`;
@@ -29423,7 +29859,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.labels",
         args: { limit },
-        callId: uuid25(),
+        callId: uuid28(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Linear labels fetch failed: ${result.error_message}`;
@@ -29437,7 +29873,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.save_issue",
         args: body,
-        callId: uuid25(),
+        callId: uuid28(),
         timeoutMs: 15e3
       });
       if (result.status !== "success") return `Linear save issue failed: ${result.error_message}`;
@@ -29449,7 +29885,7 @@ ${result.merged_context}`;
       const result = await callMcpTool({
         toolName: "linear.get_issue",
         args: { id },
-        callId: uuid25(),
+        callId: uuid28(),
         timeoutMs: 1e4
       });
       if (result.status !== "success") return `Linear get issue failed: ${result.error_message}`;
@@ -30700,7 +31136,7 @@ ${formatted}`;
             max_tokens: budget,
             domain
           },
-          callId: uuid25(),
+          callId: uuid28(),
           timeoutMs: 25e3
         });
         if (result.status !== "success") return `Folding failed: ${result.error_message}`;
@@ -30782,7 +31218,7 @@ ${summary}`;
         const lineage = await buildLineageChain2(assemblyId);
         const now = (/* @__PURE__ */ new Date()).toISOString();
         const decision = {
-          $id: `widgetdc:decision:${uuid25()}`,
+          $id: `widgetdc:decision:${uuid28()}`,
           $schema: "https://widgetdc.io/schemas/decision/v1",
           title,
           description: typeof args.description === "string" ? args.description : "",
@@ -30865,7 +31301,7 @@ ${lines.join("\n")}`;
         const { saveDrillContext: saveDrillContext2, fetchDrillChildren: fetchDrillChildren2 } = await Promise.resolve().then(() => (init_drill(), drill_exports));
         const domain = String(args.domain ?? "");
         if (!domain) return "Error: domain required";
-        const sessionId = uuid25();
+        const sessionId = uuid28();
         const ctx = {
           stack: [],
           current_level: "domain",
@@ -31101,7 +31537,7 @@ ${lines.join("\n")}`;
     case "peer_eval_evaluate": {
       const { hookIntoExecution: hookIntoExecution2 } = await Promise.resolve().then(() => (init_peer_eval(), peer_eval_exports));
       const agentId = args.agent_id;
-      const taskId = args.task_id ?? uuid25();
+      const taskId = args.task_id ?? uuid28();
       const taskType = args.task_type ?? "manual-eval";
       const success = args.success ?? true;
       const latencyMs = typeof args.latency_ms === "number" ? args.latency_ms : 1e3;
@@ -31159,6 +31595,55 @@ ${lines.join("\n")}`;
         return JSON.stringify({ issues: allIssues.slice(0, limit), count: allIssues.length });
       } catch (err) {
         return `HyperAgent auto-issues failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    // ── KnowledgeBus Manual Trigger ──────────────────────────────────────
+    case "knowledge_normalize": {
+      try {
+        const { emitKnowledge: emitKnowledge2 } = await Promise.resolve().then(() => (init_knowledge(), knowledge_exports));
+        const { foldSession: foldSession2 } = await Promise.resolve().then(() => (init_session_fold_adapter(), session_fold_adapter_exports));
+        if (args.source === "session_fold" && args.session_id) {
+          const fold = await foldSession2(args.session_id);
+          return `Session fold emitted to KnowledgeBus: ${fold.commits.length} commits, ${fold.open_tasks.length} open tasks, ${fold.decisions.length} decisions`;
+        }
+        emitKnowledge2({
+          source: args.source ?? "manual",
+          title: args.title,
+          content: args.content,
+          summary: args.summary,
+          score: args.score,
+          tags: args.tags ?? [],
+          repo: args.repo ?? "widgetdc-orchestrator"
+        });
+        const tier = args.score !== void 0 ? args.score >= 0.85 ? "L4 (skill candidate)" : args.score >= 0.7 ? "L3 (AgentMemory)" : "L2 (staging)" : "auto-scored";
+        return `KnowledgeEvent emitted: "${args.title}" \u2192 ${tier}`;
+      } catch (err) {
+        return `knowledge_normalize failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    case "knowledge_bus_consolidate": {
+      try {
+        const { listL2: listL22 } = await Promise.resolve().then(() => (init_l2_writer(), l2_writer_exports));
+        const { writeL3: writeL32 } = await Promise.resolve().then(() => (init_l3_writer(), l3_writer_exports));
+        const { judgeResponse: judgeResponse2 } = await Promise.resolve().then(() => (init_agent_judge(), agent_judge_exports));
+        const threshold = args.promote_threshold ?? 0.7;
+        const maxItems = args.max_items ?? 50;
+        const staged = await listL22();
+        let promoted = 0;
+        for (const event of staged.slice(0, maxItems)) {
+          if (event.score === void 0) {
+            const jr = await judgeResponse2(event.title, event.content.slice(0, 1500), void 0, "deepseek");
+            const raw = jr.score.aggregate;
+            event.score = Math.min(1, Math.max(0, raw > 1 ? raw / 10 : raw));
+          }
+          if (event.score >= threshold) {
+            await writeL32(event);
+            promoted++;
+          }
+        }
+        return `Knowledge consolidation: ${staged.length} staged, ${promoted} promoted to L3`;
+      } catch (err) {
+        return `knowledge_bus_consolidate failed: ${String(err)}`;
       }
     }
     // ── Inventor (ASI-Evolve MCP Tools — LIN-XXX) ────────────────────────
@@ -31647,7 +32132,7 @@ ${lines.join("\n")}`;
       if (!["read_only", "staged_write", "production_write"].includes(scope)) {
         throw new Error("scope must be read_only, staged_write, or production_write");
       }
-      const sessionId = `gov-${uuid25().slice(0, 8)}`;
+      const sessionId = `gov-${uuid28().slice(0, 8)}`;
       const plan = await createPlan2(description, sessionId, scope, {
         targetServices: targetService ? [targetService] : [],
         successMetrics: `Plan approved and executed under ${scope} profile`,
@@ -31710,7 +32195,7 @@ ${lines.join("\n")}`;
       const scoreMap = { success: 90, partial: 60, failed: 20 };
       const score = scoreMap[outcome] ?? 50;
       const plan = getPlan3(planId);
-      const kpi = await evaluatePlan2(`eval-${uuid25().slice(0, 8)}`, planId, score, "governance");
+      const kpi = await evaluatePlan2(`eval-${uuid28().slice(0, 8)}`, planId, score, "governance");
       return JSON.stringify({
         plan_id: planId,
         outcome,
@@ -32490,7 +32975,7 @@ __export(peer_eval_exports, {
   isFleetReliable: () => isFleetReliable,
   runFleetAnalysis: () => runFleetAnalysis
 });
-import { v4 as uuid26 } from "uuid";
+import { v4 as uuid29 } from "uuid";
 async function hookIntoExecution(agentId, taskId, context) {
   const t0 = Date.now();
   const qualityScore = context.metrics?.quality_score ?? (context.success ? 0.7 : 0.2);
@@ -32509,7 +32994,7 @@ async function hookIntoExecution(agentId, taskId, context) {
   } catch {
   }
   const evalReport = {
-    id: `eval-${uuid26().slice(0, 12)}`,
+    id: `eval-${uuid29().slice(0, 12)}`,
     agentId,
     taskId,
     taskType: context.taskType,
@@ -32639,7 +33124,7 @@ function updateFleetLearning(eval_) {
 async function broadcastBestPractice(eval_) {
   const insightText = eval_.insights.length > 0 ? eval_.insights.join("; ") : `Agent ${eval_.agentId} scored ${(eval_.selfScore * 100).toFixed(1)}% on ${eval_.taskType} (novelty: ${(eval_.novelty * 100).toFixed(0)}%)`;
   const bp = {
-    id: `bp-${uuid26().slice(0, 8)}`,
+    id: `bp-${uuid29().slice(0, 8)}`,
     agentId: eval_.agentId,
     taskType: eval_.taskType,
     score: eval_.selfScore,
@@ -39117,12 +39602,12 @@ import cron from "node-cron";
 // src/graph/graph-self-correct.ts
 init_mcp_caller();
 init_logger();
-import { v4 as uuid27 } from "uuid";
+import { v4 as uuid30 } from "uuid";
 async function graphRead(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid27(),
+    callId: uuid30(),
     timeoutMs: 15e3
   });
   if (result.status !== "success") return [];
@@ -39133,7 +39618,7 @@ async function graphWrite(cypher, params, force = true) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {}, _force: force },
-    callId: uuid27(),
+    callId: uuid30(),
     timeoutMs: 15e3
   });
   return result.status === "success";
@@ -39595,7 +40080,7 @@ init_mcp_caller();
 init_adoption_telemetry();
 init_phantom_loop_selector();
 import { Router as Router10 } from "express";
-import { v4 as uuid28 } from "uuid";
+import { v4 as uuid31 } from "uuid";
 var adoptionRouter = Router10();
 var REDIS_KEY5 = "orchestrator:adoption-metrics";
 var REDIS_TRENDS_KEY = "orchestrator:adoption-trends";
@@ -39721,7 +40206,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (c:Conversation) WHERE c.createdAt > datetime() - duration('P1D') RETURN count(c) AS count"
       },
-      callId: uuid28(),
+      callId: uuid31(),
       timeoutMs: 1e4
     }),
     // Count artifacts from last 24h
@@ -39730,7 +40215,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (a:AnalysisArtifact) WHERE a.createdAt > datetime() - duration('P1D') RETURN count(a) AS count"
       },
-      callId: uuid28(),
+      callId: uuid31(),
       timeoutMs: 1e4
     }),
     // Count tool calls from audit trail
@@ -39739,7 +40224,7 @@ async function captureAdoptionSnapshot() {
       args: {
         query: "MATCH (e:AuditEvent) WHERE e.timestamp > datetime() - duration('P1D') AND e.action = 'tool_call' RETURN count(e) AS count"
       },
-      callId: uuid28(),
+      callId: uuid31(),
       timeoutMs: 1e4
     })
   ]);
@@ -39844,7 +40329,7 @@ SET m.conversations_24h = $conversations,
           featuresPct: snapshot.features_pct
         }
       },
-      callId: uuid28(),
+      callId: uuid31(),
       timeoutMs: 1e4
     });
   } catch (err) {
@@ -41377,6 +41862,22 @@ function registerDefaultLoops() {
       steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
     }
   });
+  registerCronJob({
+    id: "knowledge-bus-consolidation",
+    name: "Knowledge Bus Consolidation (Daily L2\u2192L3 promotion)",
+    schedule: "0 3 * * *",
+    // 03:00 UTC daily
+    enabled: true,
+    chain: {
+      name: "Knowledge Bus Consolidation",
+      mode: "sequential",
+      steps: [{
+        agent_id: "orchestrator",
+        tool_name: "knowledge_bus_consolidate",
+        arguments: { promote_threshold: 0.7, max_items: 50 }
+      }]
+    }
+  });
 }
 
 // src/routes/cron.ts
@@ -41734,9 +42235,9 @@ init_write_gate();
 // src/flywheel/harvest-pipeline.ts
 init_logger();
 init_mcp_caller();
-import { v4 as uuid29 } from "uuid";
+import { v4 as uuid32 } from "uuid";
 async function extract(domain) {
-  const callId = `harvest-extract-${uuid29().substring(0, 8)}`;
+  const callId = `harvest-extract-${uuid32().substring(0, 8)}`;
   try {
     const result = await callMcpTool({
       toolName: "srag.query",
@@ -41762,7 +42263,7 @@ function generalize(items, domain) {
     if (content.length > 2e3 || name.toLowerCase().includes("framework")) tier = "framework";
     else if (content.length > 500 || name.toLowerCase().includes("template")) tier = "template";
     return {
-      id: `harvest-${uuid29().substring(0, 12)}`,
+      id: `harvest-${uuid32().substring(0, 12)}`,
       name,
       tier,
       description: content.substring(0, 300),
@@ -41779,7 +42280,7 @@ function generalize(items, domain) {
 }
 async function store(components) {
   if (components.length === 0) return 0;
-  const callId = `harvest-store-${uuid29().substring(0, 8)}`;
+  const callId = `harvest-store-${uuid32().substring(0, 8)}`;
   const labelMap = {
     framework: "Framework",
     template: "Template",
@@ -41831,7 +42332,7 @@ async function verify(components) {
       const result = await callMcpTool({
         toolName: "srag.query",
         args: { query: `${comp.tier} for ${comp.industries[0]}: ${comp.name}` },
-        callId: `harvest-verify-${uuid29().substring(0, 8)}`,
+        callId: `harvest-verify-${uuid32().substring(0, 8)}`,
         timeoutMs: 15e3
       });
       const resultStr = JSON.stringify(result).toLowerCase();
@@ -42580,7 +43081,7 @@ knowledgeRouter.get("/briefing", async (_req, res) => {
 init_logger();
 init_redis();
 import { Router as Router19 } from "express";
-import { v4 as uuid30 } from "uuid";
+import { v4 as uuid33 } from "uuid";
 var neuralBusRouter = Router19();
 var BUS_MESSAGES_KEY = "neural-bus:messages";
 var BUS_AGENTS_KEY = "neural-bus:agents";
@@ -42596,7 +43097,7 @@ neuralBusRouter.post("/broadcast", async (req, res) => {
     const redis2 = await getRedisClient();
     const msg = {
       ...req.body,
-      id: uuid30(),
+      id: uuid33(),
       acknowledgedBy: []
     };
     await redis2.hset(BUS_MESSAGES_KEY, msg.id, JSON.stringify(msg));
@@ -42618,7 +43119,7 @@ neuralBusRouter.post("/send", async (req, res) => {
     const redis2 = await getRedisClient();
     const msg = {
       ...req.body,
-      id: uuid30(),
+      id: uuid33(),
       acknowledgedBy: []
     };
     if (!msg.to) {
@@ -42640,7 +43141,7 @@ neuralBusRouter.post("/publish", async (req, res) => {
     const redis2 = await getRedisClient();
     const msg = {
       ...req.body,
-      id: uuid30(),
+      id: uuid33(),
       acknowledgedBy: []
     };
     await redis2.hset(BUS_MESSAGES_KEY, msg.id, JSON.stringify(msg));
@@ -42857,7 +43358,7 @@ init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router21 } from "express";
 import { randomUUID as randomUUID3 } from "crypto";
-import { v4 as uuid31 } from "uuid";
+import { v4 as uuid34 } from "uuid";
 var notebookRouter = Router21();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
 var NOTEBOOK_INDEX = "orchestrator:notebooks:index";
@@ -42897,7 +43398,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "graph.read_cypher",
         args: { query, params: {} },
-        callId: uuid31(),
+        callId: uuid34(),
         timeoutMs: 15e3
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -42905,7 +43406,7 @@ async function executeQueryCell(cell, _context) {
       const result = await callMcpTool({
         toolName: "kg_rag.query",
         args: { question: query, max_evidence: 10 },
-        callId: uuid31(),
+        callId: uuid34(),
         timeoutMs: 2e4
       });
       cell.result = result.status === "success" ? result.result : { error: result.error_message };
@@ -43240,13 +43741,13 @@ ${compressed}`,
 init_chain_engine();
 init_cognitive_proxy();
 init_logger();
-import { v4 as uuid32 } from "uuid";
+import { v4 as uuid35 } from "uuid";
 var monitorRouter = Router22();
 async function graphRead2(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid32(),
+    callId: uuid35(),
     timeoutMs: 1e4
   });
   if (result.status !== "success") return [];
@@ -43525,7 +44026,7 @@ init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router23 } from "express";
-import { v4 as uuid33 } from "uuid";
+import { v4 as uuid36 } from "uuid";
 var assemblyRouter = Router23();
 var REDIS_PREFIX11 = "orchestrator:assembly:";
 var REDIS_INDEX5 = "orchestrator:assemblies:index";
@@ -43589,7 +44090,7 @@ ORDER BY b.domain, b.name LIMIT 50`;
     const graphResult = await callMcpTool({
       toolName: "graph.read_cypher",
       args: { query: cypher, params },
-      callId: uuid33(),
+      callId: uuid36(),
       timeoutMs: 15e3
     });
     if (graphResult.status === "success" && graphResult.result) {
@@ -43655,7 +44156,7 @@ Reply as JSON:
   const assemblies = [];
   const now = (/* @__PURE__ */ new Date()).toISOString();
   for (const candidate of analysis.candidates.slice(0, maxCandidates)) {
-    const assemblyId = `widgetdc:assembly:${uuid33()}`;
+    const assemblyId = `widgetdc:assembly:${uuid36()}`;
     const selectedBlocks = blocks.filter((b) => candidate.block_ids.includes(b.block_id));
     const conflictCount = candidate.conflicts?.length ?? 0;
     const coherence = Math.max(0, Math.min(1, candidate.coherence ?? 0.5));
@@ -43714,7 +44215,7 @@ MERGE (a)-[:COMPOSED_OF]->(b)`,
             blockIds: selectedBlocks.map((b) => b.block_id)
           }
         },
-        callId: uuid33(),
+        callId: uuid36(),
         timeoutMs: 1e4
       });
     } catch (err) {
@@ -43804,7 +44305,7 @@ assemblyRouter.put("/:id", async (req, res) => {
         query: "MATCH (a:Assembly {id: $id}) SET a.status = $status, a.updated_at = datetime()",
         params: { id: assembly.$id, status: assembly.status }
       },
-      callId: uuid33(),
+      callId: uuid36(),
       timeoutMs: 5e3
     });
   } catch {
@@ -43945,7 +44446,7 @@ init_tool_executor();
 init_logger();
 init_config();
 import { Router as Router25 } from "express";
-import { v4 as uuid34 } from "uuid";
+import { v4 as uuid37 } from "uuid";
 var MATRIX_ALIAS_TARGETS = {
   "claude-sonnet": "claude-sonnet-4-20250514",
   "claude-opus": "claude-sonnet-4-20250514",
@@ -44176,7 +44677,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
     return;
   }
   const { model, messages, stream: stream3, temperature, max_tokens } = req.body;
-  const requestId = `chatcmpl-${uuid34().substring(0, 12)}`;
+  const requestId = `chatcmpl-${uuid37().substring(0, 12)}`;
   const assistant = ASSISTANT_MAP.get(model);
   const resolvedModel = assistant ? assistant.baseModel : model;
   const mapping = resolveModelToProvider(resolvedModel) ?? resolveModelToProvider("gemini-flash");
@@ -45414,7 +45915,7 @@ init_mcp_caller();
 init_config();
 init_logger();
 import { Router as Router28 } from "express";
-import { v4 as uuid35 } from "uuid";
+import { v4 as uuid38 } from "uuid";
 var mcpGatewayRouter = Router28();
 var backendToolsCache = [];
 var backendToolsCacheTime = 0;
@@ -45500,7 +46001,7 @@ async function handleToolsCall(id, params) {
   if (isOrchestratorTool) {
     try {
       const results = await executeToolCalls([{
-        id: uuid35(),
+        id: uuid38(),
         function: { name: toolName, arguments: JSON.stringify(args) }
       }]);
       const result = results[0];
@@ -45528,7 +46029,7 @@ async function handleToolsCall(id, params) {
     const mcpResult = await callMcpTool({
       toolName: backendName,
       args,
-      callId: uuid35(),
+      callId: uuid38(),
       timeoutMs: 3e4
     });
     if (mcpResult.status !== "success") {
@@ -45647,7 +46148,7 @@ init_tool_registry();
 init_logger();
 init_adoption_telemetry();
 import { Router as Router29 } from "express";
-import { v4 as uuid36 } from "uuid";
+import { v4 as uuid39 } from "uuid";
 var toolGatewayRouter = Router29();
 function respondLegacyToolResult(res, result) {
   const httpStatus = result.status === "success" ? 200 : result.status === "timeout" ? 504 : 500;
@@ -45662,7 +46163,7 @@ function respondLegacyToolResult(res, result) {
 }
 toolGatewayRouter.post("/call", async (req, res) => {
   const toolName = typeof req.body?.tool_name === "string" ? req.body.tool_name : null;
-  const callId = typeof req.body?.call_id === "string" ? req.body.call_id : uuid36();
+  const callId = typeof req.body?.call_id === "string" ? req.body.call_id : uuid39();
   const args = req.body?.arguments && typeof req.body.arguments === "object" ? req.body.arguments : {};
   if (!toolName) {
     res.status(400).json({
@@ -45701,7 +46202,7 @@ toolGatewayRouter.post("/:name", async (req, res) => {
     });
     return;
   }
-  const callId = req.body?.call_id ?? uuid36();
+  const callId = req.body?.call_id ?? uuid39();
   const args = req.body ?? {};
   logger.info({ tool: name, call_id: callId }, "REST tool gateway call");
   const result = await executeToolUnified(name, args, {
@@ -46340,12 +46841,12 @@ import { Router as Router33 } from "express";
 init_mcp_caller();
 init_logger();
 init_sse();
-import { v4 as uuid37 } from "uuid";
+import { v4 as uuid40 } from "uuid";
 async function graphRead3(cypher) {
   const result = await callMcpTool({
     toolName: "graph.read_cypher",
     args: { query: cypher },
-    callId: uuid37(),
+    callId: uuid40(),
     timeoutMs: 3e4
   });
   if (result.status !== "success") return [];
@@ -46356,7 +46857,7 @@ async function graphWrite2(cypher, params) {
   const result = await callMcpTool({
     toolName: "graph.write_cypher",
     args: { query: cypher, ...params ? { params } : {} },
-    callId: uuid37(),
+    callId: uuid40(),
     timeoutMs: 6e4
   });
   return result.status === "success";
@@ -47656,7 +48157,7 @@ intelligenceRouter.post("/adaptive-rag/retrain", async (_req, res) => {
 });
 intelligenceRouter.post("/extract-test", async (req, res) => {
   const { callMcpTool: callMcpTool2 } = await Promise.resolve().then(() => (init_mcp_caller(), mcp_caller_exports));
-  const { v4: uuid39 } = await import("uuid");
+  const { v4: uuid42 } = await import("uuid");
   const content = req.body?.content ?? "CSRD regulation, ATP pension fund, GRI framework";
   try {
     const llmResult = await callMcpTool2({
@@ -47666,7 +48167,7 @@ intelligenceRouter.post("/extract-test", async (req, res) => {
 
 Content: ${content.slice(0, 2e3)}`
       },
-      callId: uuid39(),
+      callId: uuid42(),
       timeoutMs: 3e4
     });
     const raw = llmResult.result;
@@ -47756,7 +48257,7 @@ init_manifesto_governance();
 init_mcp_caller();
 init_logger();
 import { Router as Router39 } from "express";
-import { v4 as uuid38 } from "uuid";
+import { v4 as uuid41 } from "uuid";
 var governanceRouter = Router39();
 governanceRouter.get("/matrix", (_req, res) => {
   res.json({
@@ -47814,7 +48315,7 @@ RETURN p.name as name, p.status as status`,
               gap_remediation: p.gap_remediation ?? ""
             }
           },
-          callId: uuid38(),
+          callId: uuid41(),
           timeoutMs: 15e3
         });
         results.push({
@@ -50791,6 +51292,47 @@ function parseDirectory(dir, maxFiles = 500) {
   return result;
 }
 
+// src/knowledge/adapters/phantom-bom-adapter.ts
+init_knowledge();
+init_logger();
+function emitPhantomDiscovery(discovery) {
+  const content = `## Phantom Tool Discovery: ${discovery.toolName}
+
+**Tool:** \`${discovery.toolName}\`
+**Type:** ${discovery.componentType}
+**Description:** ${discovery.toolDescription}
+**Discovered in:** ${discovery.discoveredIn}
+**Repo:** ${discovery.repo}
+**Confidence:** ${discovery.confidence}%
+
+### Capabilities
+${discovery.capabilities.length ? discovery.capabilities.map((c) => `- ${c}`).join("\n") : "- (none extracted)"}
+
+### Issue
+This tool is called in orchestrator code but is NOT registered in the backend MCP catalogue.
+It routes via \`callMcpTool\` to the backend bridge and silently fails.
+
+### Fix Pattern
+Import and call the local function directly instead of via MCP bridge:
+\`\`\`typescript
+// WRONG: const result = await callMcpTool({ toolName: '${discovery.toolName}', ... })
+// RIGHT: const { localFn } = await import('../path/to/local.js'); await localFn(...)
+\`\`\`
+`;
+  emitKnowledge({
+    source: "phantom_bom",
+    title: `PhantomBOM: ${discovery.toolName} not in backend catalogue`,
+    content,
+    summary: `Tool ${discovery.toolName} used via callMcpTool but missing from backend \u2014 use local import`,
+    score: discovery.confidence !== void 0 ? Math.min(0.95, discovery.confidence / 100) : 0.75,
+    // default: L3 tier if confidence unknown
+    tags: ["phantom-bom", "tool-routing", discovery.toolName, discovery.repo, ...discovery.tags],
+    repo: discovery.repo,
+    metadata: discovery
+  });
+  logger.info({ toolName: discovery.toolName }, "PhantomBOMAdapter: discovery emitted to KnowledgeBus");
+}
+
 // src/phantom-bom.ts
 var REPOMIX_MAX_CHARS = 6e4;
 var LLM_TIMEOUT_MS = 12e4;
@@ -51066,6 +51608,20 @@ RETURN c.componentId as id`;
         runId: bom.run_id
       }
     });
+    try {
+      emitPhantomDiscovery({
+        toolName: comp.name,
+        toolDescription: comp.description,
+        repo: bom.source_repo,
+        discoveredIn: comp.source_file ?? `${bom.source_repo} (phantom-bom scan)`,
+        componentType: comp.type,
+        confidence: comp.confidence,
+        capabilities: comp.capabilities,
+        tags: comp.tags
+      });
+    } catch (err) {
+      logger.warn({ componentId: comp.id, err: String(err) }, "PhantomBOMAdapter: emit failed (non-blocking)");
+    }
     autoEmbedComponent(comp, bom).catch((err) => {
       logger.warn({ runId: bom.run_id, componentId: comp.id, err: String(err) }, "Auto-embed failed (non-blocking)");
     });
@@ -52214,6 +52770,7 @@ prometheusMetricsRouter.get("/api/grafana/prometheus", async (_req, res) => {
 // src/index.ts
 init_pheromone_layer();
 init_peer_eval();
+init_knowledge();
 var __dirname4 = path3.dirname(fileURLToPath3(import.meta.url));
 var app = express();
 app.set("trust proxy", 1);
@@ -52580,6 +53137,7 @@ async function boot() {
   await initAnomalyWatcher();
   await initPheromoneLayer();
   await initPeerEval();
+  initKnowledgeBus();
   loadBenchmarkRuns().catch((err) => {
     logger.warn({ err: String(err) }, "Benchmark run hydration failed (non-critical)");
   });

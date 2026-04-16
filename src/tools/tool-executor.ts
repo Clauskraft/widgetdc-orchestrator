@@ -2626,6 +2626,63 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       }
     }
 
+    // ── KnowledgeBus Manual Trigger ──────────────────────────────────────
+
+    case 'knowledge_normalize': {
+      try {
+        const { emitKnowledge } = await import('../knowledge/index.js')
+        const { foldSession } = await import('../knowledge/adapters/session-fold-adapter.js')
+
+        if (args.source === 'session_fold' && args.session_id) {
+          const fold = await foldSession(args.session_id as string)
+          return `Session fold emitted to KnowledgeBus: ${fold.commits.length} commits, ${fold.open_tasks.length} open tasks, ${fold.decisions.length} decisions`
+        }
+
+        emitKnowledge({
+          source: (args.source ?? 'manual') as 'inventor' | 'session_fold' | 'phantom_bom' | 'commit' | 'manual',
+          title: args.title as string,
+          content: args.content as string,
+          summary: args.summary as string,
+          score: args.score as number | undefined,
+          tags: (args.tags as string[]) ?? [],
+          repo: (args.repo as string) ?? 'widgetdc-orchestrator',
+        })
+        const tier = args.score !== undefined
+          ? (args.score >= 0.85 ? 'L4 (skill candidate)' : args.score >= 0.70 ? 'L3 (AgentMemory)' : 'L2 (staging)')
+          : 'auto-scored'
+        return `KnowledgeEvent emitted: "${args.title as string}" → ${tier}`
+      } catch (err) {
+        return `knowledge_normalize failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    case 'knowledge_bus_consolidate': {
+      try {
+        const { listL2 } = await import('../knowledge/l2-writer.js')
+        const { writeL3 } = await import('../knowledge/l3-writer.js')
+        const { judgeResponse } = await import('../llm/agent-judge.js')
+        const threshold = (args.promote_threshold as number) ?? 0.70
+        const maxItems = (args.max_items as number) ?? 50
+
+        const staged = await listL2()
+        let promoted = 0
+        for (const event of staged.slice(0, maxItems)) {
+          if (event.score === undefined) {
+            const jr = await judgeResponse(event.title, event.content.slice(0, 1500), undefined, 'deepseek')
+            const raw = jr.score.aggregate
+            event.score = Math.min(1, Math.max(0, raw > 1 ? raw / 10 : raw))
+          }
+          if (event.score >= threshold) {
+            await writeL3(event)
+            promoted++
+          }
+        }
+        return `Knowledge consolidation: ${staged.length} staged, ${promoted} promoted to L3`
+      } catch (err) {
+        return `knowledge_bus_consolidate failed: ${String(err)}`
+      }
+    }
+
     // ── Inventor (ASI-Evolve MCP Tools — LIN-XXX) ────────────────────────
 
     case 'inventor_run': {

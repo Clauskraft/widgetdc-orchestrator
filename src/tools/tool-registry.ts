@@ -1012,6 +1012,40 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     outputDescription: 'KnowledgeDocument[] sorted by word_count descending',
   }),
 
+  // ─── knowledge.* — KnowledgeBus Manual Trigger (Knowledge Bus) ──
+
+  defineTool({
+    name: 'knowledge_normalize',
+    namespace: 'knowledge',
+    description: 'Emit a knowledge event to the normalization bus. Routes to L2/L3/L4 based on PRISM score. Use for manual promotion of protocols, patterns, or improvements.',
+    input: z.object({
+      source: z.enum(['inventor', 'session_fold', 'phantom_bom', 'commit', 'manual']).default('manual').describe('Origin of the knowledge event'),
+      title: z.string().describe('Human-readable title for the skill'),
+      content: z.string().describe('Full protocol/skill content in markdown'),
+      summary: z.string().describe('One-line description'),
+      score: z.number().min(0).max(1).optional().describe('Pre-computed PRISM score — omit to auto-score'),
+      tags: z.array(z.string()).default([]).describe('Classification tags'),
+      repo: z.string().default('widgetdc-orchestrator').describe('Source repo'),
+      session_id: z.string().optional().describe('For source=session_fold: path to JSONL transcript'),
+    }),
+    timeoutMs: 30000,
+    outputDescription: 'Confirmation of emitted KnowledgeEvent with tier routing (L2/L3/L4)',
+  }),
+
+  defineTool({
+    name: 'knowledge_bus_consolidate',
+    namespace: 'knowledge',
+    description: 'Promote L2 staged knowledge events to L3 AgentMemory if score meets threshold. Runs daily via cron.',
+    input: z.object({
+      promote_threshold: z.number().default(0.70),
+      max_items: z.number().default(50),
+    }),
+    timeoutMs: 120000,
+    authRequired: true,
+    availableVia: ['openai', 'openapi', 'mcp'],
+    outputDescription: 'Summary of staged events evaluated and count promoted to L3',
+  }),
+
   // ─── compliance.* — EU AI Act Compliance (Phantom Week 6, V1) ──
 
   defineTool({

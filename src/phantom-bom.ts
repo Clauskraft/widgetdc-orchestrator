@@ -30,6 +30,7 @@ import { createHash } from 'crypto'
 import { config } from './config.js'
 import { logger } from './logger.js'
 import { parseDirectory, type ASTModule } from './tree-sitter-ingestion/parser.js'
+import { emitPhantomDiscovery } from './knowledge/adapters/phantom-bom-adapter.js'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -387,6 +388,24 @@ RETURN c.componentId as id`
         runId: bom.run_id,
       },
     })
+
+    // Emit discovery to KnowledgeBus — non-blocking, best-effort.
+    // Allows knowledge normalization bus to route the component to L2/L3/L4
+    // depending on score. Score 0.80 → L3 tier directly.
+    try {
+      emitPhantomDiscovery({
+        toolName: comp.name,
+        toolDescription: comp.description,
+        repo: bom.source_repo,
+        discoveredIn: comp.source_file ?? `${bom.source_repo} (phantom-bom scan)`,
+        componentType: comp.type,
+        confidence: comp.confidence,
+        capabilities: comp.capabilities,
+        tags: comp.tags,
+      })
+    } catch (err) {
+      logger.warn({ componentId: comp.id, err: String(err) }, 'PhantomBOMAdapter: emit failed (non-blocking)')
+    }
 
     // Auto-embed: non-blocking fire-and-forget vidensarkiv.add per component.
     // vidensarkiv.add creates a searchable VectorDocument (with embedding) linked
