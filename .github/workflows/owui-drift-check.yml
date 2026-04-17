@@ -30,14 +30,54 @@ jobs:
       - name: Run drift check
         id: drift
         env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
           OWUI_URL: ${{ secrets.OWUI_URL }}
           OWUI_TOKEN: ${{ secrets.OWUI_TOKEN }}
           OWUI_EMAIL: ${{ secrets.OWUI_EMAIL }}
           OWUI_PASSWORD: ${{ secrets.OWUI_PASSWORD }}
         run: |
           set +e
-          python scripts/check_owui_drift.py --json > drift-report.json
-          echo "EXIT_CODE=$?" >> $GITHUB_ENV
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -z "$OWUI_TOKEN" ] && [ -z "$OWUI_PASSWORD" ]; then
+            cat > drift-report.json <<'EOF'
+          {
+            "skipped": true,
+            "reason": "OWUI secrets are not available for this pull_request run",
+            "untracked_drift": [],
+            "missing_deployment": []
+          }
+          EOF
+            echo "EXIT_CODE=0" >> $GITHUB_ENV
+            python scripts/check_owui_drift.py || true
+            exit 0
+          fi
+          python scripts/check_owui_drift.py --json > drift-report.json 2> drift-error.txt
+          EXIT_CODE=$?
+          export EXIT_CODE
+          echo "EXIT_CODE=$EXIT_CODE" >> $GITHUB_ENV
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report_path = Path("drift-report.json")
+          try:
+              json.loads(report_path.read_text(encoding="utf-8"))
+          except Exception:
+              error_text = Path("drift-error.txt").read_text(encoding="utf-8").strip()
+              report_path.write_text(
+                  json.dumps(
+                      {
+                          "exit_code": int(os.environ.get("EXIT_CODE", "0") or "0"),
+                          "error": error_text,
+                          "untracked_drift": [],
+                          "missing_deployment": [],
+                      },
+                      indent=2,
+                      ensure_ascii=False,
+                  ),
+                  encoding="utf-8",
+              )
+          PY
           python scripts/check_owui_drift.py || true
 
       - name: Upload drift report artifact
@@ -52,11 +92,33 @@ jobs:
         if: github.event_name == 'pull_request' && env.EXIT_CODE != '0'
         id: body
         run: |
+          python - <<'PY' > comment.md
+          import json
+
+          report = json.load(open('drift-report.json', encoding='utf-8'))
+          error = report.get('error')
+          if error:
+              print('## Open WebUI Drift Check Failed')
+              print()
+              print('The workflow could not complete the live OWUI verification step cleanly.')
+              print()
+              print('```text')
+              print(error[:4000])
+              print('```')
+          else:
+              print('## Open WebUI Drift Detected')
+              print()
+              print(f'**Untracked (deployed but no git source):** {len(report["untracked_drift"])}')
+              for tool_id in report['untracked_drift']:
+                  print(f'- `{tool_id}`')
+              print()
+              print(f'**Missing deployment (in git but not deployed):** {len(report["missing_deployment"])}')
+              for tool_id in report['missing_deployment']:
+                  print(f'- `{tool_id}`')
+          PY
           {
             echo 'COMMENT<<EOF'
-            echo '## Open WebUI Drift Detected'
-            echo ''
-            python -c "import json; r=json.load(open('drift-report.json')); print(f'**Untracked (deployed but no git source):** {len(r[\"untracked_drift\"])}'); [print(f'- \`{t}\`') for t in r['untracked_drift']]; print(); print(f'**Missing deployment (in git but not deployed):** {len(r[\"missing_deployment\"])}'); [print(f'- \`{t}\`') for t in r['missing_deployment']]"
+            cat comment.md
             echo ''
             echo 'See `scripts/check_owui_drift.py` for remediation.'
             echo 'EOF'
@@ -64,6 +126,7 @@ jobs:
 
       - name: Comment on PR (if drift detected)
         if: github.event_name == 'pull_request' && env.EXIT_CODE != '0'
+        continue-on-error: true
         uses: peter-evans/create-or-update-comment@v4
         with:
           issue-number: ${{ github.event.pull_request.number }}
