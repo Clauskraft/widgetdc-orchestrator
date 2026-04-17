@@ -252,9 +252,11 @@ app.use((req, res, next) => {
   // API-only paths — no SPA pages exist at these paths, always pass to API
   const apiOnlyPaths = ['/agents', '/tools', '/chains', '/chat', '/cognitive', '/cron', '/v1']
   if (apiOnlyPaths.some((p) => req.path.startsWith(p))) return next()
-  // Serve SPA only for explicit browser navigation (Accept: text/html).
-  // API clients (curl, fetch, agents) don't send Accept, so they reach the 404 handler.
-  if (req.headers.accept && req.accepts('html', 'json') === 'html') {
+  // Serve SPA only for explicit browser navigation (Accept includes text/html).
+  // Node.js fetch/curl send Accept: */* which must NOT get HTML — only real browsers
+  // include text/html explicitly. application/json always wins over */*.
+  const accept = req.headers.accept || ''
+  if (accept.includes('text/html') && !accept.includes('application/json') && req.accepts('html', 'json') === 'html') {
     return res.sendFile(spaIndexPath)
   }
   next()

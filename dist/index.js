@@ -7150,7 +7150,7 @@ var init_cost_governance = __esm({
     BUDGET_LANE_STANDARD_MAX = 16e3;
     MAX_RECURSION_DEPTH = 3;
     MAX_AGENT_FANOUT_PARALLEL = 5;
-    MAX_AGENT_FANOUT_DEBATE = 3;
+    MAX_AGENT_FANOUT_DEBATE = 5;
     CONTEXT_COMPACTION_THRESHOLD = 8e3;
     COST_TRACE_TTL_SECONDS = 86400;
     COST_TRACE_PREFIX = "orchestrator:cost-trace:";
@@ -27054,6 +27054,8 @@ async function runAutonomousCycle(phase, maxTargets) {
       } catch {
       }
     }
+  }
+  if (!_bootRestoreCompleted) {
     try {
       let closedResult = null;
       for (let attempt = 0; attempt < 15; attempt++) {
@@ -27093,14 +27095,21 @@ async function runAutonomousCycle(phase, maxTargets) {
           const ids = typeof rawValue === "string" ? JSON.parse(rawValue) : rawValue;
           if (Array.isArray(ids) && ids.length > 0) {
             ids.forEach((id) => closedTargetIds.add(id));
+            _bootRestoreCompleted = true;
             logger.info({ count: closedTargetIds.size, ids }, "HyperAgent-Auto: authoritative restore from Neo4j closed-ids");
+          } else {
+            _bootRestoreCompleted = true;
+            logger.info("HyperAgent-Auto: Neo4j closed-ids node exists but is empty \u2014 fresh start");
           }
+        } else {
+          _bootRestoreCompleted = true;
+          logger.info("HyperAgent-Auto: no closed-ids node in Neo4j \u2014 fresh start confirmed");
         }
       } else if (closedResult) {
-        logger.warn({ status: closedResult.status, err: closedResult.error_message }, "HyperAgent-Auto: closed-ids Neo4j restore call failed");
+        logger.warn({ status: closedResult.status, err: closedResult.error_message }, "HyperAgent-Auto: closed-ids Neo4j restore call failed \u2014 will retry next cycle");
       }
     } catch (err) {
-      logger.warn({ err: err instanceof Error ? err.message : String(err) }, "HyperAgent-Auto: closed-ids Neo4j restore threw");
+      logger.warn({ err: err instanceof Error ? err.message : String(err) }, "HyperAgent-Auto: closed-ids Neo4j restore threw \u2014 will retry next cycle");
     }
   }
   const cycleId = `auto-${uuid23().slice(0, 8)}`;
@@ -27576,7 +27585,7 @@ async function listCrossRepoMemory() {
   if (!redis2) return [];
   return redis2.smembers(`${MEMORY_PREFIX}:domains`);
 }
-var CHAIN_MODE_MATRIX, W_EDGE_GAP, W_TARGET_GAP, W_DEPENDENCY, W_EFFORT, LEARNING_RATE, TARGET_EDGE_SCORE, PHASE_GATES, PHASE_POLICY, CYCLE_BATCH_SIZE, isRunning2, currentPhase, currentTarget, currentStep, totalCycles2, lastCycle2, closedTargetIds, _registryCache, edgeWeights, discoveredIssues, MAX_DISCOVERED_ISSUES, DEFAULT_EDGE_SCORES, EDGE_SCORES_REDIS_KEY, SCORE_PER_TARGET, MEMORY_PREFIX, MEMORY_TTL;
+var CHAIN_MODE_MATRIX, W_EDGE_GAP, W_TARGET_GAP, W_DEPENDENCY, W_EFFORT, LEARNING_RATE, TARGET_EDGE_SCORE, PHASE_GATES, PHASE_POLICY, CYCLE_BATCH_SIZE, isRunning2, currentPhase, currentTarget, currentStep, totalCycles2, lastCycle2, closedTargetIds, _registryCache, _bootRestoreCompleted, edgeWeights, discoveredIssues, MAX_DISCOVERED_ISSUES, DEFAULT_EDGE_SCORES, EDGE_SCORES_REDIS_KEY, SCORE_PER_TARGET, MEMORY_PREFIX, MEMORY_TTL;
 var init_hyperagent_autonomous = __esm({
   "src/hyperagent/hyperagent-autonomous.ts"() {
     "use strict";
@@ -27635,6 +27644,7 @@ var init_hyperagent_autonomous = __esm({
     lastCycle2 = null;
     closedTargetIds = /* @__PURE__ */ new Set();
     _registryCache = null;
+    _bootRestoreCompleted = false;
     edgeWeights = {
       Husker: 1 / 6,
       Laerer: 1 / 6,
@@ -46684,14 +46694,32 @@ function buildDynamicAssistant(agent) {
     capabilities
   };
 }
+function buildAgentFingerprint(agents) {
+  return agents.map((agent) => [
+    agent.agent_id,
+    agent.display_name,
+    agent.status,
+    agent.source,
+    (agent.capabilities ?? []).join(","),
+    (agent.allowed_tool_namespaces ?? []).join(",")
+  ].join("|")).sort().join("||");
+}
 function loadDynamicAssistants(now = Date.now()) {
-  if (dynamicAgentCache && dynamicAgentCache.expiresAt > now) {
+  const registryAgents = AgentRegistry.all().map((entry) => entry.handshake).filter((agent) => agent.status === "online" && agent.source !== "librechat" && agent.source !== "auto-discovered");
+  const sourceAgents = /* @__PURE__ */ new Map();
+  for (const agent of AGENT_SEEDS.filter((agent2) => agent2.status === "online" && agent2.source !== "librechat")) {
+    sourceAgents.set(agent.agent_id, agent);
+  }
+  for (const agent of registryAgents) {
+    sourceAgents.set(agent.agent_id, agent);
+  }
+  const mergedAgents = [...sourceAgents.values()];
+  const fingerprint = buildAgentFingerprint(mergedAgents);
+  if (dynamicAgentCache && dynamicAgentCache.expiresAt > now && dynamicAgentCache.fingerprint === fingerprint) {
     return dynamicAgentCache.assistants;
   }
-  const registryAgents = AgentRegistry.all().map((entry) => entry.handshake).filter((agent) => agent.status === "online" && agent.source !== "librechat" && agent.source !== "auto-discovered");
-  const sourceAgents = registryAgents.length > 0 ? registryAgents : AGENT_SEEDS.filter((agent) => agent.source !== "librechat");
-  const assistants = sourceAgents.map(buildDynamicAssistant);
-  dynamicAgentCache = { expiresAt: now + DYNAMIC_AGENT_CACHE_TTL_MS, assistants };
+  const assistants = mergedAgents.map(buildDynamicAssistant);
+  dynamicAgentCache = { expiresAt: now + DYNAMIC_AGENT_CACHE_TTL_MS, fingerprint, assistants };
   return assistants;
 }
 function getAssistantMap(now = Date.now()) {
@@ -54691,7 +54719,8 @@ app.use((req, res, next) => {
   if (req.path.startsWith("/ws") || req.path.startsWith("/sse") || req.path.startsWith("/health") || req.path.startsWith("/api/") || req.path.startsWith("/v1/") || req.path.startsWith("/metrics") || req.path.match(/\.\w+$/)) return next();
   const apiOnlyPaths = ["/agents", "/tools", "/chains", "/chat", "/cognitive", "/cron", "/v1"];
   if (apiOnlyPaths.some((p) => req.path.startsWith(p))) return next();
-  if (req.headers.accept && req.accepts("html", "json") === "html") {
+  const accept = req.headers.accept || "";
+  if (accept.includes("text/html") && !accept.includes("application/json") && req.accepts("html", "json") === "html") {
     return res.sendFile(spaIndexPath);
   }
   next();
