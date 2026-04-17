@@ -27,6 +27,8 @@
 
 import { execSync } from 'child_process'
 import { createHash } from 'crypto'
+import { readdirSync, readFileSync, rmSync } from 'fs'
+import path from 'path'
 import { config } from './config.js'
 import { logger } from './logger.js'
 import { parseDirectory, type ASTModule } from './tree-sitter-ingestion/parser.js'
@@ -556,7 +558,7 @@ function extractViaTreeSitter(repoUrl: string): {
       callSiteCount: totalCalls,
     }
   } finally {
-    try { require('fs').rmSync(tmpDir, { recursive: true, force: true }) } catch {}
+    try { rmSync(tmpDir, { recursive: true, force: true }) } catch {}
   }
 }
 
@@ -581,9 +583,9 @@ function extractModuleStructure(repoUrl: string): Array<{
     const exts = ['.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs']
     const files: Array<{ path: string }> = []
     function walk(d: string) {
-      for (const entry of require('fs').readdirSync(d, { withFileTypes: true })) {
+      for (const entry of readdirSync(d, { withFileTypes: true })) {
         if (entry.name === '.git' || entry.name === 'node_modules' || entry.name === '.github') continue
-        const full = require('path').join(d, entry.name)
+        const full = path.join(d, entry.name)
         if (entry.isDirectory()) walk(full)
         else if (exts.some(e => entry.name.endsWith(e))) {
           files.push({ path: full })
@@ -595,7 +597,7 @@ function extractModuleStructure(repoUrl: string): Array<{
     // Group by subdirectory module
     const modules = new Map<string, Array<{ path: string }>>()
     for (const f of files) {
-      const rel = f.path.replace(require('path').sep, '/').substring(tmpDir.length + 1)
+      const rel = f.path.replace(path.sep, '/').substring(tmpDir.length + 1)
       const parts = rel.split('/')
       let key: string
       if (parts.length >= 3 && parts[0] === 'src') {
@@ -615,7 +617,7 @@ function extractModuleStructure(repoUrl: string): Array<{
       const exportTypes = new Set<string>()
       for (const f of modFiles) {
         try {
-          const content = require('fs').readFileSync(f.path, 'utf8')
+          const content = readFileSync(f.path, 'utf8')
           if (/^export (default |const |class |function |interface |type |enum )/m.test(content)) {
             hasExports = true
             if (/export class /m.test(content)) exportTypes.add('class')
@@ -631,11 +633,11 @@ function extractModuleStructure(repoUrl: string): Array<{
     }
 
     // Cleanup
-    try { require('fs').rmSync(tmpDir, { recursive: true, force: true }) } catch {}
+    try { rmSync(tmpDir, { recursive: true, force: true }) } catch {}
 
     return result
   } catch {
-    try { require('fs').rmSync(tmpDir, { recursive: true, force: true }) } catch {}
+    try { rmSync(tmpDir, { recursive: true, force: true }) } catch {}
     return []
   }
 }

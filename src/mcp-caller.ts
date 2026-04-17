@@ -521,6 +521,19 @@ async function callMcpToolOnce(
         result = raw
       }
 
+      // Surface backend _upgrade_hint for complexity telemetry (fix-complexity-routing).
+      // Backend attaches this to raw-cypher responses when a higher-score tool would
+      // score better (e.g. srag.query instead of graph.read_cypher).
+      if (result && typeof result === 'object' && '_upgrade_hint' in result) {
+        const hint = (result as { _upgrade_hint?: { tool?: string; reason?: string } })._upgrade_hint
+        if (hint?.tool) {
+          log.warn(
+            { from_tool: opts.toolName, upgrade_to: hint.tool, reason: hint.reason },
+            'complexity_upgrade_hint'
+          )
+        }
+      }
+
       log.info({ tool: opts.toolName, duration_ms }, 'MCP JSON call complete')
 
       return {
