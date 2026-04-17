@@ -591,6 +591,11 @@ async function boot() {
 
   // initRedis() races against 7s timeout internally — never hangs boot
   await initRedis()
+  // Restore HyperAgent closed-ids directly from Redis before any cron/API can trigger a cycle.
+  // Uses direct Redis read (no callMcpTool) — immune to validator-bypass and backend timing issues.
+  await import('./hyperagent/hyperagent-autonomous.js')
+    .then(m => m.initHyperAgentBootRestore())
+    .catch(err => logger.warn({ err: String(err) }, 'HyperAgent boot-init restore failed (non-fatal)'))
   await AgentRegistry.hydrate().catch(err => logger.warn({ err: String(err) }, 'AgentRegistry hydrate failed (non-fatal)'))
   seedAgents()
   // LIN-594: Load persisted forged tools from Redis

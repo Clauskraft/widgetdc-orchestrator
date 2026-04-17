@@ -151,6 +151,46 @@ let _registryCache: TargetDef[] | null = null
 /** Boot restore completion flag — retried each cycle until Neo4j returns historical IDs */
 let _bootRestoreCompleted = false
 
+/**
+ * initHyperAgentBootRestore — runs once during server boot() AFTER initRedis().
+ * Reads closed-ids directly from Redis (no callMcpTool → no validator-bypass race).
+ * Populates closedTargetIds before any cron job or API call can trigger a cycle.
+ */
+export async function initHyperAgentBootRestore(): Promise<void> {
+  const redis = getRedis()
+  if (!redis) return
+  try {
+    // Primary: read from persistCrossRepoMemory's Redis key
+    const raw = await redis.get('hyperagent:memory:targets:closed-ids')
+    if (raw) {
+      const entry = JSON.parse(raw) as { value: unknown }
+      const v = entry.value
+      const ids: string[] = Array.isArray(v) ? v as string[]
+        : typeof v === 'string' ? JSON.parse(v) as string[] : []
+      if (ids.length > 0) {
+        ids.forEach(id => closedTargetIds.add(id))
+        _bootRestoreCompleted = true
+        logger.info({ count: closedTargetIds.size, ids }, 'HyperAgent-Auto: boot-init restore from Redis memory key')
+        return
+      }
+    }
+    // Fallback: legacy key
+    const legacyRaw = await redis.get('hyperagent:closedTargets')
+    if (legacyRaw) {
+      const ids = JSON.parse(legacyRaw) as string[]
+      if (ids.length > 0) {
+        ids.forEach(id => closedTargetIds.add(id))
+        _bootRestoreCompleted = true
+        logger.info({ count: closedTargetIds.size }, 'HyperAgent-Auto: boot-init restore from Redis legacy key')
+        return
+      }
+    }
+    logger.info('HyperAgent-Auto: boot-init found no closed-ids in Redis — Neo4j restore will run on first cycle')
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'HyperAgent-Auto: boot-init restore failed (non-fatal)')
+  }
+}
+
 /** Adaptive edge weights — start equal, evolve */
 const edgeWeights: Record<string, number> = {
   Husker: 1 / 6, Laerer: 1 / 6, Heler: 1 / 6,
