@@ -1,6 +1,6 @@
-# Deferred Pipelines — Gated by Facade A/B Test
+# Deferred Pipelines — Remaining Gated OWUI Artifacts
 
-**Status:** 🟡 BLOCKED  
+**Status:** 🟡 PARTIALLY UNBLOCKED  
 **Gate:** SNOUT-CLOSE-06 (Thin Facade Spec) + SNOUT-CLOSE-07 (A/B benchmark)  
 **Created:** 2026-04-04  
 **Authority:** Omega Sentinel + 4-way debate consensus
@@ -13,11 +13,15 @@ Open WebUI production (SNOUT-CLOSE-03):
 - ✅ `widgetdc_flow_editor` (LIN-588 / SNOUT-18) — visualization, no SITREP OS overlap
 - ✅ `widgetdc_data_browser` (LIN-587 / SNOUT-17) — sortable tables, no SITREP OS overlap
 
-The remaining **4 pipelines are deferred** pending facade A/B test outcome. These 4 overlap
-with existing tool functionality and deploying them directly would increase tool surface
-from 16 → 20, risking gpt-4o tool selection degradation (current baseline: 90.0% accuracy).
+`widgetdc_graph_explorer` is no longer deferred. It is treated as part of the normal graph
+surface and can be synced to production with the standard OWUI deploy path.
 
-## Deferred Pipelines (4)
+The remaining **3 pipelines are deferred** pending facade A/B test outcome or filter validation.
+These artifacts overlap
+with existing tool functionality and deploying them directly would increase tool surface
+and/or add always-on hooks, risking degraded tool selection or global chat breakage.
+
+## Remaining Deferred Artifacts (3)
 
 ### 1. `widgetdc_mcp_bridge.py` — LIN-585 / SNOUT-19
 - **Methods:** `mcp_call`, `mcp_list_tools`, `orchestrator_tool`
@@ -26,14 +30,7 @@ from 16 → 20, risking gpt-4o tool selection degradation (current baseline: 90.
 - **Unblock condition:** Facade spec assigns ONE to primary, other to internal-only
 - **Owner:** Platform
 
-### 2. `widgetdc_graph_explorer.py` — LIN-586 / SNOUT-16
-- **Methods:** `explore_neighborhood`, `explore_label`
-- **Overlaps with:** `widgetdc_graph_intel` (deployed, has `graph_health`, `run_graph_hygiene`, `search_knowledge`)
-- **Risk:** 4 graph tools deployed simultaneously = high selection ambiguity
-- **Unblock condition:** Facade routes graph-query intents to single entry point
-- **Owner:** Platform
-
-### 3. `widgetdc_anticipator.py` — Intelligence Suite companion
+### 2. `widgetdc_anticipator.py` — Intelligence Suite companion
 - **Methods:** `inlet` (Filter pattern — not user-callable)
 - **Type:** Open WebUI Filter hook (runs automatically, not exposed as tool)
 - **Overlaps with:** None (different execution model)
@@ -41,7 +38,7 @@ from 16 → 20, risking gpt-4o tool selection degradation (current baseline: 90.
 - **Unblock condition:** Verify filter hook contract + test in staging
 - **Owner:** Platform
 
-### 4. `widgetdc_beautifier.py` — Intelligence Suite companion
+### 3. `widgetdc_beautifier.py` — Intelligence Suite companion
 - **Methods:** `outlet` (Filter pattern — not user-callable)
 - **Type:** Open WebUI Filter hook (response post-processor)
 - **Overlaps with:** None (different execution model)
@@ -70,11 +67,11 @@ SNOUT-CLOSE-07: A/B benchmark (facade vs flat)
 SNOUT-CLOSE-08: Omega go/no-go decision
   ↓
 If PASS:
-  - Deploy all 4 pipelines behind facade routing
+  - Deploy remaining deferred artifacts behind facade routing / validated filter rollout
   - Retest tool selection accuracy (must stay ≥90%)
 If FAIL:
-  - Deploy 2 filters (#3, #4) only with staging validation
-  - Keep mcp_bridge + graph_explorer frozen
+  - Deploy 2 filters (#2, #3) only with staging validation
+  - Keep mcp_bridge frozen
   - Document lesson: flat topology works at current scale
 ```
 
@@ -87,7 +84,7 @@ If FAIL:
   2. `list MCP tools` → routed to `uni_mcp` instead of `mcp_gateway` (overlap)
   3. `calculator math` → routed to `vaerktoej1` from innocent chitchat
 
-Deploying 4 more pipelines without facade would likely worsen these overlap patterns.
+Deploying additional overlapping pipelines without facade would likely worsen these overlap patterns.
 
 ## Governance
 
@@ -104,7 +101,6 @@ See: `consolidation_debate_2026-04-04.md` (memory file)
 
 | Pipeline | Status | Blocker | Target unblock |
 |----------|--------|---------|---------------|
-| widgetdc_mcp_bridge | 🟡 Deferred | SNOUT-CLOSE-06+07+08 | Day 4 of sprint |
-| widgetdc_graph_explorer | 🟡 Deferred | SNOUT-CLOSE-06+07+08 | Day 4 of sprint |
-| widgetdc_anticipator | 🟡 Deferred | Staging validation | Day 5 of sprint |
-| widgetdc_beautifier | 🟡 Deferred | Staging validation | Day 5 of sprint |
+| widgetdc_mcp_bridge | 🟡 Deferred | SNOUT-CLOSE-06+07+08 | Pending facade decision |
+| widgetdc_anticipator | 🟡 Deferred | Staging validation | Pending filter validation |
+| widgetdc_beautifier | 🟡 Deferred | Staging validation | Pending filter validation |
