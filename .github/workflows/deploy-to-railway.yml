@@ -16,6 +16,9 @@ jobs:
     timeout-minutes: 20
     env:
       RAILWAY_URL: ${{ secrets.RAILWAY_URL || vars.RAILWAY_URL || 'https://orchestrator-production-c27e.up.railway.app' }}
+      BACKEND_URL: ${{ secrets.BACKEND_URL || vars.BACKEND_URL || 'https://backend-production-d3da.up.railway.app' }}
+      ORCHESTRATOR_URL: ${{ secrets.ORCHESTRATOR_URL || vars.ORCHESTRATOR_URL || 'https://orchestrator-production-c27e.up.railway.app' }}
+      BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY || secrets.ORCHESTRATOR_BEARER }}
       RAILWAY_PROJECT_ID: "0faf9e36-23d2-4bda-b51d-c713b6ff7c26"
       RAILWAY_SERVICE_NAME: "orchestrator"
       RAILWAY_ENVIRONMENT_NAME: "production"
@@ -28,6 +31,11 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Install Railway CLI
         run: npm install -g @railway/cli
 
@@ -36,8 +44,15 @@ jobs:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: railway up --ci --service "$RAILWAY_SERVICE_NAME"
 
-      - name: Wait for rollout window
-        run: sleep 45
+      - name: Wait until orchestrator is healthy
+        shell: bash
+        run: |
+          set -euo pipefail
+          until curl -fsSL "$ORCHESTRATOR_URL/health" | grep -Eq '"status":"(ok|healthy)"'; do
+            sleep 5
+          done
+          echo "READY"
 
-      - name: Verify live health
-        run: curl -fsSL "$RAILWAY_URL/health"
+      - name: Run targeted deploy verification
+        shell: bash
+        run: python scripts/verify_deploy_stack.py --service orchestrator --mode targeted --json

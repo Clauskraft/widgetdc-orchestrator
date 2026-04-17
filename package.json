@@ -18,6 +18,8 @@
     "test:abi": "node test/abi-snapshot.test.mjs",
     "test:ci": "node scripts/ci-adoption-check.mjs",
     "test:ci:fast": "node scripts/ci-adoption-check.mjs --no-build --no-abi",
+    "verify:deploy:targeted": "python scripts/verify_deploy_stack.py --service orchestrator --mode targeted",
+    "verify:deploy:full": "python scripts/verify_deploy_stack.py --service backend --mode full-stack",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
