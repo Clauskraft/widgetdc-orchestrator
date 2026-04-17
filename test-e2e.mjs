@@ -1951,6 +1951,31 @@ await test('207. POST /api/tools/anomaly_patterns responds', async () => {
 })
 
 // ═══════════════════════════════════════════════════════════════
+// Section 25: Adoption Gap Coverage — ensure zero-call tools get their first call
+// ═══════════════════════════════════════════════════════════════
+
+// ── 208. graph_hygiene_run — wires graph auto-heal ──
+await test('208. POST /api/tools/graph_hygiene_run responds', async () => {
+  const r = await api('/api/tools/graph_hygiene_run', { method: 'POST', body: JSON.stringify({ dry_run: true }) })
+  assert(r.status !== 404, `graph_hygiene_run not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'graph_hygiene_run', `wrong tool_name`)
+})
+
+// ── 209. knowledge_normalize — KB session fold pipeline ──
+await test('209. POST /api/tools/knowledge_normalize responds', async () => {
+  const r = await api('/api/tools/knowledge_normalize', { method: 'POST', body: JSON.stringify({ source: 'session_fold' }) })
+  assert(r.status !== 404, `knowledge_normalize not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'knowledge_normalize', `wrong tool_name`)
+})
+
+// ── 210. knowledge_bus_consolidate — daily L2→L3 promoter ──
+await test('210. POST /api/tools/knowledge_bus_consolidate responds', async () => {
+  const r = await api('/api/tools/knowledge_bus_consolidate', { method: 'POST', body: JSON.stringify({ promote_threshold: 0.90, max_items: 1 }) })
+  assert(r.status !== 404, `knowledge_bus_consolidate not deployed (404)`)
+  assert(r.body?.data?.tool_name === 'knowledge_bus_consolidate', `wrong tool_name`)
+})
+
+// ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped
 console.log(`  RESULTS: ${passed} passed, ${failed} failed, ${skipped} skipped / ${total} total`)

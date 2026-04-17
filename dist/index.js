@@ -26652,6 +26652,10 @@ async function updateEdgeScores(currentScores, closedTargets) {
   return updated;
 }
 async function loadTargetRegistry() {
+  if (_registryCache !== null && _registryCache.length > 0) {
+    logger.debug({ count: _registryCache.length }, "HyperAgent-Auto: using cached target registry");
+    return _registryCache;
+  }
   const redis2 = getRedis();
   try {
     const keyPatterns = [
@@ -26703,6 +26707,7 @@ async function loadTargetRegistry() {
         diagnostics[key] += ` targets=${targets.length}`;
         if (targets.length > 0) {
           logger.info({ key, targetCount: targets.length, diagnostics }, "HyperAgent-Auto: loaded target registry");
+          _registryCache = targets;
           return targets;
         }
       } catch (err) {
@@ -26712,11 +26717,8 @@ async function loadTargetRegistry() {
     logger.warn({ diagnostics }, "HyperAgent-Auto: no target registry found in Redis \u2014 trying Neo4j fallback");
     try {
       const neo4jToolResult = await callMcpTool({
-        toolName: "data_graph_read",
+        toolName: "graph.read_cypher",
         args: {
-          // Pin exact registry key — do NOT use ORDER BY updated_at here: closed-ids node
-          // (domain='targets', key='closed-ids') is updated on every cycle and would shadow
-          // the registry node (key='full-registry-v2.2') once any targets are closed.
           query: `MATCH (m:HyperAgentMemory {domain: 'targets', key: 'full-registry-v2.2'})
                   RETURN m.value AS value, m.key AS key
                   LIMIT 1`,
@@ -26727,12 +26729,9 @@ async function loadTargetRegistry() {
       if (neo4jToolResult.status !== "success" || !neo4jToolResult.result) {
         logger.warn({ status: neo4jToolResult.status, err: neo4jToolResult.error_message }, "HyperAgent-Auto: Neo4j fallback call failed");
       } else {
-        const rawResult = neo4jToolResult.result;
-        const outerStr = typeof rawResult === "string" ? rawResult : JSON.stringify(rawResult);
-        const outer = JSON.parse(outerStr);
-        const inner = outer?.result ?? outer;
-        const rows = inner?.results ?? outer?.results;
-        logger.info({ rowCount: rows?.length ?? 0, outerKeys: Object.keys(outer) }, "HyperAgent-Auto: Neo4j fallback raw response");
+        const r = neo4jToolResult.result;
+        const rows = r.results;
+        logger.info({ rowCount: rows?.length ?? 0 }, "HyperAgent-Auto: Neo4j registry fallback response");
         if (Array.isArray(rows) && rows.length > 0) {
           const rawValue = rows[0]?.value;
           const neo4jKey = rows[0]?.key;
@@ -26742,6 +26741,7 @@ async function loadTargetRegistry() {
             const targets = parseRegistryToTargets(typeof data === "string" ? JSON.parse(data) : data);
             if (targets.length > 0) {
               logger.info({ key: neo4jKey, targetCount: targets.length }, "HyperAgent-Auto: loaded target registry from Neo4j fallback");
+              _registryCache = targets;
               return targets;
             }
           }
@@ -27055,30 +27055,52 @@ async function runAutonomousCycle(phase, maxTargets) {
       }
     }
     try {
-      const closedResult = await callMcpTool({
-        toolName: "data_graph_read",
-        args: {
-          query: `MATCH (m:HyperAgentMemory {domain: 'targets', key: 'closed-ids'})
-                  RETURN m.value AS value ORDER BY m.updated_at DESC LIMIT 1`,
-          params: {}
-        },
-        callId: `hyp-closed-restore-${Date.now()}`
-      });
-      if (closedResult.status === "success" && closedResult.result) {
-        const outerStr = typeof closedResult.result === "string" ? closedResult.result : JSON.stringify(closedResult.result);
-        const outer = JSON.parse(outerStr);
-        const inner = outer?.result ?? outer;
-        const rows = inner?.results ?? outer?.results;
+      let closedResult = null;
+      for (let attempt = 0; attempt < 15; attempt++) {
+        const cb = getBackendCircuitState();
+        if (cb.open) {
+          const waitMs = Math.min(cb.cooldown_remaining_ms + 1e3, 65e3);
+          logger.debug({ attempt, waitMs }, "HyperAgent-Auto: circuit breaker open on restore, waiting");
+          await new Promise((r) => setTimeout(r, waitMs));
+          continue;
+        }
+        closedResult = await callMcpTool({
+          toolName: "graph.read_cypher",
+          args: {
+            query: `MATCH (m:HyperAgentMemory {domain: 'targets', key: 'closed-ids'})
+                    RETURN m.value AS value LIMIT 1`,
+            params: {}
+          },
+          callId: `hyp-closed-restore-${Date.now()}`
+        });
+        if (typeof closedResult.result === "string" && closedResult.result === "validator-bypass") {
+          logger.debug({ attempt }, "HyperAgent-Auto: validator-bypass detected on restore, retrying in 500ms");
+          await new Promise((r) => setTimeout(r, 500));
+          continue;
+        }
+        if (closedResult.status === "error") {
+          logger.debug({ attempt, err: closedResult.error_message }, "HyperAgent-Auto: restore call error, retrying in 3s");
+          await new Promise((r) => setTimeout(r, 3e3));
+          continue;
+        }
+        break;
+      }
+      if (closedResult && closedResult.status === "success" && closedResult.result) {
+        const r = closedResult.result;
+        const rows = r.results;
         if (Array.isArray(rows) && rows.length > 0) {
           const rawValue = rows[0]?.value;
           const ids = typeof rawValue === "string" ? JSON.parse(rawValue) : rawValue;
-          if (Array.isArray(ids)) {
+          if (Array.isArray(ids) && ids.length > 0) {
             ids.forEach((id) => closedTargetIds.add(id));
-            logger.info({ count: closedTargetIds.size }, "HyperAgent-Auto: authoritative restore from Neo4j closed-ids");
+            logger.info({ count: closedTargetIds.size, ids }, "HyperAgent-Auto: authoritative restore from Neo4j closed-ids");
           }
         }
+      } else if (closedResult) {
+        logger.warn({ status: closedResult.status, err: closedResult.error_message }, "HyperAgent-Auto: closed-ids Neo4j restore call failed");
       }
-    } catch {
+    } catch (err) {
+      logger.warn({ err: err instanceof Error ? err.message : String(err) }, "HyperAgent-Auto: closed-ids Neo4j restore threw");
     }
   }
   const cycleId = `auto-${uuid23().slice(0, 8)}`;
@@ -27160,7 +27182,54 @@ ${approach.slice(0, 500)}
             await emitPerChannelReward(target.id, true, edgeDelta, channelsUsed);
             await evaluatePlan(execution.execution_id, plan.planId, 80, "hyperagent-auto");
             try {
-              await persistCrossRepoMemory("targets", "closed-ids", [...closedTargetIds], "hyperagent-auto");
+              const _persistRedis = getRedis();
+              let _idsToSave = [...closedTargetIds];
+              let _redisHadData = false;
+              if (_persistRedis) {
+                try {
+                  const _existingRaw = await _persistRedis.get("hyperagent:memory:targets:closed-ids");
+                  if (_existingRaw) {
+                    const _parsed = JSON.parse(_existingRaw);
+                    const _v = _parsed.value;
+                    const _existing = Array.isArray(_v) ? _v : typeof _v === "string" ? JSON.parse(_v) : [];
+                    if (_existing.length > 0) {
+                      _idsToSave = [.../* @__PURE__ */ new Set([..._existing, ..._idsToSave])];
+                      _redisHadData = true;
+                    }
+                  }
+                } catch {
+                }
+              }
+              if (!_redisHadData) {
+                try {
+                  const _neo4jRead = await callMcpTool({
+                    toolName: "graph.read_cypher",
+                    args: {
+                      query: `MATCH (m:HyperAgentMemory {domain: 'targets', key: 'closed-ids'}) RETURN m.value AS value LIMIT 1`,
+                      params: {}
+                    },
+                    callId: `hyp-union-neo4j-${Date.now()}`
+                  });
+                  if (_neo4jRead.status === "success" && _neo4jRead.result) {
+                    const _r = _neo4jRead.result;
+                    const _rows = _r.results;
+                    if (Array.isArray(_rows) && _rows.length > 0) {
+                      const _rawVal = _rows[0]?.value;
+                      const _neo4jIds = typeof _rawVal === "string" ? JSON.parse(_rawVal) : [];
+                      if (_neo4jIds.length > 0) {
+                        _idsToSave = [.../* @__PURE__ */ new Set([..._neo4jIds, ..._idsToSave])];
+                        _neo4jIds.forEach((id) => closedTargetIds.add(id));
+                        logger.info(
+                          { neo4jCount: _neo4jIds.length, merged: _idsToSave.length },
+                          "HyperAgent-Auto: union fallback read from Neo4j (Redis was empty)"
+                        );
+                      }
+                    }
+                  }
+                } catch {
+                }
+              }
+              await persistCrossRepoMemory("targets", "closed-ids", _idsToSave, "hyperagent-auto");
             } catch {
             }
             lessons.push(`Target ${target.id} closed via ${chainMode} (conf=${confidence.toFixed(2)}, rag=${ragResultCount})`);
@@ -27507,7 +27576,7 @@ async function listCrossRepoMemory() {
   if (!redis2) return [];
   return redis2.smembers(`${MEMORY_PREFIX}:domains`);
 }
-var CHAIN_MODE_MATRIX, W_EDGE_GAP, W_TARGET_GAP, W_DEPENDENCY, W_EFFORT, LEARNING_RATE, TARGET_EDGE_SCORE, PHASE_GATES, PHASE_POLICY, CYCLE_BATCH_SIZE, isRunning2, currentPhase, currentTarget, currentStep, totalCycles2, lastCycle2, closedTargetIds, edgeWeights, discoveredIssues, MAX_DISCOVERED_ISSUES, DEFAULT_EDGE_SCORES, EDGE_SCORES_REDIS_KEY, SCORE_PER_TARGET, MEMORY_PREFIX, MEMORY_TTL;
+var CHAIN_MODE_MATRIX, W_EDGE_GAP, W_TARGET_GAP, W_DEPENDENCY, W_EFFORT, LEARNING_RATE, TARGET_EDGE_SCORE, PHASE_GATES, PHASE_POLICY, CYCLE_BATCH_SIZE, isRunning2, currentPhase, currentTarget, currentStep, totalCycles2, lastCycle2, closedTargetIds, _registryCache, edgeWeights, discoveredIssues, MAX_DISCOVERED_ISSUES, DEFAULT_EDGE_SCORES, EDGE_SCORES_REDIS_KEY, SCORE_PER_TARGET, MEMORY_PREFIX, MEMORY_TTL;
 var init_hyperagent_autonomous = __esm({
   "src/hyperagent/hyperagent-autonomous.ts"() {
     "use strict";
@@ -27565,6 +27634,7 @@ var init_hyperagent_autonomous = __esm({
     totalCycles2 = 0;
     lastCycle2 = null;
     closedTargetIds = /* @__PURE__ */ new Set();
+    _registryCache = null;
     edgeWeights = {
       Husker: 1 / 6,
       Laerer: 1 / 6,
@@ -30846,6 +30916,7 @@ ${result.merged_context}`;
     }
     case "call_mcp_tool": {
       const toolName = args.tool_name;
+      if (!toolName) return "Error: tool_name is required";
       const payload = args.payload;
       const mcpArgs = payload ?? (() => {
         const { tool_name: _strip, ...rest } = args;
@@ -42688,6 +42759,18 @@ function registerDefaultLoops() {
     }
   });
   registerCronJob({
+    id: "graph-hygiene-run-weekly",
+    name: "Graph Hygiene Run (Weekly Auto-Heal)",
+    schedule: "0 5 * * 0",
+    // 05:00 UTC Sunday
+    enabled: true,
+    chain: {
+      name: "Graph Hygiene Run",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "graph_hygiene_run", arguments: { dry_run: false } }]
+    }
+  });
+  registerCronJob({
     id: "graph-self-correct",
     name: "Self-Correcting Graph Agent",
     schedule: "0 */2 * * *",
@@ -46004,8 +46087,333 @@ init_llm_proxy();
 init_tool_executor();
 init_logger();
 init_config();
+init_agent_registry();
 import { Router as Router25 } from "express";
 import { v4 as uuid38 } from "uuid";
+
+// src/agents/agent-seeds.ts
+init_agent_registry();
+init_logger();
+var AGENT_SEEDS = [
+  {
+    agent_id: "omega",
+    display_name: "Omega Sentinel",
+    source: "core",
+    version: "3.0",
+    status: "online",
+    capabilities: ["sitrep", "compliance", "circuit_breakers", "swarm", "pheromones", "architecture", "adoption_audit", "integrity_scoring", "judge_response"],
+    allowed_tool_namespaces: ["omega", "audit", "graph", "intelligence", "*"]
+  },
+  {
+    agent_id: "trident",
+    display_name: "Trident Security",
+    source: "core",
+    version: "3.0",
+    status: "online",
+    capabilities: ["threat_hunting", "osint", "cti", "cvr", "attack_surface", "certstream"],
+    allowed_tool_namespaces: ["trident", "osint", "the_snout", "harvest.intel", "*"]
+  },
+  {
+    agent_id: "prometheus",
+    display_name: "Prometheus Engine",
+    source: "core",
+    version: "1.0",
+    status: "online",
+    capabilities: ["code_analysis", "embeddings", "dreaming", "reinforcement_learning", "governance"],
+    allowed_tool_namespaces: ["prometheus", "code", "lsp", "*"]
+  },
+  {
+    agent_id: "master",
+    display_name: "Master Orchestrator",
+    source: "core",
+    version: "3.0",
+    status: "online",
+    capabilities: ["delegation", "introspection", "task_management", "agent_coordination", "moa_routing", "skill_forging", "critique_refine"],
+    allowed_tool_namespaces: ["master", "agent", "action", "intelligence", "*"]
+  },
+  {
+    agent_id: "harvest",
+    display_name: "Harvest Collector",
+    source: "core",
+    version: "2.0",
+    status: "online",
+    capabilities: ["web_crawl", "scraping", "cloud_ingestion", "m365", "sharepoint", "scribd", "remarkable"],
+    allowed_tool_namespaces: ["harvest", "ingestion", "datafabric", "*"]
+  },
+  {
+    agent_id: "docgen",
+    display_name: "DocGen Factory",
+    source: "core",
+    version: "1.0",
+    status: "online",
+    capabilities: ["powerpoint", "word", "excel", "diagrams", "presentations"],
+    allowed_tool_namespaces: ["docgen", "tdc", "*"]
+  },
+  {
+    agent_id: "graph",
+    display_name: "Neo4j Graph Agent",
+    source: "core",
+    version: "3.0",
+    status: "online",
+    capabilities: ["cypher_read", "cypher_write", "graph_search", "graph_stats", "hygiene", "graph_hygiene_run", "self_correct", "community_detection", "build_communities"],
+    allowed_tool_namespaces: ["graph", "kg_rag", "srag", "monitor", "*"]
+  },
+  {
+    agent_id: "consulting",
+    display_name: "Consulting Intelligence",
+    source: "core",
+    version: "3.0",
+    status: "online",
+    capabilities: ["insight_search", "pattern_search", "failure_search", "precedent_search", "generate_deliverable", "ingest_document"],
+    allowed_tool_namespaces: ["consulting", "vidensarkiv", "kg_rag", "knowledge", "assembly", "*"]
+  },
+  {
+    agent_id: "legal",
+    display_name: "Legal & Compliance",
+    source: "core",
+    version: "1.0",
+    status: "online",
+    capabilities: ["retsinformation", "compliance_check", "eu_funding", "tax", "blast_radius"],
+    allowed_tool_namespaces: ["legal", "intel", "*"]
+  },
+  {
+    agent_id: "custodian",
+    display_name: "Custodian Guardian",
+    source: "core",
+    version: "1.0",
+    status: "online",
+    capabilities: ["chaos_testing", "patrol", "voting", "governance"],
+    allowed_tool_namespaces: ["custodian", "audit", "*"]
+  },
+  {
+    agent_id: "roma",
+    display_name: "Roma Self-Healer",
+    source: "core",
+    version: "1.0",
+    status: "online",
+    capabilities: ["self_healing", "incident_response", "seed", "approval"],
+    allowed_tool_namespaces: ["roma", "incident", "*"]
+  },
+  {
+    agent_id: "rlm",
+    display_name: "RLM Reasoning Engine",
+    source: "rlm-engine",
+    version: "7.1.5",
+    status: "online",
+    capabilities: ["reasoning", "planning", "context_folding", "missions", "rag", "adaptive_rag_query", "critique_refine", "judge_response"],
+    allowed_tool_namespaces: ["rlm", "context_folding", "specialist", "intelligence", "knowledge", "*"]
+  },
+  {
+    agent_id: "llm-router",
+    display_name: "LLM Cost Router",
+    source: "core",
+    version: "1.0",
+    status: "online",
+    capabilities: ["multi_model_routing", "cost_tracking", "budget"],
+    allowed_tool_namespaces: ["llm", "*"]
+  },
+  {
+    agent_id: "vidensarkiv",
+    display_name: "Vidensarkiv",
+    source: "core",
+    version: "1.0",
+    status: "online",
+    capabilities: ["knowledge_search", "file_management", "batch_add"],
+    allowed_tool_namespaces: ["vidensarkiv", "*"]
+  },
+  {
+    agent_id: "the-snout",
+    display_name: "The Snout OSINT",
+    source: "core",
+    version: "1.0",
+    status: "online",
+    capabilities: ["domain_intel", "email_intel", "osint", "extraction"],
+    allowed_tool_namespaces: ["the_snout", "osint", "*"]
+  },
+  {
+    agent_id: "autonomous",
+    display_name: "Autonomous Swarm",
+    source: "core",
+    version: "3.0",
+    status: "online",
+    capabilities: ["graphrag", "stategraph", "evolution", "agent_teams", "moa_routing", "forge_tool", "run_evolution"],
+    allowed_tool_namespaces: ["autonomous", "loop", "intelligence", "chains", "*"]
+  },
+  {
+    agent_id: "cma",
+    display_name: "Context Memory Agent",
+    source: "core",
+    version: "3.0",
+    status: "online",
+    capabilities: ["context_management", "memory_store", "memory_retrieve", "working_memory", "blackboard", "checkpoint_saver"],
+    allowed_tool_namespaces: ["cma", "*"]
+  },
+  {
+    agent_id: "nexus",
+    display_name: "Nexus Analyzer",
+    source: "core",
+    version: "1.0",
+    status: "online",
+    capabilities: ["decomposition", "gap_analysis", "feedback"],
+    allowed_tool_namespaces: ["nexus", "*"]
+  },
+  {
+    agent_id: "command-center",
+    display_name: "Command Center",
+    source: "dashboard",
+    version: "2.2",
+    status: "online",
+    capabilities: ["mcp_tools", "chat", "chain_execution"],
+    allowed_tool_namespaces: ["*"]
+  },
+  // ─── LibreChat agents (visible in registry, not WS-connected) ────────────
+  {
+    agent_id: "lc-prometheus",
+    display_name: "Prometheus (LibreChat)",
+    source: "librechat",
+    version: "1.0",
+    status: "online",
+    capabilities: ["code_analysis", "embeddings", "governance", "reinforcement_learning"],
+    allowed_tool_namespaces: ["prometheus", "code", "*"]
+  },
+  {
+    agent_id: "lc-roma",
+    display_name: "Roma (LibreChat)",
+    source: "librechat",
+    version: "1.0",
+    status: "online",
+    capabilities: ["self_healing", "incident_response", "monitoring"],
+    allowed_tool_namespaces: ["roma", "incident", "*"]
+  },
+  {
+    agent_id: "lc-dot",
+    display_name: "DOT Navigator (LibreChat)",
+    source: "librechat",
+    version: "1.0",
+    status: "online",
+    capabilities: ["navigation", "task_routing", "context_switching"],
+    allowed_tool_namespaces: ["dot", "*"]
+  },
+  {
+    agent_id: "lc-harvester",
+    display_name: "Harvester (LibreChat)",
+    source: "librechat",
+    version: "1.0",
+    status: "online",
+    capabilities: ["web_crawl", "data_ingestion", "extraction"],
+    allowed_tool_namespaces: ["harvest", "ingestion", "*"]
+  },
+  {
+    agent_id: "lc-sentinel",
+    display_name: "Sentinel (LibreChat)",
+    source: "librechat",
+    version: "1.0",
+    status: "online",
+    capabilities: ["monitoring", "alerting", "threat_detection"],
+    allowed_tool_namespaces: ["sentinel", "alert", "*"]
+  },
+  {
+    agent_id: "lc-analyst",
+    display_name: "Analyst (LibreChat)",
+    source: "librechat",
+    version: "1.0",
+    status: "online",
+    capabilities: ["data_analysis", "reporting", "visualization"],
+    allowed_tool_namespaces: ["analyst", "report", "*"]
+  },
+  // ─── Orchestrator Inventor ─────────────────────────────────────────────
+  // ASI-Evolve-inspired closed-loop evolution engine. Runs LEARN→DESIGN→
+  // EXPERIMENT→ANALYZE cycles with UCB1/Island sampling. Deposits pheromones,
+  // triggers PeerEval, and feeds adaptive RAG rewards.
+  {
+    agent_id: "orchestrator_inventor",
+    display_name: "Orchestrator Inventor",
+    source: "core",
+    version: "1.0",
+    status: "online",
+    capabilities: [
+      "evolution_loop",
+      "trial_design",
+      "trial_execution",
+      "ucb1_sampling",
+      "island_sampling",
+      "rlm_reasoning",
+      "pheromone_deposit",
+      "peer_eval",
+      "adaptive_rag_reward",
+      "frontend_evaluation",
+      "architecture_evolution"
+    ],
+    allowed_tool_namespaces: [
+      "inventor",
+      "evolution",
+      "cognitive",
+      "knowledge",
+      "pheromone",
+      "peereval",
+      "graph",
+      "memory",
+      "chains",
+      "rlm",
+      "*"
+    ]
+  },
+  // ─── HyperAgent Autonomous Executor ────────────────────────────────────
+  // Maintained ONLY in widgetdc-orchestrator. Callable from ALL repos via MCP.
+  // Drives 72-target registry through graduated autonomy phases with
+  // persistent cross-repo memory (Redis + Neo4j Lesson nodes).
+  {
+    agent_id: "hyperagent-auto",
+    display_name: "HyperAgent Autonomous Executor",
+    source: "core",
+    version: "1.0",
+    status: "online",
+    capabilities: [
+      "autonomous_execution",
+      "target_prioritization",
+      "fitness_evolution",
+      "issue_discovery",
+      "phase_management",
+      "rlm_reasoning",
+      "rag_rewards",
+      "context_folding",
+      "cross_repo_memory",
+      "persistent_lessons"
+    ],
+    allowed_tool_namespaces: [
+      "hyperagent",
+      "autonomous",
+      "graph",
+      "knowledge",
+      "intelligence",
+      "rlm",
+      "chains",
+      "memory",
+      "*"
+    ]
+  }
+];
+function seedAgents() {
+  let seeded = 0;
+  for (const seed of AGENT_SEEDS) {
+    const existing = AgentRegistry.get(seed.agent_id);
+    if (!existing || existing.handshake.source === "auto-discovered") {
+      AgentRegistry.register(seed);
+      seeded++;
+    }
+  }
+  const ghostPattern = /^(backend|omega-sentinel|agent|rlm)-[0-9a-f]{6,}$/;
+  let cleaned = 0;
+  for (const entry of AgentRegistry.all()) {
+    if (ghostPattern.test(entry.handshake.agent_id)) {
+      AgentRegistry.remove(entry.handshake.agent_id);
+      cleaned++;
+    }
+  }
+  logger.info({ seeded, cleaned }, "Agent seeds applied");
+}
+
+// src/routes/openai-compat.ts
 var MATRIX_ALIAS_TARGETS = {
   "claude-sonnet": "claude-sonnet-4-20250514",
   "claude-opus": "claude-sonnet-4-20250514",
@@ -46029,6 +46437,13 @@ var TOOL_CATEGORIES = [
   { keywords: /\b(health|status|uptime|service|railway|deploy|online)\b/i, tools: ["get_platform_health"] },
   { keywords: /\b(linear|issue|task|sprint|backlog|blocker|LIN-\d+|projekt|project)\b/i, tools: ["linear_issues", "linear_issue_detail"] },
   { keywords: /\b(søg|search|find|pattern|knowledge|viden|consulting|document|artifact)\b/i, tools: ["search_knowledge", "search_documents"] },
+  { keywords: /\b(governance|policy|approval|audit trail|guardrail)\b/i, tools: ["governance_matrix", "governance_audit_query", "governance_policy_decide"] },
+  { keywords: /\b(legal|contract|regulatory|compliance)\b/i, tools: ["search_knowledge", "verify_output", "governance_matrix"] },
+  { keywords: /\b(obsidian|vault|note|notebook|briefing|daily brief)\b/i, tools: ["search_documents", "create_notebook", "search_knowledge"] },
+  { keywords: /\b(forge|skill.?forge|tool gap|missing tool|tooling gap)\b/i, tools: ["forge_analyze_gaps", "forge_list", "forge_tool"] },
+  { keywords: /\b(engagement|precedent|client case|statement of work|proposal)\b/i, tools: ["engagement_match", "engagement_plan", "engagement_list"] },
+  { keywords: /\b(competitive|competitor|market watch|market intel)\b/i, tools: ["competitive_crawl", "search_knowledge"] },
+  { keywords: /\b(openclaw|remote host|gateway host|fleet node|host health)\b/i, tools: ["get_platform_health", "call_mcp_tool"] },
   { keywords: /\b(analy|strateg|reason|deep|complex|evaluat|plan|why|how does|architect|OODA)\b/i, tools: ["reason_deeply", "search_knowledge"] },
   { keywords: /\b(graph|cypher|node|relation|neo4j|count|match)\b/i, tools: ["query_graph"] },
   { keywords: /\b(chain|workflow|sequential|parallel|debate|multi.step|pipeline)\b/i, tools: ["run_chain"] },
@@ -46093,14 +46508,15 @@ VIGTIGE REGLER:
 3. Generer ALTID et fyldigt, datadrevet svar baseret p\xE5 tool-resultater. Aldrig bare "lad mig s\xF8ge..." \u2014 gennemf\xF8r analysen.
 4. Inklud\xE9r konkrete tal, frameworks og referencer i dit svar.
 5. Svar p\xE5 dansk i consulting-kvalitet med struktur (overskrifter, lister, tabeller).`;
-var ASSISTANTS = [
+var STATIC_ASSISTANTS = [
   {
     id: "compliance-auditor",
     displayName: "Compliance Auditor",
     baseModel: "claude-sonnet",
     systemPrompt: "Du er WidgeTDC Compliance Auditor. Du har adgang til 12 regulatoriske frameworks (GDPR, NIS2, DORA, CSRD, AI Act, Pillar Two, CRA, eIDAS2) og 506 GDPR enforcement cases i videngrafen (445K nodes, 3.7M relationer). Brug ALTID search_knowledge og verify_output til at hente reel compliance-data. Cit\xE9r kilder med [REG-xxxx] format. Anvend EG PMM projektmetode og BPMV procesmodel i dine anbefalinger. 32 consulting dom\xE6ner er tilg\xE6ngelige. Svar p\xE5 dansk med consulting-grade pr\xE6cision.",
     tools: ["search_knowledge", "verify_output", "query_graph"],
-    promptSuggestions: ["K\xF8r NIS2 gap-analyse", "GDPR data mapping", "DORA compliance status"]
+    promptSuggestions: ["K\xF8r NIS2 gap-analyse", "GDPR data mapping", "DORA compliance status"],
+    capabilities: ["compliance", "audit", "framework_analysis"]
   },
   {
     id: "graph-analyst",
@@ -46108,7 +46524,8 @@ var ASSISTANTS = [
     baseModel: "gemini-flash",
     systemPrompt: "Du er WidgeTDC Graph Analyst med direkte adgang til Neo4j videngrafen: 445,918 nodes, 3,771,937 relationer, 32 consulting dom\xE6ner, 270+ frameworks, 288 KPIs, 52,925 McKinsey insights. Brug query_graph til Cypher-foresp\xF8rgsler og search_knowledge til semantisk s\xF8gning. Visualis\xE9r resultater som tabeller og lister. Svar p\xE5 dansk.",
     tools: ["query_graph", "search_knowledge"],
-    promptSuggestions: ["Vis domain-statistik", "Find orphan nodes", "Framework-d\xE6kning per dom\xE6ne"]
+    promptSuggestions: ["Vis domain-statistik", "Find orphan nodes", "Framework-d\xE6kning per dom\xE6ne"],
+    capabilities: ["graph_analysis", "cypher", "knowledge_search"]
   },
   {
     id: "project-manager",
@@ -46116,7 +46533,8 @@ var ASSISTANTS = [
     baseModel: "claude-sonnet",
     systemPrompt: "Du er WidgeTDC Project Manager. Brug linear_issues til at hente sprint-status, blockers og opgaver fra Linear. Brug search_knowledge til at forst\xE5 konteksten. Rapport\xE9r med KPIs: velocity, blockers, sprint burn. Anvend EG PMM projektmetode (faser, leverancer, gates) og BPMV procesmodel i projektplanl\xE6gning. 38 consulting-processer og 9 consulting-services er tilg\xE6ngelige i grafen. Svar p\xE5 dansk med actionable n\xE6ste-skridt.",
     tools: ["linear_issues", "linear_issue_detail", "search_knowledge"],
-    promptSuggestions: ["Sprint status", "N\xE6ste prioritet", "Blocker-rapport"]
+    promptSuggestions: ["Sprint status", "N\xE6ste prioritet", "Blocker-rapport"],
+    capabilities: ["project_management", "delivery", "linear_tracking"]
   },
   {
     id: "consulting-partner",
@@ -46124,7 +46542,8 @@ var ASSISTANTS = [
     baseModel: "claude-opus",
     systemPrompt: "Du er WidgeTDC Consulting Partner \u2014 strategisk r\xE5dgiver med adgang til verdens mest avancerede consulting intelligence platform. 84 frameworks (Balanced Scorecard, BCG Matrix, Porter Five Forces, McKinsey 7S, Design Thinking, EG PMM, BPMV m.fl.), 52,925 McKinsey insights, 1,201 consulting artifacts, 825 KPIs, 506 case studies, 35 consulting skills, 38 processer. Brug reason_deeply for dyb analyse og search_knowledge for grafdata. Lever\xE9r consulting-grade output med frameworks, data og handlingsplaner. Svar p\xE5 dansk.",
     tools: ["reason_deeply", "search_knowledge", "query_graph"],
-    promptSuggestions: ["Strategisk analyse af [emne]", "Framework selection", "Markedsanalyse"]
+    promptSuggestions: ["Strategisk analyse af [emne]", "Framework selection", "Markedsanalyse"],
+    capabilities: ["strategy", "reasoning", "consulting"]
   },
   {
     id: "platform-health",
@@ -46132,21 +46551,167 @@ var ASSISTANTS = [
     baseModel: "gemini-flash",
     systemPrompt: "Du er WidgeTDC Platform Health Monitor. Brug get_platform_health til at tjekke alle services (backend, RLM engine, orchestrator, Neo4j, Redis, Pipelines). Brug call_mcp_tool til avancerede MCP-kald. Rapport\xE9r: service health, Neo4j stats (445K nodes), agent fleet (430+ agenter), cron jobs, Redis status. Svar p\xE5 dansk med real-time data.",
     tools: ["get_platform_health", "call_mcp_tool", "query_graph"],
-    promptSuggestions: ["Service status", "Neo4j health", "Agent fleet oversigt"]
+    promptSuggestions: ["Service status", "Neo4j health", "Agent fleet oversigt"],
+    capabilities: ["observability", "runtime_health", "service_status"]
+  },
+  {
+    id: "governance",
+    displayName: "Governance Controller",
+    baseModel: "claude-sonnet",
+    systemPrompt: "Du er WidgeTDC Governance Controller. Brug governance_matrix, governance_audit_query og governance_policy_decide til at analysere policy, approvals, auditspor og write-gates. N\xE5r relevant skal du supplere med verify_output. Svar p\xE5 dansk med skarp governance-logik og tydelige konsekvenser.",
+    tools: ["governance_matrix", "governance_audit_query", "governance_policy_decide", "verify_output"],
+    promptSuggestions: ["Vis governance gaps", "Audit\xE9r approvals", "Tjek policy-konsekvens"],
+    capabilities: ["governance", "policy", "approval"]
+  },
+  {
+    id: "openclaw",
+    displayName: "OpenClaw Operations",
+    baseModel: "gemini-flash",
+    systemPrompt: "Du er WidgeTDC OpenClaw Operations. Brug get_platform_health og call_mcp_tool til at inspicere hosts, gateway health, deployment-signal og runtime-respons. Svar p\xE5 dansk med operationsfokus og konkrete n\xE6ste skridt.",
+    tools: ["get_platform_health", "call_mcp_tool", "query_graph"],
+    promptSuggestions: ["Host health", "Gateway status", "Deployment signal"],
+    capabilities: ["operations", "host_health", "runtime"]
+  },
+  {
+    id: "obsidian",
+    displayName: "Obsidian Vault",
+    baseModel: "claude-sonnet",
+    systemPrompt: "Du er WidgeTDC Obsidian Vault Agent. Brug search_documents, search_knowledge og create_notebook til at finde noter, samle viden og strukturere outputs til videre arbejde. Svar p\xE5 dansk med tydelige referencer og forslag til n\xE6ste note eller notebook.",
+    tools: ["search_documents", "search_knowledge", "create_notebook"],
+    promptSuggestions: ["S\xF8g i vault", "Lav notebook", "Byg briefing"],
+    capabilities: ["vault_search", "knowledge_sync", "notebooking"]
+  },
+  {
+    id: "forge",
+    displayName: "Skill Forge",
+    baseModel: "qwen-plus",
+    systemPrompt: "Du er WidgeTDC Skill Forge. Brug forge_analyze_gaps, forge_list og forge_tool til at finde tool-huller, inspicere forged tools og foresl\xE5 nye tool-kapabiliteter. Svar p\xE5 dansk med fokus p\xE5 runtime-nytte og verificerbarhed.",
+    tools: ["forge_analyze_gaps", "forge_list", "forge_tool"],
+    promptSuggestions: ["Find tool gaps", "Vis forged tools", "Foresl\xE5 nyt tool"],
+    capabilities: ["tool_forging", "gap_analysis", "runtime_extension"]
+  },
+  {
+    id: "engagement",
+    displayName: "Engagement Planner",
+    baseModel: "claude-sonnet",
+    systemPrompt: "Du er WidgeTDC Engagement Planner. Brug engagement_match, engagement_plan og engagement_list til at arbejde med precedenter, scopes og planl\xE6gning af consulting engagements. Svar p\xE5 dansk med h\xF8j signalv\xE6rdi og tydelig handlingsplan.",
+    tools: ["engagement_match", "engagement_plan", "engagement_list"],
+    promptSuggestions: ["Find precedenter", "Planl\xE6g engagement", "Vis aktive engagements"],
+    capabilities: ["precedent_matching", "engagement_planning", "delivery_scoping"]
+  },
+  {
+    id: "competitive",
+    displayName: "Competitive Intel",
+    baseModel: "deepseek-chat",
+    systemPrompt: "Du er WidgeTDC Competitive Intel. Brug competitive_crawl og search_knowledge til at analysere konkurrenter, capability gaps og markedsbev\xE6gelser. Svar p\xE5 dansk med konkrete observationer og n\xE6ste handling.",
+    tools: ["competitive_crawl", "search_knowledge", "query_graph"],
+    promptSuggestions: ["K\xF8r competitor scan", "Find capability gaps", "Opsummer markedssignal"],
+    capabilities: ["competitive_intelligence", "market_scan", "gap_analysis"]
   }
 ];
-var ASSISTANT_MAP = new Map(ASSISTANTS.map((a) => [a.id, a]));
-var MODELS = [
+var BASE_MODELS = [
   { id: "claude-sonnet", provider: "claude", displayName: "Claude Sonnet 4" },
   { id: "claude-opus", provider: "claude", displayName: "Claude Opus 4" },
   { id: "gemini-flash", provider: "gemini", displayName: "Gemini 2.0 Flash" },
   { id: "deepseek-chat", provider: "deepseek", displayName: "DeepSeek Chat" },
   { id: "qwen-plus", provider: "qwen", displayName: "Qwen 3.6 Plus" },
   { id: "gpt-4o", provider: "openai", displayName: "GPT-4o" },
-  { id: "groq-llama", provider: "groq", displayName: "Groq Llama 3.3 70B" },
-  // Consulting Assistants (LIN-524)
-  ...ASSISTANTS.map((a) => ({ id: a.id, provider: "widgetdc", displayName: a.displayName }))
+  { id: "groq-llama", provider: "groq", displayName: "Groq Llama 3.3 70B" }
 ];
+var DYNAMIC_AGENT_CACHE_TTL_MS = 6e4;
+var dynamicAgentCache = null;
+function inferBaseModel(agent) {
+  const capabilities = (agent.capabilities ?? []).map((c) => c.toLowerCase());
+  const namespaces = agent.allowed_tool_namespaces ?? [];
+  if (capabilities.some((c) => /(reason|plan|architecture|compliance|judge|policy|governance|legal)/.test(c))) return "claude-sonnet";
+  if (capabilities.some((c) => /(strategy|consult|critique|analysis)/.test(c))) return "claude-opus";
+  if (capabilities.some((c) => /(osint|crawl|scrap|intel|competitive)/.test(c))) return "deepseek-chat";
+  if (capabilities.some((c) => /(forge|embedding|reinforcement|evolution)/.test(c))) return "qwen-plus";
+  if (capabilities.some((c) => /(graph|memory|search|knowledge|notebook|vault)/.test(c))) return "gemini-flash";
+  if (namespaces.some((ns) => ["governance", "legal"].includes(ns))) return "claude-sonnet";
+  if (namespaces.some((ns) => ["engagement", "consulting"].includes(ns))) return "claude-opus";
+  return "gemini-flash";
+}
+function inferToolsForAgent(agent) {
+  const capabilities = (agent.capabilities ?? []).map((c) => c.toLowerCase());
+  const namespaces = (agent.allowed_tool_namespaces ?? []).map((ns) => ns.toLowerCase());
+  const selected = /* @__PURE__ */ new Set();
+  const addTools = (...tools) => {
+    for (const tool of tools) selected.add(tool);
+  };
+  if (capabilities.some((c) => /(governance|policy|approval)/.test(c)) || namespaces.includes("governance")) {
+    addTools("governance_matrix", "governance_audit_query", "governance_policy_decide", "verify_output");
+  }
+  if (capabilities.some((c) => /(legal|compliance|retsinformation|tax)/.test(c)) || namespaces.includes("legal")) {
+    addTools("search_knowledge", "verify_output", "governance_matrix");
+  }
+  if (capabilities.some((c) => /(vault|knowledge|note|briefing|memory)/.test(c)) || namespaces.some((ns) => ["knowledge", "vidensarkiv", "cma"].includes(ns))) {
+    addTools("search_documents", "search_knowledge", "create_notebook");
+  }
+  if (capabilities.some((c) => /(forge|gap_analysis|embeddings|reinforcement|evolution)/.test(c)) || namespaces.some((ns) => ["prometheus", "autonomous"].includes(ns))) {
+    addTools("forge_analyze_gaps", "forge_list", "forge_tool");
+  }
+  if (capabilities.some((c) => /(engagement|precedent|deliverable|client)/.test(c)) || namespaces.includes("engagement")) {
+    addTools("engagement_match", "engagement_plan", "engagement_list");
+  }
+  if (capabilities.some((c) => /(competitive|osint|threat|crawl)/.test(c)) || namespaces.some((ns) => ["trident", "the_snout", "osint"].includes(ns))) {
+    addTools("competitive_crawl", "search_knowledge", "query_graph");
+  }
+  if (capabilities.some((c) => /(graph|cypher|neo4j)/.test(c)) || namespaces.includes("graph")) {
+    addTools("query_graph", "search_knowledge");
+  }
+  if (capabilities.some((c) => /(monitor|health|incident|self_heal|runtime)/.test(c))) {
+    addTools("get_platform_health", "call_mcp_tool");
+  }
+  if (selected.size === 0) {
+    addTools("search_knowledge", "query_graph", "get_platform_health");
+  }
+  const availableTools = new Set(ORCHESTRATOR_TOOLS.map((tool) => tool.function.name));
+  return [...selected].filter((tool) => availableTools.has(tool)).slice(0, 5);
+}
+function buildDynamicAssistant(agent) {
+  const tools = inferToolsForAgent(agent);
+  const capabilities = agent.capabilities ?? [];
+  const displayName = agent.display_name || agent.agent_id;
+  const capabilityList = capabilities.length > 0 ? capabilities.join(", ") : "general orchestration";
+  return {
+    id: agent.agent_id,
+    displayName,
+    baseModel: inferBaseModel(agent),
+    systemPrompt: `Du er ${displayName}. Dine prim\xE6re kapabiliteter er ${capabilityList}. Brug altid mindst \xE9t relevant tool f\xF8r du svarer, og hold dig til verificerbar data fra platformen. Svar p\xE5 dansk med konkret, operationel pr\xE6cision.`,
+    tools,
+    promptSuggestions: capabilities.slice(0, 3).map((cap) => `Hj\xE6lp med ${cap.replace(/_/g, " ")}`),
+    capabilities
+  };
+}
+function loadDynamicAssistants(now = Date.now()) {
+  if (dynamicAgentCache && dynamicAgentCache.expiresAt > now) {
+    return dynamicAgentCache.assistants;
+  }
+  const registryAgents = AgentRegistry.all().map((entry) => entry.handshake).filter((agent) => agent.status === "online" && agent.source !== "librechat" && agent.source !== "auto-discovered");
+  const sourceAgents = registryAgents.length > 0 ? registryAgents : AGENT_SEEDS.filter((agent) => agent.source !== "librechat");
+  const assistants = sourceAgents.map(buildDynamicAssistant);
+  dynamicAgentCache = { expiresAt: now + DYNAMIC_AGENT_CACHE_TTL_MS, assistants };
+  return assistants;
+}
+function getAssistantMap(now = Date.now()) {
+  const merged = [...STATIC_ASSISTANTS, ...loadDynamicAssistants(now)];
+  return new Map(merged.map((assistant) => [assistant.id, assistant]));
+}
+function getModelEntries(now = Date.now()) {
+  const assistantMap = getAssistantMap(now);
+  const assistantEntries = [...assistantMap.values()].map((assistant) => ({
+    id: assistant.id,
+    provider: "widgetdc",
+    displayName: assistant.displayName,
+    assistant
+  }));
+  const deduped = /* @__PURE__ */ new Map();
+  for (const model of [...BASE_MODELS, ...assistantEntries]) {
+    deduped.set(model.id, model);
+  }
+  return [...deduped.values()];
+}
 var MODEL_TO_PROVIDER_FALLBACK = {
   "groq-llama": { provider: "groq", model: "llama-3.3-70b-versatile" }
 };
@@ -46206,8 +46771,9 @@ openaiCompatRouter.get("/v1/models", (req, res) => {
     res.status(429).json({ error: { message: "Rate limit exceeded", type: "rate_limit_error", code: "rate_limit" } });
     return;
   }
-  const models = MODELS.map((m) => {
-    const assistant = ASSISTANT_MAP.get(m.id);
+  const assistantMap = getAssistantMap();
+  const models = getModelEntries().map((m) => {
+    const assistant = m.assistant ?? assistantMap.get(m.id);
     return {
       id: m.id,
       object: "model",
@@ -46221,7 +46787,8 @@ openaiCompatRouter.get("/v1/models", (req, res) => {
           description: assistant.displayName,
           prompt_suggestions: assistant.promptSuggestions,
           base_model: assistant.baseModel,
-          tools: assistant.tools
+          tools: assistant.tools,
+          capabilities: assistant.capabilities ?? []
         }
       } : {}
     };
@@ -46237,7 +46804,8 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
   }
   const { model, messages, stream: stream3, temperature, max_tokens } = req.body;
   const requestId = `chatcmpl-${uuid38().substring(0, 12)}`;
-  const assistant = ASSISTANT_MAP.get(model);
+  const assistantMap = getAssistantMap();
+  const assistant = assistantMap.get(model);
   const resolvedModel = assistant ? assistant.baseModel : model;
   const mapping = resolveModelToProvider(resolvedModel) ?? resolveModelToProvider("gemini-flash");
   if (!mapping) {
@@ -46318,7 +46886,7 @@ openaiCompatRouter.post("/v1/chat/completions", async (req, res) => {
         }
         return m;
       });
-      const assistant2 = ASSISTANT_MAP.get(model);
+      const assistant2 = assistantMap.get(model);
       const domainContext = assistant2 ? `You are ${assistant2.displayName}. ` : "";
       const isCompliance = model === "compliance-auditor";
       const synthesisPrompt = isCompliance ? `${domainContext}Based on all tool results above, generate a COMPLIANCE AUDIT REPORT in the following structure:
@@ -47798,328 +48366,6 @@ toolGatewayRouter.get("/", (_req, res) => {
     }
   });
 });
-
-// src/agents/agent-seeds.ts
-init_agent_registry();
-init_logger();
-var AGENT_SEEDS = [
-  {
-    agent_id: "omega",
-    display_name: "Omega Sentinel",
-    source: "core",
-    version: "3.0",
-    status: "online",
-    capabilities: ["sitrep", "compliance", "circuit_breakers", "swarm", "pheromones", "architecture", "adoption_audit", "integrity_scoring", "judge_response"],
-    allowed_tool_namespaces: ["omega", "audit", "graph", "intelligence", "*"]
-  },
-  {
-    agent_id: "trident",
-    display_name: "Trident Security",
-    source: "core",
-    version: "3.0",
-    status: "online",
-    capabilities: ["threat_hunting", "osint", "cti", "cvr", "attack_surface", "certstream"],
-    allowed_tool_namespaces: ["trident", "osint", "the_snout", "harvest.intel", "*"]
-  },
-  {
-    agent_id: "prometheus",
-    display_name: "Prometheus Engine",
-    source: "core",
-    version: "1.0",
-    status: "online",
-    capabilities: ["code_analysis", "embeddings", "dreaming", "reinforcement_learning", "governance"],
-    allowed_tool_namespaces: ["prometheus", "code", "lsp", "*"]
-  },
-  {
-    agent_id: "master",
-    display_name: "Master Orchestrator",
-    source: "core",
-    version: "3.0",
-    status: "online",
-    capabilities: ["delegation", "introspection", "task_management", "agent_coordination", "moa_routing", "skill_forging", "critique_refine"],
-    allowed_tool_namespaces: ["master", "agent", "action", "intelligence", "*"]
-  },
-  {
-    agent_id: "harvest",
-    display_name: "Harvest Collector",
-    source: "core",
-    version: "2.0",
-    status: "online",
-    capabilities: ["web_crawl", "scraping", "cloud_ingestion", "m365", "sharepoint", "scribd", "remarkable"],
-    allowed_tool_namespaces: ["harvest", "ingestion", "datafabric", "*"]
-  },
-  {
-    agent_id: "docgen",
-    display_name: "DocGen Factory",
-    source: "core",
-    version: "1.0",
-    status: "online",
-    capabilities: ["powerpoint", "word", "excel", "diagrams", "presentations"],
-    allowed_tool_namespaces: ["docgen", "tdc", "*"]
-  },
-  {
-    agent_id: "graph",
-    display_name: "Neo4j Graph Agent",
-    source: "core",
-    version: "3.0",
-    status: "online",
-    capabilities: ["cypher_read", "cypher_write", "graph_search", "graph_stats", "hygiene", "graph_hygiene_run", "self_correct", "community_detection", "build_communities"],
-    allowed_tool_namespaces: ["graph", "kg_rag", "srag", "monitor", "*"]
-  },
-  {
-    agent_id: "consulting",
-    display_name: "Consulting Intelligence",
-    source: "core",
-    version: "3.0",
-    status: "online",
-    capabilities: ["insight_search", "pattern_search", "failure_search", "precedent_search", "generate_deliverable", "ingest_document"],
-    allowed_tool_namespaces: ["consulting", "vidensarkiv", "kg_rag", "knowledge", "assembly", "*"]
-  },
-  {
-    agent_id: "legal",
-    display_name: "Legal & Compliance",
-    source: "core",
-    version: "1.0",
-    status: "online",
-    capabilities: ["retsinformation", "compliance_check", "eu_funding", "tax", "blast_radius"],
-    allowed_tool_namespaces: ["legal", "intel", "*"]
-  },
-  {
-    agent_id: "custodian",
-    display_name: "Custodian Guardian",
-    source: "core",
-    version: "1.0",
-    status: "online",
-    capabilities: ["chaos_testing", "patrol", "voting", "governance"],
-    allowed_tool_namespaces: ["custodian", "audit", "*"]
-  },
-  {
-    agent_id: "roma",
-    display_name: "Roma Self-Healer",
-    source: "core",
-    version: "1.0",
-    status: "online",
-    capabilities: ["self_healing", "incident_response", "seed", "approval"],
-    allowed_tool_namespaces: ["roma", "incident", "*"]
-  },
-  {
-    agent_id: "rlm",
-    display_name: "RLM Reasoning Engine",
-    source: "rlm-engine",
-    version: "7.1.5",
-    status: "online",
-    capabilities: ["reasoning", "planning", "context_folding", "missions", "rag", "adaptive_rag_query", "critique_refine", "judge_response"],
-    allowed_tool_namespaces: ["rlm", "context_folding", "specialist", "intelligence", "knowledge", "*"]
-  },
-  {
-    agent_id: "llm-router",
-    display_name: "LLM Cost Router",
-    source: "core",
-    version: "1.0",
-    status: "online",
-    capabilities: ["multi_model_routing", "cost_tracking", "budget"],
-    allowed_tool_namespaces: ["llm", "*"]
-  },
-  {
-    agent_id: "vidensarkiv",
-    display_name: "Vidensarkiv",
-    source: "core",
-    version: "1.0",
-    status: "online",
-    capabilities: ["knowledge_search", "file_management", "batch_add"],
-    allowed_tool_namespaces: ["vidensarkiv", "*"]
-  },
-  {
-    agent_id: "the-snout",
-    display_name: "The Snout OSINT",
-    source: "core",
-    version: "1.0",
-    status: "online",
-    capabilities: ["domain_intel", "email_intel", "osint", "extraction"],
-    allowed_tool_namespaces: ["the_snout", "osint", "*"]
-  },
-  {
-    agent_id: "autonomous",
-    display_name: "Autonomous Swarm",
-    source: "core",
-    version: "3.0",
-    status: "online",
-    capabilities: ["graphrag", "stategraph", "evolution", "agent_teams", "moa_routing", "forge_tool", "run_evolution"],
-    allowed_tool_namespaces: ["autonomous", "loop", "intelligence", "chains", "*"]
-  },
-  {
-    agent_id: "cma",
-    display_name: "Context Memory Agent",
-    source: "core",
-    version: "3.0",
-    status: "online",
-    capabilities: ["context_management", "memory_store", "memory_retrieve", "working_memory", "blackboard", "checkpoint_saver"],
-    allowed_tool_namespaces: ["cma", "*"]
-  },
-  {
-    agent_id: "nexus",
-    display_name: "Nexus Analyzer",
-    source: "core",
-    version: "1.0",
-    status: "online",
-    capabilities: ["decomposition", "gap_analysis", "feedback"],
-    allowed_tool_namespaces: ["nexus", "*"]
-  },
-  {
-    agent_id: "command-center",
-    display_name: "Command Center",
-    source: "dashboard",
-    version: "2.2",
-    status: "online",
-    capabilities: ["mcp_tools", "chat", "chain_execution"],
-    allowed_tool_namespaces: ["*"]
-  },
-  // ─── LibreChat agents (visible in registry, not WS-connected) ────────────
-  {
-    agent_id: "lc-prometheus",
-    display_name: "Prometheus (LibreChat)",
-    source: "librechat",
-    version: "1.0",
-    status: "online",
-    capabilities: ["code_analysis", "embeddings", "governance", "reinforcement_learning"],
-    allowed_tool_namespaces: ["prometheus", "code", "*"]
-  },
-  {
-    agent_id: "lc-roma",
-    display_name: "Roma (LibreChat)",
-    source: "librechat",
-    version: "1.0",
-    status: "online",
-    capabilities: ["self_healing", "incident_response", "monitoring"],
-    allowed_tool_namespaces: ["roma", "incident", "*"]
-  },
-  {
-    agent_id: "lc-dot",
-    display_name: "DOT Navigator (LibreChat)",
-    source: "librechat",
-    version: "1.0",
-    status: "online",
-    capabilities: ["navigation", "task_routing", "context_switching"],
-    allowed_tool_namespaces: ["dot", "*"]
-  },
-  {
-    agent_id: "lc-harvester",
-    display_name: "Harvester (LibreChat)",
-    source: "librechat",
-    version: "1.0",
-    status: "online",
-    capabilities: ["web_crawl", "data_ingestion", "extraction"],
-    allowed_tool_namespaces: ["harvest", "ingestion", "*"]
-  },
-  {
-    agent_id: "lc-sentinel",
-    display_name: "Sentinel (LibreChat)",
-    source: "librechat",
-    version: "1.0",
-    status: "online",
-    capabilities: ["monitoring", "alerting", "threat_detection"],
-    allowed_tool_namespaces: ["sentinel", "alert", "*"]
-  },
-  {
-    agent_id: "lc-analyst",
-    display_name: "Analyst (LibreChat)",
-    source: "librechat",
-    version: "1.0",
-    status: "online",
-    capabilities: ["data_analysis", "reporting", "visualization"],
-    allowed_tool_namespaces: ["analyst", "report", "*"]
-  },
-  // ─── Orchestrator Inventor ─────────────────────────────────────────────
-  // ASI-Evolve-inspired closed-loop evolution engine. Runs LEARN→DESIGN→
-  // EXPERIMENT→ANALYZE cycles with UCB1/Island sampling. Deposits pheromones,
-  // triggers PeerEval, and feeds adaptive RAG rewards.
-  {
-    agent_id: "orchestrator_inventor",
-    display_name: "Orchestrator Inventor",
-    source: "core",
-    version: "1.0",
-    status: "online",
-    capabilities: [
-      "evolution_loop",
-      "trial_design",
-      "trial_execution",
-      "ucb1_sampling",
-      "island_sampling",
-      "rlm_reasoning",
-      "pheromone_deposit",
-      "peer_eval",
-      "adaptive_rag_reward",
-      "frontend_evaluation",
-      "architecture_evolution"
-    ],
-    allowed_tool_namespaces: [
-      "inventor",
-      "evolution",
-      "cognitive",
-      "knowledge",
-      "pheromone",
-      "peereval",
-      "graph",
-      "memory",
-      "chains",
-      "rlm",
-      "*"
-    ]
-  },
-  // ─── HyperAgent Autonomous Executor ────────────────────────────────────
-  // Maintained ONLY in widgetdc-orchestrator. Callable from ALL repos via MCP.
-  // Drives 72-target registry through graduated autonomy phases with
-  // persistent cross-repo memory (Redis + Neo4j Lesson nodes).
-  {
-    agent_id: "hyperagent-auto",
-    display_name: "HyperAgent Autonomous Executor",
-    source: "core",
-    version: "1.0",
-    status: "online",
-    capabilities: [
-      "autonomous_execution",
-      "target_prioritization",
-      "fitness_evolution",
-      "issue_discovery",
-      "phase_management",
-      "rlm_reasoning",
-      "rag_rewards",
-      "context_folding",
-      "cross_repo_memory",
-      "persistent_lessons"
-    ],
-    allowed_tool_namespaces: [
-      "hyperagent",
-      "autonomous",
-      "graph",
-      "knowledge",
-      "intelligence",
-      "rlm",
-      "chains",
-      "memory",
-      "*"
-    ]
-  }
-];
-function seedAgents() {
-  let seeded = 0;
-  for (const seed of AGENT_SEEDS) {
-    const existing = AgentRegistry.get(seed.agent_id);
-    if (!existing || existing.handshake.source === "auto-discovered") {
-      AgentRegistry.register(seed);
-      seeded++;
-    }
-  }
-  const ghostPattern = /^(backend|omega-sentinel|agent|rlm)-[0-9a-f]{6,}$/;
-  let cleaned = 0;
-  for (const entry of AgentRegistry.all()) {
-    if (ghostPattern.test(entry.handshake.agent_id)) {
-      AgentRegistry.remove(entry.handshake.agent_id);
-      cleaned++;
-    }
-  }
-  logger.info({ seeded, cleaned }, "Agent seeds applied");
-}
 
 // src/index.ts
 init_chat_store();
@@ -54442,10 +54688,10 @@ app.use(express.static(path3.join(__dirname4, "public"), {
 var spaIndexPath = path3.join(__dirname4, "public", "index.html");
 app.use((req, res, next) => {
   if (req.method !== "GET" && req.method !== "HEAD") return next();
-  if (req.path.startsWith("/ws") || req.path.startsWith("/sse") || req.path.startsWith("/health") || req.path.startsWith("/api/") || req.path.startsWith("/metrics") || req.path.match(/\.\w+$/)) return next();
-  const apiOnlyPaths = ["/agents", "/tools", "/chains", "/chat", "/cognitive", "/cron"];
+  if (req.path.startsWith("/ws") || req.path.startsWith("/sse") || req.path.startsWith("/health") || req.path.startsWith("/api/") || req.path.startsWith("/v1/") || req.path.startsWith("/metrics") || req.path.match(/\.\w+$/)) return next();
+  const apiOnlyPaths = ["/agents", "/tools", "/chains", "/chat", "/cognitive", "/cron", "/v1"];
   if (apiOnlyPaths.some((p) => req.path.startsWith(p))) return next();
-  if (req.accepts("html", "json") === "html") {
+  if (req.headers.accept && req.accepts("html", "json") === "html") {
     return res.sendFile(spaIndexPath);
   }
   next();
