@@ -148,6 +148,9 @@ const closedTargetIds = new Set<string>()
 /** In-memory registry cache — loaded once per container instance (registry never changes mid-run) */
 let _registryCache: TargetDef[] | null = null
 
+/** Boot restore completion flag — retried each cycle until Neo4j returns historical IDs */
+let _bootRestoreCompleted = false
+
 /** Adaptive edge weights — start equal, evolve */
 const edgeWeights: Record<string, number> = {
   Husker: 1 / 6, Laerer: 1 / 6, Heler: 1 / 6,
@@ -790,7 +793,10 @@ export async function runAutonomousCycle(
 
   isRunning = true
 
-  // Restore totalCycles + closedTargetIds on first call to this instance
+  // Restore totalCycles + closedTargetIds on first call, and retry each cycle until success.
+  // _bootRestoreCompleted gates the expensive Neo4j read — only attempts if we haven't yet
+  // loaded historical IDs. This covers cases where cycle 1's restore fails (CB open at startup,
+  // validator-bypass timeout, transient 502) so cycle 2+ don't silently re-process closed targets.
   if (totalCycles === 0) {
     const redisRestore = getRedis()
     if (redisRestore) {
@@ -809,20 +815,16 @@ export async function runAutonomousCycle(
         }
       } catch { /* non-blocking */ }
     }
+  }
 
-    // Neo4j is authoritative — ALWAYS merge on top of whatever Redis had.
-    // Use graph.read_cypher DIRECTLY (not via data_graph_read LOCAL wrapper) to
-    // avoid double-wrapping. callMcpTool('graph.read_cypher').result is always
-    // {success, results: [{value: '["A-01"...]', ...}]} — one predictable level.
-    //
-    // Guard: startup-validator runs concurrently with first HTTP requests (server.listen
-    // fires before boot()). During validation, callMcpTool returns the sentinel string
-    // 'validator-bypass' instead of a real result. Retry up to 10×500ms to let it finish.
+  // Neo4j authoritative restore — runs on cycle 1 AND any subsequent cycle where it hasn't
+  // yet succeeded. Guards: validator-bypass (retry 500ms), circuit breaker open (wait cooldown),
+  // transient errors (retry 3s). Once IDs are loaded, _bootRestoreCompleted = true and skipped.
+  if (!_bootRestoreCompleted) {
     try {
       let closedResult: Awaited<ReturnType<typeof callMcpTool>> | null = null
       for (let attempt = 0; attempt < 15; attempt++) {
-        // Wait out circuit breaker before calling — open CB returns error instantly,
-        // which looks like a real failure and bypasses the retry logic below.
+        // Wait out circuit breaker before calling — open CB returns error instantly.
         const cb = getBackendCircuitState()
         if (cb.open) {
           const waitMs = Math.min(cb.cooldown_remaining_ms + 1000, 65000)
@@ -840,13 +842,11 @@ export async function runAutonomousCycle(
           },
           callId: `hyp-closed-restore-${Date.now()}`,
         })
-        // Detect startup-validator bypass sentinel — real result is always an object
         if (typeof closedResult.result === 'string' && closedResult.result === 'validator-bypass') {
           logger.debug({ attempt }, 'HyperAgent-Auto: validator-bypass detected on restore, retrying in 500ms')
           await new Promise(r => setTimeout(r, 500))
           continue
         }
-        // Backend error (may include circuit breaker just opened) — retry after 3s
         if (closedResult.status === 'error') {
           logger.debug({ attempt, err: closedResult.error_message }, 'HyperAgent-Auto: restore call error, retrying in 3s')
           await new Promise(r => setTimeout(r, 3000))
@@ -855,7 +855,6 @@ export async function runAutonomousCycle(
         break
       }
       if (closedResult && closedResult.status === 'success' && closedResult.result) {
-        // graph.read_cypher returns {success, results: [{value: '["A-01"...]'}]}
         const r = closedResult.result as Record<string, unknown>
         const rows = r.results as Array<Record<string, unknown>> | undefined
         if (Array.isArray(rows) && rows.length > 0) {
@@ -863,14 +862,23 @@ export async function runAutonomousCycle(
           const ids = typeof rawValue === 'string' ? JSON.parse(rawValue) as string[] : rawValue as string[]
           if (Array.isArray(ids) && ids.length > 0) {
             ids.forEach(id => closedTargetIds.add(id))
+            _bootRestoreCompleted = true
             logger.info({ count: closedTargetIds.size, ids }, 'HyperAgent-Auto: authoritative restore from Neo4j closed-ids')
+          } else {
+            // Node exists but value is empty array — still counts as success (nothing to restore)
+            _bootRestoreCompleted = true
+            logger.info('HyperAgent-Auto: Neo4j closed-ids node exists but is empty — fresh start')
           }
+        } else {
+          // No node yet — also a valid fresh start
+          _bootRestoreCompleted = true
+          logger.info('HyperAgent-Auto: no closed-ids node in Neo4j — fresh start confirmed')
         }
       } else if (closedResult) {
-        logger.warn({ status: closedResult.status, err: closedResult.error_message }, 'HyperAgent-Auto: closed-ids Neo4j restore call failed')
+        logger.warn({ status: closedResult.status, err: closedResult.error_message }, 'HyperAgent-Auto: closed-ids Neo4j restore call failed — will retry next cycle')
       }
     } catch (err) {
-      logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'HyperAgent-Auto: closed-ids Neo4j restore threw')
+      logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'HyperAgent-Auto: closed-ids Neo4j restore threw — will retry next cycle')
     }
   }
 
@@ -976,12 +984,13 @@ export async function runAutonomousCycle(
             await evaluatePlan(execution.execution_id, plan.planId, 80, 'hyperagent-auto')
 
             // Persist closed target IDs to Neo4j + Redis.
-            // UNION with existing Redis value to prevent data loss across container restarts:
-            // if the boot restore loaded fewer IDs than previously stored (e.g., partial session
-            // overwrote Neo4j), the merge ensures we never shrink the historical closed-ids set.
+            // UNION with existing Redis AND Neo4j values — ensures historical closed-ids survive
+            // even when boot restore fails (e.g., circuit breaker open at startup) or Redis is empty.
+            // Read order: Redis (fast) → Neo4j fallback if Redis empty (authoritative).
             try {
               const _persistRedis = getRedis()
               let _idsToSave = [...closedTargetIds]
+              let _redisHadData = false
               if (_persistRedis) {
                 try {
                   const _existingRaw = await _persistRedis.get('hyperagent:memory:targets:closed-ids')
@@ -990,9 +999,42 @@ export async function runAutonomousCycle(
                     const _v = _parsed.value
                     const _existing: string[] = Array.isArray(_v) ? _v
                       : typeof _v === 'string' ? JSON.parse(_v) as string[] : []
-                    _idsToSave = [...new Set([..._existing, ..._idsToSave])]
+                    if (_existing.length > 0) {
+                      _idsToSave = [...new Set([..._existing, ..._idsToSave])]
+                      _redisHadData = true
+                    }
                   }
-                } catch { /* use closedTargetIds only */ }
+                } catch { /* fall through to Neo4j */ }
+              }
+              // If Redis was empty, read Neo4j directly to avoid overwriting historical data.
+              // Boot restore may have failed (e.g., CB open at startup), so Neo4j is authoritative.
+              if (!_redisHadData) {
+                try {
+                  const _neo4jRead = await callMcpTool({
+                    toolName: 'graph.read_cypher',
+                    args: {
+                      query: `MATCH (m:HyperAgentMemory {domain: 'targets', key: 'closed-ids'}) RETURN m.value AS value LIMIT 1`,
+                      params: {},
+                    },
+                    callId: `hyp-union-neo4j-${Date.now()}`,
+                  })
+                  if (_neo4jRead.status === 'success' && _neo4jRead.result) {
+                    const _r = _neo4jRead.result as Record<string, unknown>
+                    const _rows = _r.results as Array<Record<string, unknown>> | undefined
+                    if (Array.isArray(_rows) && _rows.length > 0) {
+                      const _rawVal = _rows[0]?.value
+                      const _neo4jIds: string[] = typeof _rawVal === 'string'
+                        ? JSON.parse(_rawVal) as string[] : []
+                      if (_neo4jIds.length > 0) {
+                        _idsToSave = [...new Set([..._neo4jIds, ..._idsToSave])]
+                        // Also backfill closedTargetIds so subsequent closes include historical
+                        _neo4jIds.forEach(id => closedTargetIds.add(id))
+                        logger.info({ neo4jCount: _neo4jIds.length, merged: _idsToSave.length },
+                          'HyperAgent-Auto: union fallback read from Neo4j (Redis was empty)')
+                      }
+                    }
+                  }
+                } catch { /* non-blocking */ }
               }
               await persistCrossRepoMemory('targets', 'closed-ids', _idsToSave, 'hyperagent-auto')
             } catch { /* non-blocking */ }
