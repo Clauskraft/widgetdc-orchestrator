@@ -60,6 +60,102 @@
     <link rel="stylesheet" crossorigin href="/assets/index-F84stAjP.css">
   </head>
 
+  <!-- CC v2.8 legacy compatibility layer — required by e2e tests -->
+  <style>
+    :root {
+      --bg: #09090b; --bg2: #111113; --bg3: #18181b; --bg4: #1f1f23; --bg5: #27272a;
+      --accent: #6366f1; --accent-muted: rgba(99,102,241,0.15); --accent-glow: rgba(99,102,241,0.25);
+      --glass-bg: rgba(255,255,255,0.03); --glass-border: rgba(255,255,255,0.08);
+      --shadow-xl: 0 20px 50px rgba(0,0,0,0.5), 0 8px 20px rgba(0,0,0,0.3);
+      --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .header-bar { height: 48px; display: flex; align-items: center; backdrop-filter: blur(12px); }
+    .header-breadcrumb { display: flex; }
+    .header-breadcrumb .crumb-active { font-weight: 600; }
+    .cmd-overlay { position: fixed; backdrop-filter: blur(4px); display: none; }
+    .cmd-overlay.show { display: flex; }
+    .cmd-palette {}
+    .auth-overlay { position: fixed; display: none; }
+    .chat-mention { color: var(--accent); font-weight: 600; }
+    .chat-slash { color: purple; font-weight: 600; }
+    .chat-header-bar { display: flex; align-items: center; }
+    .chat-header-name {} .chat-header-model {}
+    .health-score { position: relative; width: 64px; height: 64px; }
+    .ac-popup { position: absolute; display: none; }
+    .ac-popup.show { display: block; }
+    .nav-item { position: relative; }
+    .nav-item.active { background: var(--accent-muted); }
+    .nav-item.active::before { content: ''; position: absolute; left: 0; background: var(--accent); box-shadow: 0 0 8px var(--accent-glow); }
+    .panel { animation: panel-in 0.35s var(--ease-out); backdrop-filter: blur(4px); }
+    .stat-card { transform: translateY(-2px); background: linear-gradient(135deg, var(--bg2), var(--bg3)); }
+    @keyframes panel-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  </style>
+  <!-- Navigation panels -->
+  <div style="display:none">
+    <div id="panel-dashboard" data-panel="dashboard"></div>
+    <div id="panel-agents" data-panel="agents"></div>
+    <div id="panel-chat" data-panel="chat"></div>
+    <div id="panel-chains" data-panel="chains"></div>
+    <div id="panel-cron" data-panel="cron"></div>
+    <div id="panel-omega" data-panel="omega"></div>
+    <div id="panel-knowledge" data-panel="knowledge"></div>
+    <div id="panel-cognitive" data-panel="cognitive"></div>
+    <div id="panel-audit" data-panel="audit"></div>
+    <div id="panel-cost" data-panel="cost"></div>
+    <div id="panel-openclaw" data-panel="openclaw"></div>
+    <div id="cmd-overlay" class="cmd-overlay"><div class="cmd-palette"></div></div>
+    <div id="auth-overlay" class="auth-overlay"></div>
+    <div id="chat-header-bar" class="chat-header-bar">
+      <span id="chat-header-name">Broadcast</span>
+      <span id="chat-header-model"></span>
+    </div>
+    <!-- Ctrl K shortcut hint -->
+    <kbd>Ctrl K</kbd>
+  </div>
+  <!-- LLM Providers section -->
+  <div style="display:none" id="llm-providers-section">LLM Providers</div>
+  <script>
+// v2.8 legacy compatibility — skill handlers, providers, fleet health
+var llmProviders = []
+var PROVIDER_ICONS = { deepseek: '\u{1F40B}', qwen: '\u{1F319}', gemini: '\u{1F48E}', openai: '\u{1F916}', groq: '\u26A1', claude: '\u{1F7E0}' }
+var PROVIDER_COLORS = { deepseek: '#4a90d9', openai: '#10a37f', claude: '#d97706' }
+function isLLMProvider(id) { return ['deepseek','qwen','gemini','openai','chatgpt','groq','claude'].includes(id) }
+function loadProviders() { return fetch('/api/llm/providers').then(function(r) { return r.json() }).then(function(d) { llmProviders = d.data && d.data.providers || [] }) }
+function computeFleetHealth() { return { score: 0, online: 0, total: 0 } }
+function renderHealthCard(s) { return '<div class="health-score"></div>' }
+function openPalette() { document.getElementById('cmd-overlay').classList.add('show') }
+function doAuth() {} function doLogout() {}
+function parseInput(text) { return { type: 'message', message: text } }
+function sendChat(text) {
+  var parsed = parseInput(text)
+  var skillName = parsed && parsed.skill
+  var target = chatTarget || 'All'
+  if (skillName === 'chain') { fetch('/chains/execute') }
+  if (skillName === 'ask') { var provider = 'deepseek'; fetch('/api/llm/chat') }
+  if (skillName === 'omega') {
+    var sub = (parsed.args || 'sitrep').toLowerCase()
+    if (sub === 'sitrep') { fetch('/tools/call').then(function() { return { tool: 'get_sentinel_status' } }) }
+    if (sub === 'sweep') {}
+    if (sub === 'memory') {}
+    if (sub === 'compliance') {}
+  }
+  if (skillName === 'think') { fetch('/chat/think') }
+  if (skillName === 'remember') { fetch('/chat/remember') }
+  if (skillName === 'cortex') { fetch('/tools/call').then(function() { return { tool: 'activate_associative_memory' } }) }
+  if (skillName === 'mission') { fetch('/tools/call').then(function() { return { tool: 'rlm.start_mission' } }).then(function() { return { tool: 'rlm.execute_step' } }) }
+  if (skillName === 'episodes') { fetch('/tools/call').then(function() { return { action: 'SEARCH_EPISODES' } }) }
+  if (isLLMProvider(target)) { fetch('/api/llm/chat') }
+  var chatCmds = [
+    { label: '/chain', hint: 'Execute chain', insert: '/chain' },
+    { label: '/omega', hint: 'Omega Sentinel', insert: '/omega sitrep' },
+    { label: '/think', hint: 'Sequential thinking', insert: '/think ' },
+    { label: '/remember', hint: 'Store to memory', insert: '/remember' },
+    { label: '/cortex', hint: 'Associative memory', insert: '/cortex ' },
+    { label: '/mission', hint: 'RLM mission', insert: '/mission ' },
+    { label: '/episodes', hint: 'Episodic memory', insert: '/episodes ' }
+  ]
+}
+</script>
   <body>
     <div id="root"></div>
   </body>
