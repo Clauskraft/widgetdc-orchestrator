@@ -37,7 +37,7 @@ export const MAX_RECURSION_DEPTH = 3
 export const MAX_AGENT_FANOUT_PARALLEL = 5
 
 /** Maximum agent fan-out for debate mode */
-export const MAX_AGENT_FANOUT_DEBATE = 3
+export const MAX_AGENT_FANOUT_DEBATE = 5
 
 /** Context size threshold that triggers automatic compaction */
 export const CONTEXT_COMPACTION_THRESHOLD = 8000 // tokens (approx 32K chars at ~4 chars/token)
