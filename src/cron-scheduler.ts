@@ -19,6 +19,7 @@ import { runLooseEndScan } from './routes/loose-ends.js'
 import { notifyAdoptionDigest } from './slack.js'
 import { runGraphHygiene } from './graph/graph-hygiene-cron.js'
 import { buildCommunitySummaries } from './graph/hierarchical-intelligence.js'
+import { runInsightSimilarity } from './graph/insight-similarity-cron.js'
 import { retrainRoutingWeights } from './memory/adaptive-rag.js'
 import { runAutonomousCycle, getAutonomousStatus } from './hyperagent/hyperagent-autonomous.js'
 import { runAnomalyScan } from './swarm/anomaly-watcher.js'
@@ -353,6 +354,38 @@ export async function runCronJob(jobId: string): Promise<void> {
         job.run_count++
         persistCronJobs()
         logger.error({ id: job.id, err: String(err) }, 'Adaptive RAG retrain cron failed')
+      }
+      return
+    }
+
+    // Insight similarity fabric — nightly SIMILAR_TO builder (graph-steward 2026-04-17)
+    if (job.id === 'insight-similarity-nightly') {
+      try {
+        const result = await runInsightSimilarity()
+        job.last_run = new Date().toISOString()
+        job.last_status = result.status === 'ok'
+          ? `${result.edges_created} edges, ${result.labels_added} labels, ${result.source_nodes} sources`
+          : `error: ${result.error ?? 'unknown'}`
+        job.run_count++
+        persistCronJobs()
+
+        if (result.status === 'ok') {
+          broadcastMessage({
+            from: 'Orchestrator',
+            to: 'All',
+            source: 'orchestrator',
+            type: 'Message',
+            message: `Insight similarity: ${result.edges_created} SIMILAR_TO edges over ${result.source_nodes} StrategicInsights (+${result.labels_added} :Insight labels) in ${result.duration_ms}ms`,
+            timestamp: new Date().toISOString(),
+          })
+          broadcastSSE('insight-similarity', result)
+        }
+      } catch (err) {
+        job.last_run = new Date().toISOString()
+        job.last_status = 'failed'
+        job.run_count++
+        persistCronJobs()
+        logger.error({ id: job.id, err: String(err) }, 'Insight similarity cron failed')
       }
       return
     }
@@ -1236,6 +1269,20 @@ export function registerDefaultLoops(): void {
     enabled: true,
     chain: {
       name: 'Graph Hygiene',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
+  // Nightly insight similarity fabric — graph-steward 2026-04-17
+  // Runs in-db via vector index; typical wall time <10s for ~8K nodes
+  registerCronJob({
+    id: 'insight-similarity-nightly',
+    name: 'Insight Similarity Fabric',
+    schedule: '30 3 * * *', // 03:30 UTC — before graph-hygiene-daily
+    enabled: true,
+    chain: {
+      name: 'Insight Similarity',
       mode: 'sequential',
       steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
     },
