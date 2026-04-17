@@ -1722,6 +1722,47 @@ async function sendChat() {
     if (skillName === 'capture') { var tags = parsed.args ? parsed.args.split(/\s+/) : ['manual-capture']; var recentIds = chatMessages.slice(-10).filter(function(m) { return m.id }).map(function(m) { return m.id }); try { await api('/chat/capture', { method: 'POST', body: JSON.stringify({ message_ids: recentIds, tags: tags }) }); showToast('Captured ' + recentIds.length + ' messages to SRAG', 'success') } catch (err) { showToast('Capture failed: ' + err.message, 'error') } return }
     if (skillName === 'pin') { var lastMsg = chatMessages.filter(function(m) { return m.id }).slice(-1)[0]; if (lastMsg && lastMsg.id) await pinMessage(lastMsg.id); else showToast('No message to pin', 'error'); return }
     if (skillName === 'remember') { var tags = parsed.args ? parsed.args.split(/\s+/) : ['manual-remember']; var recentIds = chatMessages.slice(-10).filter(function(m) { return m.id }).map(function(m) { return m.id }); try { await api('/chat/remember', { method: 'POST', body: JSON.stringify({ message_ids: recentIds, tags: tags }) }); showToast('Stored ' + recentIds.length + ' messages to memory', 'success') } catch (err) { showToast('Remember failed: ' + err.message, 'error') } return }
+    if (skillName === 'think') {
+      var depth = Math.max(1, parseInt(parsed.args) || 3)
+      addLocalMsg('command-center', '/think ' + parsed.args, 'Command')
+      try {
+        var res = await api('/chat/think', { method: 'POST', body: JSON.stringify({ question: parsed.args || 'What should I focus on right now?', depth: depth }) })
+        addLocalMsg('Thinker', res.data && res.data.summary || JSON.stringify(res.data, null, 2), 'Answer')
+      } catch (err) { addLocalMsg('System', 'Think failed: ' + err.message, 'Alert') }
+      return
+    }
+    if (skillName === 'cortex') {
+      addLocalMsg('command-center', '/cortex ' + parsed.args, 'Command')
+      try {
+        var res = await api('/tools/call', { method: 'POST', body: JSON.stringify({ agent_id: 'command-center', tool_name: 'activate_associative_memory', arguments: { query: parsed.args || '', agent_id: 'command-center', context: 'Command Center cortex activation' }, call_id: uuid() }) })
+        addLocalMsg('Cortex', res.data && res.data.result || JSON.stringify(res.data, null, 2), 'Answer')
+      } catch (err) { addLocalMsg('System', 'Cortex failed: ' + err.message, 'Alert') }
+      return
+    }
+    if (skillName === 'mission') {
+      addLocalMsg('command-center', '/mission ' + parsed.args, 'Command')
+      try {
+        var startRes = await api('/tools/call', { method: 'POST', body: JSON.stringify({ agent_id: 'command-center', tool_name: 'rlm.start_mission', arguments: { objective: parsed.args || 'Execute strategic mission', steps: 3 }, call_id: uuid() }) })
+        var missionData = startRes.data && startRes.data.result
+        var missionId = missionData && (missionData.mission_id || missionData.id)
+        if (missionId) {
+          var stepRes = await api('/tools/call', { method: 'POST', body: JSON.stringify({ agent_id: 'command-center', tool_name: 'rlm.execute_step', arguments: { mission_id: missionId, step: 1 }, call_id: uuid() }) })
+          addLocalMsg('Mission Control', '\u{1F3AF} Mission **' + missionId + '** started\n' + JSON.stringify(stepRes.data && stepRes.data.result || stepRes.data, null, 2).slice(0, 1000), 'Answer')
+        } else {
+          addLocalMsg('Mission Control', JSON.stringify(missionData || startRes.data, null, 2).slice(0, 1000), 'Answer')
+        }
+      } catch (err) { addLocalMsg('System', 'Mission failed: ' + err.message, 'Alert') }
+      return
+    }
+    if (skillName === 'episodes') {
+      addLocalMsg('command-center', '/episodes ' + parsed.args, 'Command')
+      try {
+        var keywords = (parsed.args || '').split(/\s+/).filter(Boolean)
+        var res = await api('/tools/call', { method: 'POST', body: JSON.stringify({ agent_id: 'command-center', tool_name: 'memory_operation', arguments: { action: 'SEARCH_EPISODES', query: { keywords: keywords.length ? keywords : ['session','insight'], tags: ['episode'], limit: 10 } }, call_id: uuid() }) })
+        addLocalMsg('Episodic Memory', '\u{1F3AC} **Episodes**\n' + (res.data && res.data.result || JSON.stringify(res.data, null, 2)).toString().slice(0, 1500), 'Answer')
+      } catch (err) { addLocalMsg('System', 'Episodes failed: ' + err.message, 'Alert') }
+      return
+    }
 
     // Generic MCP tool call
     addLocalMsg('command-center', '/' + skillName + ' ' + parsed.args, 'Command')
@@ -1928,7 +1969,7 @@ chatInput.addEventListener('input', function() {
     var q = val.slice(1).toLowerCase()
     var askCmds = [{ label: '/ask deepseek', hint: 'LLM', insert: '/ask deepseek' },{ label: '/ask qwen', hint: 'LLM', insert: '/ask qwen' },{ label: '/ask gemini', hint: 'LLM', insert: '/ask gemini' },{ label: '/ask openai', hint: 'LLM', insert: '/ask openai' },{ label: '/ask groq', hint: 'LLM', insert: '/ask groq' },{ label: '/ask claude', hint: 'LLM', insert: '/ask claude' },{ label: '/rag', hint: 'Knowledge', insert: '/rag' },{ label: '/knowledge', hint: 'Search', insert: '/knowledge' }]
     var cogCmds = ['reason','analyze','plan','learn','fold','enrich'].map(function(c) { return { label: '/' + c, hint: 'cognitive', insert: '/' + c } })
-    var chatCmds = [{ label: '/chain', hint: 'Execute chain', insert: '/chain' },{ label: '/omega sitrep', hint: 'SITREP', insert: '/omega sitrep' },{ label: '/search', hint: 'Search', insert: '/search' },{ label: '/capture', hint: 'Save to SRAG', insert: '/capture' },{ label: '/remember', hint: 'Store to memory', insert: '/remember' },{ label: '/pin', hint: 'Pin message', insert: '/pin' }]
+    var chatCmds = [{ label: '/chain', hint: 'Execute chain', insert: '/chain' },{ label: '/omega', hint: 'Omega Sentinel', insert: '/omega sitrep' },{ label: '/omega sitrep', hint: 'SITREP', insert: '/omega sitrep' },{ label: '/think', hint: 'Sequential thinking', insert: '/think ' },{ label: '/remember', hint: 'Store to memory', insert: '/remember' },{ label: '/cortex', hint: 'Associative memory', insert: '/cortex ' },{ label: '/mission', hint: 'RLM multi-step', insert: '/mission ' },{ label: '/episodes', hint: 'Episodic memory', insert: '/episodes ' },{ label: '/search', hint: 'Search', insert: '/search' },{ label: '/capture', hint: 'Save to SRAG', insert: '/capture' },{ label: '/pin', hint: 'Pin message', insert: '/pin' }]
     var tools = availableTools.map(function(t) { return { label: '/' + t, hint: 'MCP tool', insert: '/' + t } })
     var all = chatCmds.concat(askCmds).concat(cogCmds).concat(tools).filter(function(t) { return !q || t.label.toLowerCase().includes(q) }).slice(0, 15)
     showAC(all)

@@ -707,6 +707,7 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       // 1. Internal/orchestrator: {tool_name, payload: {...}}
       // 2. External agents (OpenAI function calling): {tool_name, ...flatArgs}
       const toolName = args.tool_name as string
+      if (!toolName) return 'Error: tool_name is required'
       const payload = args.payload as Record<string, unknown> | undefined
 
       // If payload exists, use it as args (internal format)

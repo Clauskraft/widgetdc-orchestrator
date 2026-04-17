@@ -1241,6 +1241,19 @@ export function registerDefaultLoops(): void {
     },
   })
 
+  // Weekly graph auto-heal via graph_hygiene_run MCP tool (runs full hygiene repair pass)
+  registerCronJob({
+    id: 'graph-hygiene-run-weekly',
+    name: 'Graph Hygiene Run (Weekly Auto-Heal)',
+    schedule: '0 5 * * 0',  // 05:00 UTC Sunday
+    enabled: true,
+    chain: {
+      name: 'Graph Hygiene Run',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph_hygiene_run', arguments: { dry_run: false } }],
+    },
+  })
+
   registerCronJob({
     id: 'graph-self-correct',
     name: 'Self-Correcting Graph Agent',
