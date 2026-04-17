@@ -145,6 +145,9 @@ let lastCycle: CycleResult | null = null
 /** Persist closed target IDs across cycles — survives Redis eviction via Neo4j */
 const closedTargetIds = new Set<string>()
 
+/** In-memory registry cache — loaded once per container instance (registry never changes mid-run) */
+let _registryCache: TargetDef[] | null = null
+
 /** Adaptive edge weights — start equal, evolve */
 const edgeWeights: Record<string, number> = {
   Husker: 1 / 6, Laerer: 1 / 6, Heler: 1 / 6,
@@ -304,6 +307,12 @@ async function updateEdgeScores(
 // ─── Target Registry Loader ─────────────────────────────────────────────────
 
 async function loadTargetRegistry(): Promise<TargetDef[]> {
+  // Return cached registry if already loaded — registry is immutable once seeded
+  if (_registryCache !== null && _registryCache.length > 0) {
+    logger.debug({ count: _registryCache.length }, 'HyperAgent-Auto: using cached target registry')
+    return _registryCache
+  }
+
   const redis = getRedis()
 
   try {
@@ -354,6 +363,7 @@ async function loadTargetRegistry(): Promise<TargetDef[]> {
 
         if (targets.length > 0) {
           logger.info({ key, targetCount: targets.length, diagnostics }, 'HyperAgent-Auto: loaded target registry')
+          _registryCache = targets
           return targets
         }
       } catch (err) {
@@ -398,6 +408,7 @@ async function loadTargetRegistry(): Promise<TargetDef[]> {
             const targets = parseRegistryToTargets(typeof data === 'string' ? JSON.parse(data) : data)
             if (targets.length > 0) {
               logger.info({ key: neo4jKey, targetCount: targets.length }, 'HyperAgent-Auto: loaded target registry from Neo4j fallback')
+              _registryCache = targets
               return targets
             }
           }
