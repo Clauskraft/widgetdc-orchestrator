@@ -20,7 +20,7 @@
 import { v4 as uuid } from 'uuid'
 import { createPlan, executePlan, evaluatePlan, approvePlan, type HyperPlan } from './hyperagent.js'
 import { callCognitive, callCognitiveRaw, isRlmAvailable } from '../cognitive-proxy.js'
-import { callMcpTool } from '../mcp-caller.js'
+import { callMcpTool, getBackendCircuitState } from '../mcp-caller.js'
 import { dualChannelRAG } from '../memory/dual-rag.js'
 import { getRedis } from '../redis.js'
 import { broadcastSSE } from '../sse.js'
@@ -820,7 +820,17 @@ export async function runAutonomousCycle(
     // 'validator-bypass' instead of a real result. Retry up to 10×500ms to let it finish.
     try {
       let closedResult: Awaited<ReturnType<typeof callMcpTool>> | null = null
-      for (let attempt = 0; attempt < 10; attempt++) {
+      for (let attempt = 0; attempt < 15; attempt++) {
+        // Wait out circuit breaker before calling — open CB returns error instantly,
+        // which looks like a real failure and bypasses the retry logic below.
+        const cb = getBackendCircuitState()
+        if (cb.open) {
+          const waitMs = Math.min(cb.cooldown_remaining_ms + 1000, 65000)
+          logger.debug({ attempt, waitMs }, 'HyperAgent-Auto: circuit breaker open on restore, waiting')
+          await new Promise(r => setTimeout(r, waitMs))
+          continue
+        }
+
         closedResult = await callMcpTool({
           toolName: 'graph.read_cypher',
           args: {
@@ -834,6 +844,12 @@ export async function runAutonomousCycle(
         if (typeof closedResult.result === 'string' && closedResult.result === 'validator-bypass') {
           logger.debug({ attempt }, 'HyperAgent-Auto: validator-bypass detected on restore, retrying in 500ms')
           await new Promise(r => setTimeout(r, 500))
+          continue
+        }
+        // Backend error (may include circuit breaker just opened) — retry after 3s
+        if (closedResult.status === 'error') {
+          logger.debug({ attempt, err: closedResult.error_message }, 'HyperAgent-Auto: restore call error, retrying in 3s')
+          await new Promise(r => setTimeout(r, 3000))
           continue
         }
         break
