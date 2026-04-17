@@ -22,6 +22,16 @@ import argparse
 import urllib.request
 from pathlib import Path
 from datetime import datetime, timezone
+from owui_sync_lib import (
+    DEFERRED_PIPELINES,
+    TOOL_FIELDS,
+    api_request,
+    build_pipeline_tool_definition,
+    diff_fields,
+    is_subset_match,
+    load_json_tool_definition,
+    normalize_definition,
+)
 
 OWUI_URL = os.environ.get("OWUI_URL", "https://open-webui-production-25cb.up.railway.app")
 OWUI_EMAIL = os.environ.get("OWUI_EMAIL", "clauskraft@gmail.com")
@@ -32,16 +42,6 @@ OWUI_PIPELINES_DIR = Path(__file__).parent.parent / "pipelines"
 
 # Tools that should be excluded from drift check (known experimental/prototype)
 IGNORE_PREFIXES = ("exp_", "test_", "draft_")
-
-# Tools that are intentionally in git but NOT deployed (deferred by plan)
-# See docs/DEFERRED_PIPELINES.md for unblock conditions.
-DEFERRED_PIPELINES = frozenset({
-    "widgetdc_mcp_bridge",      # LIN-585, gated by facade A/B
-    "widgetdc_graph_explorer",  # LIN-586, gated by facade A/B
-    "widgetdc_anticipator",     # filter hook, staging validation needed
-    "widgetdc_beautifier",      # filter hook, staging validation needed
-})
-
 
 def login() -> str:
     """Authenticate and return JWT token. Prefers OWUI_TOKEN env var."""
@@ -79,24 +79,6 @@ def get_tool_detail(token: str, tool_id: str) -> dict:
     with urllib.request.urlopen(req, timeout=15) as r:
         return json.loads(r.read())
 
-
-# Explicit mapping: pipelines/*.py filename → Open WebUI tool ID
-# These pipelines are deployed via Open WebUI admin UI, not via owui-tools/*.json
-PIPELINE_TO_TOOL_ID = {
-    "widgetdc_intelligence.py": "widgetdc_intelligence_suite",
-    "widgetdc_graph.py": "widgetdc_graph_intel",
-    "widgetdc_obsidian.py": "widgetdc_obsidian_bridge",
-    "widgetdc_fold.py": "widgetdc_mercury_fold",
-    "widgetdc_data_browser.py": "widgetdc_data_browser",
-    "widgetdc_flow_editor.py": "widgetdc_flow_editor",
-    # Deferred (not deployed until SNOUT-CLOSE-08 / facade sprint 2)
-    "widgetdc_mcp_bridge.py": "widgetdc_mcp_bridge",
-    "widgetdc_graph_explorer.py": "widgetdc_graph_explorer",
-    "widgetdc_anticipator.py": "widgetdc_anticipator",
-    "widgetdc_beautifier.py": "widgetdc_beautifier",
-}
-
-
 def load_git_tools() -> dict:
     """Load all git-tracked tool sources. Returns {id: {file, data?}}.
 
@@ -110,9 +92,8 @@ def load_git_tools() -> dict:
     if OWUI_TOOLS_DIR.exists():
         for f in sorted(OWUI_TOOLS_DIR.glob("*.json")):
             try:
-                with f.open("r", encoding="utf-8") as fp:
-                    data = json.load(fp)
-                tool_id = data.get("id")
+                data = load_json_tool_definition(f)
+                tool_id = data["id"]
                 if tool_id:
                     tools[tool_id] = {"file": f"owui-tools/{f.name}", "data": data, "source": "json"}
             except Exception as e:
@@ -121,14 +102,43 @@ def load_git_tools() -> dict:
     # pipelines/widgetdc_*.py
     if OWUI_PIPELINES_DIR.exists():
         for f in sorted(OWUI_PIPELINES_DIR.glob("widgetdc_*.py")):
-            tool_id = PIPELINE_TO_TOOL_ID.get(f.name)
-            if tool_id and tool_id not in tools:
-                tools[tool_id] = {"file": f"pipelines/{f.name}", "data": None, "source": "pipeline"}
+            try:
+                data = build_pipeline_tool_definition(f)
+            except Exception as e:
+                print(f"WARN: could not parse {f.name}: {e}", file=sys.stderr)
+                continue
+            tool_id = data["id"]
+            if tool_id not in tools:
+                tools[tool_id] = {"file": f"pipelines/{f.name}", "data": data, "source": "pipeline"}
 
     return tools
 
 
-def analyze_drift(deployed: dict, git_tracked: dict) -> dict:
+def find_content_drift(token: str, deployed: dict, git_tracked: dict) -> list[str]:
+    drift: list[str] = []
+    shared_ids = sorted(set(deployed.keys()) & set(git_tracked.keys()))
+    for tool_id in shared_ids:
+        expected_data = git_tracked[tool_id].get("data")
+        if not isinstance(expected_data, dict):
+            continue
+
+        actual_payload = deployed.get(tool_id)
+        actual = normalize_definition(actual_payload, TOOL_FIELDS)
+
+        # The list endpoint may not include full content. Fetch detail when needed.
+        if not is_subset_match(expected_data.get("content"), actual.get("content")):
+            status, detail = api_request(token, "GET", f"/api/v1/tools/id/{tool_id}")
+            if status != 200:
+                drift.append(tool_id)
+                continue
+            actual = normalize_definition(detail, TOOL_FIELDS)
+
+        if diff_fields(expected_data, actual, TOOL_FIELDS):
+            drift.append(tool_id)
+    return drift
+
+
+def analyze_drift(deployed: dict, git_tracked: dict, content_drift: list[str]) -> dict:
     """Compare deployed vs git. Returns drift report."""
     deployed_ids = set(deployed.keys())
     git_ids = set(git_tracked.keys())
@@ -158,8 +168,9 @@ def analyze_drift(deployed: dict, git_tracked: dict) -> dict:
         "experimental_deployed": sorted(experimental),
         "deferred_as_planned": sorted(deferred),
         "untracked_drift": sorted(untracked),
+        "content_drift": sorted(content_drift),
         "missing_deployment": sorted(missing_deployment),
-        "drift_detected": bool(untracked or missing_deployment),
+        "drift_detected": bool(untracked or missing_deployment or content_drift),
     }
 
 
@@ -190,6 +201,12 @@ def format_human(report: dict) -> str:
             lines.append(f"   - {tid}")
         lines.append("")
 
+    if report.get('content_drift'):
+        lines.append(f"❌ CONTENT DRIFT: {len(report['content_drift'])} deployed tools differ from git source:")
+        for tid in report['content_drift']:
+            lines.append(f"   - {tid}")
+        lines.append("")
+
     if report['missing_deployment']:
         lines.append(f"⚠  MISSING DEPLOYMENT: {len(report['missing_deployment'])} tools in git NOT deployed:")
         for tid in report['missing_deployment']:
@@ -206,6 +223,8 @@ def format_human(report: dict) -> str:
         lines.append("Remediation:")
         if report['untracked_drift']:
             lines.append("  For untracked_drift: export tool via API and commit to owui-tools/")
+        if report.get('content_drift'):
+            lines.append("  For content_drift: redeploy the git-tracked source and verify read-back")
         if report['missing_deployment']:
             lines.append("  For missing_deployment: deploy via scripts/deploy_owui_tool.py or delete from git")
 
@@ -225,7 +244,8 @@ def main():
 
     deployed = get_deployed_tools(token)
     git_tracked = load_git_tools()
-    report = analyze_drift(deployed, git_tracked)
+    content_drift = find_content_drift(token, deployed, git_tracked)
+    report = analyze_drift(deployed, git_tracked, content_drift)
 
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False))

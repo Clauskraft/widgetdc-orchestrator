@@ -16,7 +16,7 @@ would degrade accuracy.
 Current state (post SNOUT-CLOSE-05):
 - **16 deployed tools** in Open WebUI
 - **96.7%** baseline tool-selection accuracy (29/30 benchmark)
-- **4 pipelines deferred** (DEFERRED_PIPELINES.md) — would push to 20 tools
+- **3 artifacts still deferred** (DEFERRED_PIPELINES.md)
 
 Deploying 4 more tools without facade routing would likely worsen the overlap patterns
 already seen in failures (`assembly_certifier` vs `stitch_live`, `uni_mcp` vs `mcp_gateway`).
@@ -67,7 +67,7 @@ async def wdc_intelligence(
 | `widgetdc_graph_intel` | Hygiene, health, certified search |
 | `widgetdc_graph_navigator` | Neo4j query wrapper |
 | `widgetdc_data_browser` | Sortable table view of Cypher results |
-| `widgetdc_graph_explorer` (deferred) | Cytoscape visualization |
+| `widgetdc_graph_explorer` | Cytoscape visualization |
 
 **Gateway schema:**
 ```python
@@ -234,7 +234,7 @@ Facade is approved for rollout ONLY if ALL of the following hold:
 | No workflow loses access | 100% reachable | 100% reachable via `raw_signal` |
 | Rollback possible | — | Must work: `raw_signal=True` returns to direct tool |
 
-**If any fail → facade is rejected, 4 deferred pipelines remain blocked pending alternative
+**If any fail → facade is rejected, the remaining deferred artifacts stay blocked pending alternative
 plan.**
 
 ---
@@ -254,7 +254,7 @@ plan.**
 - **No tool deletions.** 14+2 deployed tools remain regardless of facade outcome.
 - **Facade is additive.** It adds 4 wrapper tools; it does not remove anything.
 - **A/B decides scope.** If A/B fails, ship NONE of the 4 gateways. Keep flat topology.
-- **DEFERRED_PIPELINES.md unblock condition.** Only unblocked if facade A/B passes.
+- **DEFERRED_PIPELINES.md unblock condition.** Applies to the remaining deferred artifacts only.
 
 ## Debate references
 
