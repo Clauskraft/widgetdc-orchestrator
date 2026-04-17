@@ -959,9 +959,26 @@ export async function runAutonomousCycle(
             // Evaluate and persist KPI
             await evaluatePlan(execution.execution_id, plan.planId, 80, 'hyperagent-auto')
 
-            // Persist closed target IDs to Neo4j + Redis (Neo4j survives Railway redeploy/LB)
+            // Persist closed target IDs to Neo4j + Redis.
+            // UNION with existing Redis value to prevent data loss across container restarts:
+            // if the boot restore loaded fewer IDs than previously stored (e.g., partial session
+            // overwrote Neo4j), the merge ensures we never shrink the historical closed-ids set.
             try {
-              await persistCrossRepoMemory('targets', 'closed-ids', [...closedTargetIds], 'hyperagent-auto')
+              const _persistRedis = getRedis()
+              let _idsToSave = [...closedTargetIds]
+              if (_persistRedis) {
+                try {
+                  const _existingRaw = await _persistRedis.get('hyperagent:memory:targets:closed-ids')
+                  if (_existingRaw) {
+                    const _parsed = JSON.parse(_existingRaw)
+                    const _v = _parsed.value
+                    const _existing: string[] = Array.isArray(_v) ? _v
+                      : typeof _v === 'string' ? JSON.parse(_v) as string[] : []
+                    _idsToSave = [...new Set([..._existing, ..._idsToSave])]
+                  }
+                } catch { /* use closedTargetIds only */ }
+              }
+              await persistCrossRepoMemory('targets', 'closed-ids', _idsToSave, 'hyperagent-auto')
             } catch { /* non-blocking */ }
 
             lessons.push(`Target ${target.id} closed via ${chainMode} (conf=${confidence.toFixed(2)}, rag=${ragResultCount})`)
