@@ -78,32 +78,33 @@ jobs:
         if: github.event_name == 'pull_request' && env.EXIT_CODE != '0'
         id: body
         run: |
+          python - <<'PY' > comment.md
+          import json
+
+          report = json.load(open('drift-report.json', encoding='utf-8'))
+          error = report.get('error')
+          if error:
+              print('## Open WebUI Drift Check Failed')
+              print()
+              print('The workflow could not complete the live OWUI verification step cleanly.')
+              print()
+              print('```text')
+              print(error[:4000])
+              print('```')
+          else:
+              print('## Open WebUI Drift Detected')
+              print()
+              print(f'**Untracked (deployed but no git source):** {len(report["untracked_drift"])}')
+              for tool_id in report['untracked_drift']:
+                  print(f'- `{tool_id}`')
+              print()
+              print(f'**Missing deployment (in git but not deployed):** {len(report["missing_deployment"])}')
+              for tool_id in report['missing_deployment']:
+                  print(f'- `{tool_id}`')
+          PY
           {
             echo 'COMMENT<<EOF'
-            python - <<'PY'
-            import json
-
-            report = json.load(open('drift-report.json', encoding='utf-8'))
-            error = report.get('error')
-            if error:
-                print('## Open WebUI Drift Check Failed')
-                print()
-                print('The workflow could not complete the live OWUI verification step cleanly.')
-                print()
-                print('```text')
-                print(error[:4000])
-                print('```')
-            else:
-                print('## Open WebUI Drift Detected')
-                print()
-                print(f'**Untracked (deployed but no git source):** {len(report["untracked_drift"])}')
-                for tool_id in report['untracked_drift']:
-                    print(f'- `{tool_id}`')
-                print()
-                print(f'**Missing deployment (in git but not deployed):** {len(report["missing_deployment"])}')
-                for tool_id in report['missing_deployment']:
-                    print(f'- `{tool_id}`')
-            PY
+            cat comment.md
             echo ''
             echo 'See `scripts/check_owui_drift.py` for remediation.'
             echo 'EOF'
