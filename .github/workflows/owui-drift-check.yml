@@ -30,12 +30,26 @@ jobs:
       - name: Run drift check
         id: drift
         env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
           OWUI_URL: ${{ secrets.OWUI_URL }}
           OWUI_TOKEN: ${{ secrets.OWUI_TOKEN }}
           OWUI_EMAIL: ${{ secrets.OWUI_EMAIL }}
           OWUI_PASSWORD: ${{ secrets.OWUI_PASSWORD }}
         run: |
           set +e
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -z "$OWUI_TOKEN" ] && [ -z "$OWUI_PASSWORD" ]; then
+            cat > drift-report.json <<'EOF'
+          {
+            "skipped": true,
+            "reason": "OWUI secrets are not available for this pull_request run",
+            "untracked_drift": [],
+            "missing_deployment": []
+          }
+          EOF
+            echo "EXIT_CODE=0" >> $GITHUB_ENV
+            python scripts/check_owui_drift.py || true
+            exit 0
+          fi
           python scripts/check_owui_drift.py --json > drift-report.json 2> drift-error.txt
           EXIT_CODE=$?
           export EXIT_CODE
@@ -112,6 +126,7 @@ jobs:
 
       - name: Comment on PR (if drift detected)
         if: github.event_name == 'pull_request' && env.EXIT_CODE != '0'
+        continue-on-error: true
         uses: peter-evans/create-or-update-comment@v4
         with:
           issue-number: ${{ github.event.pull_request.number }}
