@@ -160,7 +160,7 @@ export async function initHyperAgentBootRestore(): Promise<void> {
   const redis = getRedis()
   if (!redis) return
   try {
-    // Primary: read from persistCrossRepoMemory's Redis key
+    // ── 1. Restore closed-ids ──────────────────────────────────────────────
     const raw = await redis.get('hyperagent:memory:targets:closed-ids')
     if (raw) {
       const entry = JSON.parse(raw) as { value: unknown }
@@ -171,21 +171,75 @@ export async function initHyperAgentBootRestore(): Promise<void> {
         ids.forEach(id => closedTargetIds.add(id))
         _bootRestoreCompleted = true
         logger.info({ count: closedTargetIds.size, ids }, 'HyperAgent-Auto: boot-init restore from Redis memory key')
-        return
       }
     }
-    // Fallback: legacy key
-    const legacyRaw = await redis.get('hyperagent:closedTargets')
-    if (legacyRaw) {
-      const ids = JSON.parse(legacyRaw) as string[]
-      if (ids.length > 0) {
-        ids.forEach(id => closedTargetIds.add(id))
-        _bootRestoreCompleted = true
-        logger.info({ count: closedTargetIds.size }, 'HyperAgent-Auto: boot-init restore from Redis legacy key')
-        return
+    if (!_bootRestoreCompleted) {
+      // Fallback: legacy key
+      const legacyRaw = await redis.get('hyperagent:closedTargets')
+      if (legacyRaw) {
+        const ids = JSON.parse(legacyRaw) as string[]
+        if (ids.length > 0) {
+          ids.forEach(id => closedTargetIds.add(id))
+          _bootRestoreCompleted = true
+          logger.info({ count: closedTargetIds.size }, 'HyperAgent-Auto: boot-init restore from Redis legacy key')
+        }
       }
     }
-    logger.info('HyperAgent-Auto: boot-init found no closed-ids in Redis — Neo4j restore will run on first cycle')
+    if (!_bootRestoreCompleted) {
+      logger.info('HyperAgent-Auto: boot-init found no closed-ids in Redis — Neo4j restore will run on first cycle')
+    }
+
+    // ── 2. Preload registry cache — bypass loadTargetRegistry() race ───────
+    // Reads directly from persistCrossRepoMemory Redis key (immune to callMcpTool timeouts).
+    // Sets _registryCache so the first cycle never has to call loadTargetRegistry().
+    if (_registryCache === null) {
+      try {
+        const regRaw = await redis.get('hyperagent:memory:targets:full-registry-v2.2')
+        if (regRaw) {
+          const regEntry = JSON.parse(regRaw) as { value: unknown }
+          const regData = regEntry.value as Record<string, unknown>
+          const categories = regData?.categories as Record<string, unknown> | undefined
+          if (categories) {
+            const targets: TargetDef[] = []
+            const edgeMap: Record<string, string> = {
+              A: 'Heler', B: 'Husker', C: 'Integrerer',
+              D: 'Vokser', E: 'Laerer', F: 'Laerer', G: 'Husker',
+            }
+            for (const [catKey, catVal] of Object.entries(categories)) {
+              const category = catKey.charAt(0).toUpperCase()
+              if (typeof catVal === 'object' && catVal !== null) {
+                const cat = catVal as Record<string, unknown>
+                const ids = cat.ids as string[] | undefined
+                if (Array.isArray(ids)) {
+                  for (const id of ids) {
+                    const parts = id.split(':')
+                    const targetId = parts[0] || id
+                    targets.push({
+                      id: targetId,
+                      category,
+                      edge: edgeMap[category] || 'Heler',
+                      metric: parts.slice(1).join(':') || targetId,
+                      current: 'unknown',
+                      goal: 'target',
+                      targetGapNorm: 0.8,
+                      deps: 0,
+                      effortNorm: 0.3,
+                      status: 'open',
+                    })
+                  }
+                }
+              }
+            }
+            if (targets.length > 0) {
+              _registryCache = targets
+              logger.info({ count: targets.length }, 'HyperAgent-Auto: boot-init preloaded registry cache from Redis')
+            }
+          }
+        }
+      } catch (regErr) {
+        logger.warn({ err: regErr instanceof Error ? regErr.message : String(regErr) }, 'HyperAgent-Auto: boot-init registry preload failed (non-fatal)')
+      }
+    }
   } catch (err) {
     logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'HyperAgent-Auto: boot-init restore failed (non-fatal)')
   }
