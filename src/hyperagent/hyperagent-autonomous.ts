@@ -814,17 +814,31 @@ export async function runAutonomousCycle(
     // Use graph.read_cypher DIRECTLY (not via data_graph_read LOCAL wrapper) to
     // avoid double-wrapping. callMcpTool('graph.read_cypher').result is always
     // {success, results: [{value: '["A-01"...]', ...}]} — one predictable level.
+    //
+    // Guard: startup-validator runs concurrently with first HTTP requests (server.listen
+    // fires before boot()). During validation, callMcpTool returns the sentinel string
+    // 'validator-bypass' instead of a real result. Retry up to 10×500ms to let it finish.
     try {
-      const closedResult = await callMcpTool({
-        toolName: 'graph.read_cypher',
-        args: {
-          query: `MATCH (m:HyperAgentMemory {domain: 'targets', key: 'closed-ids'})
-                  RETURN m.value AS value LIMIT 1`,
-          params: {},
-        },
-        callId: `hyp-closed-restore-${Date.now()}`,
-      })
-      if (closedResult.status === 'success' && closedResult.result) {
+      let closedResult: Awaited<ReturnType<typeof callMcpTool>> | null = null
+      for (let attempt = 0; attempt < 10; attempt++) {
+        closedResult = await callMcpTool({
+          toolName: 'graph.read_cypher',
+          args: {
+            query: `MATCH (m:HyperAgentMemory {domain: 'targets', key: 'closed-ids'})
+                    RETURN m.value AS value LIMIT 1`,
+            params: {},
+          },
+          callId: `hyp-closed-restore-${Date.now()}`,
+        })
+        // Detect startup-validator bypass sentinel — real result is always an object
+        if (typeof closedResult.result === 'string' && closedResult.result === 'validator-bypass') {
+          logger.debug({ attempt }, 'HyperAgent-Auto: validator-bypass detected on restore, retrying in 500ms')
+          await new Promise(r => setTimeout(r, 500))
+          continue
+        }
+        break
+      }
+      if (closedResult && closedResult.status === 'success' && closedResult.result) {
         // graph.read_cypher returns {success, results: [{value: '["A-01"...]'}]}
         const r = closedResult.result as Record<string, unknown>
         const rows = r.results as Array<Record<string, unknown>> | undefined
@@ -836,7 +850,7 @@ export async function runAutonomousCycle(
             logger.info({ count: closedTargetIds.size, ids }, 'HyperAgent-Auto: authoritative restore from Neo4j closed-ids')
           }
         }
-      } else {
+      } else if (closedResult) {
         logger.warn({ status: closedResult.status, err: closedResult.error_message }, 'HyperAgent-Auto: closed-ids Neo4j restore call failed')
       }
     } catch (err) {
