@@ -21,6 +21,9 @@ jobs:
     timeout-minutes: 15
     env:
       RAILWAY_URL: ${{ inputs.railway_url || secrets.RAILWAY_URL || vars.RAILWAY_URL }}
+      BACKEND_URL: ${{ secrets.BACKEND_URL || vars.BACKEND_URL || 'https://backend-production-d3da.up.railway.app' }}
+      ORCHESTRATOR_URL: ${{ secrets.ORCHESTRATOR_URL || vars.ORCHESTRATOR_URL || 'https://orchestrator-production-c27e.up.railway.app' }}
+      BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY || secrets.ORCHESTRATOR_BEARER }}
       TARGET_BRANCH: ${{ github.event.deployment.ref || github.ref_name }}
       TARGET_SHA: ${{ github.event.deployment.sha || github.sha }}
     steps:
@@ -35,20 +38,35 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Setup Python
+        if: ${{ hashFiles('scripts/verify_deploy_stack.py') != '' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Install dependencies when package.json exists
         if: ${{ hashFiles('package.json') != '' }}
         run: npm install --legacy-peer-deps --ignore-scripts
 
-      - name: Wait for Railway rollout window
+      - name: Wait until orchestrator is healthy
         if: ${{ env.RAILWAY_URL != '' }}
-        run: sleep 45
-
-      - name: Verify runtime endpoint
-        if: ${{ env.RAILWAY_URL != '' }}
+        shell: bash
         run: |
-          set -e
-          curl -fsSL "${RAILWAY_URL}/health" > /tmp/railway-health.json
-          cat /tmp/railway-health.json
+          set -euo pipefail
+          until curl -fsSL "${ORCHESTRATOR_URL}/health" | grep -Eq '"status":"(ok|healthy)"'; do
+            sleep 5
+          done
+          echo "READY"
+
+      - name: Run targeted deploy verification
+        if: ${{ hashFiles('scripts/verify_deploy_stack.py') != '' && env.RAILWAY_URL != '' }}
+        shell: bash
+        run: python scripts/verify_deploy_stack.py --service orchestrator --mode targeted --json
+
+      - name: Run full-stack deploy verification
+        if: ${{ hashFiles('scripts/verify_deploy_stack.py') != '' && env.RAILWAY_URL != '' }}
+        shell: bash
+        run: python scripts/verify_deploy_stack.py --service backend --mode full-stack --json
 
       - name: Run production smoke script when available
         if: ${{ hashFiles('package.json') != '' && env.RAILWAY_URL != '' }}

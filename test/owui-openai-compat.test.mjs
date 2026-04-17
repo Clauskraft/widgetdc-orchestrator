@@ -131,10 +131,59 @@ function testSpaFallbackBypassesV1Routes() {
   )
 }
 
+function testStreamingRouteFlushesEarlyAndDisablesTransforms() {
+  const routeSource = readFileSync(path.join(ROOT, 'src', 'routes', 'openai-compat.ts'), 'utf8')
+  assert(
+    routeSource.includes("'widgetdc-neural': 'gemini-2.0-flash'"),
+    'widgetdc-neural should be a first-class alias instead of falling through to an implicit fallback',
+  )
+  assert(
+    routeSource.includes("const FALLBACK_TOOLS = ['intent_detect', 'search_knowledge', 'get_platform_health']"),
+    'default tool routing should start from tested intent detection and knowledge retrieval',
+  )
+  assert(
+    routeSource.includes("tools: ['intent_detect', 'query_graph', 'search_knowledge', 'knowledge_normalize', 'context_fold']"),
+    'graph analyst should be wired to the tested intent, graph, normalization, and folding layers',
+  )
+  assert(
+    routeSource.includes("tools: ['intent_detect', 'get_platform_health', 'call_mcp_tool', 'reason_deeply', 'context_fold']"),
+    'platform health should be wired to the tested runtime, reasoning, and folding layers',
+  )
+  assert(
+    routeSource.includes("res.setHeader('Cache-Control', 'no-cache, no-transform')"),
+    'streaming responses should disable intermediary content transforms',
+  )
+  assert(
+    routeSource.includes("res.setHeader('X-Accel-Buffering', 'no')"),
+    'streaming responses should disable proxy buffering hints',
+  )
+  assert(
+    routeSource.includes("res.setHeader('Content-Encoding', 'identity')"),
+    'streaming responses should explicitly opt out of compression at the origin',
+  )
+  assert(
+    routeSource.includes('res.flushHeaders()'),
+    'streaming responses should flush headers before the heavy orchestration work begins',
+  )
+  assert(
+    routeSource.includes("writeStreamChunk(res, requestId, model, { role: 'assistant', content: '\\u200b' })"),
+    'streaming responses should emit an immediate content-bearing first chunk',
+  )
+  assert(
+    routeSource.includes('finalContent = buildDeterministicHealthResponse('),
+    'deterministic health fast path should synthesize directly from tool output instead of paying for another model round',
+  )
+  assert(
+    routeSource.includes("const allowedCompanions = new Set(['get_platform_health', 'verify_output', 'intent_detect'])"),
+    'deterministic health fast path should tolerate the generic verify tool and intent detector when the user says health check',
+  )
+}
+
 async function main() {
   await testDynamicOwuiModels()
   await testDynamicOwuiModelCacheInvalidatesOnRegistryChange()
   testSpaFallbackBypassesV1Routes()
+  testStreamingRouteFlushesEarlyAndDisablesTransforms()
   console.log('PASS owui-openai-compat')
   process.exit(0)
 }

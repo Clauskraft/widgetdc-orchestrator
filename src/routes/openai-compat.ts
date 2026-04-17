@@ -30,6 +30,7 @@ import { AGENT_SEEDS } from '../agents/agent-seeds.js'
 // to llm-proxy. The alias IDs are a stable UI contract and are defined
 // locally; the target full-model names come from the matrix.
 const MATRIX_ALIAS_TARGETS: Record<string, string> = {
+  'widgetdc-neural': 'gemini-2.0-flash',
   'claude-sonnet': 'claude-sonnet-4-20250514',
   'claude-opus': 'claude-sonnet-4-20250514', // opus not in matrix — route to sonnet
   'gemini-flash': 'gemini-2.0-flash',
@@ -65,6 +66,7 @@ interface ToolCategory {
 }
 
 const TOOL_CATEGORIES: ToolCategory[] = [
+  { keywords: /\b(intent|route|routing|goal|scope|compose|composition)\b/i, tools: ['intent_detect'] },
   { keywords: /\b(health|status|uptime|service|railway|deploy|online)\b/i, tools: ['get_platform_health'] },
   { keywords: /\b(linear|issue|task|sprint|backlog|blocker|LIN-\d+|projekt|project)\b/i, tools: ['linear_issues', 'linear_issue_detail'] },
   { keywords: /\b(søg|search|find|pattern|knowledge|viden|consulting|document|artifact)\b/i, tools: ['search_knowledge', 'search_documents'] },
@@ -76,6 +78,9 @@ const TOOL_CATEGORIES: ToolCategory[] = [
   { keywords: /\b(competitive|competitor|market watch|market intel)\b/i, tools: ['competitive_crawl', 'search_knowledge'] },
   { keywords: /\b(openclaw|remote host|gateway host|fleet node|host health)\b/i, tools: ['get_platform_health', 'call_mcp_tool'] },
   { keywords: /\b(analy|strateg|reason|deep|complex|evaluat|plan|why|how does|architect|OODA)\b/i, tools: ['reason_deeply', 'search_knowledge'] },
+  { keywords: /\b(fold|folding|compress|compression|summari[sz]e|sammenfat|token budget|context window|long context)\b/i, tools: ['context_fold'] },
+  { keywords: /\b(visuali[sz]ation|diagram|illustration|render|renderer|mermaid|chart|canvas|catalog)\b/i, tools: ['intent_detect', 'knowledge_normalize', 'search_knowledge', 'context_fold'] },
+  { keywords: /\b(phantom|bom|bill of materials|repo inventory|provider inventory|component inventory|pattern library|autonomous loop)\b/i, tools: ['recommend_skill_loop', 'knowledge_normalize', 'search_knowledge'] },
   { keywords: /\b(graph|cypher|node|relation|neo4j|count|match)\b/i, tools: ['query_graph'] },
   { keywords: /\b(chain|workflow|sequential|parallel|debate|multi.step|pipeline)\b/i, tools: ['run_chain'] },
   { keywords: /\b(verify|check|quality|audit|compliance|valid)\b/i, tools: ['verify_output'] },
@@ -83,10 +88,18 @@ const TOOL_CATEGORIES: ToolCategory[] = [
   { keywords: /\b(notebook|celle|cells|query.*insight|interactive.*analysis|structured.*analysis)\b/i, tools: ['create_notebook'] },
 ]
 
-const FALLBACK_TOOLS = ['search_knowledge', 'get_platform_health', 'linear_issues']
+const FALLBACK_TOOLS = ['intent_detect', 'search_knowledge', 'get_platform_health']
 
 function selectToolsForQuery(userMessage: string): typeof ORCHESTRATOR_TOOLS {
   const matched = new Set<string>()
+  const normalized = (userMessage || '').trim()
+
+  if (normalized.length >= 12) {
+    matched.add('intent_detect')
+  }
+  if (normalized.length >= 3000) {
+    matched.add('context_fold')
+  }
 
   for (const cat of TOOL_CATEGORIES) {
     if (cat.keywords.test(userMessage)) {
@@ -103,6 +116,79 @@ function selectToolsForQuery(userMessage: string): typeof ORCHESTRATOR_TOOLS {
   const selected = [...matched].slice(0, 5)
 
   return ORCHESTRATOR_TOOLS.filter(t => selected.includes(t.function.name))
+}
+
+function isDeterministicHealthQuery(userMessage: string, selectedTools: typeof ORCHESTRATOR_TOOLS): boolean {
+  const normalized = (userMessage || '').trim()
+  if (!normalized) return false
+  const selectedNames = new Set(selectedTools.map(tool => tool.function.name))
+  if (!selectedNames.has('get_platform_health')) return false
+  const allowedCompanions = new Set(['get_platform_health', 'verify_output', 'intent_detect'])
+  if ([...selectedNames].some(name => !allowedCompanions.has(name))) return false
+  return /\b(health|status|uptime|service|railway|deploy|online|platform)\b/i.test(normalized)
+}
+
+function writeStreamChunk(
+  res: Response,
+  requestId: string,
+  model: string,
+  delta: Record<string, unknown>,
+  finishReason: string | null = null,
+): void {
+  res.write(`data: ${JSON.stringify({
+    id: requestId,
+    object: 'chat.completion.chunk',
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [{ index: 0, delta, finish_reason: finishReason }],
+  })}\n\n`)
+}
+
+function initStreamingResponse(res: Response, requestId: string, model: string): ReturnType<typeof setInterval> {
+  res.status(200)
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
+  res.setHeader('Cache-Control', 'no-cache, no-transform')
+  res.setHeader('Connection', 'keep-alive')
+  res.setHeader('X-Accel-Buffering', 'no')
+  res.setHeader('Content-Encoding', 'identity')
+  res.flushHeaders()
+
+  // Emit an immediate content-bearing first chunk so upstream proxies treat this as an active stream.
+  // The zero-width space is invisible in the UI but avoids a long idle gap before the first content token.
+  writeStreamChunk(res, requestId, model, { role: 'assistant', content: '\u200b' })
+
+  return setInterval(() => {
+    res.write(': keepalive\n\n')
+  }, 15_000)
+}
+
+function buildDeterministicHealthResponse(toolContents: string[], userMessage: string): string {
+  const merged = toolContents.filter(Boolean).join('\n')
+  const backendLine = merged.split('\n').find(line => line.startsWith('Backend:')) ?? 'Backend: unavailable'
+  const rlmLine = merged.split('\n').find(line => line.startsWith('RLM:')) ?? 'RLM: unavailable'
+  const orchestratorLine = merged.split('\n').find(line => line.startsWith('Orchestrator:')) ?? 'Orchestrator: unavailable'
+
+  return [
+    '# WidgeTDC Platform Health',
+    '',
+    '## Status',
+    '- Scope: live platform health check',
+    `- Query: ${userMessage.trim()}`,
+    `- Timestamp: ${new Date().toISOString()}`,
+    '',
+    '## Findings',
+    `- ${backendLine}`,
+    `- ${rlmLine}`,
+    `- ${orchestratorLine}`,
+    '',
+    '## Assessment',
+    '- The response is synthesized directly from live health endpoints, not a second LLM round.',
+    '- Backend, RLM, and orchestrator telemetry are included directly from the health tool output above.',
+    '- If any line says unavailable, rerun the check or inspect backend/orchestrator pressure before escalating.',
+    '',
+    '## Next Action',
+    '- Escalate only if the health lines degrade or repeated checks show missing graph telemetry.',
+  ].join('\n')
 }
 
 // ─── Metrics tracking ──────────────────────────────────────────────────────
@@ -195,9 +281,9 @@ const STATIC_ASSISTANTS: AssistantConfig[] = [
   {
     id: 'graph-analyst',
     displayName: 'Graph Analyst',
-    baseModel: 'gemini-flash',
+    baseModel: 'widgetdc-neural',
     systemPrompt: 'Du er WidgeTDC Graph Analyst med direkte adgang til Neo4j videngrafen: 445,918 nodes, 3,771,937 relationer, 32 consulting domæner, 270+ frameworks, 288 KPIs, 52,925 McKinsey insights. Brug query_graph til Cypher-forespørgsler og search_knowledge til semantisk søgning. Visualisér resultater som tabeller og lister. Svar på dansk.',
-    tools: ['query_graph', 'search_knowledge'],
+    tools: ['intent_detect', 'query_graph', 'search_knowledge', 'knowledge_normalize', 'context_fold'],
     promptSuggestions: ['Vis domain-statistik', 'Find orphan nodes', 'Framework-dækning per domæne'],
     capabilities: ['graph_analysis', 'cypher', 'knowledge_search'],
   },
@@ -222,9 +308,9 @@ const STATIC_ASSISTANTS: AssistantConfig[] = [
   {
     id: 'platform-health',
     displayName: 'Platform Health',
-    baseModel: 'gemini-flash',
+    baseModel: 'widgetdc-neural',
     systemPrompt: 'Du er WidgeTDC Platform Health Monitor. Brug get_platform_health til at tjekke alle services (backend, RLM engine, orchestrator, Neo4j, Redis, Pipelines). Brug call_mcp_tool til avancerede MCP-kald. Rapportér: service health, Neo4j stats (445K nodes), agent fleet (430+ agenter), cron jobs, Redis status. Svar på dansk med real-time data.',
-    tools: ['get_platform_health', 'call_mcp_tool', 'query_graph'],
+    tools: ['intent_detect', 'get_platform_health', 'call_mcp_tool', 'reason_deeply', 'context_fold'],
     promptSuggestions: ['Service status', 'Neo4j health', 'Agent fleet oversigt'],
     capabilities: ['observability', 'runtime_health', 'service_status'],
   },
@@ -565,6 +651,15 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
   }
   const provider = mapping.provider
   const providerModel = mapping.model
+  const responseModel = model || 'gemini-flash'
+  let streamKeepAlive: ReturnType<typeof setInterval> | null = null
+
+  const clearStreamKeepAlive = (): void => {
+    if (streamKeepAlive) {
+      clearInterval(streamKeepAlive)
+      streamKeepAlive = null
+    }
+  }
 
   // Inject system prompt — assistants REPLACE the default prompt
   const llmMessages: LLMMessage[] = [...(messages || [])]
@@ -584,6 +679,11 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
   logger.info({ model, provider, stream, messageCount: llmMessages.length, ip: clientIp }, 'OpenAI compat request')
 
   try {
+    if (stream) {
+      streamKeepAlive = initStreamingResponse(res, requestId, responseModel)
+      req.on('close', clearStreamKeepAlive)
+    }
+
     // ─── TOOL-CALL LOOP: LLM may request tools, orchestrator executes ──
     let loopMessages = [...llmMessages]
     let finalContent = ''
@@ -598,62 +698,104 @@ openaiCompatRouter.post('/v1/chat/completions', async (req: Request, res: Respon
       : selectToolsForQuery(userMsg)
     logger.debug({ selectedTools: selectedTools.map(t => t.function.name), query: userMsg.slice(0, 50), assistant: assistant?.id || null }, 'Tool selection')
 
-    const maxRounds = assistant ? MAX_TOOL_ROUNDS_ASSISTANT : MAX_TOOL_ROUNDS
-    for (let round = 0; round <= maxRounds; round++) {
-      const result = await chatLLM({
-        provider,
-        messages: loopMessages,
-        model: providerModel,
-        temperature: temperature ?? 0.7,
-        max_tokens: max_tokens ?? 4096,
-        tools: selectedTools,
+    const useDeterministicHealthFastPath = isDeterministicHealthQuery(userMsg, selectedTools)
+    if (useDeterministicHealthFastPath) {
+      toolRounds = 1
+      allToolNames.push('get_platform_health')
+      logger.info({ query: userMsg.slice(0, 80) }, 'Using deterministic health fast path')
+
+      const syntheticToolCall = {
+        id: `call_health_${Date.now()}`,
+        function: {
+          name: 'get_platform_health',
+          arguments: '{}',
+        },
+      }
+
+      loopMessages.push({
+        role: 'assistant',
+        content: '',
+        tool_calls: [{
+          id: syntheticToolCall.id,
+          type: 'function',
+          function: {
+            name: syntheticToolCall.function.name,
+            arguments: syntheticToolCall.function.arguments,
+          },
+        }],
       })
 
-      // Accumulate usage
-      if (result.usage) {
-        totalUsage.prompt_tokens += result.usage.prompt_tokens
-        totalUsage.completion_tokens += result.usage.completion_tokens
-        totalUsage.total_tokens += result.usage.total_tokens
-      }
-
-      // Capture any partial text content alongside tool calls
-      if (result.content && result.content.length > 0) {
-        finalContent = result.content
-      }
-
-      // Check if LLM wants to call tools
-      if (result.tool_calls && result.tool_calls.length > 0 && round < maxRounds) {
-        toolRounds++
-        const toolNames = result.tool_calls.map(tc => tc.function.name)
-        allToolNames.push(...toolNames)
-        logger.info({ round, tools: toolNames, partialContent: (result.content || '').length }, 'Tool calls requested')
-
-        // Add assistant message with tool_calls
+      const toolResults = await executeToolCalls([syntheticToolCall])
+      for (const tr of toolResults) {
         loopMessages.push({
-          role: 'assistant',
-          content: result.content || '',
-          tool_calls: result.tool_calls,
+          role: 'tool',
+          content: tr.content,
+          tool_call_id: tr.tool_call_id,
+        })
+      }
+
+      finalContent = buildDeterministicHealthResponse(
+        toolResults.map(tr => tr.content),
+        userMsg,
+      )
+    } else {
+      const maxRounds = assistant ? MAX_TOOL_ROUNDS_ASSISTANT : MAX_TOOL_ROUNDS
+      for (let round = 0; round <= maxRounds; round++) {
+        const result = await chatLLM({
+          provider,
+          messages: loopMessages,
+          model: providerModel,
+          temperature: temperature ?? 0.7,
+          max_tokens: max_tokens ?? 4096,
+          tools: selectedTools,
         })
 
-        // Execute all tool calls in parallel
-        const toolResults = await executeToolCalls(result.tool_calls)
-
-        // Add tool results as messages
-        for (const tr of toolResults) {
-          loopMessages.push({
-            role: 'tool',
-            content: tr.content,
-            tool_call_id: tr.tool_call_id,
-          })
+        // Accumulate usage
+        if (result.usage) {
+          totalUsage.prompt_tokens += result.usage.prompt_tokens
+          totalUsage.completion_tokens += result.usage.completion_tokens
+          totalUsage.total_tokens += result.usage.total_tokens
         }
 
-        // Continue loop — LLM will see tool results and respond
-        continue
-      }
+        // Capture any partial text content alongside tool calls
+        if (result.content && result.content.length > 0) {
+          finalContent = result.content
+        }
 
-      // No tool calls — this is the final response
-      finalContent = result.content
-      break
+        // Check if LLM wants to call tools
+        if (result.tool_calls && result.tool_calls.length > 0 && round < maxRounds) {
+          toolRounds++
+          const toolNames = result.tool_calls.map(tc => tc.function.name)
+          allToolNames.push(...toolNames)
+          logger.info({ round, tools: toolNames, partialContent: (result.content || '').length }, 'Tool calls requested')
+
+          // Add assistant message with tool_calls
+          loopMessages.push({
+            role: 'assistant',
+            content: result.content || '',
+            tool_calls: result.tool_calls,
+          })
+
+          // Execute all tool calls in parallel
+          const toolResults = await executeToolCalls(result.tool_calls)
+
+          // Add tool results as messages
+          for (const tr of toolResults) {
+            loopMessages.push({
+              role: 'tool',
+              content: tr.content,
+              tool_call_id: tr.tool_call_id,
+            })
+          }
+
+          // Continue loop — LLM will see tool results and respond
+          continue
+        }
+
+        // No tool calls — this is the final response
+        finalContent = result.content
+        break
+      }
     }
 
     // If all rounds used tool_calls and no final content, do one more LLM call
@@ -744,29 +886,14 @@ RULES:
 
     // ─── Return response (streaming or non-streaming) ─────────────────
     if (stream) {
-      res.setHeader('Content-Type', 'text/event-stream')
-      res.setHeader('Cache-Control', 'no-cache')
-      res.setHeader('Connection', 'keep-alive')
-
-      const chunkSize = 20
+      clearStreamKeepAlive()
+      const chunkSize = 120
       for (let i = 0; i < finalContent.length; i += chunkSize) {
         const chunk = finalContent.slice(i, i + chunkSize)
-        res.write(`data: ${JSON.stringify({
-          id: requestId,
-          object: 'chat.completion.chunk',
-          created: Math.floor(Date.now() / 1000),
-          model: model || 'gemini-flash',
-          choices: [{ index: 0, delta: { content: chunk }, finish_reason: null }],
-        })}\n\n`)
+        writeStreamChunk(res, requestId, responseModel, { content: chunk })
       }
 
-      res.write(`data: ${JSON.stringify({
-        id: requestId,
-        object: 'chat.completion.chunk',
-        created: Math.floor(Date.now() / 1000),
-        model: model || 'gemini-flash',
-        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-      })}\n\n`)
+      writeStreamChunk(res, requestId, responseModel, {}, 'stop')
       res.write('data: [DONE]\n\n')
       res.end()
     } else {
@@ -785,7 +912,14 @@ RULES:
     }
 
   } catch (err) {
+    clearStreamKeepAlive()
     logger.error({ model, provider, err: String(err) }, 'OpenAI compat error')
+    if (stream && res.headersSent) {
+      writeStreamChunk(res, requestId, responseModel, {}, 'stop')
+      res.write('data: [DONE]\n\n')
+      res.end()
+      return
+    }
     res.status(500).json({
       error: {
         message: String(err),
