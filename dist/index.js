@@ -26552,6 +26552,7 @@ __export(hyperagent_autonomous_exports, {
   advancePhase: () => advancePhase,
   checkPhaseGate: () => checkPhaseGate,
   getAutonomousStatus: () => getAutonomousStatus,
+  initHyperAgentBootRestore: () => initHyperAgentBootRestore,
   listCrossRepoMemory: () => listCrossRepoMemory,
   persistCrossRepoMemory: () => persistCrossRepoMemory,
   readCrossRepoMemory: () => readCrossRepoMemory,
@@ -26559,6 +26560,37 @@ __export(hyperagent_autonomous_exports, {
   setPhase: () => setPhase
 });
 import { v4 as uuid23 } from "uuid";
+async function initHyperAgentBootRestore() {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  try {
+    const raw = await redis2.get("hyperagent:memory:targets:closed-ids");
+    if (raw) {
+      const entry = JSON.parse(raw);
+      const v = entry.value;
+      const ids = Array.isArray(v) ? v : typeof v === "string" ? JSON.parse(v) : [];
+      if (ids.length > 0) {
+        ids.forEach((id) => closedTargetIds.add(id));
+        _bootRestoreCompleted = true;
+        logger.info({ count: closedTargetIds.size, ids }, "HyperAgent-Auto: boot-init restore from Redis memory key");
+        return;
+      }
+    }
+    const legacyRaw = await redis2.get("hyperagent:closedTargets");
+    if (legacyRaw) {
+      const ids = JSON.parse(legacyRaw);
+      if (ids.length > 0) {
+        ids.forEach((id) => closedTargetIds.add(id));
+        _bootRestoreCompleted = true;
+        logger.info({ count: closedTargetIds.size }, "HyperAgent-Auto: boot-init restore from Redis legacy key");
+        return;
+      }
+    }
+    logger.info("HyperAgent-Auto: boot-init found no closed-ids in Redis \u2014 Neo4j restore will run on first cycle");
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "HyperAgent-Auto: boot-init restore failed (non-fatal)");
+  }
+}
 function stream(event, data) {
   const payload = {
     ...data,
@@ -54962,6 +54994,7 @@ async function boot() {
   const { validateOrThrow: validateOrThrow2 } = await Promise.resolve().then(() => (init_startup_validator(), startup_validator_exports));
   await validateOrThrow2();
   await initRedis();
+  await Promise.resolve().then(() => (init_hyperagent_autonomous(), hyperagent_autonomous_exports)).then((m) => m.initHyperAgentBootRestore()).catch((err) => logger.warn({ err: String(err) }, "HyperAgent boot-init restore failed (non-fatal)"));
   await AgentRegistry.hydrate().catch((err) => logger.warn({ err: String(err) }, "AgentRegistry hydrate failed (non-fatal)"));
   seedAgents();
   Promise.resolve().then(() => (init_skill_forge(), skill_forge_exports)).then((m) => m.loadForgedTools()).catch(() => {
