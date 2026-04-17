@@ -26573,20 +26573,75 @@ async function initHyperAgentBootRestore() {
         ids.forEach((id) => closedTargetIds.add(id));
         _bootRestoreCompleted = true;
         logger.info({ count: closedTargetIds.size, ids }, "HyperAgent-Auto: boot-init restore from Redis memory key");
-        return;
       }
     }
-    const legacyRaw = await redis2.get("hyperagent:closedTargets");
-    if (legacyRaw) {
-      const ids = JSON.parse(legacyRaw);
-      if (ids.length > 0) {
-        ids.forEach((id) => closedTargetIds.add(id));
-        _bootRestoreCompleted = true;
-        logger.info({ count: closedTargetIds.size }, "HyperAgent-Auto: boot-init restore from Redis legacy key");
-        return;
+    if (!_bootRestoreCompleted) {
+      const legacyRaw = await redis2.get("hyperagent:closedTargets");
+      if (legacyRaw) {
+        const ids = JSON.parse(legacyRaw);
+        if (ids.length > 0) {
+          ids.forEach((id) => closedTargetIds.add(id));
+          _bootRestoreCompleted = true;
+          logger.info({ count: closedTargetIds.size }, "HyperAgent-Auto: boot-init restore from Redis legacy key");
+        }
       }
     }
-    logger.info("HyperAgent-Auto: boot-init found no closed-ids in Redis \u2014 Neo4j restore will run on first cycle");
+    if (!_bootRestoreCompleted) {
+      logger.info("HyperAgent-Auto: boot-init found no closed-ids in Redis \u2014 Neo4j restore will run on first cycle");
+    }
+    if (_registryCache === null) {
+      try {
+        const regRaw = await redis2.get("hyperagent:memory:targets:full-registry-v2.2");
+        if (regRaw) {
+          const regEntry = JSON.parse(regRaw);
+          const regData = regEntry.value;
+          const categories = regData?.categories;
+          if (categories) {
+            const targets = [];
+            const edgeMap = {
+              A: "Heler",
+              B: "Husker",
+              C: "Integrerer",
+              D: "Vokser",
+              E: "Laerer",
+              F: "Laerer",
+              G: "Husker"
+            };
+            for (const [catKey, catVal] of Object.entries(categories)) {
+              const category = catKey.charAt(0).toUpperCase();
+              if (typeof catVal === "object" && catVal !== null) {
+                const cat = catVal;
+                const ids = cat.ids;
+                if (Array.isArray(ids)) {
+                  for (const id of ids) {
+                    const parts = id.split(":");
+                    const targetId = parts[0] || id;
+                    targets.push({
+                      id: targetId,
+                      category,
+                      edge: edgeMap[category] || "Heler",
+                      metric: parts.slice(1).join(":") || targetId,
+                      current: "unknown",
+                      goal: "target",
+                      targetGapNorm: 0.8,
+                      deps: 0,
+                      effortNorm: 0.3,
+                      status: "open"
+                    });
+                  }
+                }
+              }
+            }
+            if (targets.length > 0) {
+              _registryCache = targets;
+              logger.info({ count: targets.length }, "HyperAgent-Auto: boot-init preloaded registry cache from Redis");
+            }
+          }
+        }
+      } catch (regErr) {
+        logger.warn({ err: regErr instanceof Error ? regErr.message : String(regErr) }, "HyperAgent-Auto: boot-init registry preload failed (non-fatal)");
+      }
+    }
   } catch (err) {
     logger.warn({ err: err instanceof Error ? err.message : String(err) }, "HyperAgent-Auto: boot-init restore failed (non-fatal)");
   }
