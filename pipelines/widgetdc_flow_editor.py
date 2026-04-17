@@ -16,6 +16,27 @@ import html
 
 logger = logging.getLogger(__name__)
 
+CANONICAL_FLOWS = {
+    "forretningsanalyse": [
+        "Scope og problemdefinition",
+        "Stakeholder interviews",
+        "As-is proceskortlægning",
+        "Data- og KPI-analyse",
+        "Gap- og årsagsanalyse",
+        "Anbefalinger og løsningsdesign",
+        "Roadmap og implementering",
+    ],
+    "business analysis": [
+        "Scope and problem framing",
+        "Stakeholder interviews",
+        "Current-state process mapping",
+        "Data and KPI analysis",
+        "Gap and root-cause analysis",
+        "Recommendations and solution design",
+        "Roadmap and implementation",
+    ],
+}
+
 
 class Tools:
     class Valves(BaseModel):
@@ -38,6 +59,17 @@ class Tools:
 
     def __init__(self):
         self.valves = self.Valves()
+
+    def _canonical_steps(self, description: str) -> list[str]:
+        normalized = " ".join(description.lower().split())
+        for key, steps in CANONICAL_FLOWS.items():
+            if key in normalized:
+                return steps
+        if "proces" in normalized and "analyse" in normalized:
+            return CANONICAL_FLOWS["forretningsanalyse"]
+        if "process" in normalized and "analysis" in normalized:
+            return CANONICAL_FLOWS["business analysis"]
+        return []
 
     async def _orch_get(self, path: str) -> dict:
         url = f"{self.valves.ORCHESTRATOR_URL}{path}"
@@ -96,11 +128,14 @@ class Tools:
 
         :param description: Natural language description of the flow (use → for connections)
         """
-        # Parse description into nodes and edges
+        # Parse explicit arrows first, then fall back to a canonical flow for common analysis prompts.
         steps = [s.strip() for s in description.replace("->", "→").split("→") if s.strip()]
 
         if len(steps) < 2:
-            return "Please describe a flow with at least 2 steps connected by → arrows."
+            steps = self._canonical_steps(description)
+
+        if len(steps) < 2:
+            return "Please describe a flow with at least 2 steps connected by → arrows, or name a known process such as forretningsanalyse/business analysis."
 
         nodes = []
         edges = []
