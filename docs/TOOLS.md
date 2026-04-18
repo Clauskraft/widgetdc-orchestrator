@@ -898,7 +898,38 @@ curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/gover
 
 ---
 
-### assembly (1 tool)
+### assembly (2 tools)
+
+---
+
+#### `produce_document`
+
+**Description:** LibreChat/Open WebUI-facing tool that runs the canonical `/api/produce` gateway end-to-end — splits a free-form brief into sections (briefToSections helper), wraps in a DocumentBom v2.0, posts to the orchestrator's own `/api/produce`, and returns the composer artifact as base64 bytes for chat-UI file attachment.
+
+**Timeout:** 180,000 ms
+**Handler:** orchestrator (loopback to `/api/produce`)
+**Output:** `{order_id, plan_id, profile_id, artifact_base64, mime, cached}`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `brief` | string | yes | Free-form user intent (min 4 chars) |
+| `format` | enum | no | `docx` \| `pdf` (default: `docx`) |
+| `compliance_tier` | enum | no | `public` \| `internal` \| `legal` \| `health` (default: `internal`) |
+| `reasoning_depth` | number | no | 1-5 (default: 4) |
+| `max_cost_usd` | number | no | Soft budget ceiling |
+| `language` | string | no | BCP-47 language tag |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/produce_document \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"brief": "3-page internal overview of the Agent-MRP architecture", "format": "docx", "compliance_tier": "internal"}'
+```
+
+**Related:** `generate_deliverable` (consulting pipeline, knowledge-graph backed) vs `produce_document` (pattern-grounded DocumentBom via GenerationOrchestrator).
 
 ---
 

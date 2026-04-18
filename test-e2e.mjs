@@ -1975,6 +1975,19 @@ await test('210. POST /api/tools/knowledge_bus_consolidate responds', async () =
   assert(r.body?.data?.tool_name === 'knowledge_bus_consolidate', `wrong tool_name`)
 })
 
+// ── 211. produce_document — LibreChat/Open WebUI tool for /api/produce gateway ──
+await test('211. POST /api/tools/produce_document responds', async () => {
+  const r = await api('/api/tools/produce_document', { method: 'POST', body: JSON.stringify({
+    brief: 'E2E smoke of produce_document MCP tool',
+    format: 'docx',
+    compliance_tier: 'internal',
+    reasoning_depth: 3,
+  }) })
+  assert(r.status !== 404, `produce_document not deployed (404)`)
+  // Tool either succeeds (200 with artifact) or reports upstream error — both prove the route is wired.
+  assert([200, 401, 403, 500, 502].includes(r.status), `unexpected status ${r.status}`)
+})
+
 // ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped
