@@ -65,6 +65,23 @@ function categorizeFailure(error: string): FailureCategory {
 
 // ─── Remediation hints ───────────────────────────────────────────────────────
 
+// LIN-856 P1b: resolve backend-key hint from env (not hardcoded). One-time warn
+// if BACKEND_API_KEY is unset so ops can't miss misconfig during triage.
+let warnedMissingBackendKey = false
+function backendKeyHint(): string {
+  const key = process.env.BACKEND_API_KEY ?? ''
+  if (!key) {
+    if (!warnedMissingBackendKey) {
+      logger.warn('BACKEND_API_KEY env var not set — auth remediation hints will omit expected key')
+      warnedMissingBackendKey = true
+    }
+    return '(BACKEND_API_KEY unset — configure in Railway orchestrator service)'
+  }
+  // Redact middle of key in user-facing hint: show first 2 / last 2 chars only.
+  if (key.length <= 6) return '[set]'
+  return `${key.slice(0, 2)}…${key.slice(-2)}`
+}
+
 function remediationSuggestion(category: FailureCategory, toolName: string, _errorMessage: string): string {
   switch (category) {
     case 'timeout':
@@ -72,7 +89,7 @@ function remediationSuggestion(category: FailureCategory, toolName: string, _err
     case '502':
       return `Backend gateway unreachable. Check Railway service health for backend-production-d3da and verify Redis connection string in orchestrator env vars.`
     case 'auth':
-      return `Authentication failed on '${toolName}'. Verify BACKEND_API_KEY env var in Railway orchestrator service matches the backend's expected key (currently 'Heravej_22').`
+      return `Authentication failed on '${toolName}'. Verify BACKEND_API_KEY env var in Railway orchestrator service matches the backend's expected key (fingerprint: '${backendKeyHint()}').`
     case 'validation':
       return `Validation error on '${toolName}'. Log the exact args shape sent and compare against the tool registry schema in src/tools/tool-registry.ts.`
     case 'mcp_error':

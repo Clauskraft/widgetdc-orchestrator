@@ -1,8 +1,8 @@
 {
-  "total": 169,
-  "clean": 122,
+  "total": 171,
+  "clean": 123,
   "hard_errors": 0,
-  "warnings": 55,
+  "warnings": 56,
   "findings": [
     {
       "name": "adaptive_rag_query",
@@ -275,6 +275,14 @@
       ]
     },
     {
+      "name": "knowledge_bus_consolidate",
+      "namespace": "knowledge",
+      "errors": [],
+      "warnings": [
+        "description does not start with action verb (got \"promote\")"
+      ]
+    },
+    {
       "name": "llm_chat",
       "namespace": "llm",
       "errors": [],
@@ -389,5 +397,5 @@
       ]
     }
   ],
-  "generated_at": "2026-04-14T20:51:48.512Z"
+  "generated_at": "2026-04-18T07:44:20.574Z"
 }
