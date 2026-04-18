@@ -6389,6 +6389,26 @@ var init_tool_registry = __esm({
         input: z.object({}),
         backendTool: "anomaly-watcher.patterns",
         timeoutMs: 1e4
+      }),
+      // ─── World-Class Document Production (W7 Office add-in parity) ───────
+      defineTool({
+        name: "produce_document",
+        namespace: "assembly",
+        description: "Produce a world-class document (DOCX/PDF/HTML/MD), presentation (PPTX), or architecture artifact from a free-form brief. Routes through the /api/produce gateway: brief is split into sections, sent through the intelligenceInterceptor (PII / cluster / fold / cache / allocate / crypto-shred), gated by policy-profile, and rendered by the backend MRP composer. Returns base64 artifact bytes suitable for download.",
+        input: z.object({
+          brief: z.string().describe("Free-form description of what the document should cover (min 20 chars)"),
+          product_type: z.enum(["document", "presentation", "architecture", "diagram", "pdf", "code"]).optional().describe("Artifact family (default: document)"),
+          format: z.enum(["docx", "pdf", "html", "md"]).optional().describe("Output format for documents (default: docx)"),
+          title: z.string().optional().describe("Optional explicit title (default: derived from brief)"),
+          language: z.string().optional().describe('BCP-47 language tag (e.g. "en", "da")'),
+          compliance_tier: z.enum(["public", "internal", "legal", "health"]).optional().describe("Compliance tier (default: internal)"),
+          reasoning_depth: z.number().int().min(1).max(5).optional().describe("Reasoning depth 1-5 (default: 4 \u2014 world-class path)"),
+          max_latency_ms: z.number().int().positive().optional().describe("Soft latency budget"),
+          max_cost_usd: z.number().positive().optional().describe("Soft cost budget"),
+          agent_id: z.string().optional().describe("Calling agent identifier (for plan lineage)")
+        }),
+        timeoutMs: 18e4,
+        outputDescription: "JSON with order_id, plan_id, profile_id, artifact_base64 (mime-wrapped), artifact_path, cached flag. Chat client renders artifact_base64 as a downloadable attachment."
       })
       // ─── Universal Agent Communication ───────────────────────────────────
     ];
@@ -30727,6 +30747,182 @@ var init_anomaly_watcher = __esm({
   }
 });
 
+// src/tools/produce-tool.ts
+var produce_tool_exports = {};
+__export(produce_tool_exports, {
+  __test__: () => __test__,
+  executeProduceDocument: () => executeProduceDocument
+});
+function briefToSections(brief) {
+  const trimmed = brief.trim();
+  if (!trimmed) return [{ heading: "Overview", body: "" }];
+  const headingRegex = /^#{1,6}\s+(.+)$/gm;
+  const matches = [...trimmed.matchAll(headingRegex)];
+  if (matches.length >= 2) {
+    const sections = [];
+    for (let i = 0; i < matches.length; i++) {
+      const heading = matches[i][1].trim();
+      const start = matches[i].index + matches[i][0].length;
+      const end = i + 1 < matches.length ? matches[i + 1].index : trimmed.length;
+      const body = trimmed.slice(start, end).trim();
+      sections.push({ heading, body });
+    }
+    return sections;
+  }
+  const paragraphs = trimmed.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+  if (paragraphs.length >= 2) {
+    return paragraphs.map((body, idx) => ({
+      heading: idx === 0 ? deriveHeading(body) : `Section ${idx + 1}`,
+      body
+    }));
+  }
+  return [{ heading: deriveHeading(trimmed), body: trimmed }];
+}
+function deriveHeading(text) {
+  const firstLine = text.split("\n")[0].trim();
+  if (firstLine.length <= 80) return firstLine;
+  return firstLine.slice(0, 77) + "...";
+}
+async function executeProduceDocument(args) {
+  const brief = typeof args.brief === "string" ? args.brief.trim() : "";
+  if (!brief || brief.length < 20) {
+    return JSON.stringify({
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: "brief is required (min 20 chars)" }
+    });
+  }
+  const productType = typeof args.product_type === "string" && ["document", "presentation", "architecture", "diagram", "pdf", "code"].includes(args.product_type) ? args.product_type : "document";
+  const format = typeof args.format === "string" && ["docx", "pdf", "html", "md"].includes(args.format) ? args.format : "docx";
+  const complianceTier = typeof args.compliance_tier === "string" && ["public", "internal", "legal", "health"].includes(args.compliance_tier) ? args.compliance_tier : "internal";
+  const reasoningDepthRaw = typeof args.reasoning_depth === "number" && Number.isInteger(args.reasoning_depth) ? args.reasoning_depth : 4;
+  const reasoningDepth = Math.max(1, Math.min(5, reasoningDepthRaw));
+  const sections = briefToSections(brief);
+  const title = typeof args.title === "string" && args.title.trim() ? args.title.trim() : sections[0]?.heading ?? brief.slice(0, 80);
+  const bom = productType === "document" ? {
+    product_type: "document",
+    bom_version: "2.0",
+    title,
+    sections,
+    format,
+    citations: [],
+    ...typeof args.language === "string" ? { language: args.language } : {}
+  } : {
+    // Non-document product types take the brief verbatim — backend
+    // composer is responsible for shaping.
+    product_type: productType,
+    bom_version: "2.0",
+    title,
+    brief
+  };
+  const features = {
+    task_type: "compose",
+    compliance_tier: complianceTier,
+    reasoning_depth: reasoningDepth,
+    ...typeof args.max_latency_ms === "number" && args.max_latency_ms > 0 ? { max_latency_ms: args.max_latency_ms } : {},
+    ...typeof args.max_cost_usd === "number" && args.max_cost_usd > 0 ? { max_cost_usd: args.max_cost_usd } : {},
+    ...typeof args.language === "string" ? { language: args.language } : {}
+  };
+  const payload = {
+    product_type: productType,
+    bom,
+    _request_features: features,
+    ...typeof args.agent_id === "string" ? { agent_id: args.agent_id } : {}
+  };
+  const port = config.port ?? 3e3;
+  const url = `http://127.0.0.1:${port}/api/produce`;
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.orchestratorApiKey}`
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(17e4)
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      logger.warn({ status: response.status, body: text.slice(0, 200) }, "produce_document: upstream !ok");
+      return JSON.stringify({
+        success: false,
+        error: {
+          code: "UPSTREAM_ERROR",
+          message: `produce gateway returned HTTP ${response.status}`,
+          status_code: response.status
+        }
+      });
+    }
+    const body = await response.json();
+    if (!body.success) {
+      return JSON.stringify({
+        success: false,
+        error: body.error ?? { code: "PRODUCE_FAILED", message: "produce returned success=false" }
+      });
+    }
+    const orderId = body.order_id ?? body.order?.order_id;
+    const artifactBase64 = body.artifact?.bytes_base64 ?? body.artifact?.artifact_bytes;
+    const mime = body.artifact?.mime ?? mimeForFormat(format);
+    const artifactPath = body.artifact?.path;
+    const summary = [
+      `Produced ${productType} "${title}" (${format}).`,
+      orderId ? `order_id=${orderId}` : null,
+      body.planId ? `plan_id=${body.planId}` : null,
+      body.profileId ? `profile=${body.profileId}` : null,
+      body.cached ? "(cached)" : null
+    ].filter(Boolean).join(" ");
+    return JSON.stringify({
+      success: true,
+      summary,
+      order_id: orderId,
+      plan_id: body.planId,
+      profile_id: body.profileId,
+      cached: Boolean(body.cached),
+      artifact: {
+        mime,
+        filename: `${sanitizeFilename(title)}.${format}`,
+        base64: artifactBase64,
+        path: artifactPath
+      }
+    });
+  } catch (err) {
+    logger.error({ err: err instanceof Error ? err.message : String(err) }, "produce_document: fetch failed");
+    return JSON.stringify({
+      success: false,
+      error: {
+        code: "UPSTREAM_UNREACHABLE",
+        message: "produce gateway unreachable",
+        status_code: 502
+      }
+    });
+  }
+}
+function mimeForFormat(format) {
+  switch (format) {
+    case "docx":
+      return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    case "pdf":
+      return "application/pdf";
+    case "html":
+      return "text/html";
+    case "md":
+      return "text/markdown";
+    default:
+      return "application/octet-stream";
+  }
+}
+function sanitizeFilename(title) {
+  return title.replace(/[^a-zA-Z0-9\-_\s]/g, "").trim().replace(/\s+/g, "-").slice(0, 60) || "document";
+}
+var __test__;
+var init_produce_tool = __esm({
+  "src/tools/produce-tool.ts"() {
+    "use strict";
+    init_config();
+    init_logger();
+    __test__ = { briefToSections, mimeForFormat, sanitizeFilename };
+  }
+});
+
 // src/tools/tool-executor.ts
 var tool_executor_exports = {};
 __export(tool_executor_exports, {
@@ -33732,6 +33928,10 @@ Review and promote to a skill file in the WidgeTDC skill corpus.`,
       const { getAnomalyPatterns: getAnomalyPatterns2 } = await Promise.resolve().then(() => (init_anomaly_watcher(), anomaly_watcher_exports));
       const patterns = getAnomalyPatterns2();
       return JSON.stringify({ patterns, count: patterns.length });
+    }
+    case "produce_document": {
+      const { executeProduceDocument: executeProduceDocument2 } = await Promise.resolve().then(() => (init_produce_tool(), produce_tool_exports));
+      return executeProduceDocument2(args);
     }
     default:
       throw new Error(`Unknown tool: ${name}`);

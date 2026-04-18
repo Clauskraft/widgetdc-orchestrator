@@ -2598,6 +2598,27 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     timeoutMs: 10000,
   }),
 
+  // ─── World-Class Document Production (W7 Office add-in parity) ───────
+  defineTool({
+    name: 'produce_document',
+    namespace: 'assembly',
+    description: 'Produce a world-class document (DOCX/PDF/HTML/MD), presentation (PPTX), or architecture artifact from a free-form brief. Routes through the /api/produce gateway: brief is split into sections, sent through the intelligenceInterceptor (PII / cluster / fold / cache / allocate / crypto-shred), gated by policy-profile, and rendered by the backend MRP composer. Returns base64 artifact bytes suitable for download.',
+    input: z.object({
+      brief: z.string().describe('Free-form description of what the document should cover (min 20 chars)'),
+      product_type: z.enum(['document', 'presentation', 'architecture', 'diagram', 'pdf', 'code']).optional().describe('Artifact family (default: document)'),
+      format: z.enum(['docx', 'pdf', 'html', 'md']).optional().describe('Output format for documents (default: docx)'),
+      title: z.string().optional().describe('Optional explicit title (default: derived from brief)'),
+      language: z.string().optional().describe('BCP-47 language tag (e.g. "en", "da")'),
+      compliance_tier: z.enum(['public', 'internal', 'legal', 'health']).optional().describe('Compliance tier (default: internal)'),
+      reasoning_depth: z.number().int().min(1).max(5).optional().describe('Reasoning depth 1-5 (default: 4 — world-class path)'),
+      max_latency_ms: z.number().int().positive().optional().describe('Soft latency budget'),
+      max_cost_usd: z.number().positive().optional().describe('Soft cost budget'),
+      agent_id: z.string().optional().describe('Calling agent identifier (for plan lineage)'),
+    }),
+    timeoutMs: 180000,
+    outputDescription: 'JSON with order_id, plan_id, profile_id, artifact_base64 (mime-wrapped), artifact_path, cached flag. Chat client renders artifact_base64 as a downloadable attachment.',
+  }),
+
   // ─── Universal Agent Communication ───────────────────────────────────
 ]
 

@@ -3617,6 +3617,11 @@ ORDER BY n.score DESC LIMIT ${maxItems}`,
       return JSON.stringify({ patterns, count: patterns.length })
     }
 
+    case 'produce_document': {
+      const { executeProduceDocument } = await import('./produce-tool.js')
+      return executeProduceDocument(args as Record<string, unknown>)
+    }
+
     default:
       throw new Error(`Unknown tool: ${name}`)
   }
