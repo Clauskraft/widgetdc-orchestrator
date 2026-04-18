@@ -91,6 +91,7 @@ import { abiHealthRouter } from './routes/abi-health.js'
 import { abiVersioningRouter } from './routes/abi-versioning.js'
 import { hyperagentRouter } from './routes/hyperagent.js'
 import { hyperagentAutoRouter } from './routes/hyperagent-autonomous.js'
+import { produceRouter } from './routes/produce.js'
 import { inventorRouter } from './routes/inventor.js'
 import { anomalyWatcherRouter } from './routes/anomaly-watcher.js'
 import { initAnomalyWatcher, getWatcherState } from './swarm/anomaly-watcher.js'
@@ -353,6 +354,9 @@ app.use('/api/hyperagent/auto', requireApiKey, apiRateLimiter, hyperagentAutoRou
 
 // HyperAgent: plan-based execution with approval gate & KPI persistence (LIN-626/627/628)
 app.use('/api/hyperagent', requireApiKey, apiRateLimiter, hyperagentRouter)
+
+// Produce gateway (W4): plugin-facing /produce route, HyperAgent-gated.
+app.use('/api', requireApiKey, apiRateLimiter, produceRouter)
 
 // Tool Gateway — REST access to ALL orchestrator tools (Triple-Protocol ABI)
 // v4.0.10: uses shared apiRateLimiter (same budget shared across /tools, /chains, /api/tools, /mcp, etc.)
