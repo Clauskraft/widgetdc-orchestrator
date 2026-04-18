@@ -42,7 +42,13 @@ interface CronJob {
 const jobs = new Map<string, CronJob>()
 const cronTasks = new Map<string, cron.ScheduledTask>()
 
+// LIN-856 P0: in-process fallback mutex for when Redis is unavailable.
+// Without this fallback, a Redis outage would disable the overlap lock and
+// all 12 cron jobs could double-fire on re-entry.
+const runningJobsLocal = new Set<string>()
+
 const REDIS_CRON_KEY = 'orchestrator:cron-jobs'
+const CRON_LOCK_TTL_SEC = 300 // 5 min max lock
 
 /**
  * Register a cron job that executes an agent chain on schedule.
@@ -80,15 +86,25 @@ export async function runCronJob(jobId: string): Promise<void> {
     return
   }
 
-  // Redis-based mutex to prevent overlapping cron runs
+  // Redis-based mutex (preferred) with in-process fallback (LIN-856 P0).
+  // When Redis is unavailable, fall back to a local Set so a single process
+  // cannot double-fire the same job on overlapping ticks.
   const redis = getRedis()
   const lockKey = `cron:lock:${jobId}`
+  let usedLocalLock = false
   if (redis) {
-    const acquired = await redis.set(lockKey, Date.now().toString(), 'NX', 'EX', 300) // 5min max lock
+    const acquired = await redis.set(lockKey, Date.now().toString(), 'NX', 'EX', CRON_LOCK_TTL_SEC)
     if (!acquired) {
-      logger.warn({ id: jobId }, 'Cron job skipped — previous run still active')
+      logger.warn({ id: jobId }, 'Cron job skipped — previous run still active (remote lock)')
       return
     }
+  } else {
+    if (runningJobsLocal.has(jobId)) {
+      logger.warn({ id: jobId }, 'Cron job skipped — previous run still active (local lock, redis unavailable)')
+      return
+    }
+    runningJobsLocal.add(jobId)
+    usedLocalLock = true
   }
 
   logger.info({ id: job.id, name: job.name }, 'Cron job triggered')
@@ -766,8 +782,9 @@ export async function runCronJob(jobId: string): Promise<void> {
     persistCronJobs()
     logger.error({ id: job.id, err: String(err), consecutive_failures: job.consecutive_failures }, 'Cron job failed')
   } finally {
-    // Release cron overlap lock
+    // Release cron overlap lock (remote + local fallback)
     if (redis) await redis.del(lockKey).catch(() => {})
+    if (usedLocalLock) runningJobsLocal.delete(jobId)
   }
 }
 

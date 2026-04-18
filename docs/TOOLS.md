@@ -104,6 +104,8 @@ Every tool declares governance metadata per the Neural Bridge v2 specification:
 | 59 | `prompt_use` | prompts | 5s | Record prompt usage for quality scoring feedback loop |
 | 60 | `knowledge_ingest` | knowledge | 15s | Ingest document → Neo4j :KnowledgeDocument (from document_convert output) |
 | 61 | `knowledge_query` | knowledge | 10s | Query knowledge documents: tags, full-text, source type |
+| 61a | `knowledge_normalize` | knowledge | 15s | Normalize L2/L3/L4 knowledge candidates into canonical :KnowledgeDocument form (dedup, taxonomy alignment, embedding normalization) |
+| 61b | `knowledge_bus_consolidate` | knowledge | 30s | Consolidate tier-split knowledge candidates into unified Neo4j persistence (runs post-harvest via cron) |
 | 62 | `compliance_gap_audit` | compliance | 30s | EU AI Act Annex III gap audit: stack JSON → compliance report |
 | 63 | `engagement_cost_report` | analytics | 15s | Per-engagement DKK rollup by agent and tool |
 | 64 | `agent_drift_report` | analytics | 30s | Agent regression drift check → auto Linear issue on critical |
