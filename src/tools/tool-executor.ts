@@ -3622,6 +3622,11 @@ ORDER BY n.score DESC LIMIT ${maxItems}`,
       return executeProduceDocument(args as Record<string, unknown>)
     }
 
+    case 'canvas_builder': {
+      const { executeCanvasBuilder } = await import('./canvas-builder-tool.js')
+      return executeCanvasBuilder(args as Record<string, unknown>)
+    }
+
     default:
       throw new Error(`Unknown tool: ${name}`)
   }

@@ -6409,6 +6409,23 @@ var init_tool_registry = __esm({
         }),
         timeoutMs: 18e4,
         outputDescription: "JSON with order_id, plan_id, profile_id, artifact_base64 (mime-wrapped), artifact_path, cached flag. Chat client renders artifact_base64 as a downloadable attachment."
+      }),
+      // ─── Unified Canvas Builder (UC4 delegated-chasing-minsky) ───────────
+      defineTool({
+        name: "canvas_builder",
+        namespace: "assembly",
+        description: "Resolve a chat intent to a canvas session and return an embed URL. Host surfaces (Open WebUI, LibreChat, Office add-ins) iframe the result. Calls backend CanvasIntentConfigurator (/api/mrp/canvas/resolve) which routes to one of 7 builder tracks (textual, slide_flow, diagram, architecture, graphical, code, experiment) and seeds the widgetdc-canvas React-Flow board.",
+        input: z.object({
+          brief: z.string().describe("Free-form chat brief from the user (min 1 char)"),
+          surface_hint: z.enum(["pane", "full", "overlay"]).optional().describe("Host rendering hint"),
+          sequence_step: z.number().int().min(0).optional().describe("Multi-turn counter; >0 enables sticky-track rule"),
+          prior_track: z.enum(["textual", "slide_flow", "diagram", "architecture", "graphical", "code", "experiment"]).optional().describe("Prior builder track from earlier turn (enables sticky routing)"),
+          compliance_tier: z.enum(["public", "internal", "legal", "health"]).optional().describe("Compliance tier for data handling"),
+          host_origin: z.string().optional().describe("Embedding host origin for postMessage allowlist"),
+          agent_id: z.string().optional().describe("Calling agent identifier (for session lineage)")
+        }),
+        timeoutMs: 12e4,
+        outputDescription: "JSON with {success, stub, resolution: {track, initial_pane, canvas_session_id, embed_url, rationale[], bom_version, resolved_at}, summary}. When backend /api/mrp/canvas/resolve is unavailable the tool synthesizes a deterministic stub resolution and sets stub=true."
       })
       // ─── Universal Agent Communication ───────────────────────────────────
     ];
@@ -30923,6 +30940,191 @@ var init_produce_tool = __esm({
   }
 });
 
+// src/tools/canvas-builder-tool.ts
+var canvas_builder_tool_exports = {};
+__export(canvas_builder_tool_exports, {
+  __test__: () => __test__2,
+  buildIntentFromArgs: () => buildIntentFromArgs,
+  deriveEmbedUrl: () => deriveEmbedUrl,
+  executeCanvasBuilder: () => executeCanvasBuilder,
+  pickTrackFromBrief: () => pickTrackFromBrief,
+  synthesizeStubResolution: () => synthesizeStubResolution
+});
+import { randomUUID as randomUUID3 } from "node:crypto";
+function buildIntentFromArgs(args) {
+  const userText = typeof args.brief === "string" ? args.brief.trim() : "";
+  const intent = {
+    user_text: userText
+  };
+  if (typeof args.surface_hint === "string" && (args.surface_hint === "pane" || args.surface_hint === "full" || args.surface_hint === "overlay")) {
+    intent.surface_hint = args.surface_hint;
+  }
+  if (typeof args.sequence_step === "number" && Number.isInteger(args.sequence_step) && args.sequence_step >= 0) {
+    intent.sequence_step = args.sequence_step;
+  }
+  if (typeof args.prior_track === "string" && VALID_TRACKS.includes(args.prior_track)) {
+    intent.prior_track = args.prior_track;
+  }
+  if (typeof args.compliance_tier === "string" && VALID_TIERS.includes(args.compliance_tier)) {
+    intent.compliance_tier = args.compliance_tier;
+  }
+  if (typeof args.host_origin === "string" && args.host_origin.trim()) {
+    intent.host_origin = args.host_origin.trim();
+  }
+  if (typeof args.agent_id === "string" && args.agent_id.trim()) {
+    intent.agent_id = args.agent_id.trim();
+  }
+  return intent;
+}
+function deriveEmbedUrl(track, sessionId) {
+  const base = "https://widgetdc-canvas.up.railway.app";
+  const paneForTrack2 = {
+    textual: "markdown",
+    slide_flow: "slides",
+    diagram: "drawio",
+    architecture: "canvas",
+    graphical: "canvas",
+    code: "split",
+    experiment: "split"
+  };
+  const pane = paneForTrack2[track];
+  return `${base}/?session=${encodeURIComponent(sessionId)}&track=${encodeURIComponent(track)}&pane=${encodeURIComponent(pane)}`;
+}
+function pickTrackFromBrief(brief, priorTrack) {
+  if (priorTrack && VALID_TRACKS.includes(priorTrack)) return priorTrack;
+  const s = brief.toLowerCase();
+  if (/slide|deck|presentation|pptx/.test(s)) return "slide_flow";
+  if (/diagram|flowchart|drawio|bpmn|sequence/.test(s)) return "diagram";
+  if (/architecture|system design|c4|pattern/.test(s)) return "architecture";
+  if (/graph|mind\s?map|react.?flow|canvas/.test(s)) return "graphical";
+  if (/code|refactor|function|typescript|python/.test(s)) return "code";
+  if (/experiment|hypothesis|a\/?b test|inventor/.test(s)) return "experiment";
+  return "textual";
+}
+function paneForTrack(track) {
+  switch (track) {
+    case "textual":
+      return "markdown";
+    case "slide_flow":
+      return "slides";
+    case "diagram":
+      return "drawio";
+    case "architecture":
+      return "canvas";
+    case "graphical":
+      return "canvas";
+    case "code":
+      return "split";
+    case "experiment":
+      return "split";
+  }
+}
+function synthesizeStubResolution(intent, reason) {
+  const track = pickTrackFromBrief(intent.user_text, intent.prior_track);
+  const sessionId = randomUUID3();
+  const initialPane = paneForTrack(track);
+  const rationale = [
+    `stub:${reason}`,
+    intent.prior_track ? `sticky_prior_track:${intent.prior_track}` : `heuristic_track:${track}`,
+    intent.sequence_step && intent.sequence_step > 0 ? `sequence_step:${intent.sequence_step}` : "sequence_step:0"
+  ];
+  return {
+    track,
+    initial_pane: initialPane,
+    canvas_session_id: sessionId,
+    embed_url: deriveEmbedUrl(track, sessionId),
+    rationale,
+    bom_version: "2.0",
+    resolved_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+async function executeCanvasBuilder(args) {
+  const intent = buildIntentFromArgs(args);
+  if (!intent.user_text) {
+    return JSON.stringify({
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: "brief is required (min 1 char)" }
+    });
+  }
+  const url = `${config.backendUrl}/api/mrp/canvas/resolve`;
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.backendApiKey}`
+      },
+      body: JSON.stringify(intent),
+      signal: AbortSignal.timeout(11e4)
+    });
+    if (response.status === 404) {
+      logger.warn({ url }, "canvas_builder: backend 404, using stub resolution");
+      const stub = synthesizeStubResolution(intent, "backend_404");
+      return JSON.stringify({ success: true, stub: true, resolution: stub });
+    }
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      logger.warn({ status: response.status, body: text.slice(0, 200) }, "canvas_builder: upstream !ok");
+      return JSON.stringify({
+        success: false,
+        error: {
+          code: "UPSTREAM_ERROR",
+          message: `canvas resolver returned HTTP ${response.status}`,
+          status_code: response.status
+        }
+      });
+    }
+    const body = await response.json();
+    if (!body.canvas_session_id || !body.track || !body.embed_url) {
+      logger.warn({ body }, "canvas_builder: upstream body missing required fields, falling back to stub");
+      const stub = synthesizeStubResolution(intent, "upstream_body_incomplete");
+      return JSON.stringify({ success: true, stub: true, resolution: stub });
+    }
+    return JSON.stringify({
+      success: true,
+      stub: false,
+      resolution: body,
+      summary: [
+        `Resolved canvas session ${body.canvas_session_id.slice(0, 8)} (${body.track}).`,
+        `Initial pane: ${body.initial_pane}.`,
+        `Embed: ${body.embed_url}`
+      ].join(" ")
+    });
+  } catch (err) {
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err) },
+      "canvas_builder: fetch failed, using stub"
+    );
+    const stub = synthesizeStubResolution(intent, "upstream_unreachable");
+    return JSON.stringify({ success: true, stub: true, resolution: stub });
+  }
+}
+var VALID_TRACKS, VALID_TIERS, __test__2;
+var init_canvas_builder_tool = __esm({
+  "src/tools/canvas-builder-tool.ts"() {
+    "use strict";
+    init_config();
+    init_logger();
+    VALID_TRACKS = [
+      "textual",
+      "slide_flow",
+      "diagram",
+      "architecture",
+      "graphical",
+      "code",
+      "experiment"
+    ];
+    VALID_TIERS = ["public", "internal", "legal", "health"];
+    __test__2 = {
+      buildIntentFromArgs,
+      deriveEmbedUrl,
+      pickTrackFromBrief,
+      synthesizeStubResolution,
+      VALID_TRACKS
+    };
+  }
+});
+
 // src/tools/tool-executor.ts
 var tool_executor_exports = {};
 __export(tool_executor_exports, {
@@ -33932,6 +34134,10 @@ Review and promote to a skill file in the WidgeTDC skill corpus.`,
     case "produce_document": {
       const { executeProduceDocument: executeProduceDocument2 } = await Promise.resolve().then(() => (init_produce_tool(), produce_tool_exports));
       return executeProduceDocument2(args);
+    }
+    case "canvas_builder": {
+      const { executeCanvasBuilder: executeCanvasBuilder2 } = await Promise.resolve().then(() => (init_canvas_builder_tool(), canvas_builder_tool_exports));
+      return executeCanvasBuilder2(args);
     }
     default:
       throw new Error(`Unknown tool: ${name}`);
@@ -45335,7 +45541,7 @@ init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router21 } from "express";
-import { randomUUID as randomUUID3 } from "crypto";
+import { randomUUID as randomUUID4 } from "crypto";
 import { v4 as uuid35 } from "uuid";
 var notebookRouter = Router21();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
@@ -45444,7 +45650,7 @@ notebookRouter.post("/execute", async (req, res) => {
     res.status(400).json({ success: false, error: "Missing required fields: title, cells (non-empty array)" });
     return;
   }
-  const id = `widgetdc:notebook:${randomUUID3()}`;
+  const id = `widgetdc:notebook:${randomUUID4()}`;
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const cells = body.cells;
   for (let i = 0; i < cells.length; i++) {

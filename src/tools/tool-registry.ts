@@ -2619,6 +2619,24 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
     outputDescription: 'JSON with order_id, plan_id, profile_id, artifact_base64 (mime-wrapped), artifact_path, cached flag. Chat client renders artifact_base64 as a downloadable attachment.',
   }),
 
+  // ─── Unified Canvas Builder (UC4 delegated-chasing-minsky) ───────────
+  defineTool({
+    name: 'canvas_builder',
+    namespace: 'assembly',
+    description: 'Resolve a chat intent to a canvas session and return an embed URL. Host surfaces (Open WebUI, LibreChat, Office add-ins) iframe the result. Calls backend CanvasIntentConfigurator (/api/mrp/canvas/resolve) which routes to one of 7 builder tracks (textual, slide_flow, diagram, architecture, graphical, code, experiment) and seeds the widgetdc-canvas React-Flow board.',
+    input: z.object({
+      brief: z.string().describe('Free-form chat brief from the user (min 1 char)'),
+      surface_hint: z.enum(['pane', 'full', 'overlay']).optional().describe('Host rendering hint'),
+      sequence_step: z.number().int().min(0).optional().describe('Multi-turn counter; >0 enables sticky-track rule'),
+      prior_track: z.enum(['textual', 'slide_flow', 'diagram', 'architecture', 'graphical', 'code', 'experiment']).optional().describe('Prior builder track from earlier turn (enables sticky routing)'),
+      compliance_tier: z.enum(['public', 'internal', 'legal', 'health']).optional().describe('Compliance tier for data handling'),
+      host_origin: z.string().optional().describe('Embedding host origin for postMessage allowlist'),
+      agent_id: z.string().optional().describe('Calling agent identifier (for session lineage)'),
+    }),
+    timeoutMs: 120000,
+    outputDescription: 'JSON with {success, stub, resolution: {track, initial_pane, canvas_session_id, embed_url, rationale[], bom_version, resolved_at}, summary}. When backend /api/mrp/canvas/resolve is unavailable the tool synthesizes a deterministic stub resolution and sets stub=true.',
+  }),
+
   // ─── Universal Agent Communication ───────────────────────────────────
 ]
 
