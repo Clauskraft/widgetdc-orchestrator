@@ -898,7 +898,7 @@ curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/gover
 
 ---
 
-### assembly (2 tools)
+### assembly (3 tools)
 
 ---
 
@@ -930,6 +930,38 @@ curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/produ
 ```
 
 **Related:** `generate_deliverable` (consulting pipeline, knowledge-graph backed) vs `produce_document` (pattern-grounded DocumentBom via GenerationOrchestrator).
+
+---
+
+#### `canvas_builder`
+
+**Description:** Resolve a chat intent to a canvas session and return an embed URL. Host surfaces (Open WebUI, LibreChat, Office add-ins) iframe the result and exchange two-way `postMessage` with the widgetdc-canvas board. The tool calls the backend CanvasIntentConfigurator (`POST /api/mrp/canvas/resolve`), which routes the brief to one of 7 canonical builder tracks — `textual`, `slide_flow`, `diagram`, `architecture`, `graphical`, `code`, `experiment` — and returns a seeded CanvasResolution. When the backend endpoint is not yet deployed (404) or unreachable, the tool synthesizes a deterministic stub resolution so host surfaces can still exercise the contract; the response body carries `stub: true` in that case.
+
+**Timeout:** 120,000 ms
+**Handler:** orchestrator (fetch to `{BACKEND_URL}/api/mrp/canvas/resolve`, stub fallback on 404/502)
+**Output:** `{success, stub, resolution: {track, initial_pane, canvas_session_id, embed_url, rationale[], bom_version, resolved_at}, summary?}`
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `brief` | string | yes | Free-form chat brief from the user (min 1 char) |
+| `surface_hint` | enum | no | `pane` \| `full` \| `overlay` — host rendering hint |
+| `sequence_step` | integer | no | Multi-turn counter (>=0); >0 activates sticky-track rule |
+| `prior_track` | enum | no | Prior builder track from earlier turn (enables sticky routing) |
+| `compliance_tier` | enum | no | `public` \| `internal` \| `legal` \| `health` |
+| `host_origin` | string | no | Embedding host origin for postMessage allowlist |
+| `agent_id` | string | no | Calling agent identifier (for session lineage) |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/canvas_builder \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"brief": "Design a C4 architecture for the Agent-MRP control plane", "surface_hint": "pane", "compliance_tier": "internal"}'
+```
+
+**Related:** Sibling of `produce_document` — `produce_document` returns a finished artifact; `canvas_builder` returns a live editable surface.
 
 ---
 

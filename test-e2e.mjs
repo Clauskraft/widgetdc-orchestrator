@@ -1988,6 +1988,15 @@ await test('211. POST /api/tools/produce_document responds', async () => {
   assert([200, 401, 403, 500, 502].includes(r.status), `unexpected status ${r.status}`)
 })
 
+// ── 212. canvas_builder — UC4 unified canvas MCP tool ──
+await test('212. POST /api/tools/canvas_builder responds', async () => {
+  const r = await api('/api/tools/canvas_builder', { method: 'POST', body: JSON.stringify({
+    brief: 'E2E smoke of canvas_builder MCP tool',
+  }) })
+  assert(r.status !== 404, 'canvas_builder not deployed (404)')
+  assert([200, 401, 403, 500, 502].includes(r.status), `unexpected status ${r.status}`)
+})
+
 // ═══════════════════════════════════════════════════════════════
 console.log('\n' + '=' .repeat(60))
 const total = passed + failed + skipped
