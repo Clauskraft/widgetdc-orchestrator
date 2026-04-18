@@ -42840,6 +42840,26 @@ function registerDefaultLoops() {
     }
   });
   registerCronJob({
+    id: "closed-loop-priors",
+    name: "Closed-Loop Priors Aggregation",
+    schedule: "*/15 * * * *",
+    enabled: true,
+    chain: {
+      name: "Closed-Loop Priors",
+      mode: "sequential",
+      steps: [
+        {
+          agent_id: "orchestrator",
+          tool_name: "backend.http_post",
+          arguments: {
+            path: "/api/mrp/closed-loop/aggregate",
+            body: { window_days: 7 }
+          }
+        }
+      ]
+    }
+  });
+  registerCronJob({
     id: "adaptive-rag-retrain",
     name: "Adaptive RAG Weight Retraining",
     schedule: "0 5 * * 1",
@@ -51435,13 +51455,156 @@ data: ${JSON.stringify({
   });
 });
 
+// src/routes/produce.ts
+init_config();
+init_logger();
+init_hyperagent();
+import { Router as Router48 } from "express";
+
+// src/hyperagent/policy-profile.ts
+function selectProfile(req, features = {}) {
+  if (features.compliance_tier === "legal" || features.compliance_tier === "health") {
+    return "production_write";
+  }
+  if (req.product_type === "architecture") {
+    return "staged_write";
+  }
+  if (req.product_type === "document" || req.product_type === "presentation" || req.product_type === "pdf" || req.product_type === "diagram") {
+    return "staged_write";
+  }
+  if (req.product_type === "code") {
+    return "production_write";
+  }
+  return "read_only";
+}
+
+// src/routes/produce.ts
+var produceRouter = Router48();
+produceRouter.post("/produce", async (req, res) => {
+  const body = req.body;
+  const productType = body?.product_type;
+  const features = body?._request_features ?? {};
+  if (!productType) {
+    res.status(400).json({
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: "Required: product_type", status_code: 400 }
+    });
+    return;
+  }
+  const profileId = selectProfile({ product_type: productType }, features);
+  const sessionId = body?.agent_id ?? `produce-${Date.now().toString(36)}`;
+  let planId;
+  try {
+    const plan = await createPlan(
+      `produce ${productType}`,
+      sessionId,
+      profileId,
+      {
+        targetServices: ["backend/mrp"],
+        successMetrics: `ProductionOrder.closed for product_type=${productType}`
+      }
+    );
+    planId = plan.planId;
+    logger.info({ planId, profileId, productType }, "produce: plan created");
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err), profileId }, "produce: HyperAgent plan creation failed, falling through");
+  }
+  try {
+    const upstream = await fetch(`${config.backendUrl}/api/mrp/produce`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${config.backendApiKey}`
+      },
+      body: JSON.stringify({ ...body, _orchestrator_plan_id: planId, _profile: profileId })
+    });
+    if (!upstream.ok) {
+      const errText = await upstream.text().catch(() => "");
+      res.status(upstream.status).json({
+        success: false,
+        error: { code: "UPSTREAM_ERROR", message: `backend returned ${upstream.status}`, details: errText.slice(0, 500), status_code: upstream.status },
+        planId
+      });
+      return;
+    }
+    const upstreamBody = await upstream.json();
+    res.json({
+      success: true,
+      planId,
+      profileId,
+      ...upstreamBody
+    });
+  } catch (err) {
+    logger.error({ err: err instanceof Error ? err.message : String(err), planId }, "produce: upstream fetch failed");
+    res.status(502).json({
+      success: false,
+      error: { code: "UPSTREAM_UNREACHABLE", message: "Backend unreachable", status_code: 502 },
+      planId
+    });
+  }
+});
+produceRouter.get("/produce/:order_id/status", async (req, res) => {
+  const orderId = req.params.order_id;
+  if (!orderId || orderId.length > 100) {
+    res.status(400).json({ success: false, error: { code: "VALIDATION_ERROR", message: "Invalid order_id" } });
+    return;
+  }
+  try {
+    const upstream = await fetch(`${config.backendUrl}/api/mrp/order/${encodeURIComponent(orderId)}/status`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${config.backendApiKey}` }
+    });
+    if (!upstream.ok) {
+      res.status(upstream.status).json({
+        success: false,
+        error: { code: "UPSTREAM_ERROR", message: `backend returned ${upstream.status}`, status_code: upstream.status }
+      });
+      return;
+    }
+    const body = await upstream.json();
+    res.json({ success: true, ...body });
+  } catch (err) {
+    logger.error({ err: err instanceof Error ? err.message : String(err), orderId }, "produce-status: fetch failed");
+    res.status(502).json({ success: false, error: { code: "UPSTREAM_UNREACHABLE", message: "Backend unreachable" } });
+  }
+});
+produceRouter.get("/produce/:order_id/artifact", async (req, res) => {
+  const orderId = req.params.order_id;
+  if (!orderId || orderId.length > 100) {
+    res.status(400).json({ success: false, error: { code: "VALIDATION_ERROR", message: "Invalid order_id" } });
+    return;
+  }
+  try {
+    const upstream = await fetch(`${config.backendUrl}/api/mrp/order/${encodeURIComponent(orderId)}/artifact`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${config.backendApiKey}` }
+    });
+    if (!upstream.ok) {
+      res.status(upstream.status).json({
+        success: false,
+        error: { code: "UPSTREAM_ERROR", message: `backend returned ${upstream.status}`, status_code: upstream.status }
+      });
+      return;
+    }
+    const contentType = upstream.headers.get("content-type") ?? "application/octet-stream";
+    const contentDisposition = upstream.headers.get("content-disposition");
+    res.setHeader("content-type", contentType);
+    if (contentDisposition) res.setHeader("content-disposition", contentDisposition);
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    res.send(buf);
+  } catch (err) {
+    logger.error({ err: err instanceof Error ? err.message : String(err), orderId }, "produce-artifact: fetch failed");
+    res.status(502).json({ success: false, error: { code: "UPSTREAM_UNREACHABLE", message: "Backend unreachable" } });
+  }
+});
+
 // src/routes/inventor.ts
 init_chat_broadcaster();
 init_mcp_caller();
 init_inventor_loop();
 init_logger();
-import { Router as Router48 } from "express";
-var inventorRouter = Router48();
+import { Router as Router49 } from "express";
+var inventorRouter = Router49();
 inventorRouter.post("/run", async (req, res) => {
   const { config: config2, resume } = req.body;
   if (!config2 || !config2.experimentName || !config2.taskDescription) {
@@ -51691,8 +51854,8 @@ inventorRouter.get("/export/:name", async (req, res) => {
 // src/routes/anomaly-watcher.ts
 init_anomaly_watcher();
 init_logger();
-import { Router as Router49 } from "express";
-var anomalyWatcherRouter = Router49();
+import { Router as Router50 } from "express";
+var anomalyWatcherRouter = Router50();
 anomalyWatcherRouter.get("/status", (_req, res) => {
   const state4 = getWatcherState();
   res.json({
@@ -51807,8 +51970,8 @@ init_anomaly_watcher();
 // src/routes/peer-eval.ts
 init_peer_eval();
 init_logger();
-import { Router as Router50 } from "express";
-var peerEvalRouter = Router50();
+import { Router as Router51 } from "express";
+var peerEvalRouter = Router51();
 peerEvalRouter.get("/status", (_req, res) => {
   res.json({ success: true, data: getPeerEvalState() });
 });
@@ -51885,8 +52048,8 @@ init_flywheel_coordinator();
 init_consolidation_engine();
 init_cost_optimizer();
 init_logger();
-import { Router as Router51 } from "express";
-var flywheelRouter = Router51();
+import { Router as Router52 } from "express";
+var flywheelRouter = Router52();
 flywheelRouter.get("/metrics", async (_req, res) => {
   try {
     const data = await getFlywheelMetrics();
@@ -51932,7 +52095,7 @@ flywheelRouter.get("/cost-summary", (_req, res) => {
 });
 
 // src/routes/benchmark.ts
-import { Router as Router52 } from "express";
+import { Router as Router53 } from "express";
 
 // src/benchmark-runner.ts
 init_redis();
@@ -52321,7 +52484,7 @@ function buildRecommendation(results, taskId) {
 
 // src/routes/benchmark.ts
 init_logger();
-var benchmarkRouter = Router52();
+var benchmarkRouter = Router53();
 benchmarkRouter.get("/tasks", (_req, res) => {
   const tasks = listBenchmarkTasks();
   res.json({ success: true, tasks });
@@ -52418,8 +52581,8 @@ benchmarkRouter.get("/ablation/:taskId/report", (req, res) => {
 init_config();
 init_logger();
 init_engagement_lineage();
-import { Router as Router53 } from "express";
-var obsidianRouter = Router53();
+import { Router as Router54 } from "express";
+var obsidianRouter = Router54();
 var TIMEOUT_MS = 8e3;
 function isLiveMode() {
   return !!config.obsidianUrl;
@@ -52972,8 +53135,8 @@ obsidianRouter.post("/canvas", async (req, res) => {
 // src/routes/grafana-proxy.ts
 init_logger();
 init_config();
-import { Router as Router54 } from "express";
-var grafanaProxyRouter = Router54();
+import { Router as Router55 } from "express";
+var grafanaProxyRouter = Router55();
 var GRAFANA_URL = "https://clauskraft.grafana.net";
 var GRAFANA_API_KEY = config.grafanaApiKey;
 var PROM_URL = "https://prometheus-prod-39-prod-eu-north-0.grafana.net/api/prom";
@@ -53069,7 +53232,7 @@ grafanaProxyRouter.get("/alerts", async (_req, res) => {
 });
 
 // src/routes/phantom-bom.ts
-import { Router as Router55 } from "express";
+import { Router as Router56 } from "express";
 
 // src/phantom-bom.ts
 init_config();
@@ -54381,7 +54544,7 @@ async function getProviderRegistry() {
 init_logger();
 init_config();
 init_phantom_loop_selector();
-var phantomBomRouter = Router55();
+var phantomBomRouter = Router56();
 var activeExtractions = 0;
 var MAX_CONCURRENT3 = 3;
 phantomBomRouter.post("/skills/route", async (req, res) => {
@@ -54564,8 +54727,8 @@ phantomBomRouter.get("/clusters/debug", async (_req, res) => {
 // src/routes/linear-proxy.ts
 init_logger();
 init_config();
-import { Router as Router56 } from "express";
-var linearProxyRouter = Router56();
+import { Router as Router57 } from "express";
+var linearProxyRouter = Router57();
 async function callBackendMcp2(toolName, payload) {
   const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
     method: "POST",
@@ -54673,8 +54836,8 @@ linearProxyRouter.post("/issues/:id", async (req, res) => {
 
 // src/routes/prometheus-metrics.ts
 init_logger();
-import { Router as Router57 } from "express";
-var prometheusMetricsRouter = Router57();
+import { Router as Router58 } from "express";
+var prometheusMetricsRouter = Router58();
 var samples = [];
 function collectMetrics(health) {
   const now = Date.now();
@@ -55017,6 +55180,7 @@ app.use("/api/phantom-bom", requireApiKey, apiRateLimiter, phantomBomRouter);
 app.use("/api/obsidian", requireApiKey, obsidianRouter);
 app.use("/api/hyperagent/auto", requireApiKey, apiRateLimiter, hyperagentAutoRouter);
 app.use("/api/hyperagent", requireApiKey, apiRateLimiter, hyperagentRouter);
+app.use("/api", requireApiKey, apiRateLimiter, produceRouter);
 app.use("/api/tools", requireApiKey, apiRateLimiter, toolGatewayRouter);
 app.get("/api/tasks", requireApiKey, async (req, res) => {
   try {
