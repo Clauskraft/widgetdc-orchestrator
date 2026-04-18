@@ -43,3 +43,4 @@ docs/Orch_*.txt
 docs/ORCHESTRATOR_tst.txt
 karpathy_analysis.py
 .claude/scheduled_tasks.lock
+tmp/

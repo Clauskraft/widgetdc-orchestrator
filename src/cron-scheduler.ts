@@ -1218,6 +1218,30 @@ export function registerDefaultLoops(): void {
     },
   })
 
+  // W6 — Closed-loop priors: every 15min, aggregate FoldEpisode → update
+  // ConfiguratorEngine priors.  Keeps cluster-health rankings fresh so next
+  // /produce routes to better-performing cluster.
+  registerCronJob({
+    id: 'closed-loop-priors',
+    name: 'Closed-Loop Priors Aggregation',
+    schedule: '*/15 * * * *',
+    enabled: true,
+    chain: {
+      name: 'Closed-Loop Priors',
+      mode: 'sequential',
+      steps: [
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'backend.http_post',
+          arguments: {
+            path: '/api/mrp/closed-loop/aggregate',
+            body: { window_days: 7 },
+          },
+        },
+      ],
+    },
+  })
+
   // Self-correcting graph agent — detects and fixes inconsistencies every 2 hours
   // F5: Weekly adaptive RAG retraining (Q-learning integration)
   registerCronJob({
