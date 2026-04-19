@@ -27,6 +27,7 @@ import { runFleetAnalysis } from './swarm/peer-eval.js'
 import { runWeeklySync as runFlywheelSync } from './flywheel/flywheel-coordinator.js'
 import { runWeeklyConsolidation } from './llm/consolidation-engine.js'
 import { storeMemory, retrieveMemory, listMemories } from './memory/working-memory.js'
+import { runPlanHealthPoll, runPlanHealthDailyDigest, logPlanHealthFailure } from './cron/plan-health-cron.js'
 
 interface CronJob {
   id: string
@@ -413,116 +414,21 @@ export async function runCronJob(jobId: string): Promise<void> {
     //   - Detect status deltas vs previous poll and store each delta
     //     to :AgentMemory {key:'plan:health:delta:<ts>'} with 7d TTL.
     if (job.id === 'plan-health-poll') {
-      const endpoint = `${config.backendUrl}/api/plan/health`
       try {
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${config.backendApiKey}`,
-            'X-Call-Id': `cron-${job.id}-${Date.now()}`,
-          },
-          signal: AbortSignal.timeout(60_000),
-        })
-
-        const body = await res.json().catch(() => null) as Record<string, unknown> | null
+        const result = await runPlanHealthPoll()
         job.last_run = new Date().toISOString()
-        job.last_status = res.ok ? 'completed' : `failed:${res.status}`
+        job.last_status = 'completed'
         job.run_count++
-        if (res.ok) job.consecutive_failures = 0
+        job.consecutive_failures = 0
         persistCronJobs()
-
-        if (res.ok) {
-          // Compute deltas against previous poll.
-          let deltas: Array<{ task_id: string; from: string; to: string; blocked_since?: string }> = []
-          try {
-            const prev = await retrieveMemory('orch-cron', 'plan:health:last-poll')
-            const prevTasks = (prev?.value as { tasks?: Array<Record<string, unknown>> } | null)?.tasks
-            const nextTasks = (body?.tasks as Array<Record<string, unknown>> | undefined) ?? []
-            if (Array.isArray(prevTasks)) {
-              const prevById = new Map<string, Record<string, unknown>>()
-              for (const t of prevTasks) {
-                const id = typeof t.id === 'string' ? t.id : null
-                if (id) prevById.set(id, t)
-              }
-              for (const t of nextTasks) {
-                const id = typeof t.id === 'string' ? t.id : null
-                const status = typeof t.status === 'string' ? t.status : null
-                if (!id || !status) continue
-                const prevEntry = prevById.get(id)
-                const prevStatus = prevEntry && typeof prevEntry.status === 'string' ? prevEntry.status : null
-                if (prevStatus && prevStatus !== status) {
-                  deltas.push({
-                    task_id: id,
-                    from: prevStatus,
-                    to: status,
-                    blocked_since: typeof t.blocked_since === 'string' ? t.blocked_since : undefined,
-                  })
-                }
-              }
-            }
-          } catch (deltaErr) {
-            logger.warn({ err: String(deltaErr) }, 'plan-health delta compute failed')
-          }
-
-          await storeMemory('orch-cron', 'plan:health:last-poll', {
-            polled_at: job.last_run,
-            status: 'completed',
-            endpoint,
-            run_count: job.run_count,
-            phase: body?.phase ?? null,
-            summary: body?.summary ?? null,
-            tasks: body?.tasks ?? [],
-            deltas_detected: deltas.length,
-            raw: body ?? null,
-          }, 7 * 86_400) // 7-day TTL
-
-          if (deltas.length > 0) {
-            const ts = job.last_run.replace(/[:.]/g, '-')
-            await storeMemory('orch-cron', `plan:health:delta:${ts}`, {
-              recorded_at: job.last_run,
-              deltas,
-              source_endpoint: endpoint,
-            }, 7 * 86_400).catch((err) => {
-              logger.warn({ err: String(err) }, 'plan-health delta write failed')
-            })
-          }
-        }
-
-        const statusEmoji = res.ok ? '✅' : '❌'
-        broadcastMessage({
-          from: 'Orchestrator',
-          to: 'All',
-          source: 'orchestrator',
-          type: 'Message',
-          message: `${statusEmoji} Plan health poll: ${res.ok ? 'completed' : `HTTP ${res.status}`}${body?.summary ? ` — ${body.summary}` : ''}`,
-          timestamp: new Date().toISOString(),
-        })
-
-        if (res.ok) {
-          broadcastSSE(`cron-${job.id}`, { status: 'completed', result: body })
-        } else {
-          logger.warn({ id: job.id, status: res.status, body }, `Backend cron ${job.id} returned non-OK`)
-          throw new Error(`Backend returned HTTP ${res.status}`)
-        }
+        broadcastSSE(`cron-${job.id}`, { status: 'completed', result })
       } catch (err) {
         job.last_run = new Date().toISOString()
         job.last_status = 'failed'
         job.run_count++
         job.consecutive_failures = (job.consecutive_failures || 0) + 1
         persistCronJobs()
-
-        await storeMemory('orch-cron', 'plan:health:last-failure', {
-          failed_at: job.last_run,
-          error: String(err),
-          consecutive_failures: job.consecutive_failures,
-          endpoint,
-        }, 7 * 86_400).catch(() => { /* ignore A2A write failure */ })
-
-        logger.error(
-          { id: job.id, err: String(err), consecutive_failures: job.consecutive_failures },
-          'Plan health poll cron failed',
-        )
+        logPlanHealthFailure('poll', err)
       }
       return
     }
@@ -536,140 +442,21 @@ export async function runCronJob(jobId: string): Promise<void> {
     // and posts a concise markdown digest to Linear LIN-928 via backend
     // MCP 'linear.comment_create'.
     if (job.id === 'plan-health-digest-daily') {
-      const COMPLETED_STATES = new Set(['completed', 'done', 'verified', 'shipped'])
-      const FOUR_HOURS_MS = 4 * 3_600_000
-      const TWENTY_FOUR_HOURS_MS = 24 * 3_600_000
       try {
-        const nowIso = new Date().toISOString()
-        const windowStart = Date.now() - TWENTY_FOUR_HOURS_MS
-
-        const entries = await listMemories('orch-cron')
-        const deltaEntries = entries.filter(
-          (e) => e.key.startsWith('plan:health:delta:') &&
-                 new Date(e.created_at).getTime() >= windowStart,
-        )
-        const latestPoll = await retrieveMemory('orch-cron', 'plan:health:last-poll')
-
-        let tasksCompleted: Array<{ task_id: string; from: string; to: string }> = []
-        let tasksBlockedLong: Array<{ task_id: string; status: string; blocked_since: string }> = []
-        const phaseSeen = new Set<string>()
-
-        for (const e of deltaEntries) {
-          const val = e.value as { deltas?: Array<{ task_id: string; from: string; to: string; blocked_since?: string }> } | null
-          const deltas = val?.deltas ?? []
-          for (const d of deltas) {
-            if (COMPLETED_STATES.has(d.to.toLowerCase())) {
-              tasksCompleted.push({ task_id: d.task_id, from: d.from, to: d.to })
-            }
-          }
-        }
-
-        // Identify long-blocked tasks from the latest poll.
-        const latestTasks = (latestPoll?.value as { tasks?: Array<Record<string, unknown>>; phase?: string } | null)?.tasks ?? []
-        const latestPhase = (latestPoll?.value as { phase?: string } | null)?.phase
-        if (typeof latestPhase === 'string') phaseSeen.add(latestPhase)
-        for (const t of latestTasks) {
-          const id = typeof t.id === 'string' ? t.id : null
-          const status = typeof t.status === 'string' ? t.status : null
-          const blockedSinceStr = typeof t.blocked_since === 'string' ? t.blocked_since : null
-          if (!id || !status || !blockedSinceStr) continue
-          const ageMs = Date.now() - new Date(blockedSinceStr).getTime()
-          if (Number.isFinite(ageMs) && ageMs > FOUR_HOURS_MS && /block/i.test(status)) {
-            tasksBlockedLong.push({ task_id: id, status, blocked_since: blockedSinceStr })
-          }
-        }
-
-        // Also collect phases observed in deltas / polls over the window.
-        for (const e of entries) {
-          if (!e.key.startsWith('plan:health:last-poll')) continue
-          const v = e.value as { phase?: string } | null
-          if (v && typeof v.phase === 'string') phaseSeen.add(v.phase)
-        }
-
-        const completedList = tasksCompleted
-          .slice(0, 20)
-          .map((t) => `- \`${t.task_id}\` : ${t.from} → **${t.to}**`)
-          .join('\n') || '_none_'
-        const blockedList = tasksBlockedLong
-          .slice(0, 20)
-          .map((t) => {
-            const ageH = ((Date.now() - new Date(t.blocked_since).getTime()) / 3_600_000).toFixed(1)
-            return `- \`${t.task_id}\` : ${t.status} (${ageH}h since ${t.blocked_since})`
-          })
-          .join('\n') || '_none_'
-        const phaseList = Array.from(phaseSeen).join(' → ') || '_unknown_'
-
-        const digestBody =
-          `**divine-symbiosis plan-health daily digest** (${nowIso})\n\n` +
-          `Window: last 24h · Polls scanned: ${deltaEntries.length} · Latest phase: \`${latestPhase ?? 'unknown'}\`\n\n` +
-          `### Tasks completed (${tasksCompleted.length})\n${completedList}\n\n` +
-          `### Tasks blocked > 4h (${tasksBlockedLong.length})\n${blockedList}\n\n` +
-          `### Phase progression\n${phaseList}\n\n` +
-          `_Posted automatically by orchestrator cron \`plan-health-digest-daily\` (runs 08:00 UTC)._`
-
-        const mcpRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${config.backendApiKey}`,
-            'X-Call-Id': `cron-${job.id}-${Date.now()}`,
-          },
-          body: JSON.stringify({
-            tool: 'linear.comment_create',
-            payload: { identifier: 'LIN-928', body: digestBody },
-          }),
-          signal: AbortSignal.timeout(30_000),
-        })
-
+        const result = await runPlanHealthDailyDigest()
         job.last_run = new Date().toISOString()
-        job.last_status = mcpRes.ok ? 'completed' : `failed:${mcpRes.status}`
+        job.last_status = 'completed'
         job.run_count++
-        if (mcpRes.ok) job.consecutive_failures = 0
+        job.consecutive_failures = 0
         persistCronJobs()
-
-        if (mcpRes.ok) {
-          await storeMemory('orch-cron', 'plan:health:digest:last-run', {
-            ran_at: job.last_run,
-            tasks_completed: tasksCompleted.length,
-            tasks_blocked_long: tasksBlockedLong.length,
-            phase: latestPhase ?? null,
-            polls_scanned: deltaEntries.length,
-          }, 7 * 86_400)
-
-          broadcastMessage({
-            from: 'Orchestrator',
-            to: 'All',
-            source: 'orchestrator',
-            type: 'Message',
-            message: `✅ Plan health digest posted to LIN-928: ${tasksCompleted.length} completed, ${tasksBlockedLong.length} blocked >4h`,
-            timestamp: new Date().toISOString(),
-          })
-          broadcastSSE(`cron-${job.id}`, {
-            status: 'completed',
-            completed: tasksCompleted.length,
-            blocked_long: tasksBlockedLong.length,
-          })
-        } else {
-          logger.warn({ id: job.id, status: mcpRes.status }, 'Linear comment post failed')
-          throw new Error(`Linear comment post returned HTTP ${mcpRes.status}`)
-        }
+        broadcastSSE(`cron-${job.id}`, { status: 'completed', result })
       } catch (err) {
         job.last_run = new Date().toISOString()
         job.last_status = 'failed'
         job.run_count++
         job.consecutive_failures = (job.consecutive_failures || 0) + 1
         persistCronJobs()
-
-        await storeMemory('orch-cron', 'plan:health:digest:last-failure', {
-          failed_at: job.last_run,
-          error: String(err),
-          consecutive_failures: job.consecutive_failures,
-        }, 7 * 86_400).catch(() => { /* ignore */ })
-
-        logger.error(
-          { id: job.id, err: String(err), consecutive_failures: job.consecutive_failures },
-          'Plan health digest cron failed',
-        )
+        logPlanHealthFailure('digest', err)
       }
       return
     }

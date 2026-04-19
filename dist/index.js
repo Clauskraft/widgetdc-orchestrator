@@ -42339,7 +42339,196 @@ init_pheromone_layer();
 init_peer_eval();
 init_flywheel_coordinator();
 init_consolidation_engine();
+
+// src/cron/plan-health-cron.ts
+init_chat_broadcaster();
+init_config();
+init_logger();
 init_working_memory();
+init_sse();
+var PLAN_HEALTH_LINEAR_CANDIDATES = ["LIN-DIVINE-SYMBIOSIS", "LIN-928"];
+var PLAN_HEALTH_TTL_SECONDS = 7 * 86400;
+function toNumber(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  if (value && typeof value === "object" && "low" in value) {
+    const low = Number(value.low);
+    return Number.isFinite(low) ? low : null;
+  }
+  return null;
+}
+function normalizePlanHealthResponse(payload, nowIso) {
+  return {
+    phase: typeof payload?.phase === "string" ? payload.phase : null,
+    milestone: typeof payload?.milestone === "string" ? payload.milestone : null,
+    in_flight_tasks: toNumber(payload?.in_flight_tasks) ?? 0,
+    blocked_tasks: toNumber(payload?.blocked_tasks) ?? 0,
+    fitness_latest: toNumber(payload?.fitness_latest),
+    polled_at: nowIso
+  };
+}
+function computePlanHealthDelta(previous, next) {
+  const inFlightDelta = next.in_flight_tasks - (previous?.in_flight_tasks ?? 0);
+  const blockedDelta = next.blocked_tasks - (previous?.blocked_tasks ?? 0);
+  const fitnessDelta = previous?.fitness_latest != null && next.fitness_latest != null ? Number((next.fitness_latest - previous.fitness_latest).toFixed(4)) : null;
+  const phaseChanged = (previous?.phase ?? null) !== next.phase;
+  const milestoneChanged = (previous?.milestone ?? null) !== next.milestone;
+  return {
+    has_changes: !previous || inFlightDelta !== 0 || blockedDelta !== 0 || fitnessDelta !== null || phaseChanged || milestoneChanged,
+    in_flight_delta: inFlightDelta,
+    blocked_delta: blockedDelta,
+    fitness_delta: fitnessDelta,
+    phase_changed: phaseChanged,
+    milestone_changed: milestoneChanged
+  };
+}
+function formatDelta(value) {
+  if (value > 0) return `+${value}`;
+  return `${value}`;
+}
+function formatPlanHealthPollDigest(snapshot, delta) {
+  const fitnessLine = snapshot.fitness_latest == null ? "n/a" : `${snapshot.fitness_latest}${delta.fitness_delta == null ? "" : ` (\u0394 ${formatDelta(delta.fitness_delta)})`}`;
+  return [
+    `**divine-symbiosis plan-health poll** (${snapshot.polled_at})`,
+    "",
+    `Phase: \`${snapshot.phase ?? "unknown"}\``,
+    `Milestone: \`${snapshot.milestone ?? "unknown"}\``,
+    `In-flight tasks: **${snapshot.in_flight_tasks}** (\u0394 ${formatDelta(delta.in_flight_delta)})`,
+    `Blocked tasks: **${snapshot.blocked_tasks}** (\u0394 ${formatDelta(delta.blocked_delta)})`,
+    `Fitness latest: **${fitnessLine}**`,
+    `Changes detected: **${delta.has_changes ? "yes" : "no"}**`,
+    "",
+    "_Posted automatically by orchestrator cron `plan-health-poll`._"
+  ].join("\n");
+}
+function formatPlanHealthDailyDigest(polls) {
+  const latest = polls[0] ?? null;
+  const lines = polls.slice(0, 12).map(
+    (poll) => `- ${poll.polled_at}: phase=\`${poll.phase ?? "unknown"}\`, milestone=\`${poll.milestone ?? "unknown"}\`, in-flight=${poll.in_flight_tasks}, blocked=${poll.blocked_tasks}, fitness=${poll.fitness_latest ?? "n/a"}`
+  );
+  return [
+    `**divine-symbiosis plan-health daily digest** (${(/* @__PURE__ */ new Date()).toISOString()})`,
+    "",
+    `Polls scanned: **${polls.length}**`,
+    `Latest phase: \`${latest?.phase ?? "unknown"}\``,
+    `Latest milestone: \`${latest?.milestone ?? "unknown"}\``,
+    `Latest in-flight tasks: **${latest?.in_flight_tasks ?? 0}**`,
+    `Latest blocked tasks: **${latest?.blocked_tasks ?? 0}**`,
+    `Latest fitness: **${latest?.fitness_latest ?? "n/a"}**`,
+    "",
+    "### Recent trajectory",
+    lines.join("\n") || "_none_",
+    "",
+    "_Posted automatically by orchestrator cron `plan-health-digest-daily`._"
+  ].join("\n");
+}
+async function callBackendMcp(fetchImpl, tool, payload) {
+  const res = await fetchImpl(`${config.backendUrl}/api/mcp/route`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${config.backendApiKey}`
+    },
+    body: JSON.stringify({ tool, payload }),
+    signal: AbortSignal.timeout(2e4)
+  });
+  if (!res.ok) {
+    throw new Error(`Backend MCP ${tool}: HTTP ${res.status}`);
+  }
+  return res.json();
+}
+async function resolvePlanHealthLinearIdentifier(fetchImpl) {
+  for (const identifier of PLAN_HEALTH_LINEAR_CANDIDATES) {
+    try {
+      const result = await callBackendMcp(fetchImpl, "linear.issue_get", { identifier });
+      if (result?.success === false || result?.error) continue;
+      return identifier;
+    } catch {
+      continue;
+    }
+  }
+  return "LIN-928";
+}
+async function postLinearComment(fetchImpl, identifier, body) {
+  await callBackendMcp(fetchImpl, "linear.comment_create", { identifier, body });
+}
+function unwrapSnapshot(entry) {
+  const value = entry?.value;
+  if (!value) return null;
+  if (typeof value === "object" && "snapshot" in value && value.snapshot) return value.snapshot;
+  if (typeof value === "object" && "in_flight_tasks" in value) return value;
+  return null;
+}
+async function runPlanHealthPoll(deps = {}) {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const retrieveMemoryImpl = deps.retrieveMemoryImpl ?? retrieveMemory;
+  const storeMemoryImpl = deps.storeMemoryImpl ?? storeMemory;
+  const broadcastMessageImpl = deps.broadcastMessageImpl ?? broadcastMessage;
+  const broadcastSseImpl = deps.broadcastSseImpl ?? broadcastSSE;
+  const now = deps.now ?? (() => /* @__PURE__ */ new Date());
+  const polledAt = now().toISOString();
+  const response = await fetchImpl(`${config.backendUrl}/api/plan/health`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${config.backendApiKey}`,
+      "X-Call-Id": `cron-plan-health-poll-${Date.now()}`
+    },
+    signal: AbortSignal.timeout(6e4)
+  });
+  if (!response.ok) {
+    throw new Error(`Plan health endpoint returned HTTP ${response.status}`);
+  }
+  const body = await response.json().catch(() => null);
+  const snapshot = normalizePlanHealthResponse(body, polledAt);
+  const previous = unwrapSnapshot(await retrieveMemoryImpl("orch-cron", "plan:health:last-poll"));
+  const delta = computePlanHealthDelta(previous, snapshot);
+  const digestBody = formatPlanHealthPollDigest(snapshot, delta);
+  const linearIdentifier = await resolvePlanHealthLinearIdentifier(fetchImpl);
+  await storeMemoryImpl("orch-cron", "plan:health:last-poll", { snapshot, delta }, PLAN_HEALTH_TTL_SECONDS);
+  await storeMemoryImpl("orch-cron", `plan:health:poll:${polledAt.replace(/[:.]/g, "-")}`, { snapshot, delta }, PLAN_HEALTH_TTL_SECONDS);
+  if (delta.has_changes) {
+    await storeMemoryImpl("orch-cron", `plan:health:delta:${polledAt.replace(/[:.]/g, "-")}`, { snapshot, delta }, PLAN_HEALTH_TTL_SECONDS);
+  }
+  await postLinearComment(fetchImpl, linearIdentifier, digestBody);
+  broadcastMessageImpl({
+    from: "Orchestrator",
+    to: "All",
+    source: "orchestrator",
+    type: "Message",
+    message: `\u2705 Plan health poll posted to ${linearIdentifier}: phase=${snapshot.phase ?? "unknown"}, milestone=${snapshot.milestone ?? "unknown"}, in-flight=${snapshot.in_flight_tasks}, blocked=${snapshot.blocked_tasks}`,
+    timestamp: polledAt
+  });
+  broadcastSseImpl("cron-plan-health-poll", { snapshot, delta, linear_identifier: linearIdentifier });
+  return { snapshot, delta, linear_identifier: linearIdentifier, digest_body: digestBody };
+}
+async function runPlanHealthDailyDigest(deps = {}) {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const listMemoriesImpl = deps.listMemoriesImpl ?? listMemories;
+  const storeMemoryImpl = deps.storeMemoryImpl ?? storeMemory;
+  const now = deps.now ?? (() => /* @__PURE__ */ new Date());
+  const windowStart = now().getTime() - 24 * 36e5;
+  const entries = await listMemoriesImpl("orch-cron");
+  const polls = entries.filter((entry) => entry.key.startsWith("plan:health:poll:") && new Date(entry.created_at).getTime() >= windowStart).map((entry) => unwrapSnapshot(entry)).filter((entry) => Boolean(entry)).sort((a, b) => b.polled_at.localeCompare(a.polled_at));
+  const digestBody = formatPlanHealthDailyDigest(polls);
+  const linearIdentifier = await resolvePlanHealthLinearIdentifier(fetchImpl);
+  await postLinearComment(fetchImpl, linearIdentifier, digestBody);
+  await storeMemoryImpl("orch-cron", "plan:health:digest:last-run", {
+    ran_at: now().toISOString(),
+    polls_scanned: polls.length,
+    latest_phase: polls[0]?.phase ?? null,
+    latest_milestone: polls[0]?.milestone ?? null
+  }, PLAN_HEALTH_TTL_SECONDS);
+  return { linear_identifier: linearIdentifier, digest_body: digestBody, polls_scanned: polls.length };
+}
+function logPlanHealthFailure(scope, error) {
+  logger.error({ scope, err: String(error) }, "Plan health cron failed");
+}
+
+// src/cron-scheduler.ts
 var jobs = /* @__PURE__ */ new Map();
 var cronTasks = /* @__PURE__ */ new Map();
 var runningJobsLocal = /* @__PURE__ */ new Set();
@@ -42643,232 +42832,40 @@ async function runCronJob(jobId) {
       return;
     }
     if (job.id === "plan-health-poll") {
-      const endpoint2 = `${config.backendUrl}/api/plan/health`;
       try {
-        const res = await fetch(endpoint2, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${config.backendApiKey}`,
-            "X-Call-Id": `cron-${job.id}-${Date.now()}`
-          },
-          signal: AbortSignal.timeout(6e4)
-        });
-        const body = await res.json().catch(() => null);
+        const result2 = await runPlanHealthPoll();
         job.last_run = (/* @__PURE__ */ new Date()).toISOString();
-        job.last_status = res.ok ? "completed" : `failed:${res.status}`;
+        job.last_status = "completed";
         job.run_count++;
-        if (res.ok) job.consecutive_failures = 0;
+        job.consecutive_failures = 0;
         persistCronJobs();
-        if (res.ok) {
-          let deltas = [];
-          try {
-            const prev = await retrieveMemory("orch-cron", "plan:health:last-poll");
-            const prevTasks = prev?.value?.tasks;
-            const nextTasks = body?.tasks ?? [];
-            if (Array.isArray(prevTasks)) {
-              const prevById = /* @__PURE__ */ new Map();
-              for (const t of prevTasks) {
-                const id = typeof t.id === "string" ? t.id : null;
-                if (id) prevById.set(id, t);
-              }
-              for (const t of nextTasks) {
-                const id = typeof t.id === "string" ? t.id : null;
-                const status = typeof t.status === "string" ? t.status : null;
-                if (!id || !status) continue;
-                const prevEntry = prevById.get(id);
-                const prevStatus = prevEntry && typeof prevEntry.status === "string" ? prevEntry.status : null;
-                if (prevStatus && prevStatus !== status) {
-                  deltas.push({
-                    task_id: id,
-                    from: prevStatus,
-                    to: status,
-                    blocked_since: typeof t.blocked_since === "string" ? t.blocked_since : void 0
-                  });
-                }
-              }
-            }
-          } catch (deltaErr) {
-            logger.warn({ err: String(deltaErr) }, "plan-health delta compute failed");
-          }
-          await storeMemory("orch-cron", "plan:health:last-poll", {
-            polled_at: job.last_run,
-            status: "completed",
-            endpoint: endpoint2,
-            run_count: job.run_count,
-            phase: body?.phase ?? null,
-            summary: body?.summary ?? null,
-            tasks: body?.tasks ?? [],
-            deltas_detected: deltas.length,
-            raw: body ?? null
-          }, 7 * 86400);
-          if (deltas.length > 0) {
-            const ts = job.last_run.replace(/[:.]/g, "-");
-            await storeMemory("orch-cron", `plan:health:delta:${ts}`, {
-              recorded_at: job.last_run,
-              deltas,
-              source_endpoint: endpoint2
-            }, 7 * 86400).catch((err) => {
-              logger.warn({ err: String(err) }, "plan-health delta write failed");
-            });
-          }
-        }
-        const statusEmoji = res.ok ? "\u2705" : "\u274C";
-        broadcastMessage({
-          from: "Orchestrator",
-          to: "All",
-          source: "orchestrator",
-          type: "Message",
-          message: `${statusEmoji} Plan health poll: ${res.ok ? "completed" : `HTTP ${res.status}`}${body?.summary ? ` \u2014 ${body.summary}` : ""}`,
-          timestamp: (/* @__PURE__ */ new Date()).toISOString()
-        });
-        if (res.ok) {
-          broadcastSSE(`cron-${job.id}`, { status: "completed", result: body });
-        } else {
-          logger.warn({ id: job.id, status: res.status, body }, `Backend cron ${job.id} returned non-OK`);
-          throw new Error(`Backend returned HTTP ${res.status}`);
-        }
+        broadcastSSE(`cron-${job.id}`, { status: "completed", result: result2 });
       } catch (err) {
         job.last_run = (/* @__PURE__ */ new Date()).toISOString();
         job.last_status = "failed";
         job.run_count++;
         job.consecutive_failures = (job.consecutive_failures || 0) + 1;
         persistCronJobs();
-        await storeMemory("orch-cron", "plan:health:last-failure", {
-          failed_at: job.last_run,
-          error: String(err),
-          consecutive_failures: job.consecutive_failures,
-          endpoint: endpoint2
-        }, 7 * 86400).catch(() => {
-        });
-        logger.error(
-          { id: job.id, err: String(err), consecutive_failures: job.consecutive_failures },
-          "Plan health poll cron failed"
-        );
+        logPlanHealthFailure("poll", err);
       }
       return;
     }
     if (job.id === "plan-health-digest-daily") {
-      const COMPLETED_STATES = /* @__PURE__ */ new Set(["completed", "done", "verified", "shipped"]);
-      const FOUR_HOURS_MS = 4 * 36e5;
-      const TWENTY_FOUR_HOURS_MS = 24 * 36e5;
       try {
-        const nowIso = (/* @__PURE__ */ new Date()).toISOString();
-        const windowStart = Date.now() - TWENTY_FOUR_HOURS_MS;
-        const entries = await listMemories("orch-cron");
-        const deltaEntries = entries.filter(
-          (e) => e.key.startsWith("plan:health:delta:") && new Date(e.created_at).getTime() >= windowStart
-        );
-        const latestPoll = await retrieveMemory("orch-cron", "plan:health:last-poll");
-        let tasksCompleted = [];
-        let tasksBlockedLong = [];
-        const phaseSeen = /* @__PURE__ */ new Set();
-        for (const e of deltaEntries) {
-          const val = e.value;
-          const deltas = val?.deltas ?? [];
-          for (const d of deltas) {
-            if (COMPLETED_STATES.has(d.to.toLowerCase())) {
-              tasksCompleted.push({ task_id: d.task_id, from: d.from, to: d.to });
-            }
-          }
-        }
-        const latestTasks = latestPoll?.value?.tasks ?? [];
-        const latestPhase = latestPoll?.value?.phase;
-        if (typeof latestPhase === "string") phaseSeen.add(latestPhase);
-        for (const t of latestTasks) {
-          const id = typeof t.id === "string" ? t.id : null;
-          const status = typeof t.status === "string" ? t.status : null;
-          const blockedSinceStr = typeof t.blocked_since === "string" ? t.blocked_since : null;
-          if (!id || !status || !blockedSinceStr) continue;
-          const ageMs = Date.now() - new Date(blockedSinceStr).getTime();
-          if (Number.isFinite(ageMs) && ageMs > FOUR_HOURS_MS && /block/i.test(status)) {
-            tasksBlockedLong.push({ task_id: id, status, blocked_since: blockedSinceStr });
-          }
-        }
-        for (const e of entries) {
-          if (!e.key.startsWith("plan:health:last-poll")) continue;
-          const v = e.value;
-          if (v && typeof v.phase === "string") phaseSeen.add(v.phase);
-        }
-        const completedList = tasksCompleted.slice(0, 20).map((t) => `- \`${t.task_id}\` : ${t.from} \u2192 **${t.to}**`).join("\n") || "_none_";
-        const blockedList = tasksBlockedLong.slice(0, 20).map((t) => {
-          const ageH = ((Date.now() - new Date(t.blocked_since).getTime()) / 36e5).toFixed(1);
-          return `- \`${t.task_id}\` : ${t.status} (${ageH}h since ${t.blocked_since})`;
-        }).join("\n") || "_none_";
-        const phaseList = Array.from(phaseSeen).join(" \u2192 ") || "_unknown_";
-        const digestBody = `**divine-symbiosis plan-health daily digest** (${nowIso})
-
-Window: last 24h \xB7 Polls scanned: ${deltaEntries.length} \xB7 Latest phase: \`${latestPhase ?? "unknown"}\`
-
-### Tasks completed (${tasksCompleted.length})
-${completedList}
-
-### Tasks blocked > 4h (${tasksBlockedLong.length})
-${blockedList}
-
-### Phase progression
-${phaseList}
-
-_Posted automatically by orchestrator cron \`plan-health-digest-daily\` (runs 08:00 UTC)._`;
-        const mcpRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${config.backendApiKey}`,
-            "X-Call-Id": `cron-${job.id}-${Date.now()}`
-          },
-          body: JSON.stringify({
-            tool: "linear.comment_create",
-            payload: { identifier: "LIN-928", body: digestBody }
-          }),
-          signal: AbortSignal.timeout(3e4)
-        });
+        const result2 = await runPlanHealthDailyDigest();
         job.last_run = (/* @__PURE__ */ new Date()).toISOString();
-        job.last_status = mcpRes.ok ? "completed" : `failed:${mcpRes.status}`;
+        job.last_status = "completed";
         job.run_count++;
-        if (mcpRes.ok) job.consecutive_failures = 0;
+        job.consecutive_failures = 0;
         persistCronJobs();
-        if (mcpRes.ok) {
-          await storeMemory("orch-cron", "plan:health:digest:last-run", {
-            ran_at: job.last_run,
-            tasks_completed: tasksCompleted.length,
-            tasks_blocked_long: tasksBlockedLong.length,
-            phase: latestPhase ?? null,
-            polls_scanned: deltaEntries.length
-          }, 7 * 86400);
-          broadcastMessage({
-            from: "Orchestrator",
-            to: "All",
-            source: "orchestrator",
-            type: "Message",
-            message: `\u2705 Plan health digest posted to LIN-928: ${tasksCompleted.length} completed, ${tasksBlockedLong.length} blocked >4h`,
-            timestamp: (/* @__PURE__ */ new Date()).toISOString()
-          });
-          broadcastSSE(`cron-${job.id}`, {
-            status: "completed",
-            completed: tasksCompleted.length,
-            blocked_long: tasksBlockedLong.length
-          });
-        } else {
-          logger.warn({ id: job.id, status: mcpRes.status }, "Linear comment post failed");
-          throw new Error(`Linear comment post returned HTTP ${mcpRes.status}`);
-        }
+        broadcastSSE(`cron-${job.id}`, { status: "completed", result: result2 });
       } catch (err) {
         job.last_run = (/* @__PURE__ */ new Date()).toISOString();
         job.last_status = "failed";
         job.run_count++;
         job.consecutive_failures = (job.consecutive_failures || 0) + 1;
         persistCronJobs();
-        await storeMemory("orch-cron", "plan:health:digest:last-failure", {
-          failed_at: job.last_run,
-          error: String(err),
-          consecutive_failures: job.consecutive_failures
-        }, 7 * 86400).catch(() => {
-        });
-        logger.error(
-          { id: job.id, err: String(err), consecutive_failures: job.consecutive_failures },
-          "Plan health digest cron failed"
-        );
+        logPlanHealthFailure("digest", err);
       }
       return;
     }
@@ -54389,7 +54386,7 @@ function parseLlmBom(raw, repoUrl) {
     }))
   };
 }
-async function callBackendMcp(tool, payload) {
+async function callBackendMcp2(tool, payload) {
   let finalPayload = payload;
   if (tool === "graph.write_cypher") {
     const GOVERNANCE_FIELDS = ["intent", "purpose", "objective", "evidence", "verification", "test_results"];
@@ -54443,7 +54440,7 @@ SET r.sourceRepo = $sourceRepo,
     r.componentCount = $componentCount,
     r.updatedAt = datetime()
 RETURN r.runId as runId`;
-  await callBackendMcp("graph.write_cypher", {
+  await callBackendMcp2("graph.write_cypher", {
     query: runCypher,
     intent: "phantom_bom_ingestion",
     evidence: "phantom-BOM pipeline output (LLM/Tree-sitter extraction + completeness gate, see PhantomBOMRun.confidenceScore)",
@@ -54484,7 +54481,7 @@ WITH c
 MATCH (r:PhantomBOMRun {runId: $runId})
 MERGE (r)-[:EXTRACTED]->(c)
 RETURN c.componentId as id`;
-    await callBackendMcp("graph.write_cypher", {
+    await callBackendMcp2("graph.write_cypher", {
       query: compCypher,
       intent: "phantom_bom_ingestion",
       evidence: "phantom-BOM pipeline output (LLM/Tree-sitter extraction + completeness gate, see PhantomBOMRun.confidenceScore)",
@@ -54531,7 +54528,7 @@ async function autoEmbedComponent(comp, bom) {
     comp.capabilities?.length ? `Capabilities: ${comp.capabilities.join(", ")}` : null,
     comp.tags?.length ? `Tags: ${comp.tags.join(", ")}` : null
   ].filter(Boolean).join("\n");
-  await callBackendMcp("vidensarkiv.add", {
+  await callBackendMcp2("vidensarkiv.add", {
     content,
     metadata: {
       source: "phantom-bom",
@@ -54542,7 +54539,7 @@ async function autoEmbedComponent(comp, bom) {
       runId: bom.run_id
     }
   });
-  await callBackendMcp("graph.write_cypher", {
+  await callBackendMcp2("graph.write_cypher", {
     query: "MATCH (c:PhantomComponent {componentId: $cid}) SET c.needsEmbedding = false, c.embeddedAt = datetime() RETURN c.componentId",
     params: { cid: comp.id },
     intent: "phantom_bom_ingestion",
@@ -54842,7 +54839,7 @@ Return: {"name":"...","description":"...","primary_language":"...","license":"..
         }
       }
     }
-    await callBackendMcp("graph.write_cypher", {
+    await callBackendMcp2("graph.write_cypher", {
       intent: "phantom_bom_ingestion",
       evidence: "phantom-BOM pipeline output (LLM/Tree-sitter extraction + completeness gate, see PhantomBOMRun.confidenceScore)",
       verification: "idempotent MERGE by primary key (runId/componentId/providerId/clusterId/external_id); read-back verifies node exists",
@@ -55005,7 +55002,7 @@ confidence: 80+ if well-documented, 70-79 partial, <70 if guessing`;
 }
 async function cveCheck(providerName) {
   try {
-    const res = await callBackendMcp("graph.read_cypher", {
+    const res = await callBackendMcp2("graph.read_cypher", {
       query: `MATCH (c:CVE) WHERE toLower(c.description) CONTAINS toLower($name) OR toLower(c.id) CONTAINS toLower($name) RETURN c.id as cveId LIMIT 10`,
       params: { name: providerName }
     });
@@ -55017,7 +55014,7 @@ async function cveCheck(providerName) {
 async function hitlGate(provider) {
   if (provider.confidence >= HITL_THRESHOLD) return { blocked: false };
   try {
-    const res = await callBackendMcp("linear.save_issue", {
+    const res = await callBackendMcp2("linear.save_issue", {
       title: `[HITL] PhantomProvider low confidence: ${provider.name} (${provider.confidence}%)`,
       description: `PhantomProvider ingest blocked \u2014 confidence ${provider.confidence}% is below threshold ${HITL_THRESHOLD}%.
 
@@ -55054,7 +55051,7 @@ SET p.name = $name,
     p.needsEmbedding = true,
     p.updatedAt = datetime()
 RETURN p.providerId as id`;
-  await callBackendMcp("graph.write_cypher", {
+  await callBackendMcp2("graph.write_cypher", {
     query: cypher,
     intent: "phantom_bom_ingestion",
     evidence: "phantom-BOM pipeline output (LLM/Tree-sitter extraction + completeness gate, see PhantomBOMRun.confidenceScore)",
@@ -55119,7 +55116,7 @@ async function extractProvider(opts) {
 }
 async function generatePhantomClusters() {
   logger.info("Generating PhantomClusters");
-  const res = await callBackendMcp("graph.read_cypher", {
+  const res = await callBackendMcp2("graph.read_cypher", {
     query: `MATCH (p:PhantomProvider) RETURN p.providerId as id, p.geoRestriction as geo, p.capabilities as caps, p.costModel as cost, p.confidence as conf, p.hitlRequired as hitl`,
     params: {}
   });
@@ -55153,7 +55150,7 @@ async function generatePhantomClusters() {
       provider_ids: members.map((p) => p.id),
       created_at: (/* @__PURE__ */ new Date()).toISOString()
     };
-    await callBackendMcp("graph.write_cypher", {
+    await callBackendMcp2("graph.write_cypher", {
       intent: "phantom_bom_ingestion",
       evidence: "phantom-BOM pipeline output (LLM/Tree-sitter extraction + completeness gate, see PhantomBOMRun.confidenceScore)",
       verification: "idempotent MERGE by primary key (runId/componentId/providerId/clusterId/external_id); read-back verifies node exists",
@@ -55188,7 +55185,7 @@ RETURN cl.clusterId as id`,
   return clusters;
 }
 async function getProviderRegistry() {
-  const res = await callBackendMcp("graph.read_cypher", {
+  const res = await callBackendMcp2("graph.read_cypher", {
     query: `MATCH (p:PhantomProvider) RETURN p.providerId as id, p.name as name, p.geoRestriction as geo, p.primaryCapability as cap, p.confidence as conf, size(p.cveIds) as cves, p.hitlRequired as hitl ORDER BY p.confidence DESC`,
     params: {}
   });
@@ -55390,7 +55387,7 @@ init_logger();
 init_config();
 import { Router as Router57 } from "express";
 var linearProxyRouter = Router57();
-async function callBackendMcp2(toolName, payload) {
+async function callBackendMcp3(toolName, payload) {
   const res = await fetch(`${config.backendUrl}/api/mcp/route`, {
     method: "POST",
     headers: {
@@ -55416,7 +55413,7 @@ linearProxyRouter.get("/issues", async (req, res) => {
     const state4 = req.query.state;
     const payload = { limit };
     if (state4) payload.status = state4;
-    const data = await callBackendMcp2("linear.issues", payload);
+    const data = await callBackendMcp3("linear.issues", payload);
     const result = data?.result ?? data;
     const rawIssues = result?.issues ?? result?.nodes ?? result ?? [];
     const issues = rawIssues.map((issue) => ({
@@ -55432,7 +55429,7 @@ linearProxyRouter.get("/issues", async (req, res) => {
 });
 linearProxyRouter.get("/labels", async (_req, res) => {
   try {
-    const data = await callBackendMcp2("linear.labels", { limit: 100 });
+    const data = await callBackendMcp3("linear.labels", { limit: 100 });
     const result = data?.result ?? data;
     const labels = result?.labels ?? result?.nodes ?? result ?? [];
     res.json(Array.isArray(labels) ? labels : []);
@@ -55444,7 +55441,7 @@ linearProxyRouter.get("/labels", async (_req, res) => {
 });
 linearProxyRouter.get("/issue/:id", async (req, res) => {
   try {
-    const data = await callBackendMcp2("linear.issue_get", { identifier: req.params.id });
+    const data = await callBackendMcp3("linear.issue_get", { identifier: req.params.id });
     res.json(data?.result ?? data ?? {});
   } catch (err) {
     logger.error({ err: String(err) }, `Linear proxy: failed to fetch issue ${req.params.id}`);
@@ -55458,7 +55455,7 @@ linearProxyRouter.post("/issues", async (req, res) => {
       res.status(400).json({ error: "title required for new issues" });
       return;
     }
-    const data = await callBackendMcp2("linear.save_issue", {
+    const data = await callBackendMcp3("linear.save_issue", {
       id: body.id,
       title: body.title,
       description: body.description,
@@ -55478,7 +55475,7 @@ linearProxyRouter.post("/issues", async (req, res) => {
 linearProxyRouter.post("/issues/:id", async (req, res) => {
   try {
     const body = req.body;
-    const data = await callBackendMcp2("linear.save_issue", {
+    const data = await callBackendMcp3("linear.save_issue", {
       id: req.params.id,
       title: body.title,
       description: body.description,
