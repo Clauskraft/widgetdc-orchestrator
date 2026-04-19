@@ -42339,6 +42339,7 @@ init_pheromone_layer();
 init_peer_eval();
 init_flywheel_coordinator();
 init_consolidation_engine();
+init_working_memory();
 var jobs = /* @__PURE__ */ new Map();
 var cronTasks = /* @__PURE__ */ new Map();
 var runningJobsLocal = /* @__PURE__ */ new Set();
@@ -42638,6 +42639,236 @@ async function runCronJob(jobId) {
         job.run_count++;
         persistCronJobs();
         logger.error({ id: job.id, err: String(err) }, "Community builder cron failed");
+      }
+      return;
+    }
+    if (job.id === "plan-health-poll") {
+      const endpoint2 = `${config.backendUrl}/api/plan/health`;
+      try {
+        const res = await fetch(endpoint2, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${config.backendApiKey}`,
+            "X-Call-Id": `cron-${job.id}-${Date.now()}`
+          },
+          signal: AbortSignal.timeout(6e4)
+        });
+        const body = await res.json().catch(() => null);
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = res.ok ? "completed" : `failed:${res.status}`;
+        job.run_count++;
+        if (res.ok) job.consecutive_failures = 0;
+        persistCronJobs();
+        if (res.ok) {
+          let deltas = [];
+          try {
+            const prev = await retrieveMemory("orch-cron", "plan:health:last-poll");
+            const prevTasks = prev?.value?.tasks;
+            const nextTasks = body?.tasks ?? [];
+            if (Array.isArray(prevTasks)) {
+              const prevById = /* @__PURE__ */ new Map();
+              for (const t of prevTasks) {
+                const id = typeof t.id === "string" ? t.id : null;
+                if (id) prevById.set(id, t);
+              }
+              for (const t of nextTasks) {
+                const id = typeof t.id === "string" ? t.id : null;
+                const status = typeof t.status === "string" ? t.status : null;
+                if (!id || !status) continue;
+                const prevEntry = prevById.get(id);
+                const prevStatus = prevEntry && typeof prevEntry.status === "string" ? prevEntry.status : null;
+                if (prevStatus && prevStatus !== status) {
+                  deltas.push({
+                    task_id: id,
+                    from: prevStatus,
+                    to: status,
+                    blocked_since: typeof t.blocked_since === "string" ? t.blocked_since : void 0
+                  });
+                }
+              }
+            }
+          } catch (deltaErr) {
+            logger.warn({ err: String(deltaErr) }, "plan-health delta compute failed");
+          }
+          await storeMemory("orch-cron", "plan:health:last-poll", {
+            polled_at: job.last_run,
+            status: "completed",
+            endpoint: endpoint2,
+            run_count: job.run_count,
+            phase: body?.phase ?? null,
+            summary: body?.summary ?? null,
+            tasks: body?.tasks ?? [],
+            deltas_detected: deltas.length,
+            raw: body ?? null
+          }, 7 * 86400);
+          if (deltas.length > 0) {
+            const ts = job.last_run.replace(/[:.]/g, "-");
+            await storeMemory("orch-cron", `plan:health:delta:${ts}`, {
+              recorded_at: job.last_run,
+              deltas,
+              source_endpoint: endpoint2
+            }, 7 * 86400).catch((err) => {
+              logger.warn({ err: String(err) }, "plan-health delta write failed");
+            });
+          }
+        }
+        const statusEmoji = res.ok ? "\u2705" : "\u274C";
+        broadcastMessage({
+          from: "Orchestrator",
+          to: "All",
+          source: "orchestrator",
+          type: "Message",
+          message: `${statusEmoji} Plan health poll: ${res.ok ? "completed" : `HTTP ${res.status}`}${body?.summary ? ` \u2014 ${body.summary}` : ""}`,
+          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        });
+        if (res.ok) {
+          broadcastSSE(`cron-${job.id}`, { status: "completed", result: body });
+        } else {
+          logger.warn({ id: job.id, status: res.status, body }, `Backend cron ${job.id} returned non-OK`);
+          throw new Error(`Backend returned HTTP ${res.status}`);
+        }
+      } catch (err) {
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = "failed";
+        job.run_count++;
+        job.consecutive_failures = (job.consecutive_failures || 0) + 1;
+        persistCronJobs();
+        await storeMemory("orch-cron", "plan:health:last-failure", {
+          failed_at: job.last_run,
+          error: String(err),
+          consecutive_failures: job.consecutive_failures,
+          endpoint: endpoint2
+        }, 7 * 86400).catch(() => {
+        });
+        logger.error(
+          { id: job.id, err: String(err), consecutive_failures: job.consecutive_failures },
+          "Plan health poll cron failed"
+        );
+      }
+      return;
+    }
+    if (job.id === "plan-health-digest-daily") {
+      const COMPLETED_STATES = /* @__PURE__ */ new Set(["completed", "done", "verified", "shipped"]);
+      const FOUR_HOURS_MS = 4 * 36e5;
+      const TWENTY_FOUR_HOURS_MS = 24 * 36e5;
+      try {
+        const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+        const windowStart = Date.now() - TWENTY_FOUR_HOURS_MS;
+        const entries = await listMemories("orch-cron");
+        const deltaEntries = entries.filter(
+          (e) => e.key.startsWith("plan:health:delta:") && new Date(e.created_at).getTime() >= windowStart
+        );
+        const latestPoll = await retrieveMemory("orch-cron", "plan:health:last-poll");
+        let tasksCompleted = [];
+        let tasksBlockedLong = [];
+        const phaseSeen = /* @__PURE__ */ new Set();
+        for (const e of deltaEntries) {
+          const val = e.value;
+          const deltas = val?.deltas ?? [];
+          for (const d of deltas) {
+            if (COMPLETED_STATES.has(d.to.toLowerCase())) {
+              tasksCompleted.push({ task_id: d.task_id, from: d.from, to: d.to });
+            }
+          }
+        }
+        const latestTasks = latestPoll?.value?.tasks ?? [];
+        const latestPhase = latestPoll?.value?.phase;
+        if (typeof latestPhase === "string") phaseSeen.add(latestPhase);
+        for (const t of latestTasks) {
+          const id = typeof t.id === "string" ? t.id : null;
+          const status = typeof t.status === "string" ? t.status : null;
+          const blockedSinceStr = typeof t.blocked_since === "string" ? t.blocked_since : null;
+          if (!id || !status || !blockedSinceStr) continue;
+          const ageMs = Date.now() - new Date(blockedSinceStr).getTime();
+          if (Number.isFinite(ageMs) && ageMs > FOUR_HOURS_MS && /block/i.test(status)) {
+            tasksBlockedLong.push({ task_id: id, status, blocked_since: blockedSinceStr });
+          }
+        }
+        for (const e of entries) {
+          if (!e.key.startsWith("plan:health:last-poll")) continue;
+          const v = e.value;
+          if (v && typeof v.phase === "string") phaseSeen.add(v.phase);
+        }
+        const completedList = tasksCompleted.slice(0, 20).map((t) => `- \`${t.task_id}\` : ${t.from} \u2192 **${t.to}**`).join("\n") || "_none_";
+        const blockedList = tasksBlockedLong.slice(0, 20).map((t) => {
+          const ageH = ((Date.now() - new Date(t.blocked_since).getTime()) / 36e5).toFixed(1);
+          return `- \`${t.task_id}\` : ${t.status} (${ageH}h since ${t.blocked_since})`;
+        }).join("\n") || "_none_";
+        const phaseList = Array.from(phaseSeen).join(" \u2192 ") || "_unknown_";
+        const digestBody = `**divine-symbiosis plan-health daily digest** (${nowIso})
+
+Window: last 24h \xB7 Polls scanned: ${deltaEntries.length} \xB7 Latest phase: \`${latestPhase ?? "unknown"}\`
+
+### Tasks completed (${tasksCompleted.length})
+${completedList}
+
+### Tasks blocked > 4h (${tasksBlockedLong.length})
+${blockedList}
+
+### Phase progression
+${phaseList}
+
+_Posted automatically by orchestrator cron \`plan-health-digest-daily\` (runs 08:00 UTC)._`;
+        const mcpRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${config.backendApiKey}`,
+            "X-Call-Id": `cron-${job.id}-${Date.now()}`
+          },
+          body: JSON.stringify({
+            tool: "linear.comment_create",
+            payload: { identifier: "LIN-928", body: digestBody }
+          }),
+          signal: AbortSignal.timeout(3e4)
+        });
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = mcpRes.ok ? "completed" : `failed:${mcpRes.status}`;
+        job.run_count++;
+        if (mcpRes.ok) job.consecutive_failures = 0;
+        persistCronJobs();
+        if (mcpRes.ok) {
+          await storeMemory("orch-cron", "plan:health:digest:last-run", {
+            ran_at: job.last_run,
+            tasks_completed: tasksCompleted.length,
+            tasks_blocked_long: tasksBlockedLong.length,
+            phase: latestPhase ?? null,
+            polls_scanned: deltaEntries.length
+          }, 7 * 86400);
+          broadcastMessage({
+            from: "Orchestrator",
+            to: "All",
+            source: "orchestrator",
+            type: "Message",
+            message: `\u2705 Plan health digest posted to LIN-928: ${tasksCompleted.length} completed, ${tasksBlockedLong.length} blocked >4h`,
+            timestamp: (/* @__PURE__ */ new Date()).toISOString()
+          });
+          broadcastSSE(`cron-${job.id}`, {
+            status: "completed",
+            completed: tasksCompleted.length,
+            blocked_long: tasksBlockedLong.length
+          });
+        } else {
+          logger.warn({ id: job.id, status: mcpRes.status }, "Linear comment post failed");
+          throw new Error(`Linear comment post returned HTTP ${mcpRes.status}`);
+        }
+      } catch (err) {
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = "failed";
+        job.run_count++;
+        job.consecutive_failures = (job.consecutive_failures || 0) + 1;
+        persistCronJobs();
+        await storeMemory("orch-cron", "plan:health:digest:last-failure", {
+          failed_at: job.last_run,
+          error: String(err),
+          consecutive_failures: job.consecutive_failures
+        }, 7 * 86400).catch(() => {
+        });
+        logger.error(
+          { id: job.id, err: String(err), consecutive_failures: job.consecutive_failures },
+          "Plan health digest cron failed"
+        );
       }
       return;
     }
@@ -43947,6 +44178,30 @@ function registerDefaultLoops() {
         tool_name: "knowledge_l4_sync",
         arguments: { max_items: 10 }
       }]
+    }
+  });
+  registerCronJob({
+    id: "plan-health-poll",
+    name: "Plan Health Poll (divine-symbiosis :Task status)",
+    schedule: "*/30 * * * *",
+    // every 30 minutes
+    enabled: true,
+    chain: {
+      name: "Plan Health Poll",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
+    }
+  });
+  registerCronJob({
+    id: "plan-health-digest-daily",
+    name: "Plan Health Digest (Daily Linear LIN-928 comment)",
+    schedule: "0 8 * * *",
+    // 08:00 UTC daily
+    enabled: true,
+    chain: {
+      name: "Plan Health Digest",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
     }
   });
 }
