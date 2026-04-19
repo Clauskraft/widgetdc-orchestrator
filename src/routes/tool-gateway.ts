@@ -33,32 +33,35 @@ function respondLegacyToolResult(res: Response, result: Awaited<ReturnType<typeo
   })
 }
 
-/**
- * POST /api/tools/call — backward-compatible shim for legacy cc-v4 clients.
- *
- * Accepts the old OrchestratorToolCall envelope and forwards to the canonical
- * /api/tools/:name gateway. Keep this until all clients have migrated.
- */
-toolGatewayRouter.post('/call', async (req: Request, res: Response) => {
-  const toolName = typeof req.body?.tool_name === 'string' ? req.body.tool_name : null
+async function handleCallMcpTool(req: Request, res: Response) {
+  const toolName = typeof req.body?.tool_name === 'string'
+    ? req.body.tool_name
+    : typeof req.body?.tool === 'string'
+      ? req.body.tool
+      : typeof req.body?.name === 'string'
+        ? req.body.name
+        : null
+
   const callId = typeof req.body?.call_id === 'string' ? req.body.call_id : uuid()
-  const args = req.body?.arguments && typeof req.body.arguments === 'object'
-    ? req.body.arguments as Record<string, unknown>
-    : {}
+  const args = req.body?.payload && typeof req.body.payload === 'object'
+    ? req.body.payload as Record<string, unknown>
+    : req.body?.arguments && typeof req.body.arguments === 'object'
+      ? req.body.arguments as Record<string, unknown>
+      : {}
 
   if (!toolName) {
     res.status(400).json({
       call_id: callId,
       status: 'error',
       result: null,
-      error_message: 'Legacy /api/tools/call requires tool_name',
+      error_message: 'call_mcp_tool requires tool_name',
       duration_ms: 0,
       completed_at: new Date().toISOString(),
     })
     return
   }
 
-  logger.warn({ tool: toolName, call_id: callId }, 'Deprecated /api/tools/call shim used')
+  logger.warn({ tool: toolName, call_id: callId }, 'Canonical /api/tools/call_mcp_tool shim used')
 
   const result = await executeToolUnified(toolName, args, {
     call_id: callId,
@@ -71,6 +74,28 @@ toolGatewayRouter.post('/call', async (req: Request, res: Response) => {
   }
 
   respondLegacyToolResult(res, result)
+}
+
+/**
+ * POST /api/tools/call — backward-compatible shim for legacy cc-v4 clients.
+ *
+ * Accepts the old OrchestratorToolCall envelope and forwards to the canonical
+ * /api/tools/:name gateway. Keep this until all clients have migrated.
+ */
+toolGatewayRouter.post('/call', async (req: Request, res: Response) => {
+  await handleCallMcpTool(req, res)
+})
+
+/**
+ * POST /api/tools/call_mcp_tool — alias endpoint expected by cross-repo callers.
+ *
+ * Supports all modern shapes:
+ * - { tool_name, payload }
+ * - { tool, arguments }
+ * - { name, arguments }
+ */
+toolGatewayRouter.post('/call_mcp_tool', async (req: Request, res: Response) => {
+  await handleCallMcpTool(req, res)
 })
 
 /**

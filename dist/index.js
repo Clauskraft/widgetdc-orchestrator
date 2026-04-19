@@ -48959,22 +48959,22 @@ function respondLegacyToolResult(res, result) {
     completed_at: result.completed_at
   });
 }
-toolGatewayRouter.post("/call", async (req, res) => {
-  const toolName = typeof req.body?.tool_name === "string" ? req.body.tool_name : null;
+async function handleCallMcpTool(req, res) {
+  const toolName = typeof req.body?.tool_name === "string" ? req.body.tool_name : typeof req.body?.tool === "string" ? req.body.tool : typeof req.body?.name === "string" ? req.body.name : null;
   const callId = typeof req.body?.call_id === "string" ? req.body.call_id : uuid40();
-  const args = req.body?.arguments && typeof req.body.arguments === "object" ? req.body.arguments : {};
+  const args = req.body?.payload && typeof req.body.payload === "object" ? req.body.payload : req.body?.arguments && typeof req.body.arguments === "object" ? req.body.arguments : {};
   if (!toolName) {
     res.status(400).json({
       call_id: callId,
       status: "error",
       result: null,
-      error_message: "Legacy /api/tools/call requires tool_name",
+      error_message: "call_mcp_tool requires tool_name",
       duration_ms: 0,
       completed_at: (/* @__PURE__ */ new Date()).toISOString()
     });
     return;
   }
-  logger.warn({ tool: toolName, call_id: callId }, "Deprecated /api/tools/call shim used");
+  logger.warn({ tool: toolName, call_id: callId }, "Canonical /api/tools/call_mcp_tool shim used");
   const result = await executeToolUnified(toolName, args, {
     call_id: callId,
     source_protocol: "legacy-rest",
@@ -48984,6 +48984,12 @@ toolGatewayRouter.post("/call", async (req, res) => {
     recordToolCall(toolName);
   }
   respondLegacyToolResult(res, result);
+}
+toolGatewayRouter.post("/call", async (req, res) => {
+  await handleCallMcpTool(req, res);
+});
+toolGatewayRouter.post("/call_mcp_tool", async (req, res) => {
+  await handleCallMcpTool(req, res);
 });
 toolGatewayRouter.post("/:name", async (req, res) => {
   const { name } = req.params;
