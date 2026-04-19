@@ -6,7 +6,7 @@
  * rules on every MCP tool definition in src/tools/tool-registry.ts.
  *
  * Rules (from SWE-agent paper + adapted to WidgeTDC conventions):
- *   A1. Tool name ≤25 chars, lowercase snake_case (no camelCase, no dashes)
+ *   A1. Tool name ≤25 chars, lowercase snake_case (or namespace-qualified snake_case for canonical passthrough tools)
  *   A2. Namespace is non-empty and lowercase
  *   A3. Description is present, ≤200 chars, starts with an action verb
  *   A4. Input schema: ≤6 required fields; every field has a .describe()
@@ -54,6 +54,7 @@ const MAX_NAME_LEN = 25
 const MAX_DESC_LEN = 200
 const MAX_REQUIRED_FIELDS = 6
 const NAME_RE = /^[a-z][a-z0-9_]*$/
+const QUALIFIED_NAME_RE = /^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$/
 
 // ─── Parse tool-registry.ts ────────────────────────────────────────────────
 
@@ -108,7 +109,10 @@ function checkTool(t) {
   if (t.name.length > MAX_NAME_LEN) {
     warnings.push(`name length ${t.name.length} > ${MAX_NAME_LEN}`)
   }
-  if (!NAME_RE.test(t.name)) {
+  const qualifiedNameAllowed = QUALIFIED_NAME_RE.test(t.name)
+    && typeof t.namespace === 'string'
+    && t.name.startsWith(`${t.namespace}.`)
+  if (!NAME_RE.test(t.name) && !qualifiedNameAllowed) {
     errors.push(`name not snake_case: "${t.name}"`)
   }
 

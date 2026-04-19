@@ -831,6 +831,23 @@ await test('84. POST /api/tools/query_graph rejects DELETE cypher', async () => 
   assert(result.includes('Error') && result.includes('read-only'), `expected read-only Error, got: ${result.slice(0, 100)}`)
 })
 
+// ── 84a. graph.write_cypher — rejects missing governance intent ──
+await test('84a. POST /api/tools/graph.write_cypher rejects missing intent', async () => {
+  const r = await api('/api/tools/graph.write_cypher', {
+    method: 'POST',
+    body: JSON.stringify({
+      query: 'MERGE (n:CiTest {id: $id}) SET n.updatedAt = timestamp() RETURN n.id AS id',
+      params: { id: 'aci-graph-write-cypher' },
+      evidence: 'test coverage for write gate',
+    }),
+  })
+  assert(r.status !== 404, `graph.write_cypher not deployed (404)`)
+  assert(r.status === 200, `expected 200, got ${r.status}`)
+  assert(r.body?.data?.tool_name === 'graph.write_cypher', `wrong tool_name: ${r.body?.data?.tool_name}`)
+  const result = r.body?.data?.result ?? ''
+  assert(result.includes('intent is required'), `expected intent validation error, got: ${result.slice(0, 100)}`)
+})
+
 // ── 85. check_tasks — succeeds without required args ──
 await test('85. POST /api/tools/check_tasks returns data (no args needed)', async () => {
   const r = await api('/api/tools/check_tasks', { method: 'POST', body: JSON.stringify({}) })

@@ -676,6 +676,38 @@ async function executeToolByName(name: string, args: Record<string, unknown>): P
       return JSON.stringify(rows, null, 2).slice(0, 800)
     }
 
+    case 'graph.write_cypher': {
+      const query = args.query as string
+      if (!query || typeof query !== 'string') return 'Error: query is required and must be a string'
+      if (!/\bMERGE\b/i.test(query)) return 'Error: graph.write_cypher requires a MERGE-based query.'
+      const FORBIDDEN_WRITE_KEYWORDS = /\b(CREATE|DELETE|DETACH|DROP|REMOVE|CALL\s+dbms)\b/i
+      if (FORBIDDEN_WRITE_KEYWORDS.test(query)) {
+        return 'Error: graph.write_cypher only allows MERGE-based writes and rejects CREATE/DELETE/REMOVE/DROP operations.'
+      }
+
+      const intent = String(args.intent ?? args._intent ?? '').trim()
+      const evidence = String(args.evidence ?? args._evidence ?? '').trim()
+      if (intent.length < 3) return 'Error: intent is required (min 3 chars)'
+      if (evidence.length < 3) return 'Error: evidence is required (min 3 chars)'
+
+      const normalizedArgs = {
+        ...args,
+        intent,
+        evidence,
+      }
+
+      const result = await callMcpTool({
+        toolName: 'graph.write_cypher',
+        args: normalizedArgs,
+        callId: uuid(),
+        timeoutMs: 15000,
+      })
+      if (result.status !== 'success') return `Graph write failed: ${result.error_message}`
+      return typeof result.result === 'string'
+        ? result.result
+        : JSON.stringify(result.result, null, 2).slice(0, 800)
+    }
+
     case 'check_tasks': {
       const filter = (args.filter as string) ?? 'active'
       const keyword = args.keyword as string ?? ''

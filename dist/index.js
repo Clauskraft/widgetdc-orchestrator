@@ -4333,6 +4333,26 @@ var init_tool_registry = __esm({
         timeoutMs: 15e3
       }),
       defineTool({
+        name: "graph.write_cypher",
+        namespace: "graph",
+        description: "Execute a MERGE-based Cypher write against Neo4j. Use for controlled lineage/state writes only; CREATE is rejected by write gate.",
+        input: z.object({
+          query: z.string().describe("Neo4j Cypher write query (MERGE-only pattern required by write gate)"),
+          params: z.record(z.unknown()).optional().describe("Query parameters"),
+          intent: z.string().optional().describe("One-line rationale for this write"),
+          _intent: z.string().optional().describe("Legacy alias for intent"),
+          evidence: z.string().optional().describe("Evidence log string for audit"),
+          _evidence: z.string().optional().describe("Legacy alias for evidence"),
+          purpose: z.string().optional().describe("Optional write purpose"),
+          objective: z.string().optional().describe("Optional write objective"),
+          verification: z.string().optional().describe("Optional post-write verification query"),
+          test_results: z.string().optional().describe("Optional verification evidence")
+        }),
+        backendTool: "graph.write_cypher",
+        timeoutMs: 15e3,
+        riskLevel: "staged_write"
+      }),
+      defineTool({
         name: "check_tasks",
         namespace: "linear",
         description: "Get active tasks, issues, and project status from the knowledge graph. Use when asked about project status, next steps, blockers, sprints, or Linear issues.",
@@ -31395,6 +31415,32 @@ ${result.merged_context}`;
       const rows = Array.isArray(result.result) ? result.result : result.result?.results ?? result.result;
       return JSON.stringify(rows, null, 2).slice(0, 800);
     }
+    case "graph.write_cypher": {
+      const query = args.query;
+      if (!query || typeof query !== "string") return "Error: query is required and must be a string";
+      if (!/\bMERGE\b/i.test(query)) return "Error: graph.write_cypher requires a MERGE-based query.";
+      const FORBIDDEN_WRITE_KEYWORDS = /\b(CREATE|DELETE|DETACH|DROP|REMOVE|CALL\s+dbms)\b/i;
+      if (FORBIDDEN_WRITE_KEYWORDS.test(query)) {
+        return "Error: graph.write_cypher only allows MERGE-based writes and rejects CREATE/DELETE/REMOVE/DROP operations.";
+      }
+      const intent = String(args.intent ?? args._intent ?? "").trim();
+      const evidence = String(args.evidence ?? args._evidence ?? "").trim();
+      if (intent.length < 3) return "Error: intent is required (min 3 chars)";
+      if (evidence.length < 3) return "Error: evidence is required (min 3 chars)";
+      const normalizedArgs = {
+        ...args,
+        intent,
+        evidence
+      };
+      const result = await callMcpTool({
+        toolName: "graph.write_cypher",
+        args: normalizedArgs,
+        callId: uuid28(),
+        timeoutMs: 15e3
+      });
+      if (result.status !== "success") return `Graph write failed: ${result.error_message}`;
+      return typeof result.result === "string" ? result.result : JSON.stringify(result.result, null, 2).slice(0, 800);
+    }
     case "check_tasks": {
       const filter = args.filter ?? "active";
       const keyword = args.keyword ?? "";
@@ -48948,6 +48994,11 @@ init_adoption_telemetry();
 import { Router as Router29 } from "express";
 import { v4 as uuid40 } from "uuid";
 var toolGatewayRouter = Router29();
+var KNOWN_WRITE_TOOLS = /* @__PURE__ */ new Set([
+  "graph.write_cypher",
+  "memory_store",
+  "linear_save_issue"
+]);
 function respondLegacyToolResult(res, result) {
   const httpStatus = result.status === "success" ? 200 : result.status === "timeout" ? 504 : 500;
   res.status(httpStatus).json({
@@ -48973,6 +49024,32 @@ async function handleCallMcpTool(req, res) {
       completed_at: (/* @__PURE__ */ new Date()).toISOString()
     });
     return;
+  }
+  if (KNOWN_WRITE_TOOLS.has(toolName)) {
+    const intent = args.intent ?? args._intent;
+    const evidence = args.evidence ?? args._evidence;
+    if (typeof intent !== "string" || intent.length < 3) {
+      res.status(400).json({
+        call_id: callId,
+        status: "error",
+        result: null,
+        error_message: `${toolName} requires 'intent' string in payload/arguments`,
+        duration_ms: 0,
+        completed_at: (/* @__PURE__ */ new Date()).toISOString()
+      });
+      return;
+    }
+    if (typeof evidence !== "string" || evidence.length < 3) {
+      res.status(400).json({
+        call_id: callId,
+        status: "error",
+        result: null,
+        error_message: `${toolName} requires 'evidence' string in payload/arguments`,
+        duration_ms: 0,
+        completed_at: (/* @__PURE__ */ new Date()).toISOString()
+      });
+      return;
+    }
   }
   logger.warn({ tool: toolName, call_id: callId }, "Canonical /api/tools/call_mcp_tool shim used");
   const result = await executeToolUnified(toolName, args, {

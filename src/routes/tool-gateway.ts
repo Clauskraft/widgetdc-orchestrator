@@ -18,6 +18,12 @@ import { v4 as uuid } from 'uuid'
 
 export const toolGatewayRouter = Router()
 
+const KNOWN_WRITE_TOOLS = new Set([
+  'graph.write_cypher',
+  'memory_store',
+  'linear_save_issue',
+])
+
 function respondLegacyToolResult(res: Response, result: Awaited<ReturnType<typeof executeToolUnified>>) {
   const httpStatus = result.status === 'success' ? 200
     : result.status === 'timeout' ? 504
@@ -59,6 +65,35 @@ async function handleCallMcpTool(req: Request, res: Response) {
       completed_at: new Date().toISOString(),
     })
     return
+  }
+
+  if (KNOWN_WRITE_TOOLS.has(toolName)) {
+    const intent = args.intent ?? args._intent
+    const evidence = args.evidence ?? args._evidence
+
+    if (typeof intent !== 'string' || intent.length < 3) {
+      res.status(400).json({
+        call_id: callId,
+        status: 'error',
+        result: null,
+        error_message: `${toolName} requires 'intent' string in payload/arguments`,
+        duration_ms: 0,
+        completed_at: new Date().toISOString(),
+      })
+      return
+    }
+
+    if (typeof evidence !== 'string' || evidence.length < 3) {
+      res.status(400).json({
+        call_id: callId,
+        status: 'error',
+        result: null,
+        error_message: `${toolName} requires 'evidence' string in payload/arguments`,
+        duration_ms: 0,
+        completed_at: new Date().toISOString(),
+      })
+      return
+    }
   }
 
   logger.warn({ tool: toolName, call_id: callId }, 'Canonical /api/tools/call_mcp_tool shim used')

@@ -51,6 +51,7 @@ Every tool declares governance metadata per the Neural Bridge v2 specification:
 | 10 | `investigate` | cognitive | 120s | Multi-agent deep investigation on a topic |
 | 11 | `context_fold` | cognitive | 30s | Compress large context via RLM /cognitive/fold |
 | 12 | `query_graph` | graph | 15s | Execute a Cypher query against the Neo4j knowledge graph |
+| 12a | `graph.write_cypher` | graph | 15s | Execute a MERGE-based Cypher write against Neo4j for controlled lineage/state writes |
 | 12 | `build_communities` | graph | 120s | Build hierarchical community summaries via Leiden detection |
 | 13 | `drill_start` | graph | 15s | Start hierarchical drill-down session (G4.15) |
 | 14 | `drill_down` | graph | 15s | Drill into child level in active session (G4.16) |
@@ -456,7 +457,7 @@ curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/inves
 
 ---
 
-### graph (2 tools)
+### graph (3 tools)
 
 ---
 
@@ -480,6 +481,39 @@ curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/query
   -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"cypher": "MATCH (c:Client)-[:HAS_DOMAIN]->(d:Domain) WHERE d.name = $domain RETURN c.name LIMIT 10", "params": {"domain": "telecom"}}'
+```
+
+---
+
+#### `graph.write_cypher`
+
+**Description:** Execute a MERGE-based Cypher write against Neo4j. Use for controlled lineage and state writes only. Direct calls require `intent` and `evidence`, and destructive keywords are rejected.
+
+**Timeout:** 15,000 ms  
+**Handler:** mcp-proxy → `graph.write_cypher`  
+**Risk Level:** staged_write
+
+**Input Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | yes | Neo4j Cypher write query using a MERGE-based pattern |
+| `params` | object | no | Query parameters |
+| `intent` | string | no | One-line rationale for the write |
+| `_intent` | string | no | Legacy alias for `intent` |
+| `evidence` | string | no | Evidence string for audit trail |
+| `_evidence` | string | no | Legacy alias for `evidence` |
+| `purpose` | string | no | Optional write purpose |
+| `objective` | string | no | Optional write objective |
+| `verification` | string | no | Optional post-write verification query |
+| `test_results` | string | no | Optional verification evidence |
+
+**Example:**
+```bash
+curl -X POST https://orchestrator-production-c27e.up.railway.app/api/tools/graph.write_cypher \
+  -H "Authorization: Bearer $ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "MERGE (r:ReasonRun {id: $id}) SET r.kind = $kind RETURN r.id", "params": {"id": "rr-123", "kind": "cron-dispatch"}, "intent": "record telemetry ping", "evidence": "LIN-932 governance-gated write path"}'
 ```
 
 ---
