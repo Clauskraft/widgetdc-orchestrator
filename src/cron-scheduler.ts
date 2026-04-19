@@ -26,6 +26,7 @@ import { runPheromoneCron } from './swarm/pheromone-layer.js'
 import { runFleetAnalysis } from './swarm/peer-eval.js'
 import { runWeeklySync as runFlywheelSync } from './flywheel/flywheel-coordinator.js'
 import { runWeeklyConsolidation } from './llm/consolidation-engine.js'
+import { storeMemory } from './memory/working-memory.js'
 
 interface CronJob {
   id: string
@@ -396,6 +397,115 @@ export async function runCronJob(jobId: string): Promise<void> {
         job.run_count++
         persistCronJobs()
         logger.error({ id: job.id, err: String(err) }, 'Community builder cron failed')
+      }
+      return
+    }
+
+    // ═══ Vault Layer Migration (LIN-927 · divine-symbiosis 1.6) ═════════
+    // POSTs to backend /api/cron/vault-layer-migration (Claude-Obsidian P5.2.4).
+    // On success: A2A memory_store {agentId:'orch-cron', key:'vault-layer-migration:last-run'}.
+    // On failure: increments :AgentMemory counter; after 3 consecutive failures,
+    // posts a comment to Linear LIN-927. The generic circuit-breaker then
+    // auto-disables the job (see consecutive_failures handling below).
+    if (job.id === 'vault-layer-migration-nightly') {
+      const endpoint = `${config.backendUrl}/api/cron/vault-layer-migration`
+      try {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${config.backendApiKey}`,
+            'X-Call-Id': `cron-${job.id}-${Date.now()}`,
+          },
+          signal: AbortSignal.timeout(120_000),
+        })
+
+        const body = await res.json().catch(() => null) as Record<string, unknown> | null
+        job.last_run = new Date().toISOString()
+        job.last_status = res.ok ? 'completed' : `failed:${res.status}`
+        job.run_count++
+        if (res.ok) job.consecutive_failures = 0
+        persistCronJobs()
+
+        if (res.ok) {
+          await storeMemory('orch-cron', 'vault-layer-migration:last-run', {
+            ran_at: job.last_run,
+            status: 'completed',
+            endpoint,
+            run_count: job.run_count,
+            summary: body?.summary ?? null,
+            result: body ?? null,
+          }, 7 * 86_400) // 7-day TTL
+        }
+
+        const statusEmoji = res.ok ? '✅' : '❌'
+        broadcastMessage({
+          from: 'Orchestrator',
+          to: 'All',
+          source: 'orchestrator',
+          type: 'Message',
+          message: `${statusEmoji} Vault layer migration: ${res.ok ? 'completed' : `HTTP ${res.status}`}${body?.summary ? ` — ${body.summary}` : ''}`,
+          timestamp: new Date().toISOString(),
+        })
+
+        if (res.ok) {
+          broadcastSSE(`cron-${job.id}`, { status: 'completed', result: body })
+        } else {
+          logger.warn({ id: job.id, status: res.status, body }, `Backend cron ${job.id} returned non-OK`)
+          throw new Error(`Backend returned HTTP ${res.status}`)
+        }
+      } catch (err) {
+        job.last_run = new Date().toISOString()
+        job.last_status = 'failed'
+        job.run_count++
+        job.consecutive_failures = (job.consecutive_failures || 0) + 1
+        persistCronJobs()
+
+        await storeMemory('orch-cron', 'vault-layer-migration:last-failure', {
+          failed_at: job.last_run,
+          error: String(err),
+          consecutive_failures: job.consecutive_failures,
+          endpoint,
+        }, 7 * 86_400).catch(() => { /* ignore A2A write failure */ })
+
+        logger.error(
+          { id: job.id, err: String(err), consecutive_failures: job.consecutive_failures },
+          'Vault layer migration cron failed',
+        )
+
+        // Escalate to Linear LIN-927 on 3rd consecutive failure. The generic
+        // circuit breaker below will then auto-disable the job.
+        if (job.consecutive_failures >= 3) {
+          try {
+            const commentBody =
+              `Vault layer migration cron failed ${job.consecutive_failures} consecutive runs.\n\n` +
+              `* Endpoint: \`POST ${endpoint}\`\n` +
+              `* Latest error: \`${String(err).slice(0, 500)}\`\n` +
+              `* Job id: \`${job.id}\`\n` +
+              `* Last run: ${job.last_run}\n\n` +
+              `The orchestrator circuit breaker will auto-disable this job. ` +
+              `Investigate backend \`/api/cron/vault-layer-migration\` health, then re-enable via ` +
+              `\`POST /api/cron/${job.id}/enable\`.`
+
+            const mcpRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${config.backendApiKey}`,
+              },
+              body: JSON.stringify({
+                tool: 'linear.save_comment',
+                payload: { issueId: 'LIN-927', body: commentBody },
+              }),
+              signal: AbortSignal.timeout(15_000),
+            })
+            if (!mcpRes.ok) {
+              logger.warn({ status: mcpRes.status }, 'Failed to post LIN-927 escalation comment')
+            }
+          } catch (linearErr) {
+            logger.warn({ err: String(linearErr) }, 'Linear escalation for LIN-927 failed')
+          }
+        }
       }
       return
     }
@@ -2046,6 +2156,27 @@ export function registerDefaultLoops(): void {
         tool_name: 'knowledge_l4_sync',
         arguments: { max_items: 10 },
       }],
+    },
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // VAULT LAYER MIGRATION — LIN-927 · divine-symbiosis 1.6
+  // Daily at 02:30 UTC: POST backend /api/cron/vault-layer-migration.
+  // Migrates :VectorDocument through Ingested → Curated → Archived per
+  // Claude-Obsidian P5.2.4 (7d quality-gate + 365d archival).
+  // Dedicated handler above writes :AgentMemory on success and escalates
+  // to Linear LIN-927 after 3 consecutive failures.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  registerCronJob({
+    id: 'vault-layer-migration-nightly',
+    name: 'Vault Layer Migration (Ingested → Curated → Archived)',
+    schedule: '30 02 * * *', // Daily 02:30 UTC
+    enabled: true,
+    chain: {
+      name: 'Vault Layer Migration',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
     },
   })
 }
