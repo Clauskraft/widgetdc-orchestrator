@@ -26,6 +26,7 @@ import { runPheromoneCron } from './swarm/pheromone-layer.js'
 import { runFleetAnalysis } from './swarm/peer-eval.js'
 import { runWeeklySync as runFlywheelSync } from './flywheel/flywheel-coordinator.js'
 import { runWeeklyConsolidation } from './llm/consolidation-engine.js'
+import { runVaultLayerMigrationCron } from './cron/vault-layer-migration.js'
 
 interface CronJob {
   id: string
@@ -396,6 +397,34 @@ export async function runCronJob(jobId: string): Promise<void> {
         job.run_count++
         persistCronJobs()
         logger.error({ id: job.id, err: String(err) }, 'Community builder cron failed')
+      }
+      return
+    }
+
+    // Vault layer migration — backend cron proxy with dedicated helper for LIN-927.
+    if (job.id === 'vault-layer-migration') {
+      try {
+        const result = await runVaultLayerMigrationCron()
+        job.last_run = new Date().toISOString()
+        job.last_status = 'completed'
+        job.run_count++
+        persistCronJobs()
+
+        broadcastMessage({
+          from: 'Orchestrator',
+          to: 'All',
+          source: 'orchestrator',
+          type: 'Message',
+          message: `✅ Backend cron "${job.name}": ${result.summary}`,
+          timestamp: new Date().toISOString(),
+        })
+        broadcastSSE(`cron-${job.id}`, { status: 'completed', result })
+      } catch (err) {
+        job.last_run = new Date().toISOString()
+        job.last_status = 'failed'
+        job.run_count++
+        persistCronJobs()
+        logger.error({ id: job.id, err: String(err) }, 'Vault layer migration cron failed')
       }
       return
     }
@@ -1945,6 +1974,21 @@ export function registerDefaultLoops(): void {
     enabled: true,
     chain: {
       name: 'Consulting Activation',
+      mode: 'sequential',
+      steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
+    },
+  })
+
+  // Vault Layer Migration — LIN-927 / LIN-895 P5.2.4
+  // Runs the backend Ingested -> Curated -> Archived promotion cycle once daily.
+  // Offset from the 03:00 UTC job cluster to avoid stacking with other backend crons.
+  registerCronJob({
+    id: 'vault-layer-migration',
+    name: 'Vault Layer Migration (Ingested -> Curated -> Archived)',
+    schedule: '20 2 * * *', // Daily 02:20 UTC
+    enabled: true,
+    chain: {
+      name: 'Vault Layer Migration',
       mode: 'sequential',
       steps: [{ agent_id: 'orchestrator', tool_name: 'graph.stats', arguments: {} }],
     },
