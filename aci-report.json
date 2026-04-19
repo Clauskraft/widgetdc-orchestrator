@@ -1,8 +1,8 @@
 {
-  "total": 171,
+  "total": 173,
   "clean": 123,
   "hard_errors": 0,
-  "warnings": 56,
+  "warnings": 58,
   "findings": [
     {
       "name": "adaptive_rag_query",
@@ -66,6 +66,14 @@
       "errors": [],
       "warnings": [
         "description 215 chars > 200"
+      ]
+    },
+    {
+      "name": "canvas_builder",
+      "namespace": "assembly",
+      "errors": [],
+      "warnings": [
+        "description 366 chars > 200"
       ]
     },
     {
@@ -325,6 +333,14 @@
       ]
     },
     {
+      "name": "produce_document",
+      "namespace": "assembly",
+      "errors": [],
+      "warnings": [
+        "description 410 chars > 200"
+      ]
+    },
+    {
       "name": "prompt_ab_test",
       "namespace": "value-props",
       "errors": [],
@@ -397,5 +413,5 @@
       ]
     }
   ],
-  "generated_at": "2026-04-18T07:44:20.574Z"
+  "generated_at": "2026-04-19T13:53:53.488Z"
 }

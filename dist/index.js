@@ -42339,6 +42339,7 @@ init_pheromone_layer();
 init_peer_eval();
 init_flywheel_coordinator();
 init_consolidation_engine();
+init_working_memory();
 var jobs = /* @__PURE__ */ new Map();
 var cronTasks = /* @__PURE__ */ new Map();
 var runningJobsLocal = /* @__PURE__ */ new Set();
@@ -42638,6 +42639,98 @@ async function runCronJob(jobId) {
         job.run_count++;
         persistCronJobs();
         logger.error({ id: job.id, err: String(err) }, "Community builder cron failed");
+      }
+      return;
+    }
+    if (job.id === "vault-layer-migration-nightly") {
+      const endpoint2 = `${config.backendUrl}/api/cron/vault-layer-migration`;
+      try {
+        const res = await fetch(endpoint2, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${config.backendApiKey}`,
+            "X-Call-Id": `cron-${job.id}-${Date.now()}`
+          },
+          signal: AbortSignal.timeout(12e4)
+        });
+        const body = await res.json().catch(() => null);
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = res.ok ? "completed" : `failed:${res.status}`;
+        job.run_count++;
+        if (res.ok) job.consecutive_failures = 0;
+        persistCronJobs();
+        if (res.ok) {
+          await storeMemory("orch-cron", "vault-layer-migration:last-run", {
+            ran_at: job.last_run,
+            status: "completed",
+            endpoint: endpoint2,
+            run_count: job.run_count,
+            summary: body?.summary ?? null,
+            result: body ?? null
+          }, 7 * 86400);
+        }
+        const statusEmoji = res.ok ? "\u2705" : "\u274C";
+        broadcastMessage({
+          from: "Orchestrator",
+          to: "All",
+          source: "orchestrator",
+          type: "Message",
+          message: `${statusEmoji} Vault layer migration: ${res.ok ? "completed" : `HTTP ${res.status}`}${body?.summary ? ` \u2014 ${body.summary}` : ""}`,
+          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        });
+        if (res.ok) {
+          broadcastSSE(`cron-${job.id}`, { status: "completed", result: body });
+        } else {
+          logger.warn({ id: job.id, status: res.status, body }, `Backend cron ${job.id} returned non-OK`);
+          throw new Error(`Backend returned HTTP ${res.status}`);
+        }
+      } catch (err) {
+        job.last_run = (/* @__PURE__ */ new Date()).toISOString();
+        job.last_status = "failed";
+        job.run_count++;
+        job.consecutive_failures = (job.consecutive_failures || 0) + 1;
+        persistCronJobs();
+        await storeMemory("orch-cron", "vault-layer-migration:last-failure", {
+          failed_at: job.last_run,
+          error: String(err),
+          consecutive_failures: job.consecutive_failures,
+          endpoint: endpoint2
+        }, 7 * 86400).catch(() => {
+        });
+        logger.error(
+          { id: job.id, err: String(err), consecutive_failures: job.consecutive_failures },
+          "Vault layer migration cron failed"
+        );
+        if (job.consecutive_failures >= 3) {
+          try {
+            const commentBody = `Vault layer migration cron failed ${job.consecutive_failures} consecutive runs.
+
+* Endpoint: \`POST ${endpoint2}\`
+* Latest error: \`${String(err).slice(0, 500)}\`
+* Job id: \`${job.id}\`
+* Last run: ${job.last_run}
+
+The orchestrator circuit breaker will auto-disable this job. Investigate backend \`/api/cron/vault-layer-migration\` health, then re-enable via \`POST /api/cron/${job.id}/enable\`.`;
+            const mcpRes = await fetch(`${config.backendUrl}/api/mcp/route`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${config.backendApiKey}`
+              },
+              body: JSON.stringify({
+                tool: "linear.save_comment",
+                payload: { issueId: "LIN-927", body: commentBody }
+              }),
+              signal: AbortSignal.timeout(15e3)
+            });
+            if (!mcpRes.ok) {
+              logger.warn({ status: mcpRes.status }, "Failed to post LIN-927 escalation comment");
+            }
+          } catch (linearErr) {
+            logger.warn({ err: String(linearErr) }, "Linear escalation for LIN-927 failed");
+          }
+        }
       }
       return;
     }
@@ -43947,6 +44040,18 @@ function registerDefaultLoops() {
         tool_name: "knowledge_l4_sync",
         arguments: { max_items: 10 }
       }]
+    }
+  });
+  registerCronJob({
+    id: "vault-layer-migration-nightly",
+    name: "Vault Layer Migration (Ingested \u2192 Curated \u2192 Archived)",
+    schedule: "30 02 * * *",
+    // Daily 02:30 UTC
+    enabled: true,
+    chain: {
+      name: "Vault Layer Migration",
+      mode: "sequential",
+      steps: [{ agent_id: "orchestrator", tool_name: "graph.stats", arguments: {} }]
     }
   });
 }
