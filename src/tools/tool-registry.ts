@@ -341,6 +341,27 @@ export const TOOL_REGISTRY: CanonicalTool[] = [
   }),
 
   defineTool({
+    name: 'graph.write_cypher',
+    namespace: 'graph',
+    description: 'Execute a MERGE-based Cypher write against Neo4j. Use for controlled lineage/state writes only; CREATE is rejected by write gate.',
+    input: z.object({
+      query: z.string().describe('Neo4j Cypher write query (MERGE-only pattern required by write gate)'),
+      params: z.record(z.unknown()).optional().describe('Query parameters'),
+      intent: z.string().optional().describe('One-line rationale for this write'),
+      _intent: z.string().optional().describe('Legacy alias for intent'),
+      evidence: z.string().optional().describe('Evidence log string for audit'),
+      _evidence: z.string().optional().describe('Legacy alias for evidence'),
+      purpose: z.string().optional().describe('Optional write purpose'),
+      objective: z.string().optional().describe('Optional write objective'),
+      verification: z.string().optional().describe('Optional post-write verification query'),
+      test_results: z.string().optional().describe('Optional verification evidence'),
+    }),
+    backendTool: 'graph.write_cypher',
+    timeoutMs: 15000,
+    riskLevel: 'staged_write',
+  }),
+
+  defineTool({
     name: 'check_tasks',
     namespace: 'linear',
     description: 'Get active tasks, issues, and project status from the knowledge graph. Use when asked about project status, next steps, blockers, sprints, or Linear issues.',
