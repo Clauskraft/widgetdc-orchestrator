@@ -27,8 +27,13 @@ import argparse
 import urllib.request
 from datetime import datetime, timezone
 
-BACKEND_URL = os.environ.get("BACKEND_URL", "https://backend-production-d3da.up.railway.app")
-BACKEND_API_KEY = os.environ.get("BACKEND_API_KEY", "Heravej_22")
+# Env-var with empty-string fallback — GitHub workflows pass "" for unset secrets,
+# which os.environ.get() returns as "" instead of falling through to the default.
+# Explicit truthy check prevents `""/api/mcp/route` URL-construction failure.
+_BACKEND_URL_ENV = os.environ.get("BACKEND_URL", "").strip()
+BACKEND_URL = _BACKEND_URL_ENV if _BACKEND_URL_ENV else "https://backend-production-d3da.up.railway.app"
+_BACKEND_API_KEY_ENV = os.environ.get("BACKEND_API_KEY", "").strip()
+BACKEND_API_KEY = _BACKEND_API_KEY_ENV if _BACKEND_API_KEY_ENV else "Heravej_22"
 
 TOP_N = 15
 DEAD_AFTER_DAYS = 7
