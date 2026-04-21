@@ -655,6 +655,49 @@ export async function onExternalSignal(
   )
 }
 
+export interface HumanSignaledTriggerInput {
+  source: string
+  domain: string
+  label: string
+  signalType: 'risk' | 'novelty' | 'question' | 'claim' | 'contradiction' | 'breaking_change' | 'opportunity' | 'attention'
+  clientSurface: 'canvas' | 'word_addin' | 'excel_addin' | 'web_overlay' | 'filesystem_shell'
+  strength?: number
+  rationale?: string
+  metrics?: Record<string, number>
+  anchor?: {
+    anchor_kind?: string
+    resource_uri?: string
+  }
+}
+
+export async function onHumanSignaledTrigger(input: HumanSignaledTriggerInput): Promise<Pheromone> {
+  const signalStrength = Math.max(0, Math.min(1, Number(input.strength) || 0.72))
+  const signalLabel = input.rationale?.trim()
+    ? `${input.label} :: ${input.rationale.trim().slice(0, 160)}`
+    : input.label
+
+  return deposit(
+    `human:${input.source}`,
+    'external',
+    `human-signaled:${input.domain}`,
+    signalStrength,
+    signalLabel,
+    {
+      ...(input.metrics ?? {}),
+      anchor_present: input.anchor ? 1 : 0,
+    },
+    [
+      'human-signaled',
+      'operator-anchored',
+      `signal:${input.signalType}`,
+      `surface:${input.clientSurface}`,
+      `domain:${input.domain}`,
+      ...(input.anchor?.anchor_kind ? [`anchor:${input.anchor.anchor_kind}`] : []),
+    ],
+    43200,
+  )
+}
+
 // ─── State & Getters ────────────────────────────────────────────────────────
 
 export function getPheromoneState(): PheromoneState {
@@ -941,3 +984,4 @@ export async function initPheromoneLayer(): Promise<void> {
   logger.info({ totalDeposits: state.totalDeposits, activePheromones: state.activePheromones },
     'Pheromone layer initialized')
 }
+
