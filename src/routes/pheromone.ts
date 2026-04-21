@@ -6,14 +6,16 @@
  * GET  /trails    — Aggregated trail summaries
  * GET  /heatmap   — Cross-domain heatmap for dashboard
  * POST /deposit   — Manual pheromone deposit (external signals)
+ * POST /human-signaled — Operator-anchored trigger ingress for human-signaled pheromones
  * POST /decay     — Trigger manual decay cycle
  */
 import { Router, Request, Response } from 'express'
 import {
   getPheromoneState, sense, getTrailSummary, getHeatmap,
-  deposit, runPheromoneCron, onExternalSignal,
+  deposit, runPheromoneCron, onExternalSignal, onHumanSignaledTrigger,
   type PheromoneType,
 } from '../swarm/pheromone-layer.js'
+import type { HumanSignaledPheromoneTriggerRequest, HumanSignaledPheromoneTriggerResponse } from '@widgetdc/contracts/mrp'
 import { logger } from '../logger.js'
 
 export const pheromoneRouter = Router()
@@ -69,7 +71,6 @@ pheromoneRouter.post('/deposit', async (req: Request, res: Response) => {
       res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Required: source, domain, label, strength', status_code: 400 } })
       return
     }
-    // Input bounds: strength 0-1, string lengths capped, metrics depth limited
     const clampedStrength = Math.max(0, Math.min(1, Number(strength) || 0))
     const safeSource = String(source).slice(0, 128)
     const safeDomain = String(domain).slice(0, 128)
@@ -84,6 +85,54 @@ pheromoneRouter.post('/deposit', async (req: Request, res: Response) => {
     res.json({ success: true, message: 'External pheromone deposited' })
   } catch (err) {
     res.status(500).json({ success: false, error: { code: 'DEPOSIT_FAILED', message: String(err), status_code: 500 } })
+  }
+})
+
+pheromoneRouter.post('/human-signaled', async (req: Request, res: Response) => {
+  try {
+    const { source, domain, label, signal_type, client_surface, strength, rationale, metrics, anchor } = req.body as HumanSignaledPheromoneTriggerRequest
+    if (!source || !domain || !label || !signal_type || !client_surface) {
+      res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Required: source, domain, label, signal_type, client_surface', status_code: 400 } })
+      return
+    }
+
+    const safeMetrics: Record<string, number> = {}
+    if (metrics && typeof metrics === 'object') {
+      for (const [k, v] of Object.entries(metrics).slice(0, 20)) {
+        safeMetrics[String(k).slice(0, 64)] = Number(v) || 0
+      }
+    }
+
+    const safeSource = String(source).slice(0, 128)
+    const safeDomain = String(domain).slice(0, 128)
+    const safeLabel = String(label).slice(0, 256)
+    const safeRationale = typeof rationale === 'string' ? rationale.slice(0, 1000) : undefined
+
+    await onHumanSignaledTrigger({
+      source: safeSource,
+      domain: safeDomain,
+      label: safeLabel,
+      signalType: signal_type,
+      clientSurface: client_surface,
+      strength: strength == null ? undefined : Math.max(0, Math.min(1, Number(strength) || 0)),
+      rationale: safeRationale,
+      metrics: safeMetrics,
+      anchor,
+    })
+
+    const response: HumanSignaledPheromoneTriggerResponse = {
+      status: 'accepted',
+      domain: safeDomain,
+      signal_type,
+      client_surface,
+      message: 'Human-signaled pheromone accepted',
+      accepted_at: new Date().toISOString(),
+    }
+
+    res.status(202).json({ success: true, data: response })
+  } catch (err) {
+    logger.error({ error: String(err) }, 'Human-signaled pheromone deposit failed')
+    res.status(500).json({ success: false, error: { code: 'HUMAN_SIGNAL_FAILED', message: String(err), status_code: 500 } })
   }
 })
 
