@@ -18,6 +18,7 @@ import { dualChannelRAG } from '../memory/dual-rag.js'
 import { AgentRegistry } from '../agents/agent-registry.js'
 import { resolveRoutingDecision } from '../agents/routing-engine.js'
 import type { AgentMessage } from '@widgetdc/contracts/orchestrator'
+import { getRedis } from '../redis.js'
 
 // ─── Memory helpers — persist to multiple memory layers ──────────────────────
 
@@ -34,6 +35,127 @@ async function mcpCall(tool: string, payload: Record<string, unknown>): Promise<
   })
   const data = await res.json().catch(() => null)
   return data?.result ?? data
+}
+
+// ─── N1-C: A2A Atomic Handshake (delivery + ack evidence) ───────────────────
+
+type HandshakeStatus = 'delivered' | 'acked'
+
+interface AtomicHandshakeRecord {
+  handshake_id: string
+  message_id: string
+  from: string
+  to: string
+  thread_id: string
+  status: HandshakeStatus
+  delivered_at: string
+  acked_at?: string
+  ack_by?: string
+  ack_note?: string
+}
+
+const A2A_HANDSHAKE_PREFIX = 'orchestrator:a2a:handshake:'
+const A2A_HANDSHAKE_TTL_SECONDS = 24 * 3600
+const atomicHandshakeMemory = new Map<string, AtomicHandshakeRecord>()
+
+function handshakeIdForMessage(messageId: string): string {
+  return `hs-${messageId}`
+}
+
+async function saveHandshakeRecord(record: AtomicHandshakeRecord): Promise<void> {
+  atomicHandshakeMemory.set(record.handshake_id, record)
+  const redis = getRedis()
+  if (!redis) return
+  await redis.set(
+    `${A2A_HANDSHAKE_PREFIX}${record.handshake_id}`,
+    JSON.stringify(record),
+    'EX',
+    A2A_HANDSHAKE_TTL_SECONDS,
+  )
+}
+
+async function loadHandshakeRecord(handshakeId: string): Promise<AtomicHandshakeRecord | null> {
+  const inMemory = atomicHandshakeMemory.get(handshakeId)
+  if (inMemory) return inMemory
+  const redis = getRedis()
+  if (!redis) return null
+  const raw = await redis.get(`${A2A_HANDSHAKE_PREFIX}${handshakeId}`)
+  if (!raw) return null
+  const parsed = JSON.parse(raw) as AtomicHandshakeRecord
+  atomicHandshakeMemory.set(handshakeId, parsed)
+  return parsed
+}
+
+async function persistHandshakeDeliveryGraph(record: AtomicHandshakeRecord): Promise<void> {
+  try {
+    await mcpCall('graph.write_cypher', {
+      query: `
+MERGE (h:A2AAtomicHandshake {handshakeId: $handshakeId})
+SET h.messageId = $messageId,
+    h.fromAgent = $fromAgent,
+    h.toAgent = $toAgent,
+    h.threadId = $threadId,
+    h.status = 'delivered',
+    h.deliveredAt = datetime($deliveredAt),
+    h.bom_version = '2.0',
+    h.normalization_complete = true,
+    h.last_audited = datetime(),
+    h.lastUpdatedAt = datetime()
+MERGE (from:Agent {agentId: $fromAgent})
+MERGE (to:Agent {agentId: $toAgent})
+MERGE (from)-[:SENT_HANDSHAKE]->(h)
+MERGE (h)-[:TARGETS_AGENT]->(to)
+RETURN count(h) AS matched
+      `,
+      params: {
+        handshakeId: record.handshake_id,
+        messageId: record.message_id,
+        fromAgent: record.from,
+        toAgent: record.to,
+        threadId: record.thread_id,
+        deliveredAt: record.delivered_at,
+      },
+    })
+  } catch (err) {
+    logger.warn({ err: String(err), handshake_id: record.handshake_id }, 'Handshake delivery graph write failed (non-fatal)')
+  }
+}
+
+async function persistHandshakeAckGraph(record: AtomicHandshakeRecord): Promise<void> {
+  try {
+    await mcpCall('graph.write_cypher', {
+      query: `
+MERGE (h:A2AAtomicHandshake {handshakeId: $handshakeId})
+SET h.status = 'acked',
+    h.ackBy = $ackBy,
+    h.ackNote = $ackNote,
+    h.ackedAt = datetime($ackedAt),
+    h.last_audited = datetime(),
+    h.lastUpdatedAt = datetime()
+MERGE (ack:Agent {agentId: $ackBy})
+MERGE (ack)-[:ACKED_HANDSHAKE]->(h)
+RETURN count(h) AS matched
+      `,
+      params: {
+        handshakeId: record.handshake_id,
+        ackBy: record.ack_by,
+        ackNote: record.ack_note ?? null,
+        ackedAt: record.acked_at,
+      },
+    })
+  } catch (err) {
+    logger.warn({ err: String(err), handshake_id: record.handshake_id }, 'Handshake ack graph write failed (non-fatal)')
+  }
+}
+
+async function persistAtomicHandshakeDelivery(record: AtomicHandshakeRecord): Promise<void> {
+  await saveHandshakeRecord(record)
+  await persistHandshakeDeliveryGraph(record)
+}
+
+async function persistAtomicHandshakeAck(record: AtomicHandshakeRecord): Promise<void> {
+  await saveHandshakeRecord(record)
+  await persistHandshakeAckGraph(record)
 }
 
 /** Store to episodic memory via memory_operation RECORD_EPISODE */
@@ -285,7 +407,7 @@ chatRouter.post('/message', (req: Request, res: Response) => {
 })
 
 // ─── POST /send — Simple A2A message (convenience wrapper for /message) ─────
-chatRouter.post('/send', (req: Request, res: Response) => {
+chatRouter.post('/send', async (req: Request, res: Response) => {
   const { from, to, message, thread_id } = req.body
   if (!from || !to || !message) {
     res.status(400).json({
@@ -312,6 +434,17 @@ chatRouter.post('/send', (req: Request, res: Response) => {
   notifyChatMessage(msg.from, msg.to, msg.message)
   logger.info({ from: msg.from, to: msg.to, type: msg.type }, 'A2A chat message sent')
 
+  const handshake: AtomicHandshakeRecord = {
+    handshake_id: handshakeIdForMessage(msg.id),
+    message_id: msg.id,
+    from: msg.from,
+    to: msg.to,
+    thread_id: msg.thread_id,
+    status: 'delivered',
+    delivered_at: msg.timestamp,
+  }
+  await persistAtomicHandshakeDelivery(handshake).catch(() => {})
+
   // Persist to Neo4j AgentMemory for cross-session recall
   mcpCall('graph.write_cypher', {
     query: `MERGE (m:AgentMemory {agentId: $from, key: $key}) SET m.value = $value, m.type = 'a2a_message', m.updatedAt = datetime()`,
@@ -322,7 +455,78 @@ chatRouter.post('/send', (req: Request, res: Response) => {
     },
   }).catch(() => {})
 
-  res.json({ success: true, data: { id: msg.id, timestamp: msg.timestamp } })
+  res.json({
+    success: true,
+    data: {
+      id: msg.id,
+      timestamp: msg.timestamp,
+      thread_id: msg.thread_id,
+      handshake_id: handshake.handshake_id,
+      ack_required: true,
+      status: handshake.status,
+    },
+  })
+})
+
+// ─── POST /ack — Atomic handshake acknowledgement ────────────────────────────
+chatRouter.post('/ack', async (req: Request, res: Response) => {
+  const handshakeId = typeof req.body.handshake_id === 'string' && req.body.handshake_id
+    ? req.body.handshake_id
+    : (typeof req.body.message_id === 'string' && req.body.message_id ? handshakeIdForMessage(req.body.message_id) : '')
+  const ackBy = typeof req.body.ack_by === 'string' ? req.body.ack_by : ''
+  const ackNote = typeof req.body.ack_note === 'string' ? req.body.ack_note : undefined
+
+  if (!handshakeId || !ackBy) {
+    res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_PAYLOAD', message: 'ack_by and handshake_id (or message_id) are required', status_code: 400 },
+    })
+    return
+  }
+
+  const existing = await loadHandshakeRecord(handshakeId)
+  if (!existing) {
+    res.status(404).json({
+      success: false,
+      error: { code: 'HANDSHAKE_NOT_FOUND', message: `Handshake '${handshakeId}' not found`, status_code: 404 },
+    })
+    return
+  }
+
+  const acked: AtomicHandshakeRecord = {
+    ...existing,
+    status: 'acked',
+    ack_by: ackBy,
+    ack_note: ackNote,
+    acked_at: new Date().toISOString(),
+  }
+
+  await persistAtomicHandshakeAck(acked).catch(() => {})
+
+  res.json({
+    success: true,
+    data: {
+      handshake_id: acked.handshake_id,
+      message_id: acked.message_id,
+      thread_id: acked.thread_id,
+      status: acked.status,
+      ack_by: acked.ack_by,
+      acked_at: acked.acked_at,
+    },
+  })
+})
+
+// ─── GET /handshake/:id — Inspect atomic handshake state ─────────────────────
+chatRouter.get('/handshake/:id', async (req: Request, res: Response) => {
+  const handshake = await loadHandshakeRecord(req.params.id)
+  if (!handshake) {
+    res.status(404).json({
+      success: false,
+      error: { code: 'HANDSHAKE_NOT_FOUND', message: `Handshake '${req.params.id}' not found`, status_code: 404 },
+    })
+    return
+  }
+  res.json({ success: true, data: handshake })
 })
 
 // ─── GET /history — Persistent message history ───────────────────────────────
