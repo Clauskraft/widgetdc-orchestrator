@@ -1174,12 +1174,898 @@ var init_llm = __esm({
   }
 });
 
+// src/llm/cost-governance.ts
+var cost_governance_exports = {};
+__export(cost_governance_exports, {
+  BUDGET_LANE_MICRO_MAX: () => BUDGET_LANE_MICRO_MAX,
+  BUDGET_LANE_STANDARD_MAX: () => BUDGET_LANE_STANDARD_MAX,
+  CONTEXT_COMPACTION_THRESHOLD: () => CONTEXT_COMPACTION_THRESHOLD,
+  GlobalInferenceBudgetError: () => GlobalInferenceBudgetError,
+  MAX_AGENT_FANOUT_DEBATE: () => MAX_AGENT_FANOUT_DEBATE,
+  MAX_AGENT_FANOUT_PARALLEL: () => MAX_AGENT_FANOUT_PARALLEL,
+  MAX_RECURSION_DEPTH: () => MAX_RECURSION_DEPTH,
+  chainVerificationGate: () => chainVerificationGate,
+  checkModelPolicy: () => checkModelPolicy,
+  compactContext: () => compactContext,
+  default: () => cost_governance_default,
+  enforceMaxFanOut: () => enforceMaxFanOut,
+  enforceMaxRecursionDepth: () => enforceMaxRecursionDepth,
+  estimateModelCost: () => estimateModelCost,
+  estimateTokenCount: () => estimateTokenCount,
+  getAggregateWorkflowCosts: () => getAggregateWorkflowCosts,
+  getBudgetLane: () => getBudgetLane,
+  getWorkflowCostTrace: () => getWorkflowCostTrace,
+  inferBudgetLaneFromTask: () => inferBudgetLaneFromTask,
+  isClaudeEscalationAllowed: () => isClaudeEscalationAllowed,
+  preflightGlobalInferenceBudget: () => preflightGlobalInferenceBudget,
+  recordPriorFailure: () => recordPriorFailure,
+  recordWorkflowCost: () => recordWorkflowCost,
+  routeToModelTier: () => routeToModelTier,
+  settleGlobalInferenceBudget: () => settleGlobalInferenceBudget,
+  shouldCompactContext: () => shouldCompactContext
+});
+async function getBudgetLane(task, estimatedTokens) {
+  let lane;
+  if (isRlmAvailable()) {
+    try {
+      const costKnowledge = await queryCostKnowledge(task);
+      const raw = await callCognitiveRaw("analyze", {
+        prompt: `Classify the cost budget lane for this task: ${task}${costKnowledge ? `
+
+Relevant cost knowledge from prior engagements: ${costKnowledge}` : ""}`,
+        context: {
+          task,
+          estimatedTokens: estimatedTokens ?? 0,
+          cost_knowledge: costKnowledge ?? null,
+          classification_dimensions: ["cost_complexity", "reasoning_depth", "token_budget"]
+        },
+        agent_id: "cost-governance"
+      }, 15e3);
+      if (raw?.routing?.cost) {
+        const rlmCost = raw.routing.cost;
+        if (rlmCost < 0.1) lane = "micro";
+        else if (rlmCost < 1) lane = "standard";
+        else lane = "deep";
+      } else if (raw?.routing?.domain) {
+        const domain = String(raw.routing.domain).toLowerCase();
+        if (domain.includes("simple") || domain.includes("lookup") || domain.includes("format")) lane = "micro";
+        else if (domain.includes("deep") || domain.includes("complex") || domain.includes("strategic")) lane = "deep";
+        else lane = "standard";
+      } else if (typeof raw?.analysis?.budget_lane === "string") {
+        lane = raw.analysis.budget_lane;
+      } else if (typeof raw?.result === "string") {
+        const text = raw.result.toLowerCase();
+        if (/\b(micro|simple|trivial|lookup)\b/.test(text)) lane = "micro";
+        else if (/\b(deep|complex|investigation|strategic)\b/.test(text)) lane = "deep";
+        else lane = "standard";
+      } else {
+        lane = classifyByTokenCount(estimatedTokens ?? 0);
+      }
+      logger.info({ task: task.slice(0, 80), lane, rlmRouting: raw?.routing }, "Budget lane classified (RLM)");
+    } catch (err) {
+      logger.warn({ error: String(err) }, "RLM budget classification failed \u2014 falling back to heuristics");
+      lane = classifyByTokenCount(estimatedTokens ?? 0);
+    }
+  } else {
+    lane = estimatedTokens ? classifyByTokenCount(estimatedTokens) : inferBudgetLaneFromTask(task);
+  }
+  const tokens = estimatedTokens ?? 0;
+  const recommendedMaxCostDKK = lane === "micro" ? 0.1 : lane === "standard" ? 1 : 5;
+  return { lane, estimatedTokens: tokens, recommendedMaxCostDKK };
+}
+function classifyByTokenCount(tokens) {
+  if (tokens < BUDGET_LANE_MICRO_MAX) return "micro";
+  if (tokens <= BUDGET_LANE_STANDARD_MAX) return "standard";
+  return "deep";
+}
+function normalizeBudgetIdentity(value, fallback) {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : fallback;
+}
+function normalizePositiveInt(value, fallback) {
+  if (!Number.isFinite(value) || value <= 0) return fallback;
+  return Math.floor(value);
+}
+function isoDay(date = /* @__PURE__ */ new Date()) {
+  return date.toISOString().slice(0, 10);
+}
+function budgetId(tenantId, period) {
+  return `${tenantId}:daily:${period}`;
+}
+function coerceRows(result) {
+  if (Array.isArray(result.result)) return result.result;
+  if (result.result && typeof result.result === "object") {
+    const payload = result.result;
+    if (Array.isArray(payload.results)) return payload.results;
+    if (Array.isArray(payload.rows)) return payload.rows;
+    return [payload];
+  }
+  return [];
+}
+async function preflightGlobalInferenceBudget(input) {
+  const tenantId = normalizeBudgetIdentity(input.tenantId, B4_DEFAULT_TENANT_ID);
+  const agentId = normalizeBudgetIdentity(input.agentId, B4_DEFAULT_AGENT_ID);
+  const runId = normalizeBudgetIdentity(input.runId, `llmrun-${Date.now()}`);
+  const period = isoDay();
+  const hardLimit = normalizePositiveInt(B4_DAILY_BUDGET_TOKENS, 12e4);
+  const softLimit = Math.max(1, Math.floor(hardLimit * 0.8));
+  const callLimit = normalizePositiveInt(B4_DAILY_BUDGET_CALLS, 1e3);
+  const estimatedInputTokens = Math.max(0, normalizePositiveInt(input.estimatedInputTokens, 0));
+  const estimatedOutputTokens = Math.max(0, normalizePositiveInt(input.estimatedOutputTokens, 0));
+  const estimatedTokens = estimatedInputTokens + estimatedOutputTokens;
+  const estimatedCalls = normalizePositiveInt(input.estimatedCallCount, 1);
+  const id = budgetId(tenantId, period);
+  const preflight = await callMcpTool({
+    toolName: "graph.write_cypher",
+    callId: `b4-preflight-${runId}-${Date.now()}`,
+    args: {
+      query: `MERGE (b:TenantBudget {id: $budget_id})
+        ON CREATE SET
+          b.id = $budget_id,
+          b.tenant_id = $tenant_id,
+          b.agent_id = $agent_id,
+          b.window_kind = 'daily',
+          b.period = date($period),
+          b.hard_limit = $hard_limit,
+          b.soft_limit = $soft_limit,
+          b.call_limit = $call_limit,
+          b.consumed = 0,
+          b.remaining = $hard_limit,
+          b.used_calls = 0,
+          b.status = 'active',
+          b.bom_version = '2.0',
+          b.normalization_complete = true,
+          b.created_at = datetime(),
+          b.last_audited = datetime()
+        ON MATCH SET
+          b.hard_limit = coalesce(b.hard_limit, $hard_limit),
+          b.soft_limit = coalesce(b.soft_limit, $soft_limit),
+          b.call_limit = coalesce(b.call_limit, $call_limit),
+          b.last_audited = datetime()
+        WITH b,
+             coalesce(b.consumed, 0) AS used,
+             coalesce(b.hard_limit, $hard_limit) AS hard,
+             coalesce(b.used_calls, 0) AS used_calls,
+             coalesce(b.call_limit, $call_limit) AS max_calls
+        WHERE used + $estimated_tokens <= hard AND used_calls + $estimated_calls <= max_calls
+        SET b.remaining = hard - used,
+            b.last_audited = datetime()
+        RETURN b.id AS budget_id,
+               used AS consumed,
+               coalesce(b.remaining, hard - used) AS remaining,
+               hard AS hard_limit,
+               coalesce(b.soft_limit, $soft_limit) AS soft_limit,
+               'within_budget' AS decision`,
+      params: {
+        budget_id: id,
+        tenant_id: tenantId,
+        agent_id: agentId,
+        period,
+        hard_limit: hardLimit,
+        soft_limit: softLimit,
+        call_limit: callLimit,
+        estimated_tokens: estimatedTokens,
+        estimated_calls: estimatedCalls
+      },
+      intent: `B4 orchestrator preflight for tenant=${tenantId}, run=${runId}`,
+      evidence: `estimate in=${estimatedInputTokens} out=${estimatedOutputTokens} calls=${estimatedCalls}`
+    },
+    timeoutMs: 15e3
+  });
+  if (preflight.status !== "success") {
+    throw new Error(preflight.error_message ?? "B4 preflight failed");
+  }
+  const rows = coerceRows(preflight);
+  if (rows.length > 0) {
+    const row = rows[0];
+    return {
+      budgetId: String(row.budget_id ?? id),
+      consumed: Number(row.consumed ?? 0),
+      remaining: Number(row.remaining ?? hardLimit),
+      hardLimit: Number(row.hard_limit ?? hardLimit),
+      softLimit: Number(row.soft_limit ?? softLimit),
+      decision: String(row.decision ?? "within_budget")
+    };
+  }
+  const existing = await callMcpTool({
+    toolName: "graph.read_cypher",
+    callId: `b4-preflight-readback-${runId}-${Date.now()}`,
+    args: {
+      query: `MATCH (b:TenantBudget {id: $budget_id})
+        RETURN coalesce(b.consumed, 0) AS consumed,
+               coalesce(b.hard_limit, $hard_limit) AS hard_limit,
+               coalesce(b.call_limit, $call_limit) AS call_limit,
+               coalesce(b.used_calls, 0) AS used_calls`,
+      params: {
+        budget_id: id,
+        hard_limit: hardLimit,
+        call_limit: callLimit
+      }
+    },
+    timeoutMs: 1e4
+  });
+  const budgetRows = existing.status === "success" ? coerceRows(existing) : [];
+  const budget = budgetRows[0] ?? {};
+  throw Object.assign(
+    new GlobalInferenceBudgetError(`Global inference budget exceeded for tenant ${tenantId} (run ${runId})`),
+    {
+      tenantId,
+      runId,
+      consumed: Number(budget.consumed ?? 0),
+      hardLimit: Number(budget.hard_limit ?? hardLimit),
+      usedCalls: Number(budget.used_calls ?? 0),
+      callLimit: Number(budget.call_limit ?? callLimit)
+    }
+  );
+}
+async function settleGlobalInferenceBudget(input) {
+  const tenantId = normalizeBudgetIdentity(input.tenantId, B4_DEFAULT_TENANT_ID);
+  const agentId = normalizeBudgetIdentity(input.agentId, B4_DEFAULT_AGENT_ID);
+  const runId = normalizeBudgetIdentity(input.runId, `llmrun-${Date.now()}`);
+  const period = isoDay();
+  const hardLimit = normalizePositiveInt(B4_DAILY_BUDGET_TOKENS, 12e4);
+  const softLimit = Math.max(1, Math.floor(hardLimit * 0.8));
+  const callLimit = normalizePositiveInt(B4_DAILY_BUDGET_CALLS, 1e3);
+  const tokensIn = Math.max(0, normalizePositiveInt(input.tokensIn, 0));
+  const tokensOut = Math.max(0, normalizePositiveInt(input.tokensOut, 0));
+  const totalTokens = tokensIn + tokensOut;
+  const spendId = `${runId}-${input.provider}-${Date.now()}`;
+  const providerCallId = `${spendId}-provider`;
+  const result = await callMcpTool({
+    toolName: "graph.write_cypher",
+    callId: `b4-settle-${runId}-${Date.now()}`,
+    args: {
+      query: `MERGE (b:TenantBudget {id: $budget_id})
+        ON CREATE SET
+          b.id = $budget_id,
+          b.tenant_id = $tenant_id,
+          b.agent_id = $agent_id,
+          b.window_kind = 'daily',
+          b.period = date($period),
+          b.hard_limit = $hard_limit,
+          b.soft_limit = $soft_limit,
+          b.call_limit = $call_limit,
+          b.consumed = 0,
+          b.remaining = $hard_limit,
+          b.used_calls = 0,
+          b.status = 'active',
+          b.bom_version = '2.0',
+          b.normalization_complete = true,
+          b.created_at = datetime(),
+          b.last_audited = datetime()
+        WITH b
+        MERGE (s:InferenceSpend {id: $spend_id})
+          SET s.tenant_id = $tenant_id,
+              s.agent_id = $agent_id,
+              s.run_id = $run_id,
+              s.provider = $provider,
+              s.model = $model,
+              s.tokens_in = $tokens_in,
+              s.tokens_out = $tokens_out,
+              s.status = $status,
+              s.reason = $reason,
+              s.estimated_cost = toFloat($tokens_in + $tokens_out),
+              s.bom_version = '2.0',
+              s.normalization_complete = true,
+              s.created_at = datetime(),
+              s.last_audited = datetime()
+        MERGE (e:ExternalProviderCall {id: $provider_call_id})
+          SET e.run_id = $run_id,
+              e.tenant_id = $tenant_id,
+              e.agent_id = $agent_id,
+              e.provider = $provider,
+              e.model = $model,
+              e.tokens_in = $tokens_in,
+              e.tokens_out = $tokens_out,
+              e.reason = $reason,
+              e.status = $status,
+              e.created_at = datetime(),
+              e.last_audited = datetime()
+        MERGE (s)-[:BILLED_TO]->(b)
+        MERGE (b)-[:SPENT_ON]->(e)
+        WITH b, s
+        OPTIONAL MATCH (r:PhantomBOMRun)
+        WHERE coalesce(r.id, r.runId) = $run_id
+        FOREACH (_ IN CASE WHEN r IS NULL THEN [] ELSE [1] END |
+          MERGE (s)-[:FROM_RUN]->(r)
+        )
+        WITH b
+        SET b.consumed = coalesce(b.consumed, 0) + $total_tokens,
+            b.used_calls = coalesce(b.used_calls, 0) + 1,
+            b.remaining = coalesce(b.hard_limit, $hard_limit) - (coalesce(b.consumed, 0) + $total_tokens),
+            b.last_audited = datetime(),
+            b.status = CASE
+              WHEN coalesce(b.consumed, 0) + $total_tokens > coalesce(b.hard_limit, $hard_limit) THEN 'depleted'
+              ELSE 'active'
+            END
+        RETURN b.id AS budget_id`,
+      params: {
+        budget_id: budgetId(tenantId, period),
+        tenant_id: tenantId,
+        agent_id: agentId,
+        run_id: runId,
+        period,
+        hard_limit: hardLimit,
+        soft_limit: softLimit,
+        call_limit: callLimit,
+        spend_id: spendId,
+        provider_call_id: providerCallId,
+        provider: input.provider,
+        model: input.model,
+        tokens_in: tokensIn,
+        tokens_out: tokensOut,
+        total_tokens: totalTokens,
+        status: input.status,
+        reason: input.reason ?? "llm-provider-call"
+      },
+      intent: `B4 orchestrator settlement for tenant=${tenantId}, run=${runId}`,
+      evidence: `provider=${input.provider} model=${input.model} tokens_in=${tokensIn} tokens_out=${tokensOut}`
+    },
+    timeoutMs: 15e3
+  });
+  if (result.status !== "success") {
+    throw new Error(result.error_message ?? "B4 settlement failed");
+  }
+}
+async function queryCostKnowledge(task) {
+  try {
+    const result = await callMcpTool({
+      toolName: "srag.query",
+      args: { query: `workflow cost estimates for task: ${task}`, max_results: 3 },
+      callId: `cost-srag-${Date.now()}`,
+      timeoutMs: 1e4
+    });
+    if (result.status === "success" && result.result) {
+      return typeof result.result === "string" ? result.result : JSON.stringify(result.result).slice(0, 2e3);
+    }
+  } catch (err) {
+    logger.debug({ error: String(err) }, "SRAG cost knowledge query failed");
+  }
+  return null;
+}
+function inferBudgetLaneFromTask(task) {
+  const lower = task.toLowerCase();
+  if (/\b(investigate|deep|complex|synthesize|comprehensive|multi-hop|strategic|architecture)\b/.test(lower)) {
+    return "deep";
+  }
+  if (/\b(analyze|reason|explain|compare|evaluate|review|summary|report)\b/.test(lower)) {
+    return "standard";
+  }
+  if (/\b(format|list|count|lookup|route|classify|status|health|ping)\b/.test(lower)) {
+    return "micro";
+  }
+  return "standard";
+}
+async function isClaudeEscalationAllowed(provider, task, opts) {
+  const providerLower = provider.toLowerCase();
+  const isPremiumProvider = providerLower.includes("claude") || providerLower.includes("anthropic") || providerLower.includes("opus");
+  if (!isPremiumProvider) {
+    return {
+      allowed: true,
+      reason: "Non-premium provider \u2014 no escalation check needed",
+      priorFailures: opts?.priorFailures ?? 0,
+      requiresPremiumFlag: false
+    };
+  }
+  if (isRlmAvailable()) {
+    try {
+      const priorFailures2 = opts?.priorFailures ?? await getPriorFailures(provider, task);
+      const lane2 = opts?.estimatedTokens ? (await getBudgetLane(task, opts.estimatedTokens)).lane : inferBudgetLaneFromTask(task);
+      const raw = await callCognitiveRaw("analyze", {
+        prompt: `Evaluate whether premium model (Claude) escalation is justified for this task: ${task}. Budget lane: ${lane2}. Prior failures: ${priorFailures2}. Premium explicitly allowed: ${opts?.premiumAllowed ?? false}.`,
+        context: {
+          provider,
+          task,
+          budget_lane: lane2,
+          prior_failures: priorFailures2,
+          premium_explicitly_allowed: opts?.premiumAllowed ?? false,
+          analysis_dimensions: ["cost_efficiency", "necessity", "alternative_availability"]
+        },
+        agent_id: "cost-governance"
+      }, 15e3);
+      if (raw) {
+        const analysis = raw.analysis ?? raw.result;
+        const analysisStr = typeof analysis === "string" ? analysis : JSON.stringify(analysis);
+        const analysisLower = analysisStr.toLowerCase();
+        const approved = /\b(approved|justified|allowed|recommended)\b/.test(analysisLower) && !/\b(not\s+(approved|justified)|reject|denied|not\s+recommended|cheaper\s+first)\b/.test(analysisLower);
+        const rejected = /\b(not\s+(approved|justified)|reject|denied|not\s+recommended|cheaper\s+first|retry\s+(with|using))\b/.test(analysisLower);
+        if (rejected) {
+          return {
+            allowed: false,
+            reason: `RLM analysis rejected escalation: ${analysisStr.slice(0, 300)}`,
+            priorFailures: priorFailures2,
+            requiresPremiumFlag: !opts?.premiumAllowed
+          };
+        }
+        if (approved) {
+          return {
+            allowed: true,
+            reason: `RLM analysis approved escalation: ${analysisStr.slice(0, 300)}`,
+            priorFailures: priorFailures2,
+            requiresPremiumFlag: false
+          };
+        }
+        logger.warn({ provider, task: task.slice(0, 80) }, "RLM escalation analysis ambiguous \u2014 falling back to deterministic check");
+      }
+    } catch (err) {
+      logger.warn({ error: String(err) }, "RLM escalation analysis failed \u2014 falling back to deterministic check");
+    }
+  }
+  const priorFailures = opts?.priorFailures ?? await getPriorFailures(provider, task);
+  const lane = opts?.estimatedTokens ? (await getBudgetLane(task, opts.estimatedTokens)).lane : inferBudgetLaneFromTask(task);
+  const requiresPremiumReasoning = lane === "deep";
+  const hasSufficientFailures = priorFailures >= 2;
+  const premiumAllowed = opts?.premiumAllowed ?? false;
+  if (!requiresPremiumReasoning) {
+    return {
+      allowed: false,
+      reason: `Task does not require premium reasoning (budget lane: ${lane}). Use cheaper models first.`,
+      priorFailures,
+      requiresPremiumFlag: false
+    };
+  }
+  if (!hasSufficientFailures) {
+    return {
+      allowed: false,
+      reason: `Insufficient cheaper model failures (${priorFailures}/2 required). Retry with deepseek/qwen/gemini first.`,
+      priorFailures,
+      requiresPremiumFlag: false
+    };
+  }
+  if (!premiumAllowed) {
+    return {
+      allowed: false,
+      reason: "Premium model not explicitly allowed in execution plan. Set premium_allowed=true.",
+      priorFailures,
+      requiresPremiumFlag: true
+    };
+  }
+  return {
+    allowed: true,
+    reason: `Escalation justified: deep lane task, ${priorFailures} cheaper model failures, premium explicitly allowed.`,
+    priorFailures,
+    requiresPremiumFlag: false
+  };
+}
+async function recordPriorFailure(provider, task) {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  const key = `${ESCALATION_PREFIX}${provider}:${hashTask(task)}`;
+  try {
+    const current = parseInt(await redis2.get(key) ?? "0", 10);
+    await redis2.incr(key);
+    await redis2.expire(key, 3600);
+    logger.warn({ provider, failures: current + 1 }, "Prior failure recorded for escalation tracking");
+  } catch {
+  }
+}
+async function getPriorFailures(provider, task) {
+  const redis2 = getRedis();
+  if (!redis2) return 0;
+  const key = `${ESCALATION_PREFIX}${provider}:${hashTask(task)}`;
+  try {
+    const val = await redis2.get(key);
+    return val ? parseInt(val, 10) : 0;
+  } catch {
+    return 0;
+  }
+}
+function hashTask(task) {
+  let hash = 0;
+  const str = task.slice(0, 100);
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash << 5) - hash + str.charCodeAt(i) | 0;
+  }
+  return Math.abs(hash).toString(36);
+}
+function enforceMaxRecursionDepth(currentDepth) {
+  if (currentDepth >= MAX_RECURSION_DEPTH) {
+    return {
+      allowed: false,
+      error: `Max recursion depth exceeded (${currentDepth}/${MAX_RECURSION_DEPTH}). Chain nesting must not exceed ${MAX_RECURSION_DEPTH} levels. Refactor to flatten chain structure.`
+    };
+  }
+  return { allowed: true };
+}
+function enforceMaxFanOut(parallelSteps, mode = "parallel", agentIds) {
+  const maxAllowed = mode === "debate" ? MAX_AGENT_FANOUT_DEBATE : MAX_AGENT_FANOUT_PARALLEL;
+  if (parallelSteps > maxAllowed) {
+    return {
+      allowed: false,
+      error: `Agent fan-out exceeded: requested ${parallelSteps}, max ${maxAllowed} for ${mode} mode. Reduce parallel steps or increase MAX_AGENT_FANOUT_PARALLEL/MAX_AGENT_FANOUT_DEBATE constant.`,
+      maxAllowed,
+      requested: parallelSteps
+    };
+  }
+  if (agentIds && agentIds.length > maxAllowed) {
+    return {
+      allowed: false,
+      error: `Agent list exceeds max fan-out: ${agentIds.length} > ${maxAllowed}`,
+      maxAllowed,
+      requested: agentIds.length
+    };
+  }
+  return { allowed: true, maxAllowed, requested: parallelSteps };
+}
+async function recordWorkflowCost(workflowId, provider, model, tokensIn, tokensOut, costDKK) {
+  const redis2 = getRedis();
+  if (!redis2) return;
+  const key = `${COST_TRACE_PREFIX}${workflowId}`;
+  const callRecord = {
+    provider,
+    model,
+    tokensIn,
+    tokensOut,
+    costDKK,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  try {
+    const existing = await redis2.get(key);
+    let trace2;
+    if (existing) {
+      trace2 = JSON.parse(existing);
+      trace2.totalCostDKK += costDKK;
+      trace2.totalTokens += tokensIn + tokensOut;
+      trace2.modelCalls.push(callRecord);
+      trace2.lastUpdatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    } else {
+      trace2 = {
+        workflowId,
+        totalCostDKK: costDKK,
+        totalTokens: tokensIn + tokensOut,
+        modelCalls: [callRecord],
+        startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        lastUpdatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+    await redis2.set(key, JSON.stringify(trace2), "EX", COST_TRACE_TTL_SECONDS);
+  } catch (err) {
+    logger.warn({ workflowId, error: String(err) }, "Cost trace recording failed (non-fatal)");
+  }
+}
+async function getWorkflowCostTrace(workflowId) {
+  const redis2 = getRedis();
+  if (!redis2) return null;
+  const key = `${COST_TRACE_PREFIX}${workflowId}`;
+  try {
+    const raw = await redis2.get(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+async function getAggregateWorkflowCosts(windowHours = 24) {
+  const redis2 = getRedis();
+  if (!redis2) {
+    return { totalCostDKK: 0, totalWorkflows: 0, totalModelCalls: 0, workflows: [] };
+  }
+  try {
+    const keys = await redis2.keys(`${COST_TRACE_PREFIX}*`);
+    const traces = [];
+    for (const key of keys) {
+      const raw = await redis2.get(key);
+      if (raw) {
+        traces.push(JSON.parse(raw));
+      }
+    }
+    const cutoff = new Date(Date.now() - windowHours * 60 * 60 * 1e3).toISOString();
+    const filtered = traces.filter((t) => t.startedAt >= cutoff);
+    return {
+      totalCostDKK: filtered.reduce((sum, t) => sum + t.totalCostDKK, 0),
+      totalWorkflows: filtered.length,
+      totalModelCalls: filtered.reduce((sum, t) => sum + t.modelCalls.length, 0),
+      workflows: filtered
+    };
+  } catch {
+    return { totalCostDKK: 0, totalWorkflows: 0, totalModelCalls: 0, workflows: [] };
+  }
+}
+function estimateModelCost(provider, model, estimatedTokens, outputRatio = 0.3) {
+  const USD_TO_DKK = 7;
+  let modelConfig = null;
+  try {
+    modelConfig = LlmMatrix.getModel(model);
+  } catch {
+    modelConfig = null;
+  }
+  let costPer1KInputUSD;
+  let costPer1KOutputUSD;
+  if (modelConfig) {
+    costPer1KInputUSD = modelConfig.cost_per_1k_input_usd;
+    costPer1KOutputUSD = modelConfig.cost_per_1k_output_usd ?? modelConfig.cost_per_1k_input_usd;
+  } else {
+    const providerLower = provider.toLowerCase();
+    if (providerLower.includes("claude") || providerLower.includes("anthropic")) {
+      costPer1KInputUSD = 0.015;
+      costPer1KOutputUSD = 0.075;
+    } else if (providerLower.includes("openai")) {
+      costPer1KInputUSD = 0.01;
+      costPer1KOutputUSD = 0.03;
+    } else if (providerLower.includes("gemini")) {
+      costPer1KInputUSD = 125e-5;
+      costPer1KOutputUSD = 375e-5;
+    } else if (providerLower.includes("deepseek")) {
+      costPer1KInputUSD = 27e-5;
+      costPer1KOutputUSD = 11e-4;
+    } else {
+      costPer1KInputUSD = 5e-4;
+      costPer1KOutputUSD = 15e-4;
+    }
+  }
+  const estimatedInputTokens = Math.ceil(estimatedTokens * (1 - outputRatio));
+  const estimatedOutputTokens = Math.ceil(estimatedTokens * outputRatio);
+  const inputCostDKK = estimatedInputTokens / 1e3 * costPer1KInputUSD * USD_TO_DKK;
+  const outputCostDKK = estimatedOutputTokens / 1e3 * costPer1KOutputUSD * USD_TO_DKK;
+  const totalCostDKK = inputCostDKK + outputCostDKK;
+  return {
+    provider,
+    model,
+    estimatedTokens,
+    costPer1KInputDKK: costPer1KInputUSD * USD_TO_DKK,
+    costPer1KOutputDKK: costPer1KOutputUSD * USD_TO_DKK,
+    totalCostDKK: Math.round(totalCostDKK * 1e4) / 1e4,
+    currency: "DKK"
+  };
+}
+async function checkModelPolicy(provider, model, opts) {
+  const providerLower = provider.toLowerCase();
+  const isPremium = providerLower.includes("claude") || providerLower.includes("anthropic") || providerLower.includes("opus") || providerLower.includes("openai");
+  const dailySpend = opts?.currentDailySpendDKK ?? (await getAggregateWorkflowCosts(24)).totalCostDKK;
+  const budgetRemaining = dailySpend < DAILY_BUDGET_CAP_DKK;
+  if (!budgetRemaining) {
+    return {
+      pass: false,
+      reason: `Daily budget cap exceeded (${dailySpend.toFixed(2)} DKK / ${DAILY_BUDGET_CAP_DKK} DKK). All model calls blocked until budget resets.`,
+      provider,
+      model,
+      isEscalation: opts?.isEscalation ?? false,
+      budgetRemaining: false
+    };
+  }
+  if (!isPremium) {
+    return {
+      pass: true,
+      reason: `Non-premium provider '${provider}' \u2014 allowed by default policy.`,
+      provider,
+      model,
+      isEscalation: false,
+      budgetRemaining: true
+    };
+  }
+  const isEscalation = opts?.isEscalation ?? false;
+  if (!isEscalation) {
+    return {
+      pass: false,
+      reason: `Premium provider '${provider}' used without escalation flag. Set isEscalation=true and ensure cheaper models failed first.`,
+      provider,
+      model,
+      isEscalation: false,
+      budgetRemaining: true
+    };
+  }
+  const escalationCheck = await isClaudeEscalationAllowed(provider, opts?.task ?? "", {
+    premiumAllowed: true,
+    // If caller got here, they're claiming escalation
+    estimatedTokens: opts?.estimatedTokens
+  });
+  if (!escalationCheck.allowed) {
+    return {
+      pass: false,
+      reason: `Claude escalation not justified: ${escalationCheck.reason}`,
+      provider,
+      model,
+      isEscalation: true,
+      budgetRemaining: true
+    };
+  }
+  return {
+    pass: true,
+    reason: `Premium escalation approved: ${escalationCheck.reason}`,
+    provider,
+    model,
+    isEscalation: true,
+    budgetRemaining: true
+  };
+}
+function estimateTokenCount(text) {
+  return Math.ceil(text.length / 4);
+}
+function shouldCompactContext(context) {
+  const estimatedTokens = estimateTokenCount(context);
+  return {
+    needsCompaction: estimatedTokens > CONTEXT_COMPACTION_THRESHOLD,
+    estimatedTokens
+  };
+}
+async function compactContext(context, targetTokens = 4e3, query, domain) {
+  const originalTokens = estimateTokenCount(context);
+  if (originalTokens <= CONTEXT_COMPACTION_THRESHOLD) {
+    return null;
+  }
+  if (isRlmAvailable()) {
+    try {
+      const result = await callCognitive("fold", {
+        prompt: query ?? "Compress and fold the following context while preserving key information",
+        context: {
+          text: context.slice(0, 3e4),
+          // Hard cap to avoid runaway costs
+          budget: targetTokens,
+          strategy: "semantic"
+        },
+        agent_id: "cost-governance"
+      }, 3e4);
+      const compacted2 = typeof result === "string" ? result : JSON.stringify(result);
+      const compactedTokens2 = estimateTokenCount(compacted2);
+      const ratio2 = originalTokens / Math.max(compactedTokens2, 1);
+      logger.info(
+        { originalTokens, compactedTokens: compactedTokens2, ratio: ratio2.toFixed(2), method: "rlm-fold" },
+        "Context compaction complete (RLM)"
+      );
+      return { compacted: compacted2, originalTokens, compactedTokens: compactedTokens2, ratio: ratio2 };
+    } catch (err) {
+      logger.warn({ error: String(err) }, "RLM context compaction failed \u2014 falling back to truncation");
+    }
+  }
+  const targetChars = targetTokens * 4;
+  const compacted = context.slice(0, targetChars);
+  const compactedTokens = estimateTokenCount(compacted);
+  const ratio = originalTokens / Math.max(compactedTokens, 1);
+  logger.warn(
+    { originalTokens, compactedTokens, ratio: ratio.toFixed(2), method: "truncation-fallback" },
+    "Context compaction via truncation (RLM unavailable)"
+  );
+  return { compacted, originalTokens, compactedTokens, ratio };
+}
+function chainVerificationGate(stepResults) {
+  const scoredSteps = stepResults.filter((s) => typeof s.quality_score === "number");
+  if (scoredSteps.length === 0) {
+    return { passed: true, avgQualityScore: 0.5, stepCount: 0, lowQualitySteps: 0, verdict: "pass", message: "No scored steps" };
+  }
+  const avgQualityScore = scoredSteps.reduce((sum, s) => sum + (s.quality_score ?? 0), 0) / scoredSteps.length;
+  const lowQualitySteps = scoredSteps.filter((s) => (s.quality_score ?? 0) < 0.4).length;
+  const lowQualityRatio = lowQualitySteps / scoredSteps.length;
+  let verdict;
+  let message;
+  if (avgQualityScore < 0.35) {
+    verdict = "fail";
+    message = `Chain quality below threshold: avg ${avgQualityScore.toFixed(2)} < 0.35`;
+  } else if (avgQualityScore < 0.6 || lowQualityRatio > 0.3) {
+    verdict = "warn";
+    message = `Chain quality degraded: avg ${avgQualityScore.toFixed(2)}, ${lowQualitySteps}/${scoredSteps.length} steps below 0.4`;
+  } else {
+    verdict = "pass";
+    message = `Chain quality OK: avg ${avgQualityScore.toFixed(2)}`;
+  }
+  return { passed: verdict !== "fail", avgQualityScore, stepCount: scoredSteps.length, lowQualitySteps, verdict, message };
+}
+async function routeToModelTier(task, opts = {}) {
+  const {
+    requiredQuality = 0.5,
+    estimatedTokens = 1e3,
+    agentId,
+    agentTrustScore,
+    workflowId
+  } = opts;
+  let tier;
+  if (requiredQuality < 0.4) tier = "fast";
+  else if (requiredQuality <= 0.7) tier = "standard";
+  else tier = "premium";
+  const trust = agentTrustScore ?? 1;
+  if (trust < 0.5 && tier === "fast") {
+    tier = "standard";
+  }
+  if (tier !== "premium" && agentId) {
+    const lowerTierModel = TIER_OPTIONS[tier][0];
+    const failures = await getPriorFailures(lowerTierModel.provider, task).catch(() => 0);
+    if (failures >= 2) {
+      const nextTier = { fast: "standard", standard: "premium", premium: "premium" };
+      tier = nextTier[tier];
+    }
+  }
+  const option = TIER_OPTIONS[tier][0];
+  const estimate = estimateModelCost(option.provider, option.model, estimatedTokens);
+  if (tier === "premium") {
+    const policy = await checkModelPolicy(option.provider, option.model, {
+      isEscalation: true,
+      estimatedTokens,
+      task
+    });
+    if (!policy.pass) {
+      const fallback = TIER_OPTIONS.standard[0];
+      const fallbackEstimate = estimateModelCost(fallback.provider, fallback.model, estimatedTokens);
+      return {
+        tier: "standard",
+        provider: fallback.provider,
+        model: fallback.model,
+        reason: `Premium blocked (${policy.reason}) \u2014 routing to standard`,
+        estimatedCostDKK: fallbackEstimate.totalCostDKK
+      };
+    }
+  }
+  const reason = [
+    `Quality target ${requiredQuality.toFixed(2)} \u2192 ${tier} tier`,
+    trust < 1 ? `agent trust ${trust.toFixed(2)}` : null,
+    workflowId ? `workflow ${workflowId}` : null
+  ].filter(Boolean).join(", ");
+  return {
+    tier,
+    provider: option.provider,
+    model: option.model,
+    reason,
+    estimatedCostDKK: estimate.totalCostDKK
+  };
+}
+var BUDGET_LANE_MICRO_MAX, BUDGET_LANE_STANDARD_MAX, MAX_RECURSION_DEPTH, MAX_AGENT_FANOUT_PARALLEL, MAX_AGENT_FANOUT_DEBATE, CONTEXT_COMPACTION_THRESHOLD, COST_TRACE_TTL_SECONDS, COST_TRACE_PREFIX, ESCALATION_PREFIX, DAILY_BUDGET_CAP_DKK, GlobalInferenceBudgetError, B4_DAILY_BUDGET_TOKENS, B4_DAILY_BUDGET_CALLS, B4_DEFAULT_TENANT_ID, B4_DEFAULT_AGENT_ID, TIER_OPTIONS, cost_governance_default;
+var init_cost_governance = __esm({
+  "src/llm/cost-governance.ts"() {
+    "use strict";
+    init_llm();
+    init_cognitive_proxy();
+    init_mcp_caller();
+    init_redis();
+    init_logger();
+    BUDGET_LANE_MICRO_MAX = 4e3;
+    BUDGET_LANE_STANDARD_MAX = 16e3;
+    MAX_RECURSION_DEPTH = 3;
+    MAX_AGENT_FANOUT_PARALLEL = 5;
+    MAX_AGENT_FANOUT_DEBATE = 5;
+    CONTEXT_COMPACTION_THRESHOLD = 8e3;
+    COST_TRACE_TTL_SECONDS = 86400;
+    COST_TRACE_PREFIX = "orchestrator:cost-trace:";
+    ESCALATION_PREFIX = "orchestrator:escalation:";
+    DAILY_BUDGET_CAP_DKK = parseFloat(process.env.DAILY_BUDGET_CAP_DKK ?? "100");
+    GlobalInferenceBudgetError = class extends Error {
+      code = "AXIS_UNSATISFIABLE";
+      reason = "budget_exceeded";
+    };
+    B4_DAILY_BUDGET_TOKENS = parseInt(process.env.B4_DAILY_BUDGET_TOKENS ?? "120000", 10);
+    B4_DAILY_BUDGET_CALLS = parseInt(process.env.B4_DAILY_BUDGET_CALLS ?? "1000", 10);
+    B4_DEFAULT_TENANT_ID = process.env.B4_DEFAULT_TENANT_ID ?? "widgetdc-platform";
+    B4_DEFAULT_AGENT_ID = process.env.B4_DEFAULT_AGENT_ID ?? "widgetdc-orchestrator";
+    TIER_OPTIONS = {
+      fast: [{ provider: "deepseek", model: "deepseek-chat" }, { provider: "groq", model: "llama-3.1-8b-instant" }],
+      standard: [{ provider: "deepseek", model: "deepseek-reasoner" }, { provider: "gemini", model: "gemini-2.0-flash-lite" }],
+      premium: [{ provider: "anthropic", model: "claude-sonnet-4-6" }, { provider: "openai", model: "gpt-4o" }]
+    };
+    cost_governance_default = {
+      // Constants
+      MAX_RECURSION_DEPTH,
+      MAX_AGENT_FANOUT_PARALLEL,
+      MAX_AGENT_FANOUT_DEBATE,
+      CONTEXT_COMPACTION_THRESHOLD,
+      // Budget lane classification
+      getBudgetLane,
+      inferBudgetLaneFromTask,
+      // Claude escalation
+      isClaudeEscalationAllowed,
+      recordPriorFailure,
+      // Recursion depth
+      enforceMaxRecursionDepth,
+      // Fan-out
+      enforceMaxFanOut,
+      // Cost trace
+      recordWorkflowCost,
+      getWorkflowCostTrace,
+      getAggregateWorkflowCosts,
+      // Cost estimation
+      estimateModelCost,
+      // Policy check
+      checkModelPolicy,
+      // Context compaction
+      shouldCompactContext,
+      compactContext,
+      estimateTokenCount
+    };
+  }
+});
+
 // src/llm/llm-proxy.ts
 var llm_proxy_exports = {};
 __export(llm_proxy_exports, {
   chatLLM: () => chatLLM,
   listProviders: () => listProviders
 });
+import { randomUUID } from "crypto";
 function dispatchTypeFor(providerId, openaiCompatible) {
   if (openaiCompatible) return "openai-compat";
   if (providerId === "gemini") return "gemini";
@@ -1224,6 +2110,17 @@ function getProviders() {
     if (providerId === "anthropic") providers.claude = cfg;
   }
   return providers;
+}
+function estimatePromptTokens(messages) {
+  const chars = messages.reduce((sum, message) => {
+    const toolChars = message.tool_calls ? JSON.stringify(message.tool_calls).length : 0;
+    return sum + message.content.length + toolChars + 32;
+  }, 0);
+  return Math.max(1, Math.ceil(chars / 4));
+}
+function normalizeBudgetIdentity2(value, fallback) {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : fallback;
 }
 async function callOpenAICompat(provider, req) {
   const start = Date.now();
@@ -1505,22 +2402,74 @@ async function chatLLM(req) {
     throw new Error(`Unknown provider '${req.provider}'. Available: ${available.join(", ")}`);
   }
   logger.info({ provider: req.provider, model: req.model, messages: req.messages.length }, "LLM proxy call");
-  switch (provider.type) {
-    case "openai-compat":
-      return callOpenAICompat(provider, req);
-    case "gemini":
-      return callGemini(provider, req);
-    case "anthropic": {
-      try {
-        return await callAnthropic(provider, req);
-      } catch (err) {
-        if (!isAnthropicBillingError(err)) throw err;
-        const reason = String(err?.message ?? err);
-        return callAnthropicFallback(req, reason, providers);
+  const runId = normalizeBudgetIdentity2(req.workflow_id, `llmrun-${randomUUID()}`);
+  const tenantId = normalizeBudgetIdentity2(req.tenant_id, process.env.B4_DEFAULT_TENANT_ID ?? "widgetdc-platform");
+  const agentId = normalizeBudgetIdentity2(req.agent_id, process.env.B4_DEFAULT_AGENT_ID ?? "widgetdc-orchestrator");
+  const estimatedInputTokens = estimatePromptTokens(req.messages);
+  const estimatedOutputTokens = Math.max(1, req.max_tokens ?? 2048);
+  await preflightGlobalInferenceBudget({
+    tenantId,
+    agentId,
+    runId,
+    estimatedInputTokens,
+    estimatedOutputTokens,
+    estimatedCallCount: 1,
+    reason: req.budget_reason ?? `llm-dispatch:${req.provider}`
+  });
+  try {
+    let response;
+    switch (provider.type) {
+      case "openai-compat":
+        response = await callOpenAICompat(provider, req);
+        break;
+      case "gemini":
+        response = await callGemini(provider, req);
+        break;
+      case "anthropic": {
+        try {
+          response = await callAnthropic(provider, req);
+        } catch (err) {
+          if (!isAnthropicBillingError(err)) throw err;
+          const reason = String(err?.message ?? err);
+          response = await callAnthropicFallback(req, reason, providers);
+        }
+        break;
       }
+      default:
+        throw new Error(`Unsupported provider type: ${provider.type}`);
     }
-    default:
-      throw new Error(`Unsupported provider type: ${provider.type}`);
+    const promptTokens = response.usage?.prompt_tokens ?? estimatedInputTokens;
+    const completionTokens = response.usage?.completion_tokens ?? Math.max(1, Math.ceil(response.content.length / 4));
+    await settleGlobalInferenceBudget({
+      tenantId,
+      agentId,
+      runId,
+      provider: response.provider,
+      model: response.model,
+      tokensIn: promptTokens,
+      tokensOut: completionTokens,
+      status: "completed",
+      reason: req.budget_reason ?? `llm-dispatch:${response.provider}`
+    });
+    return response;
+  } catch (err) {
+    const fallbackModel = req.model || provider.defaultModel;
+    try {
+      await settleGlobalInferenceBudget({
+        tenantId,
+        agentId,
+        runId,
+        provider: req.provider,
+        model: fallbackModel,
+        tokensIn: 0,
+        tokensOut: 0,
+        status: "failed",
+        reason: req.budget_reason ?? "llm-dispatch-failed"
+      });
+    } catch (settlementErr) {
+      logger.warn({ error: String(settlementErr), runId }, "[llm-proxy] failed to persist B4 failure settlement");
+    }
+    throw err;
   }
 }
 function listProviders() {
@@ -1543,6 +2492,7 @@ var init_llm_proxy = __esm({
     init_llm();
     init_config();
     init_logger();
+    init_cost_governance();
     PROVIDER_DISPLAY_NAMES = {
       deepseek: "DeepSeek",
       qwen: "Qwen",
@@ -6654,631 +7604,6 @@ var init_adoption_telemetry = __esm({
       swarm: "Hook into peer-eval.hookIntoExecution so pheromone/eval tools fire on every chain step",
       llm: "Add as a cost-governance step in chain-engine.ts to surface cost data automatically",
       default: "Register in agent-seeds.ts capabilities list so agents can discover and call this tool"
-    };
-  }
-});
-
-// src/llm/cost-governance.ts
-var cost_governance_exports = {};
-__export(cost_governance_exports, {
-  BUDGET_LANE_MICRO_MAX: () => BUDGET_LANE_MICRO_MAX,
-  BUDGET_LANE_STANDARD_MAX: () => BUDGET_LANE_STANDARD_MAX,
-  CONTEXT_COMPACTION_THRESHOLD: () => CONTEXT_COMPACTION_THRESHOLD,
-  MAX_AGENT_FANOUT_DEBATE: () => MAX_AGENT_FANOUT_DEBATE,
-  MAX_AGENT_FANOUT_PARALLEL: () => MAX_AGENT_FANOUT_PARALLEL,
-  MAX_RECURSION_DEPTH: () => MAX_RECURSION_DEPTH,
-  chainVerificationGate: () => chainVerificationGate,
-  checkModelPolicy: () => checkModelPolicy,
-  compactContext: () => compactContext,
-  default: () => cost_governance_default,
-  enforceMaxFanOut: () => enforceMaxFanOut,
-  enforceMaxRecursionDepth: () => enforceMaxRecursionDepth,
-  estimateModelCost: () => estimateModelCost,
-  estimateTokenCount: () => estimateTokenCount,
-  getAggregateWorkflowCosts: () => getAggregateWorkflowCosts,
-  getBudgetLane: () => getBudgetLane,
-  getWorkflowCostTrace: () => getWorkflowCostTrace,
-  inferBudgetLaneFromTask: () => inferBudgetLaneFromTask,
-  isClaudeEscalationAllowed: () => isClaudeEscalationAllowed,
-  recordPriorFailure: () => recordPriorFailure,
-  recordWorkflowCost: () => recordWorkflowCost,
-  routeToModelTier: () => routeToModelTier,
-  shouldCompactContext: () => shouldCompactContext
-});
-async function getBudgetLane(task, estimatedTokens) {
-  let lane;
-  if (isRlmAvailable()) {
-    try {
-      const costKnowledge = await queryCostKnowledge(task);
-      const raw = await callCognitiveRaw("analyze", {
-        prompt: `Classify the cost budget lane for this task: ${task}${costKnowledge ? `
-
-Relevant cost knowledge from prior engagements: ${costKnowledge}` : ""}`,
-        context: {
-          task,
-          estimatedTokens: estimatedTokens ?? 0,
-          cost_knowledge: costKnowledge ?? null,
-          classification_dimensions: ["cost_complexity", "reasoning_depth", "token_budget"]
-        },
-        agent_id: "cost-governance"
-      }, 15e3);
-      if (raw?.routing?.cost) {
-        const rlmCost = raw.routing.cost;
-        if (rlmCost < 0.1) lane = "micro";
-        else if (rlmCost < 1) lane = "standard";
-        else lane = "deep";
-      } else if (raw?.routing?.domain) {
-        const domain = String(raw.routing.domain).toLowerCase();
-        if (domain.includes("simple") || domain.includes("lookup") || domain.includes("format")) lane = "micro";
-        else if (domain.includes("deep") || domain.includes("complex") || domain.includes("strategic")) lane = "deep";
-        else lane = "standard";
-      } else if (typeof raw?.analysis?.budget_lane === "string") {
-        lane = raw.analysis.budget_lane;
-      } else if (typeof raw?.result === "string") {
-        const text = raw.result.toLowerCase();
-        if (/\b(micro|simple|trivial|lookup)\b/.test(text)) lane = "micro";
-        else if (/\b(deep|complex|investigation|strategic)\b/.test(text)) lane = "deep";
-        else lane = "standard";
-      } else {
-        lane = classifyByTokenCount(estimatedTokens ?? 0);
-      }
-      logger.info({ task: task.slice(0, 80), lane, rlmRouting: raw?.routing }, "Budget lane classified (RLM)");
-    } catch (err) {
-      logger.warn({ error: String(err) }, "RLM budget classification failed \u2014 falling back to heuristics");
-      lane = classifyByTokenCount(estimatedTokens ?? 0);
-    }
-  } else {
-    lane = estimatedTokens ? classifyByTokenCount(estimatedTokens) : inferBudgetLaneFromTask(task);
-  }
-  const tokens = estimatedTokens ?? 0;
-  const recommendedMaxCostDKK = lane === "micro" ? 0.1 : lane === "standard" ? 1 : 5;
-  return { lane, estimatedTokens: tokens, recommendedMaxCostDKK };
-}
-function classifyByTokenCount(tokens) {
-  if (tokens < BUDGET_LANE_MICRO_MAX) return "micro";
-  if (tokens <= BUDGET_LANE_STANDARD_MAX) return "standard";
-  return "deep";
-}
-async function queryCostKnowledge(task) {
-  try {
-    const result = await callMcpTool({
-      toolName: "srag.query",
-      args: { query: `workflow cost estimates for task: ${task}`, max_results: 3 },
-      callId: `cost-srag-${Date.now()}`,
-      timeoutMs: 1e4
-    });
-    if (result.status === "success" && result.result) {
-      return typeof result.result === "string" ? result.result : JSON.stringify(result.result).slice(0, 2e3);
-    }
-  } catch (err) {
-    logger.debug({ error: String(err) }, "SRAG cost knowledge query failed");
-  }
-  return null;
-}
-function inferBudgetLaneFromTask(task) {
-  const lower = task.toLowerCase();
-  if (/\b(investigate|deep|complex|synthesize|comprehensive|multi-hop|strategic|architecture)\b/.test(lower)) {
-    return "deep";
-  }
-  if (/\b(analyze|reason|explain|compare|evaluate|review|summary|report)\b/.test(lower)) {
-    return "standard";
-  }
-  if (/\b(format|list|count|lookup|route|classify|status|health|ping)\b/.test(lower)) {
-    return "micro";
-  }
-  return "standard";
-}
-async function isClaudeEscalationAllowed(provider, task, opts) {
-  const providerLower = provider.toLowerCase();
-  const isPremiumProvider = providerLower.includes("claude") || providerLower.includes("anthropic") || providerLower.includes("opus");
-  if (!isPremiumProvider) {
-    return {
-      allowed: true,
-      reason: "Non-premium provider \u2014 no escalation check needed",
-      priorFailures: opts?.priorFailures ?? 0,
-      requiresPremiumFlag: false
-    };
-  }
-  if (isRlmAvailable()) {
-    try {
-      const priorFailures2 = opts?.priorFailures ?? await getPriorFailures(provider, task);
-      const lane2 = opts?.estimatedTokens ? (await getBudgetLane(task, opts.estimatedTokens)).lane : inferBudgetLaneFromTask(task);
-      const raw = await callCognitiveRaw("analyze", {
-        prompt: `Evaluate whether premium model (Claude) escalation is justified for this task: ${task}. Budget lane: ${lane2}. Prior failures: ${priorFailures2}. Premium explicitly allowed: ${opts?.premiumAllowed ?? false}.`,
-        context: {
-          provider,
-          task,
-          budget_lane: lane2,
-          prior_failures: priorFailures2,
-          premium_explicitly_allowed: opts?.premiumAllowed ?? false,
-          analysis_dimensions: ["cost_efficiency", "necessity", "alternative_availability"]
-        },
-        agent_id: "cost-governance"
-      }, 15e3);
-      if (raw) {
-        const analysis = raw.analysis ?? raw.result;
-        const analysisStr = typeof analysis === "string" ? analysis : JSON.stringify(analysis);
-        const analysisLower = analysisStr.toLowerCase();
-        const approved = /\b(approved|justified|allowed|recommended)\b/.test(analysisLower) && !/\b(not\s+(approved|justified)|reject|denied|not\s+recommended|cheaper\s+first)\b/.test(analysisLower);
-        const rejected = /\b(not\s+(approved|justified)|reject|denied|not\s+recommended|cheaper\s+first|retry\s+(with|using))\b/.test(analysisLower);
-        if (rejected) {
-          return {
-            allowed: false,
-            reason: `RLM analysis rejected escalation: ${analysisStr.slice(0, 300)}`,
-            priorFailures: priorFailures2,
-            requiresPremiumFlag: !opts?.premiumAllowed
-          };
-        }
-        if (approved) {
-          return {
-            allowed: true,
-            reason: `RLM analysis approved escalation: ${analysisStr.slice(0, 300)}`,
-            priorFailures: priorFailures2,
-            requiresPremiumFlag: false
-          };
-        }
-        logger.warn({ provider, task: task.slice(0, 80) }, "RLM escalation analysis ambiguous \u2014 falling back to deterministic check");
-      }
-    } catch (err) {
-      logger.warn({ error: String(err) }, "RLM escalation analysis failed \u2014 falling back to deterministic check");
-    }
-  }
-  const priorFailures = opts?.priorFailures ?? await getPriorFailures(provider, task);
-  const lane = opts?.estimatedTokens ? (await getBudgetLane(task, opts.estimatedTokens)).lane : inferBudgetLaneFromTask(task);
-  const requiresPremiumReasoning = lane === "deep";
-  const hasSufficientFailures = priorFailures >= 2;
-  const premiumAllowed = opts?.premiumAllowed ?? false;
-  if (!requiresPremiumReasoning) {
-    return {
-      allowed: false,
-      reason: `Task does not require premium reasoning (budget lane: ${lane}). Use cheaper models first.`,
-      priorFailures,
-      requiresPremiumFlag: false
-    };
-  }
-  if (!hasSufficientFailures) {
-    return {
-      allowed: false,
-      reason: `Insufficient cheaper model failures (${priorFailures}/2 required). Retry with deepseek/qwen/gemini first.`,
-      priorFailures,
-      requiresPremiumFlag: false
-    };
-  }
-  if (!premiumAllowed) {
-    return {
-      allowed: false,
-      reason: "Premium model not explicitly allowed in execution plan. Set premium_allowed=true.",
-      priorFailures,
-      requiresPremiumFlag: true
-    };
-  }
-  return {
-    allowed: true,
-    reason: `Escalation justified: deep lane task, ${priorFailures} cheaper model failures, premium explicitly allowed.`,
-    priorFailures,
-    requiresPremiumFlag: false
-  };
-}
-async function recordPriorFailure(provider, task) {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  const key = `${ESCALATION_PREFIX}${provider}:${hashTask(task)}`;
-  try {
-    const current = parseInt(await redis2.get(key) ?? "0", 10);
-    await redis2.incr(key);
-    await redis2.expire(key, 3600);
-    logger.warn({ provider, failures: current + 1 }, "Prior failure recorded for escalation tracking");
-  } catch {
-  }
-}
-async function getPriorFailures(provider, task) {
-  const redis2 = getRedis();
-  if (!redis2) return 0;
-  const key = `${ESCALATION_PREFIX}${provider}:${hashTask(task)}`;
-  try {
-    const val = await redis2.get(key);
-    return val ? parseInt(val, 10) : 0;
-  } catch {
-    return 0;
-  }
-}
-function hashTask(task) {
-  let hash = 0;
-  const str = task.slice(0, 100);
-  for (let i = 0; i < str.length; i++) {
-    hash = (hash << 5) - hash + str.charCodeAt(i) | 0;
-  }
-  return Math.abs(hash).toString(36);
-}
-function enforceMaxRecursionDepth(currentDepth) {
-  if (currentDepth >= MAX_RECURSION_DEPTH) {
-    return {
-      allowed: false,
-      error: `Max recursion depth exceeded (${currentDepth}/${MAX_RECURSION_DEPTH}). Chain nesting must not exceed ${MAX_RECURSION_DEPTH} levels. Refactor to flatten chain structure.`
-    };
-  }
-  return { allowed: true };
-}
-function enforceMaxFanOut(parallelSteps, mode = "parallel", agentIds) {
-  const maxAllowed = mode === "debate" ? MAX_AGENT_FANOUT_DEBATE : MAX_AGENT_FANOUT_PARALLEL;
-  if (parallelSteps > maxAllowed) {
-    return {
-      allowed: false,
-      error: `Agent fan-out exceeded: requested ${parallelSteps}, max ${maxAllowed} for ${mode} mode. Reduce parallel steps or increase MAX_AGENT_FANOUT_PARALLEL/MAX_AGENT_FANOUT_DEBATE constant.`,
-      maxAllowed,
-      requested: parallelSteps
-    };
-  }
-  if (agentIds && agentIds.length > maxAllowed) {
-    return {
-      allowed: false,
-      error: `Agent list exceeds max fan-out: ${agentIds.length} > ${maxAllowed}`,
-      maxAllowed,
-      requested: agentIds.length
-    };
-  }
-  return { allowed: true, maxAllowed, requested: parallelSteps };
-}
-async function recordWorkflowCost(workflowId, provider, model, tokensIn, tokensOut, costDKK) {
-  const redis2 = getRedis();
-  if (!redis2) return;
-  const key = `${COST_TRACE_PREFIX}${workflowId}`;
-  const callRecord = {
-    provider,
-    model,
-    tokensIn,
-    tokensOut,
-    costDKK,
-    timestamp: (/* @__PURE__ */ new Date()).toISOString()
-  };
-  try {
-    const existing = await redis2.get(key);
-    let trace2;
-    if (existing) {
-      trace2 = JSON.parse(existing);
-      trace2.totalCostDKK += costDKK;
-      trace2.totalTokens += tokensIn + tokensOut;
-      trace2.modelCalls.push(callRecord);
-      trace2.lastUpdatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    } else {
-      trace2 = {
-        workflowId,
-        totalCostDKK: costDKK,
-        totalTokens: tokensIn + tokensOut,
-        modelCalls: [callRecord],
-        startedAt: (/* @__PURE__ */ new Date()).toISOString(),
-        lastUpdatedAt: (/* @__PURE__ */ new Date()).toISOString()
-      };
-    }
-    await redis2.set(key, JSON.stringify(trace2), "EX", COST_TRACE_TTL_SECONDS);
-  } catch (err) {
-    logger.warn({ workflowId, error: String(err) }, "Cost trace recording failed (non-fatal)");
-  }
-}
-async function getWorkflowCostTrace(workflowId) {
-  const redis2 = getRedis();
-  if (!redis2) return null;
-  const key = `${COST_TRACE_PREFIX}${workflowId}`;
-  try {
-    const raw = await redis2.get(key);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-async function getAggregateWorkflowCosts(windowHours = 24) {
-  const redis2 = getRedis();
-  if (!redis2) {
-    return { totalCostDKK: 0, totalWorkflows: 0, totalModelCalls: 0, workflows: [] };
-  }
-  try {
-    const keys = await redis2.keys(`${COST_TRACE_PREFIX}*`);
-    const traces = [];
-    for (const key of keys) {
-      const raw = await redis2.get(key);
-      if (raw) {
-        traces.push(JSON.parse(raw));
-      }
-    }
-    const cutoff = new Date(Date.now() - windowHours * 60 * 60 * 1e3).toISOString();
-    const filtered = traces.filter((t) => t.startedAt >= cutoff);
-    return {
-      totalCostDKK: filtered.reduce((sum, t) => sum + t.totalCostDKK, 0),
-      totalWorkflows: filtered.length,
-      totalModelCalls: filtered.reduce((sum, t) => sum + t.modelCalls.length, 0),
-      workflows: filtered
-    };
-  } catch {
-    return { totalCostDKK: 0, totalWorkflows: 0, totalModelCalls: 0, workflows: [] };
-  }
-}
-function estimateModelCost(provider, model, estimatedTokens, outputRatio = 0.3) {
-  const USD_TO_DKK = 7;
-  let modelConfig = null;
-  try {
-    modelConfig = LlmMatrix.getModel(model);
-  } catch {
-    modelConfig = null;
-  }
-  let costPer1KInputUSD;
-  let costPer1KOutputUSD;
-  if (modelConfig) {
-    costPer1KInputUSD = modelConfig.cost_per_1k_input_usd;
-    costPer1KOutputUSD = modelConfig.cost_per_1k_output_usd ?? modelConfig.cost_per_1k_input_usd;
-  } else {
-    const providerLower = provider.toLowerCase();
-    if (providerLower.includes("claude") || providerLower.includes("anthropic")) {
-      costPer1KInputUSD = 0.015;
-      costPer1KOutputUSD = 0.075;
-    } else if (providerLower.includes("openai")) {
-      costPer1KInputUSD = 0.01;
-      costPer1KOutputUSD = 0.03;
-    } else if (providerLower.includes("gemini")) {
-      costPer1KInputUSD = 125e-5;
-      costPer1KOutputUSD = 375e-5;
-    } else if (providerLower.includes("deepseek")) {
-      costPer1KInputUSD = 27e-5;
-      costPer1KOutputUSD = 11e-4;
-    } else {
-      costPer1KInputUSD = 5e-4;
-      costPer1KOutputUSD = 15e-4;
-    }
-  }
-  const estimatedInputTokens = Math.ceil(estimatedTokens * (1 - outputRatio));
-  const estimatedOutputTokens = Math.ceil(estimatedTokens * outputRatio);
-  const inputCostDKK = estimatedInputTokens / 1e3 * costPer1KInputUSD * USD_TO_DKK;
-  const outputCostDKK = estimatedOutputTokens / 1e3 * costPer1KOutputUSD * USD_TO_DKK;
-  const totalCostDKK = inputCostDKK + outputCostDKK;
-  return {
-    provider,
-    model,
-    estimatedTokens,
-    costPer1KInputDKK: costPer1KInputUSD * USD_TO_DKK,
-    costPer1KOutputDKK: costPer1KOutputUSD * USD_TO_DKK,
-    totalCostDKK: Math.round(totalCostDKK * 1e4) / 1e4,
-    currency: "DKK"
-  };
-}
-async function checkModelPolicy(provider, model, opts) {
-  const providerLower = provider.toLowerCase();
-  const isPremium = providerLower.includes("claude") || providerLower.includes("anthropic") || providerLower.includes("opus") || providerLower.includes("openai");
-  const dailySpend = opts?.currentDailySpendDKK ?? (await getAggregateWorkflowCosts(24)).totalCostDKK;
-  const budgetRemaining = dailySpend < DAILY_BUDGET_CAP_DKK;
-  if (!budgetRemaining) {
-    return {
-      pass: false,
-      reason: `Daily budget cap exceeded (${dailySpend.toFixed(2)} DKK / ${DAILY_BUDGET_CAP_DKK} DKK). All model calls blocked until budget resets.`,
-      provider,
-      model,
-      isEscalation: opts?.isEscalation ?? false,
-      budgetRemaining: false
-    };
-  }
-  if (!isPremium) {
-    return {
-      pass: true,
-      reason: `Non-premium provider '${provider}' \u2014 allowed by default policy.`,
-      provider,
-      model,
-      isEscalation: false,
-      budgetRemaining: true
-    };
-  }
-  const isEscalation = opts?.isEscalation ?? false;
-  if (!isEscalation) {
-    return {
-      pass: false,
-      reason: `Premium provider '${provider}' used without escalation flag. Set isEscalation=true and ensure cheaper models failed first.`,
-      provider,
-      model,
-      isEscalation: false,
-      budgetRemaining: true
-    };
-  }
-  const escalationCheck = await isClaudeEscalationAllowed(provider, opts?.task ?? "", {
-    premiumAllowed: true,
-    // If caller got here, they're claiming escalation
-    estimatedTokens: opts?.estimatedTokens
-  });
-  if (!escalationCheck.allowed) {
-    return {
-      pass: false,
-      reason: `Claude escalation not justified: ${escalationCheck.reason}`,
-      provider,
-      model,
-      isEscalation: true,
-      budgetRemaining: true
-    };
-  }
-  return {
-    pass: true,
-    reason: `Premium escalation approved: ${escalationCheck.reason}`,
-    provider,
-    model,
-    isEscalation: true,
-    budgetRemaining: true
-  };
-}
-function estimateTokenCount(text) {
-  return Math.ceil(text.length / 4);
-}
-function shouldCompactContext(context) {
-  const estimatedTokens = estimateTokenCount(context);
-  return {
-    needsCompaction: estimatedTokens > CONTEXT_COMPACTION_THRESHOLD,
-    estimatedTokens
-  };
-}
-async function compactContext(context, targetTokens = 4e3, query, domain) {
-  const originalTokens = estimateTokenCount(context);
-  if (originalTokens <= CONTEXT_COMPACTION_THRESHOLD) {
-    return null;
-  }
-  if (isRlmAvailable()) {
-    try {
-      const result = await callCognitive("fold", {
-        prompt: query ?? "Compress and fold the following context while preserving key information",
-        context: {
-          text: context.slice(0, 3e4),
-          // Hard cap to avoid runaway costs
-          budget: targetTokens,
-          strategy: "semantic"
-        },
-        agent_id: "cost-governance"
-      }, 3e4);
-      const compacted2 = typeof result === "string" ? result : JSON.stringify(result);
-      const compactedTokens2 = estimateTokenCount(compacted2);
-      const ratio2 = originalTokens / Math.max(compactedTokens2, 1);
-      logger.info(
-        { originalTokens, compactedTokens: compactedTokens2, ratio: ratio2.toFixed(2), method: "rlm-fold" },
-        "Context compaction complete (RLM)"
-      );
-      return { compacted: compacted2, originalTokens, compactedTokens: compactedTokens2, ratio: ratio2 };
-    } catch (err) {
-      logger.warn({ error: String(err) }, "RLM context compaction failed \u2014 falling back to truncation");
-    }
-  }
-  const targetChars = targetTokens * 4;
-  const compacted = context.slice(0, targetChars);
-  const compactedTokens = estimateTokenCount(compacted);
-  const ratio = originalTokens / Math.max(compactedTokens, 1);
-  logger.warn(
-    { originalTokens, compactedTokens, ratio: ratio.toFixed(2), method: "truncation-fallback" },
-    "Context compaction via truncation (RLM unavailable)"
-  );
-  return { compacted, originalTokens, compactedTokens, ratio };
-}
-function chainVerificationGate(stepResults) {
-  const scoredSteps = stepResults.filter((s) => typeof s.quality_score === "number");
-  if (scoredSteps.length === 0) {
-    return { passed: true, avgQualityScore: 0.5, stepCount: 0, lowQualitySteps: 0, verdict: "pass", message: "No scored steps" };
-  }
-  const avgQualityScore = scoredSteps.reduce((sum, s) => sum + (s.quality_score ?? 0), 0) / scoredSteps.length;
-  const lowQualitySteps = scoredSteps.filter((s) => (s.quality_score ?? 0) < 0.4).length;
-  const lowQualityRatio = lowQualitySteps / scoredSteps.length;
-  let verdict;
-  let message;
-  if (avgQualityScore < 0.35) {
-    verdict = "fail";
-    message = `Chain quality below threshold: avg ${avgQualityScore.toFixed(2)} < 0.35`;
-  } else if (avgQualityScore < 0.6 || lowQualityRatio > 0.3) {
-    verdict = "warn";
-    message = `Chain quality degraded: avg ${avgQualityScore.toFixed(2)}, ${lowQualitySteps}/${scoredSteps.length} steps below 0.4`;
-  } else {
-    verdict = "pass";
-    message = `Chain quality OK: avg ${avgQualityScore.toFixed(2)}`;
-  }
-  return { passed: verdict !== "fail", avgQualityScore, stepCount: scoredSteps.length, lowQualitySteps, verdict, message };
-}
-async function routeToModelTier(task, opts = {}) {
-  const {
-    requiredQuality = 0.5,
-    estimatedTokens = 1e3,
-    agentId,
-    agentTrustScore,
-    workflowId
-  } = opts;
-  let tier;
-  if (requiredQuality < 0.4) tier = "fast";
-  else if (requiredQuality <= 0.7) tier = "standard";
-  else tier = "premium";
-  const trust = agentTrustScore ?? 1;
-  if (trust < 0.5 && tier === "fast") {
-    tier = "standard";
-  }
-  if (tier !== "premium" && agentId) {
-    const lowerTierModel = TIER_OPTIONS[tier][0];
-    const failures = await getPriorFailures(lowerTierModel.provider, task).catch(() => 0);
-    if (failures >= 2) {
-      const nextTier = { fast: "standard", standard: "premium", premium: "premium" };
-      tier = nextTier[tier];
-    }
-  }
-  const option = TIER_OPTIONS[tier][0];
-  const estimate = estimateModelCost(option.provider, option.model, estimatedTokens);
-  if (tier === "premium") {
-    const policy = await checkModelPolicy(option.provider, option.model, {
-      isEscalation: true,
-      estimatedTokens,
-      task
-    });
-    if (!policy.pass) {
-      const fallback = TIER_OPTIONS.standard[0];
-      const fallbackEstimate = estimateModelCost(fallback.provider, fallback.model, estimatedTokens);
-      return {
-        tier: "standard",
-        provider: fallback.provider,
-        model: fallback.model,
-        reason: `Premium blocked (${policy.reason}) \u2014 routing to standard`,
-        estimatedCostDKK: fallbackEstimate.totalCostDKK
-      };
-    }
-  }
-  const reason = [
-    `Quality target ${requiredQuality.toFixed(2)} \u2192 ${tier} tier`,
-    trust < 1 ? `agent trust ${trust.toFixed(2)}` : null,
-    workflowId ? `workflow ${workflowId}` : null
-  ].filter(Boolean).join(", ");
-  return {
-    tier,
-    provider: option.provider,
-    model: option.model,
-    reason,
-    estimatedCostDKK: estimate.totalCostDKK
-  };
-}
-var BUDGET_LANE_MICRO_MAX, BUDGET_LANE_STANDARD_MAX, MAX_RECURSION_DEPTH, MAX_AGENT_FANOUT_PARALLEL, MAX_AGENT_FANOUT_DEBATE, CONTEXT_COMPACTION_THRESHOLD, COST_TRACE_TTL_SECONDS, COST_TRACE_PREFIX, ESCALATION_PREFIX, DAILY_BUDGET_CAP_DKK, TIER_OPTIONS, cost_governance_default;
-var init_cost_governance = __esm({
-  "src/llm/cost-governance.ts"() {
-    "use strict";
-    init_llm();
-    init_cognitive_proxy();
-    init_mcp_caller();
-    init_redis();
-    init_logger();
-    BUDGET_LANE_MICRO_MAX = 4e3;
-    BUDGET_LANE_STANDARD_MAX = 16e3;
-    MAX_RECURSION_DEPTH = 3;
-    MAX_AGENT_FANOUT_PARALLEL = 5;
-    MAX_AGENT_FANOUT_DEBATE = 5;
-    CONTEXT_COMPACTION_THRESHOLD = 8e3;
-    COST_TRACE_TTL_SECONDS = 86400;
-    COST_TRACE_PREFIX = "orchestrator:cost-trace:";
-    ESCALATION_PREFIX = "orchestrator:escalation:";
-    DAILY_BUDGET_CAP_DKK = parseFloat(process.env.DAILY_BUDGET_CAP_DKK ?? "100");
-    TIER_OPTIONS = {
-      fast: [{ provider: "deepseek", model: "deepseek-chat" }, { provider: "groq", model: "llama-3.1-8b-instant" }],
-      standard: [{ provider: "deepseek", model: "deepseek-reasoner" }, { provider: "gemini", model: "gemini-2.0-flash-lite" }],
-      premium: [{ provider: "anthropic", model: "claude-sonnet-4-6" }, { provider: "openai", model: "gpt-4o" }]
-    };
-    cost_governance_default = {
-      // Constants
-      MAX_RECURSION_DEPTH,
-      MAX_AGENT_FANOUT_PARALLEL,
-      MAX_AGENT_FANOUT_DEBATE,
-      CONTEXT_COMPACTION_THRESHOLD,
-      // Budget lane classification
-      getBudgetLane,
-      inferBudgetLaneFromTask,
-      // Claude escalation
-      isClaudeEscalationAllowed,
-      recordPriorFailure,
-      // Recursion depth
-      enforceMaxRecursionDepth,
-      // Fan-out
-      enforceMaxFanOut,
-      // Cost trace
-      recordWorkflowCost,
-      getWorkflowCostTrace,
-      getAggregateWorkflowCosts,
-      // Cost estimation
-      estimateModelCost,
-      // Policy check
-      checkModelPolicy,
-      // Context compaction
-      shouldCompactContext,
-      compactContext,
-      estimateTokenCount
     };
   }
 });
@@ -25949,7 +26274,7 @@ __export(artifacts_exports, {
   storeArtifact: () => storeArtifact
 });
 import { Router as Router3 } from "express";
-import { randomUUID } from "crypto";
+import { randomUUID as randomUUID2 } from "crypto";
 async function storeArtifact(artifact) {
   const redis2 = getRedis();
   if (!redis2) return false;
@@ -26153,7 +26478,7 @@ var init_artifacts = __esm({
         res.status(400).json({ success: false, error: "Missing required fields: title, source, blocks, created_by" });
         return;
       }
-      const id = `widgetdc:artifact:${randomUUID()}`;
+      const id = `widgetdc:artifact:${randomUUID2()}`;
       const now = (/* @__PURE__ */ new Date()).toISOString();
       const artifact = {
         $id: id,
@@ -26288,7 +26613,7 @@ __export(drill_exports, {
   saveDrillContext: () => saveDrillContext
 });
 import { Router as Router4 } from "express";
-import { randomUUID as randomUUID2 } from "crypto";
+import { randomUUID as randomUUID3 } from "crypto";
 async function callMcp(tool, payload) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), MCP_TIMEOUT_MS);
@@ -26443,7 +26768,7 @@ var init_drill = __esm({
         res.status(400).json({ success: false, error: "Missing required field: domain" });
         return;
       }
-      const sessionId = randomUUID2();
+      const sessionId = randomUUID3();
       const ctx = {
         stack: [],
         current_level: "domain",
@@ -30995,7 +31320,7 @@ __export(canvas_builder_tool_exports, {
   pickTrackFromBrief: () => pickTrackFromBrief,
   synthesizeStubResolution: () => synthesizeStubResolution
 });
-import { randomUUID as randomUUID3 } from "node:crypto";
+import { randomUUID as randomUUID4 } from "node:crypto";
 function buildIntentFromArgs(args) {
   const userText = typeof args.brief === "string" ? args.brief.trim() : "";
   const intent = {
@@ -31066,7 +31391,7 @@ function paneForTrack(track) {
 }
 function synthesizeStubResolution(intent, reason) {
   const track = pickTrackFromBrief(intent.user_text, intent.prior_track);
-  const sessionId = randomUUID3();
+  const sessionId = randomUUID4();
   const initialPane = paneForTrack(track);
   const rationale = [
     `stub:${reason}`,
@@ -45823,7 +46148,7 @@ init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router21 } from "express";
-import { randomUUID as randomUUID4 } from "crypto";
+import { randomUUID as randomUUID5 } from "crypto";
 import { v4 as uuid35 } from "uuid";
 var notebookRouter = Router21();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
@@ -45932,7 +46257,7 @@ notebookRouter.post("/execute", async (req, res) => {
     res.status(400).json({ success: false, error: "Missing required fields: title, cells (non-empty array)" });
     return;
   }
-  const id = `widgetdc:notebook:${randomUUID4()}`;
+  const id = `widgetdc:notebook:${randomUUID5()}`;
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const cells = body.cells;
   for (let i = 0; i < cells.length; i++) {

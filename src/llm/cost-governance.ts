@@ -108,6 +108,47 @@ export interface PolicyCheckResult {
   budgetRemaining: boolean
 }
 
+export interface GlobalInferenceBudgetPreflightInput {
+  tenantId: string
+  agentId: string
+  runId: string
+  estimatedInputTokens: number
+  estimatedOutputTokens: number
+  estimatedCallCount: number
+  reason?: string
+}
+
+export interface GlobalInferenceBudgetPreflightResult {
+  budgetId: string
+  consumed: number
+  remaining: number
+  hardLimit: number
+  softLimit: number
+  decision: 'within_budget' | 'budget_exceeded' | 'rate_limited'
+}
+
+export interface GlobalInferenceBudgetSettlementInput {
+  tenantId: string
+  agentId: string
+  runId: string
+  provider: string
+  model: string
+  tokensIn: number
+  tokensOut: number
+  status: 'completed' | 'failed'
+  reason?: string
+}
+
+export class GlobalInferenceBudgetError extends Error {
+  code = 'AXIS_UNSATISFIABLE'
+  reason = 'budget_exceeded'
+}
+
+const B4_DAILY_BUDGET_TOKENS = parseInt(process.env.B4_DAILY_BUDGET_TOKENS ?? '120000', 10)
+const B4_DAILY_BUDGET_CALLS = parseInt(process.env.B4_DAILY_BUDGET_CALLS ?? '1000', 10)
+const B4_DEFAULT_TENANT_ID = process.env.B4_DEFAULT_TENANT_ID ?? 'widgetdc-platform'
+const B4_DEFAULT_AGENT_ID = process.env.B4_DEFAULT_AGENT_ID ?? 'widgetdc-orchestrator'
+
 // ─── Budget Lane Classification (FR-9) ────────────────────────────────────────
 
 /**
@@ -191,6 +232,272 @@ function classifyByTokenCount(tokens: number): BudgetLane {
   if (tokens < BUDGET_LANE_MICRO_MAX) return 'micro'
   if (tokens <= BUDGET_LANE_STANDARD_MAX) return 'standard'
   return 'deep'
+}
+
+function normalizeBudgetIdentity(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim()
+  return trimmed && trimmed.length > 0 ? trimmed : fallback
+}
+
+function normalizePositiveInt(value: number, fallback: number): number {
+  if (!Number.isFinite(value) || value <= 0) return fallback
+  return Math.floor(value)
+}
+
+function isoDay(date = new Date()): string {
+  return date.toISOString().slice(0, 10)
+}
+
+function budgetId(tenantId: string, period: string): string {
+  return `${tenantId}:daily:${period}`
+}
+
+function coerceRows(result: OrchestratorToolResult): Array<Record<string, unknown>> {
+  if (Array.isArray(result.result)) return result.result as Array<Record<string, unknown>>
+  if (result.result && typeof result.result === 'object') {
+    const payload = result.result as Record<string, unknown>
+    if (Array.isArray(payload.results)) return payload.results as Array<Record<string, unknown>>
+    if (Array.isArray(payload.rows)) return payload.rows as Array<Record<string, unknown>>
+    return [payload]
+  }
+  return []
+}
+
+export async function preflightGlobalInferenceBudget(
+  input: GlobalInferenceBudgetPreflightInput,
+): Promise<GlobalInferenceBudgetPreflightResult> {
+  const tenantId = normalizeBudgetIdentity(input.tenantId, B4_DEFAULT_TENANT_ID)
+  const agentId = normalizeBudgetIdentity(input.agentId, B4_DEFAULT_AGENT_ID)
+  const runId = normalizeBudgetIdentity(input.runId, `llmrun-${Date.now()}`)
+  const period = isoDay()
+  const hardLimit = normalizePositiveInt(B4_DAILY_BUDGET_TOKENS, 120000)
+  const softLimit = Math.max(1, Math.floor(hardLimit * 0.8))
+  const callLimit = normalizePositiveInt(B4_DAILY_BUDGET_CALLS, 1000)
+  const estimatedInputTokens = Math.max(0, normalizePositiveInt(input.estimatedInputTokens, 0))
+  const estimatedOutputTokens = Math.max(0, normalizePositiveInt(input.estimatedOutputTokens, 0))
+  const estimatedTokens = estimatedInputTokens + estimatedOutputTokens
+  const estimatedCalls = normalizePositiveInt(input.estimatedCallCount, 1)
+  const id = budgetId(tenantId, period)
+
+  const preflight = await callMcpTool({
+    toolName: 'graph.write_cypher',
+    callId: `b4-preflight-${runId}-${Date.now()}`,
+    args: {
+      query: `MERGE (b:TenantBudget {id: $budget_id})
+        ON CREATE SET
+          b.id = $budget_id,
+          b.tenant_id = $tenant_id,
+          b.agent_id = $agent_id,
+          b.window_kind = 'daily',
+          b.period = date($period),
+          b.hard_limit = $hard_limit,
+          b.soft_limit = $soft_limit,
+          b.call_limit = $call_limit,
+          b.consumed = 0,
+          b.remaining = $hard_limit,
+          b.used_calls = 0,
+          b.status = 'active',
+          b.bom_version = '2.0',
+          b.normalization_complete = true,
+          b.created_at = datetime(),
+          b.last_audited = datetime()
+        ON MATCH SET
+          b.hard_limit = coalesce(b.hard_limit, $hard_limit),
+          b.soft_limit = coalesce(b.soft_limit, $soft_limit),
+          b.call_limit = coalesce(b.call_limit, $call_limit),
+          b.last_audited = datetime()
+        WITH b,
+             coalesce(b.consumed, 0) AS used,
+             coalesce(b.hard_limit, $hard_limit) AS hard,
+             coalesce(b.used_calls, 0) AS used_calls,
+             coalesce(b.call_limit, $call_limit) AS max_calls
+        WHERE used + $estimated_tokens <= hard AND used_calls + $estimated_calls <= max_calls
+        SET b.remaining = hard - used,
+            b.last_audited = datetime()
+        RETURN b.id AS budget_id,
+               used AS consumed,
+               coalesce(b.remaining, hard - used) AS remaining,
+               hard AS hard_limit,
+               coalesce(b.soft_limit, $soft_limit) AS soft_limit,
+               'within_budget' AS decision`,
+      params: {
+        budget_id: id,
+        tenant_id: tenantId,
+        agent_id: agentId,
+        period,
+        hard_limit: hardLimit,
+        soft_limit: softLimit,
+        call_limit: callLimit,
+        estimated_tokens: estimatedTokens,
+        estimated_calls: estimatedCalls,
+      },
+      intent: `B4 orchestrator preflight for tenant=${tenantId}, run=${runId}`,
+      evidence: `estimate in=${estimatedInputTokens} out=${estimatedOutputTokens} calls=${estimatedCalls}`,
+    },
+    timeoutMs: 15000,
+  })
+
+  if (preflight.status !== 'success') {
+    throw new Error(preflight.error_message ?? 'B4 preflight failed')
+  }
+
+  const rows = coerceRows(preflight)
+  if (rows.length > 0) {
+    const row = rows[0]
+    return {
+      budgetId: String(row.budget_id ?? id),
+      consumed: Number(row.consumed ?? 0),
+      remaining: Number(row.remaining ?? hardLimit),
+      hardLimit: Number(row.hard_limit ?? hardLimit),
+      softLimit: Number(row.soft_limit ?? softLimit),
+      decision: String(row.decision ?? 'within_budget') as GlobalInferenceBudgetPreflightResult['decision'],
+    }
+  }
+
+  const existing = await callMcpTool({
+    toolName: 'graph.read_cypher',
+    callId: `b4-preflight-readback-${runId}-${Date.now()}`,
+    args: {
+      query: `MATCH (b:TenantBudget {id: $budget_id})
+        RETURN coalesce(b.consumed, 0) AS consumed,
+               coalesce(b.hard_limit, $hard_limit) AS hard_limit,
+               coalesce(b.call_limit, $call_limit) AS call_limit,
+               coalesce(b.used_calls, 0) AS used_calls`,
+      params: {
+        budget_id: id,
+        hard_limit: hardLimit,
+        call_limit: callLimit,
+      },
+    },
+    timeoutMs: 10000,
+  })
+  const budgetRows = existing.status === 'success' ? coerceRows(existing) : []
+  const budget = budgetRows[0] ?? {}
+  throw Object.assign(
+    new GlobalInferenceBudgetError(`Global inference budget exceeded for tenant ${tenantId} (run ${runId})`),
+    {
+      tenantId,
+      runId,
+      consumed: Number(budget.consumed ?? 0),
+      hardLimit: Number(budget.hard_limit ?? hardLimit),
+      usedCalls: Number(budget.used_calls ?? 0),
+      callLimit: Number(budget.call_limit ?? callLimit),
+    },
+  )
+}
+
+export async function settleGlobalInferenceBudget(
+  input: GlobalInferenceBudgetSettlementInput,
+): Promise<void> {
+  const tenantId = normalizeBudgetIdentity(input.tenantId, B4_DEFAULT_TENANT_ID)
+  const agentId = normalizeBudgetIdentity(input.agentId, B4_DEFAULT_AGENT_ID)
+  const runId = normalizeBudgetIdentity(input.runId, `llmrun-${Date.now()}`)
+  const period = isoDay()
+  const hardLimit = normalizePositiveInt(B4_DAILY_BUDGET_TOKENS, 120000)
+  const softLimit = Math.max(1, Math.floor(hardLimit * 0.8))
+  const callLimit = normalizePositiveInt(B4_DAILY_BUDGET_CALLS, 1000)
+  const tokensIn = Math.max(0, normalizePositiveInt(input.tokensIn, 0))
+  const tokensOut = Math.max(0, normalizePositiveInt(input.tokensOut, 0))
+  const totalTokens = tokensIn + tokensOut
+  const spendId = `${runId}-${input.provider}-${Date.now()}`
+  const providerCallId = `${spendId}-provider`
+
+  const result = await callMcpTool({
+    toolName: 'graph.write_cypher',
+    callId: `b4-settle-${runId}-${Date.now()}`,
+    args: {
+      query: `MERGE (b:TenantBudget {id: $budget_id})
+        ON CREATE SET
+          b.id = $budget_id,
+          b.tenant_id = $tenant_id,
+          b.agent_id = $agent_id,
+          b.window_kind = 'daily',
+          b.period = date($period),
+          b.hard_limit = $hard_limit,
+          b.soft_limit = $soft_limit,
+          b.call_limit = $call_limit,
+          b.consumed = 0,
+          b.remaining = $hard_limit,
+          b.used_calls = 0,
+          b.status = 'active',
+          b.bom_version = '2.0',
+          b.normalization_complete = true,
+          b.created_at = datetime(),
+          b.last_audited = datetime()
+        WITH b
+        MERGE (s:InferenceSpend {id: $spend_id})
+          SET s.tenant_id = $tenant_id,
+              s.agent_id = $agent_id,
+              s.run_id = $run_id,
+              s.provider = $provider,
+              s.model = $model,
+              s.tokens_in = $tokens_in,
+              s.tokens_out = $tokens_out,
+              s.status = $status,
+              s.reason = $reason,
+              s.estimated_cost = toFloat($tokens_in + $tokens_out),
+              s.bom_version = '2.0',
+              s.normalization_complete = true,
+              s.created_at = datetime(),
+              s.last_audited = datetime()
+        MERGE (e:ExternalProviderCall {id: $provider_call_id})
+          SET e.run_id = $run_id,
+              e.tenant_id = $tenant_id,
+              e.agent_id = $agent_id,
+              e.provider = $provider,
+              e.model = $model,
+              e.tokens_in = $tokens_in,
+              e.tokens_out = $tokens_out,
+              e.reason = $reason,
+              e.status = $status,
+              e.created_at = datetime(),
+              e.last_audited = datetime()
+        MERGE (s)-[:BILLED_TO]->(b)
+        MERGE (b)-[:SPENT_ON]->(e)
+        WITH b, s
+        OPTIONAL MATCH (r:PhantomBOMRun)
+        WHERE coalesce(r.id, r.runId) = $run_id
+        FOREACH (_ IN CASE WHEN r IS NULL THEN [] ELSE [1] END |
+          MERGE (s)-[:FROM_RUN]->(r)
+        )
+        WITH b
+        SET b.consumed = coalesce(b.consumed, 0) + $total_tokens,
+            b.used_calls = coalesce(b.used_calls, 0) + 1,
+            b.remaining = coalesce(b.hard_limit, $hard_limit) - (coalesce(b.consumed, 0) + $total_tokens),
+            b.last_audited = datetime(),
+            b.status = CASE
+              WHEN coalesce(b.consumed, 0) + $total_tokens > coalesce(b.hard_limit, $hard_limit) THEN 'depleted'
+              ELSE 'active'
+            END
+        RETURN b.id AS budget_id`,
+      params: {
+        budget_id: budgetId(tenantId, period),
+        tenant_id: tenantId,
+        agent_id: agentId,
+        run_id: runId,
+        period,
+        hard_limit: hardLimit,
+        soft_limit: softLimit,
+        call_limit: callLimit,
+        spend_id: spendId,
+        provider_call_id: providerCallId,
+        provider: input.provider,
+        model: input.model,
+        tokens_in: tokensIn,
+        tokens_out: tokensOut,
+        total_tokens: totalTokens,
+        status: input.status,
+        reason: input.reason ?? 'llm-provider-call',
+      },
+      intent: `B4 orchestrator settlement for tenant=${tenantId}, run=${runId}`,
+      evidence: `provider=${input.provider} model=${input.model} tokens_in=${tokensIn} tokens_out=${tokensOut}`,
+    },
+    timeoutMs: 15000,
+  })
+
+  if (result.status !== 'success') {
+    throw new Error(result.error_message ?? 'B4 settlement failed')
+  }
 }
 
 /**

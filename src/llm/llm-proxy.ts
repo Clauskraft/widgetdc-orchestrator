@@ -10,9 +10,11 @@
  *
  * Supports any provider declared in the matrix whose auth env var is set.
  */
+import { randomUUID } from 'crypto'
 import { LlmMatrix, type ProviderId } from '@widgetdc/contracts/llm'
 import { config } from '../config.js'
 import { logger } from '../logger.js'
+import { preflightGlobalInferenceBudget, settleGlobalInferenceBudget } from './cost-governance.js'
 
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
@@ -27,6 +29,10 @@ export interface LLMRequest {
   model?: string
   temperature?: number
   max_tokens?: number
+  workflow_id?: string
+  tenant_id?: string
+  agent_id?: string
+  budget_reason?: string
   tools?: Array<{ type: string; function: { name: string; description: string; parameters: unknown } }>
 }
 
@@ -127,6 +133,21 @@ function getProviders(): Record<string, ProviderConfig> {
   }
 
   return providers
+}
+
+function estimatePromptTokens(messages: LLMMessage[]): number {
+  const chars = messages.reduce((sum, message) => {
+    const toolChars = message.tool_calls
+      ? JSON.stringify(message.tool_calls).length
+      : 0
+    return sum + message.content.length + toolChars + 32
+  }, 0)
+  return Math.max(1, Math.ceil(chars / 4))
+}
+
+function normalizeBudgetIdentity(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim()
+  return trimmed && trimmed.length > 0 ? trimmed : fallback
 }
 
 async function callOpenAICompat(provider: ProviderConfig, req: LLMRequest): Promise<LLMResponse> {
@@ -505,22 +526,78 @@ export async function chatLLM(req: LLMRequest): Promise<LLMResponse> {
 
   logger.info({ provider: req.provider, model: req.model, messages: req.messages.length }, 'LLM proxy call')
 
-  switch (provider.type) {
-    case 'openai-compat': return callOpenAICompat(provider, req)
-    case 'gemini': return callGemini(provider, req)
-    case 'anthropic': {
-      // v4.1.1: Anthropic direct is primary. On billing/credit/quota errors
-      // only, cascade through OPENROUTER → DEEPSEEK fallback chain. All other
-      // errors (network, 5xx, auth, schema) propagate unchanged.
-      try {
-        return await callAnthropic(provider, req)
-      } catch (err) {
-        if (!isAnthropicBillingError(err)) throw err
-        const reason = String((err as any)?.message ?? err)
-        return callAnthropicFallback(req, reason, providers)
+  const runId = normalizeBudgetIdentity(req.workflow_id, `llmrun-${randomUUID()}`)
+  const tenantId = normalizeBudgetIdentity(req.tenant_id, process.env.B4_DEFAULT_TENANT_ID ?? 'widgetdc-platform')
+  const agentId = normalizeBudgetIdentity(req.agent_id, process.env.B4_DEFAULT_AGENT_ID ?? 'widgetdc-orchestrator')
+  const estimatedInputTokens = estimatePromptTokens(req.messages)
+  const estimatedOutputTokens = Math.max(1, req.max_tokens ?? 2048)
+
+  await preflightGlobalInferenceBudget({
+    tenantId,
+    agentId,
+    runId,
+    estimatedInputTokens,
+    estimatedOutputTokens,
+    estimatedCallCount: 1,
+    reason: req.budget_reason ?? `llm-dispatch:${req.provider}`,
+  })
+
+  try {
+    let response: LLMResponse
+    switch (provider.type) {
+      case 'openai-compat':
+        response = await callOpenAICompat(provider, req)
+        break
+      case 'gemini':
+        response = await callGemini(provider, req)
+        break
+      case 'anthropic': {
+        try {
+          response = await callAnthropic(provider, req)
+        } catch (err) {
+          if (!isAnthropicBillingError(err)) throw err
+          const reason = String((err as any)?.message ?? err)
+          response = await callAnthropicFallback(req, reason, providers)
+        }
+        break
       }
+      default:
+        throw new Error(`Unsupported provider type: ${provider.type}`)
     }
-    default: throw new Error(`Unsupported provider type: ${provider.type}`)
+
+    const promptTokens = response.usage?.prompt_tokens ?? estimatedInputTokens
+    const completionTokens = response.usage?.completion_tokens
+      ?? Math.max(1, Math.ceil(response.content.length / 4))
+    await settleGlobalInferenceBudget({
+      tenantId,
+      agentId,
+      runId,
+      provider: response.provider,
+      model: response.model,
+      tokensIn: promptTokens,
+      tokensOut: completionTokens,
+      status: 'completed',
+      reason: req.budget_reason ?? `llm-dispatch:${response.provider}`,
+    })
+    return response
+  } catch (err) {
+    const fallbackModel = req.model || provider.defaultModel
+    try {
+      await settleGlobalInferenceBudget({
+        tenantId,
+        agentId,
+        runId,
+        provider: req.provider,
+        model: fallbackModel,
+        tokensIn: 0,
+        tokensOut: 0,
+        status: 'failed',
+        reason: req.budget_reason ?? 'llm-dispatch-failed',
+      })
+    } catch (settlementErr) {
+      logger.warn({ error: String(settlementErr), runId }, '[llm-proxy] failed to persist B4 failure settlement')
+    }
+    throw err
   }
 }
 
