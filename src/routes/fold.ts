@@ -7,14 +7,16 @@
  * Usage logged to Redis for metering.
  */
 import { Router, Request, Response } from 'express'
-import { callCognitive, isRlmAvailable } from '../cognitive-proxy.js'
+import { isRlmAvailable } from '../cognitive-proxy.js'
 import { getRedis } from '../redis.js'
 import { logger } from '../logger.js'
+import { StrategicDistiller, type DistillationStrategy } from '../memory/strategic-distiller.js'
 
 export const foldRouter = Router()
 
 const DAILY_LIMIT = 100
 const REDIS_PREFIX = 'caas:usage:'
+const strategicDistiller = new StrategicDistiller()
 
 /**
  * Get today's usage count for a given API key.
@@ -124,19 +126,18 @@ foldRouter.post('/', async (req: Request, res: Response) => {
   // P3: Budget and strategy validation
   const VALID_STRATEGIES = ['semantic', 'extractive', 'hybrid']
   const budget = typeof body.budget === 'number' && body.budget >= 100 && body.budget <= 50000 ? body.budget : 2000
-  const strategy = typeof body.strategy === 'string' && VALID_STRATEGIES.includes(body.strategy) ? body.strategy : 'semantic'
+  const strategy = typeof body.strategy === 'string' && VALID_STRATEGIES.includes(body.strategy) ? body.strategy as DistillationStrategy : 'semantic'
 
   const t0 = Date.now()
 
   try {
-    const result = await callCognitive('fold', {
-      prompt: body.query ?? 'Compress and fold the following text while preserving key information',
-      context: {
-        text: body.text,
-        budget,
-        strategy,
-      },
-    }, 30000)
+    const distillation = await strategicDistiller.distill({
+      text: body.text,
+      budget,
+      strategy,
+      query: body.query,
+    })
+    const result = distillation.folded_text
 
     const durationMs = Date.now() - t0
     const inputTokens = Math.ceil(body.text.length / 4) // rough estimate
@@ -158,6 +159,11 @@ foldRouter.post('/', async (req: Request, res: Response) => {
         tokens_saved_estimate: Math.max(0, inputTokens - outputTokens),
         duration_ms: durationMs,
         strategy,
+        memory_sources: distillation.source_count,
+        memory_summary: distillation.memory_summary,
+        bom_components: distillation.bom_components,
+        compression_mode: distillation.compression_mode,
+        graph_weight_profile: distillation.graph_weight_profile,
       },
       usage: {
         today: usage + 1,
