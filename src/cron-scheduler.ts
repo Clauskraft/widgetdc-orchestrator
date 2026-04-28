@@ -2052,22 +2052,23 @@ export function registerDefaultLoops(): void {
   // Adoption Triage Pipeline — 6h cadence, batches of 50 untriaged PhantomComponents.
   // Per-tick lineage: :PhantomBOMRun{run_kind:'directive_adoption'} + :AdoptionAudit closeout.
   // 9-annex package: docs/directives/2026-04-28-adoption-triage-pipeline-*.md
-  // Pre-existing endpoint: POST /api/cron/adoption-triage[?dry_run=true][&batch_size=N]
+  // Endpoint: POST /api/cron/adoption-triage[?dry_run=true][&batch_size=N]
   //
-  // PAUSED 2026-04-28 04:20 UTC pending v2 evidence bundle.
-  //   First v2 wet-tick (PR #4841 deploy) exposed two defects:
-  //     1. Neo4j read-query timeout (10s) — O(n²) sibling scan
-  //     2. AdoptionAudit closeout skipped on read-failure
-  //   Hotfix WidgeTDC#4843 fixes both. Cron stays disabled until:
-  //     a) hotfix is deployed
-  //     b) one clean v2 wet-tick is run + readback verified
-  //     c) evidence bundle landed in docs/governance/adoption-triage-v2-evidence-2026-04-28.md
-  //   Re-enable via single-line follow-up commit (enabled: false → true).
+  // RE-ENABLED 2026-04-28 08:12 UTC — v2 evidence bundle verified:
+  //   docs/governance/adoption-triage-v2-evidence-2026-04-28.md (WidgeTDC PR #4849)
+  //   - Hotfix-1 WidgeTDC#4843 (read-query) DEPLOYED
+  //   - Hotfix-2 WidgeTDC#4846 (workcore resolver) DEPLOYED
+  //   - Clean v2 wet-tick: bomrun-43439869 audit PASSED score=1.0 gaps=[]
+  //   - All 3 readback queries (per operator spec) PASS
+  //   - 2 dangling runs (pre/post-hotfix-1) closed with failed AdoptionAudit
+  // Claim status: still L1/L2. Re-enabling cron does NOT promote claim;
+  // claim:phantom-bom-composition advancement requires 3 consecutive
+  // scheduled ticks passing per claim governance rules.
   registerCronJob({
     id: 'adoption-triage',
     name: 'Adoption Triage Pipeline (PhantomComponent → InnovationTicket)',
     schedule: '0 */6 * * *',  // every 6h at :00 UTC
-    enabled: false,            // PAUSED pending v2 evidence — see comment above
+    enabled: true,             // RE-ENABLED post evidence-verification (see comment above)
     chain: {
       name: 'Adoption Triage',
       mode: 'sequential',
