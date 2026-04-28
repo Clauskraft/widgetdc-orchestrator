@@ -510,7 +510,7 @@ function validateBeforeMerge(query, params, force) {
       }
     }
     if (!hasIdentifier && !setsIdentifier && !mergesIdentifierInline) {
-      const isInfraNode = /:(GraphHealthSnapshot|RLMDecision|RLMTool|RLMPattern|InventorExperiment|InventorTrial|InventorNode)/i.test(query);
+      const isInfraNode = /:(GraphHealthSnapshot|RLMDecision|RLMTool|RLMPattern|InventorExperiment|InventorTrial|InventorNode|TenantBudget|InferenceSpend|ExternalProviderCall|ManifestoPrinciple)/i.test(query);
       if (!isInfraNode) {
         metrics.writes_rejected++;
         const reason = "New nodes must have a non-empty title, name, or filename";
