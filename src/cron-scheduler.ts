@@ -2048,4 +2048,28 @@ export function registerDefaultLoops(): void {
       }],
     },
   })
+
+  // Adoption Triage Pipeline — 6h cadence, batches of 50 untriaged PhantomComponents.
+  // Per-tick lineage: :PhantomBOMRun{run_kind:'directive_adoption'} + :AdoptionAudit closeout.
+  // 9-annex package: docs/directives/2026-04-28-adoption-triage-pipeline-*.md
+  // Pre-existing endpoint: POST /api/cron/adoption-triage[?dry_run=true][&batch_size=N]
+  // ENABLED — operator authorization granted 2026-04-28 (PR #4841 v2 retro-fit).
+  registerCronJob({
+    id: 'adoption-triage',
+    name: 'Adoption Triage Pipeline (PhantomComponent → InnovationTicket)',
+    schedule: '0 */6 * * *',  // every 6h at :00 UTC
+    enabled: true,
+    chain: {
+      name: 'Adoption Triage',
+      mode: 'sequential',
+      steps: [{
+        agent_id: 'orchestrator',
+        tool_name: 'backend.http_post',
+        arguments: {
+          path: '/api/cron/adoption-triage?batch_size=50',
+          body: {},
+        },
+      }],
+    },
+  })
 }
