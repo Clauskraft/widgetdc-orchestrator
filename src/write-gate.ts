@@ -164,11 +164,24 @@ export function validateBeforeMerge(
       return (key === 'title' || key === 'name' || key === 'filename')
         && typeof val === 'string' && val.trim().length > 0
     })
-    // Also check if the Cypher itself sets title/name inline
+    // Also check if the Cypher itself sets title/name via SET clause
     const setsIdentifier = /SET\s+\w+\.(title|name|filename)\s*=/i.test(query)
-    if (!hasIdentifier && !setsIdentifier) {
-      // Don't reject relationship-only writes or known infrastructure nodes
-      const isInfraNode = /:(GraphHealthSnapshot|RLMDecision|RLMTool|RLMPattern)/i.test(query)
+    // B-5b (2026-04-28): also accept inline-MERGE pattern  MERGE (x:Label {name: $param} ...)
+    // Inventor + many other writers use this canonical Neo4j pattern for upserts.
+    // Validate the param actually contains a non-empty string when matched.
+    let mergesIdentifierInline = false
+    const inlineMatch = query.match(/(?:MERGE|CREATE)\s*\(\w*:\w+\s*\{[^}]*\b(title|name|filename)\s*:\s*\$(\w+)/i)
+    if (inlineMatch) {
+      const inlineParam = inlineMatch[2]
+      const inlineVal = params[inlineParam]
+      if (typeof inlineVal === 'string' && inlineVal.trim().length > 0) {
+        mergesIdentifierInline = true
+      }
+    }
+    if (!hasIdentifier && !setsIdentifier && !mergesIdentifierInline) {
+      // Don't reject relationship-only writes or known infrastructure nodes.
+      // Inventor* labels are append-only trial/experiment lineage with UUID ids — exempted.
+      const isInfraNode = /:(GraphHealthSnapshot|RLMDecision|RLMTool|RLMPattern|InventorExperiment|InventorTrial|InventorNode)/i.test(query)
       if (!isInfraNode) {
         metrics.writes_rejected++
         const reason = 'New nodes must have a non-empty title, name, or filename'
