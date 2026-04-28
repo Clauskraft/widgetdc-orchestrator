@@ -2053,12 +2053,21 @@ export function registerDefaultLoops(): void {
   // Per-tick lineage: :PhantomBOMRun{run_kind:'directive_adoption'} + :AdoptionAudit closeout.
   // 9-annex package: docs/directives/2026-04-28-adoption-triage-pipeline-*.md
   // Pre-existing endpoint: POST /api/cron/adoption-triage[?dry_run=true][&batch_size=N]
-  // ENABLED — operator authorization granted 2026-04-28 (PR #4841 v2 retro-fit).
+  //
+  // PAUSED 2026-04-28 04:20 UTC pending v2 evidence bundle.
+  //   First v2 wet-tick (PR #4841 deploy) exposed two defects:
+  //     1. Neo4j read-query timeout (10s) — O(n²) sibling scan
+  //     2. AdoptionAudit closeout skipped on read-failure
+  //   Hotfix WidgeTDC#4843 fixes both. Cron stays disabled until:
+  //     a) hotfix is deployed
+  //     b) one clean v2 wet-tick is run + readback verified
+  //     c) evidence bundle landed in docs/governance/adoption-triage-v2-evidence-2026-04-28.md
+  //   Re-enable via single-line follow-up commit (enabled: false → true).
   registerCronJob({
     id: 'adoption-triage',
     name: 'Adoption Triage Pipeline (PhantomComponent → InnovationTicket)',
     schedule: '0 */6 * * *',  // every 6h at :00 UTC
-    enabled: true,
+    enabled: false,            // PAUSED pending v2 evidence — see comment above
     chain: {
       name: 'Adoption Triage',
       mode: 'sequential',
