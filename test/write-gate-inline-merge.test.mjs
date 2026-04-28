@@ -46,7 +46,7 @@ function checkB5(query, params) {
 
   if (hasIdentifier || setsIdentifier || mergesIdentifierInline) return { allowed: true }
 
-  const isInfraNode = /:(GraphHealthSnapshot|RLMDecision|RLMTool|RLMPattern|InventorExperiment|InventorTrial|InventorNode)/i.test(query)
+  const isInfraNode = /:(GraphHealthSnapshot|RLMDecision|RLMTool|RLMPattern|InventorExperiment|InventorTrial|InventorNode|TenantBudget|InferenceSpend|ExternalProviderCall|ManifestoPrinciple)/i.test(query)
   if (isInfraNode) return { allowed: true }
 
   return { allowed: false, reason: 'New nodes must have a non-empty title, name, or filename' }
@@ -120,6 +120,39 @@ test('RLMDecision still EXEMPT', () => {
   const r = checkB5(
     `MERGE (d:RLMDecision {id: $id}) ON CREATE SET d.score = $score`,
     { id: 'dec-1', score: 0.5 }
+  )
+  assert(r.allowed)
+})
+
+// ─── New 2026-04-28: LLM cost-governance labels exempted ─────────────────
+test('TenantBudget (cost-governance preflight) — EXEMPT', () => {
+  const r = checkB5(
+    `MERGE (b:TenantBudget {id: $budget_id}) ON CREATE SET b.tenant_id = $tenant_id, b.period = date($period), b.hard_limit = $hard_limit, b.created_at = datetime()`,
+    { budget_id: 'widgetdc-platform:2026-04-28', tenant_id: 'widgetdc-platform', period: '2026-04-28', hard_limit: 120000 }
+  )
+  assert(r.allowed)
+})
+
+test('InferenceSpend (cost-governance settle) — EXEMPT', () => {
+  const r = checkB5(
+    `MERGE (s:InferenceSpend {id: $spend_id}) ON CREATE SET s.tokens = $tokens, s.created_at = datetime()`,
+    { spend_id: 'spend-uuid-1', tokens: 100 }
+  )
+  assert(r.allowed)
+})
+
+test('ExternalProviderCall (cost-governance settle) — EXEMPT', () => {
+  const r = checkB5(
+    `MERGE (e:ExternalProviderCall {id: $provider_call_id}) ON CREATE SET e.provider = $provider, e.created_at = datetime()`,
+    { provider_call_id: 'pc-uuid-1', provider: 'deepseek' }
+  )
+  assert(r.allowed)
+})
+
+test('ManifestoPrinciple (governance schema) — EXEMPT', () => {
+  const r = checkB5(
+    `MERGE (p:ManifestoPrinciple {number: $number}) ON CREATE SET p.text = $text, p.created_at = datetime()`,
+    { number: 1, text: 'principle text' }
   )
   assert(r.allowed)
 })
