@@ -2110,7 +2110,7 @@ export function registerDefaultLoops(): void {
     id: 'psr-canary',
     name: 'PSR Context-Reduction Canary (Phase Δ P3 streak gate)',
     schedule: '0 */6 * * *',  // every 6h at :00 UTC (offset by 0 — runs alongside adoption-triage)
-    enabled: false,            // OPERATOR-GATED: flip true only after OP-1 + OP-2 + backend endpoint deployed
+    enabled: true,             // OP-3c FLIP: OP-1 (ENABLE_BOOT_MIGRATIONS=1) + OP-2 (PSR_TELEMETRY_ENABLED=1) applied; canary now firing at :00 UTC ticks. Backend /api/cron/psr-canary endpoint may not yet be deployed — emission visibility (psr_canary_pending) is the verify target until full bundle lands.
     chain: {
       name: 'PSR Canary',
       mode: 'sequential',
