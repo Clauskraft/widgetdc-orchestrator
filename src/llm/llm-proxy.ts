@@ -15,6 +15,7 @@ import { LlmMatrix, type ProviderId } from '@widgetdc/contracts/llm'
 import { config } from '../config.js'
 import { logger } from '../logger.js'
 import { preflightGlobalInferenceBudget, settleGlobalInferenceBudget } from './cost-governance.js'
+import { emitTokenTelemetry, buildTelemetryRecord, isTelemetryEnabled } from './token-telemetry.js'
 
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
@@ -579,6 +580,25 @@ export async function chatLLM(req: LLMRequest): Promise<LLMResponse> {
       status: 'completed',
       reason: req.budget_reason ?? `llm-dispatch:${response.provider}`,
     })
+
+    // PSR P1.b — TokenTelemetry emission (best-effort, feature-flag-gated).
+    // Per master prompt §HYPERAGENT staged rollout: PSR_TELEMETRY_ENABLED=1
+    // to enable. void-call NEVER blocks LLM path; failures swallow + log warn.
+    if (isTelemetryEnabled()) {
+      void emitTokenTelemetry(
+        buildTelemetryRecord({
+          run_id: runId,
+          provider: response.provider,
+          model: response.model,
+          prompt_tokens: promptTokens,
+          completion_tokens: completionTokens,
+          workflow_id: req.workflow_id,
+          // PSR runtime extensions (selected_skills, router_*, jit_*, etc.)
+          // populate later when IntentRouter + JIT Materializer ship in P2.
+        })
+      )
+    }
+
     return response
   } catch (err) {
     const fallbackModel = req.model || provider.defaultModel
