@@ -2082,4 +2082,46 @@ export function registerDefaultLoops(): void {
       }],
     },
   })
+
+  // ── Phase Δ P3 — PSR context-reduction canary ────────────────────────
+  // Per .claude/plans/drifting-riding-prism.md plan v2:
+  //   Stage 1 (L2 gate): boot_p50<=19000 (35%), die_rate<=0.10, cov>=0.95, gap<0.05
+  //   Stage 2 (L3 gate): boot_p50<=14600 (50%), die_rate<=0.05, cov>=0.99, gap<0.01
+  // 3x consecutive scheduled passes for L3 promotion.
+  //
+  // Cron is REGISTERED disabled. Operator flips enabled:false → true ONLY after:
+  //   OP-1: ENABLE_BOOT_MIGRATIONS=1 applied → 0011 §1-4 + 0012 constraints active
+  //   OP-2: PSR_TELEMETRY_ENABLED=1 on orchestrator → :TokenTelemetry data flows
+  //   OP-3 follow-up: backend /api/cron/psr-canary endpoint deployed
+  //                   (separate captain PR; canary handler runs runCanary() in-proc)
+  //
+  // Canary script source: WidgeTDC/scripts/psr-context-reduction-canary.ts
+  // Backend endpoint contract (TODO): POST /api/cron/psr-canary?stage=1|2 → JSON envelope
+  // Phase Δ PRs:
+  //   P1.a HyperAgent template:        WidgeTDC#4860 (545db17d)
+  //   P1.b TokenTelemetry hook:        orchestrator#97 (e55b7038)
+  //   P1.c Canary real wiring:         WidgeTDC#4864 (6e2aafab)
+  //   P2.a IntentRouter:               orchestrator#98 (ed4c17a7)
+  //   P2.b JIT Materializer:           orchestrator#99 (2c8e4928)
+  //   P2.c BOMItem typed lineage:      WidgeTDC#4867 (24fbb93b)
+  //
+  // Default stage=1 (Stage 1 / L2). After 3x Stage-1 passes, captain flips to stage=2.
+  registerCronJob({
+    id: 'psr-canary',
+    name: 'PSR Context-Reduction Canary (Phase Δ P3 streak gate)',
+    schedule: '0 */6 * * *',  // every 6h at :00 UTC (offset by 0 — runs alongside adoption-triage)
+    enabled: false,            // OPERATOR-GATED: flip true only after OP-1 + OP-2 + backend endpoint deployed
+    chain: {
+      name: 'PSR Canary',
+      mode: 'sequential',
+      steps: [{
+        agent_id: 'orchestrator',
+        tool_name: 'backend.http_post',
+        arguments: {
+          path: '/api/cron/psr-canary?stage=1',
+          body: {},
+        },
+      }],
+    },
+  })
 }
