@@ -2066,13 +2066,132 @@ var init_cost_governance = __esm({
   }
 });
 
+// src/llm/token-telemetry.ts
+import { randomUUID } from "crypto";
+function isTelemetryEnabled() {
+  return process.env.PSR_TELEMETRY_ENABLED === "1";
+}
+async function emitTokenTelemetry(record) {
+  if (!isTelemetryEnabled()) return;
+  try {
+    await callMcpTool({
+      toolName: "graph.write_cypher",
+      callId: `psr-telemetry-${record.run_id}`,
+      args: {
+        query: `MERGE (t:TokenTelemetry {id: $id})
+                ON CREATE SET t.created_at = datetime($created_at)
+                SET t.session_id                = $session_id,
+                    t.run_id                    = $run_id,
+                    t.provider                  = $provider,
+                    t.model                     = $model,
+                    t.prompt_tokens             = $prompt_tokens,
+                    t.completion_tokens         = $completion_tokens,
+                    t.total_tokens              = $total_tokens,
+                    t.estimated_cost_dkk        = $estimated_cost_dkk,
+                    t.budget_lane               = $budget_lane,
+                    t.selected_skills           = $selected_skills,
+                    t.router_algorithm          = $router_algorithm,
+                    t.prompt_tokens_before_jit  = $prompt_tokens_before_jit,
+                    t.prompt_tokens_after_jit   = $prompt_tokens_after_jit,
+                    t.context_saved_tokens      = $context_saved_tokens,
+                    t.fold_triggered            = $fold_triggered,
+                    t.router_decision_id        = $router_decision_id,
+                    t.materialization_id        = $materialization_id,
+                    t.llm_call_id               = $llm_call_id,
+                    t.settle_id                 = $settle_id,
+                    t.embedding_hash            = $embedding_hash,
+                    t.fold_compression_ratio    = $fold_compression_ratio,
+                    t.router_precision          = $router_precision,
+                    t.downstream_task_success_rate = $downstream_task_success_rate,
+                    t.semantic_drift_score      = $semantic_drift_score,
+                    t.cache_hit_rate            = $cache_hit_rate,
+                    t.meta_skill_invocation_id  = $meta_skill_invocation_id,
+                    t.reasoning_chain_hash      = $reasoning_chain_hash,
+                    t.invocation_count          = $invocation_count,
+                    t.compliance_gap_score      = $compliance_gap_score,
+                    t.rollback_trigger_state    = $rollback_trigger_state,
+                    t.meta_skill_invocation_latency_ms = $meta_skill_invocation_latency_ms,
+                    t.workflow_id               = $workflow_id,
+                    t.plan_id                   = $plan_id,
+                    t.correlation_id            = $correlation_id,
+                    t.last_audited              = datetime()`,
+        params: normalizeRecord(record),
+        intent: `PSR token telemetry emission for run=${record.run_id}`,
+        evidence: `provider=${record.provider} model=${record.model} total_tokens=${record.total_tokens}`,
+        destructiveHint: false,
+        contains_pii: false
+      }
+    });
+  } catch (err) {
+    logger.warn(
+      { error: String(err), run_id: record.run_id },
+      "[psr-telemetry] emit failed (non-blocking)"
+    );
+  }
+}
+function buildTelemetryRecord(input) {
+  const correlation_id = input.correlation_id ?? input.workflow_id ?? input.run_id;
+  return {
+    id: `telemetry-${input.run_id}-${randomUUID().slice(0, 8)}`,
+    session_id: input.session_id ?? input.workflow_id ?? input.run_id,
+    run_id: input.run_id,
+    provider: input.provider,
+    model: input.model,
+    prompt_tokens: input.prompt_tokens,
+    completion_tokens: input.completion_tokens,
+    total_tokens: input.prompt_tokens + input.completion_tokens,
+    estimated_cost_dkk: input.estimated_cost_dkk ?? 0,
+    budget_lane: input.budget_lane ?? "standard",
+    selected_skills: input.selected_skills,
+    router_algorithm: input.router_algorithm,
+    prompt_tokens_before_jit: input.prompt_tokens_before_jit,
+    prompt_tokens_after_jit: input.prompt_tokens_after_jit,
+    context_saved_tokens: input.context_saved_tokens,
+    fold_triggered: input.fold_triggered,
+    router_decision_id: input.router_decision_id,
+    materialization_id: input.materialization_id,
+    llm_call_id: input.llm_call_id,
+    settle_id: input.settle_id,
+    embedding_hash: input.embedding_hash,
+    fold_compression_ratio: input.fold_compression_ratio,
+    router_precision: input.router_precision,
+    downstream_task_success_rate: input.downstream_task_success_rate,
+    semantic_drift_score: input.semantic_drift_score,
+    cache_hit_rate: input.cache_hit_rate,
+    meta_skill_invocation_id: input.meta_skill_invocation_id,
+    reasoning_chain_hash: input.reasoning_chain_hash,
+    invocation_count: input.invocation_count,
+    compliance_gap_score: input.compliance_gap_score,
+    rollback_trigger_state: input.rollback_trigger_state ?? "none",
+    meta_skill_invocation_latency_ms: input.meta_skill_invocation_latency_ms,
+    workflow_id: input.workflow_id,
+    plan_id: input.plan_id,
+    correlation_id,
+    created_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function normalizeRecord(record) {
+  const out = {};
+  for (const [k, v] of Object.entries(record)) {
+    out[k] = v === void 0 ? null : v;
+  }
+  return out;
+}
+var init_token_telemetry = __esm({
+  "src/llm/token-telemetry.ts"() {
+    "use strict";
+    init_logger();
+    init_mcp_caller();
+  }
+});
+
 // src/llm/llm-proxy.ts
 var llm_proxy_exports = {};
 __export(llm_proxy_exports, {
   chatLLM: () => chatLLM,
   listProviders: () => listProviders
 });
-import { randomUUID } from "crypto";
+import { randomUUID as randomUUID2 } from "crypto";
 function dispatchTypeFor(providerId, openaiCompatible) {
   if (openaiCompatible) return "openai-compat";
   if (providerId === "gemini") return "gemini";
@@ -2409,7 +2528,7 @@ async function chatLLM(req) {
     throw new Error(`Unknown provider '${req.provider}'. Available: ${available.join(", ")}`);
   }
   logger.info({ provider: req.provider, model: req.model, messages: req.messages.length }, "LLM proxy call");
-  const runId = normalizeBudgetIdentity2(req.workflow_id, `llmrun-${randomUUID()}`);
+  const runId = normalizeBudgetIdentity2(req.workflow_id, `llmrun-${randomUUID2()}`);
   const tenantId = normalizeBudgetIdentity2(req.tenant_id, process.env.B4_DEFAULT_TENANT_ID ?? "widgetdc-platform");
   const agentId = normalizeBudgetIdentity2(req.agent_id, process.env.B4_DEFAULT_AGENT_ID ?? "widgetdc-orchestrator");
   const estimatedInputTokens = estimatePromptTokens(req.messages);
@@ -2458,6 +2577,20 @@ async function chatLLM(req) {
       status: "completed",
       reason: req.budget_reason ?? `llm-dispatch:${response.provider}`
     });
+    if (isTelemetryEnabled()) {
+      void emitTokenTelemetry(
+        buildTelemetryRecord({
+          run_id: runId,
+          provider: response.provider,
+          model: response.model,
+          prompt_tokens: promptTokens,
+          completion_tokens: completionTokens,
+          workflow_id: req.workflow_id
+          // PSR runtime extensions (selected_skills, router_*, jit_*, etc.)
+          // populate later when IntentRouter + JIT Materializer ship in P2.
+        })
+      );
+    }
     return response;
   } catch (err) {
     const fallbackModel = req.model || provider.defaultModel;
@@ -2500,6 +2633,7 @@ var init_llm_proxy = __esm({
     init_config();
     init_logger();
     init_cost_governance();
+    init_token_telemetry();
     PROVIDER_DISPLAY_NAMES = {
       deepseek: "DeepSeek",
       qwen: "Qwen",
@@ -26281,7 +26415,7 @@ __export(artifacts_exports, {
   storeArtifact: () => storeArtifact
 });
 import { Router as Router3 } from "express";
-import { randomUUID as randomUUID2 } from "crypto";
+import { randomUUID as randomUUID3 } from "crypto";
 async function storeArtifact(artifact) {
   const redis2 = getRedis();
   if (!redis2) return false;
@@ -26485,7 +26619,7 @@ var init_artifacts = __esm({
         res.status(400).json({ success: false, error: "Missing required fields: title, source, blocks, created_by" });
         return;
       }
-      const id = `widgetdc:artifact:${randomUUID2()}`;
+      const id = `widgetdc:artifact:${randomUUID3()}`;
       const now = (/* @__PURE__ */ new Date()).toISOString();
       const artifact = {
         $id: id,
@@ -26620,7 +26754,7 @@ __export(drill_exports, {
   saveDrillContext: () => saveDrillContext
 });
 import { Router as Router4 } from "express";
-import { randomUUID as randomUUID3 } from "crypto";
+import { randomUUID as randomUUID4 } from "crypto";
 async function callMcp(tool, payload) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), MCP_TIMEOUT_MS);
@@ -26775,7 +26909,7 @@ var init_drill = __esm({
         res.status(400).json({ success: false, error: "Missing required field: domain" });
         return;
       }
-      const sessionId = randomUUID3();
+      const sessionId = randomUUID4();
       const ctx = {
         stack: [],
         current_level: "domain",
@@ -31327,7 +31461,7 @@ __export(canvas_builder_tool_exports, {
   pickTrackFromBrief: () => pickTrackFromBrief,
   synthesizeStubResolution: () => synthesizeStubResolution
 });
-import { randomUUID as randomUUID4 } from "node:crypto";
+import { randomUUID as randomUUID5 } from "node:crypto";
 function buildIntentFromArgs(args) {
   const userText = typeof args.brief === "string" ? args.brief.trim() : "";
   const intent = {
@@ -31398,7 +31532,7 @@ function paneForTrack(track) {
 }
 function synthesizeStubResolution(intent, reason) {
   const track = pickTrackFromBrief(intent.user_text, intent.prior_track);
-  const sessionId = randomUUID4();
+  const sessionId = randomUUID5();
   const initialPane = paneForTrack(track);
   const rationale = [
     `stub:${reason}`,
@@ -46175,7 +46309,7 @@ init_logger();
 init_mcp_caller();
 init_cognitive_proxy();
 import { Router as Router21 } from "express";
-import { randomUUID as randomUUID5 } from "crypto";
+import { randomUUID as randomUUID6 } from "crypto";
 import { v4 as uuid35 } from "uuid";
 var notebookRouter = Router21();
 var NOTEBOOK_PREFIX = "orchestrator:notebook:";
@@ -46284,7 +46418,7 @@ notebookRouter.post("/execute", async (req, res) => {
     res.status(400).json({ success: false, error: "Missing required fields: title, cells (non-empty array)" });
     return;
   }
-  const id = `widgetdc:notebook:${randomUUID5()}`;
+  const id = `widgetdc:notebook:${randomUUID6()}`;
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const cells = body.cells;
   for (let i = 0; i < cells.length; i++) {
