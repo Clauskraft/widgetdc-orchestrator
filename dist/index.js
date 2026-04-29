@@ -44675,6 +44675,26 @@ function registerDefaultLoops() {
       }]
     }
   });
+  registerCronJob({
+    id: "psr-canary",
+    name: "PSR Context-Reduction Canary (Phase \u0394 P3 streak gate)",
+    schedule: "0 */6 * * *",
+    // every 6h at :00 UTC (offset by 0 — runs alongside adoption-triage)
+    enabled: false,
+    // OPERATOR-GATED: flip true only after OP-1 + OP-2 + backend endpoint deployed
+    chain: {
+      name: "PSR Canary",
+      mode: "sequential",
+      steps: [{
+        agent_id: "orchestrator",
+        tool_name: "backend.http_post",
+        arguments: {
+          path: "/api/cron/psr-canary?stage=1",
+          body: {}
+        }
+      }]
+    }
+  });
 }
 
 // src/routes/cron.ts
