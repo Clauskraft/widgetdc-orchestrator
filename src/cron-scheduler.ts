@@ -1242,6 +1242,30 @@ export function registerDefaultLoops(): void {
     },
   })
 
+  // Autophagic Deploy — hourly health-probe + conditional webhook (Sovereign Flywheel)
+  // Dry-run by default. Set AUTOPHAGIC_DEPLOY_WEBHOOK_URL in backend env and flip
+  // `execute=true` to arm webhook firing. Rate-limited + HMAC-signed at runtime.
+  registerCronJob({
+    id: 'autophagic-deploy-hourly',
+    name: 'Autophagic Deploy Health Probe',
+    schedule: '0 * * * *', // Every hour at :00 UTC
+    enabled: true,
+    chain: {
+      name: 'Autophagic Deploy',
+      mode: 'sequential',
+      steps: [
+        {
+          agent_id: 'orchestrator',
+          tool_name: 'backend.http_post',
+          arguments: {
+            path: '/api/cron/autophagic-deploy',
+            body: {},
+          },
+        },
+      ],
+    },
+  })
+
   // Self-correcting graph agent — detects and fixes inconsistencies every 2 hours
   // F5: Weekly adaptive RAG retraining (Q-learning integration)
   registerCronJob({
