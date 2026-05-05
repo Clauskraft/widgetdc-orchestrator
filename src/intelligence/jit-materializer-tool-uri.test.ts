@@ -2,7 +2,7 @@
  * jit-materializer-tool-uri.test.ts
  *
  * Tests for the tool:// URI resolution path added to fetchSkillBody()
- * as part of the CL4R1T4S corpus :Observation implementation.
+ * as part of the WDC_Method corpus :Observation implementation.
  *
  * The resolveToolUri() function is private; we test it indirectly via
  * the exported materializeContext() public surface, using a mocked
