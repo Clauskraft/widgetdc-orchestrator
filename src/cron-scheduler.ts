@@ -2148,4 +2148,44 @@ export function registerDefaultLoops(): void {
       }],
     },
   })
+
+  // ── Phase Δ Optimizer L1 — Tuning Signals Harvest (LIN-1018 Stage 1) ─
+  //
+  // Captain audit 2026-05-06: TuningSignal node count in graph = 0 despite
+  // PR #4881 (e953a3c5) shipping the harvest cron handler. Root cause: the
+  // backend endpoint /api/cron/tuning-signals-harvest is wired in
+  // WidgeTDC/apps/backend/src/routes/cronRoutes.ts:639 + cron handler at
+  // apps/backend/src/cron/tuningSignalsHarvestCron.ts, but the orchestrator's
+  // cron-scheduler never had a registerCronJob entry — so nothing actually
+  // calls the endpoint on a schedule. The dry_run probe confirms the endpoint
+  // returns success with signal_count_total=0 in dry-run, so the wire from
+  // here through to the proxy is sound. This registration closes the loop.
+  //
+  // Schedule: every 6h at :15 UTC (offset 15min from decision-bom @ :00 and
+  // async-reasoning @ :30, so the three governance crons spread evenly).
+  // Cadence is advisory — handler returns recommended_cadence_minutes which
+  // the captain can use to retune later.
+  //
+  // Backend endpoint: POST /api/cron/tuning-signals-harvest (cronRoutes.ts:639)
+  // Handler: WidgeTDC/apps/backend/src/cron/tuningSignalsHarvestCron.ts
+  // Upstream: /api/tuning/proxy/run-once (PR #4882, f966c67c)
+  // Linear: LIN-1018 (Stage 1 — signal harvest; Stage 3 LLM-judge separate)
+  registerCronJob({
+    id: 'tuning-signals-harvest',
+    name: 'Tuning Signals Harvest (LIN-1018 Stage 1, Optimizer L1 substrate)',
+    schedule: '15 */6 * * *',  // every 6h at :15 UTC
+    enabled: true,
+    chain: {
+      name: 'Tuning Signals Harvest',
+      mode: 'sequential',
+      steps: [{
+        agent_id: 'orchestrator',
+        tool_name: 'backend.http_post',
+        arguments: {
+          path: '/api/cron/tuning-signals-harvest',
+          body: {},
+        },
+      }],
+    },
+  })
 }
