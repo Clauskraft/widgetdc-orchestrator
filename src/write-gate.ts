@@ -183,8 +183,9 @@ export function validateBeforeMerge(
       // Inventor* labels are append-only trial/experiment lineage with UUID ids.
       // TenantBudget/InferenceSpend/ExternalProviderCall fire on EVERY LLM call
       // (cost-governance preflight + settle); ManifestoPrinciple is platform-internal
-      // governance schema. All exempt from the name/title/filename requirement.
-      const isInfraNode = /:(GraphHealthSnapshot|RLMDecision|RLMTool|RLMPattern|InventorExperiment|InventorTrial|InventorNode|TenantBudget|InferenceSpend|ExternalProviderCall|ManifestoPrinciple)/i.test(query)
+      // governance schema; TokenTelemetry fires on every LLM call for PSR telemetry.
+      // All exempt from the name/title/filename requirement.
+      const isInfraNode = /:(GraphHealthSnapshot|RLMDecision|RLMTool|RLMPattern|InventorExperiment|InventorTrial|InventorNode|TenantBudget|InferenceSpend|ExternalProviderCall|ManifestoPrinciple|TokenTelemetry)/i.test(query)
       if (!isInfraNode) {
         metrics.writes_rejected++
         const reason = 'New nodes must have a non-empty title, name, or filename'
