@@ -49,7 +49,7 @@ export interface MaterializedSkill {
   body_hash: string            // sha256:16-char prefix (for telemetry, not raw)
   rank: number
   similarity: number
-  fetched_from: 'graph_property' | 'body_uri' | 'fallback_empty'
+  fetched_from: 'graph_property' | 'body_uri' | 'tool_uri' | 'fallback_empty'
   fetch_latency_ms: number
 }
 
@@ -111,13 +111,101 @@ function hashBody(body: string): string {
   return 'sha256:' + createHash('sha256').update(body).digest('hex').slice(0, 16)
 }
 
+// ─── Tool URI resolver ────────────────────────────────────────────────────
+
+/**
+ * Resolve a `tool://` URI to an injectable tool contract block.
+ *
+ * tool://<tool_name> points to a PhantomSkill with skill_type='tool_definition'.
+ * The resolver queries the PhantomSkill node for its tool schema fields
+ * (tool_name, description, parameters, provider_examples) and formats them
+ * as a canonical tool contract block ready for LLM prompt injection.
+ *
+ * Example output (tool://web.search):
+ *
+ *   ## Tool Contract: web.search
+ *   **Description**: Execute a web search and return a result list.
+ *   **Parameters**:
+ *     - query (string, required): The search query
+ *     - num_results (number, optional): Max results to return (default 10)
+ *   **Provider examples**: Grok, ChatGPT, Perplexity, Cursor
+ */
+async function resolveToolUri(
+  toolUri: string,
+  skillId: string,
+  callId: string
+): Promise<{ body: string; latencyMs: number } | null> {
+  const toolName = toolUri.replace(/^tool:\/\//, '')
+  if (!toolName) return null
+
+  const t0 = Date.now()
+  const res = await callMcpTool({
+    toolName: 'graph.read_cypher',
+    callId,
+    args: {
+      query: `
+        MATCH (s:PhantomSkill {id: $id})
+        RETURN s.tool_name        AS tool_name,
+               s.description      AS description,
+               s.parameters       AS parameters,
+               s.provider_examples AS provider_examples,
+               s.name             AS name
+      `,
+      params: { id: skillId },
+    },
+  })
+  const latencyMs = Date.now() - t0
+
+  if (res.status !== 'success') return null
+
+  const rows = (res.result as { results?: Array<Record<string, unknown>> })?.results ?? []
+  const row = rows[0]
+  if (!row) return null
+
+  const name = typeof row.tool_name === 'string' ? row.tool_name : toolName
+  const desc = typeof row.description === 'string' ? row.description : ''
+  const providers = Array.isArray(row.provider_examples)
+    ? (row.provider_examples as string[]).join(', ')
+    : typeof row.provider_examples === 'string'
+      ? row.provider_examples
+      : ''
+
+  // Format parameters — stored as JSON string or array of {name, type, required, description}
+  let paramLines = ''
+  try {
+    const raw = typeof row.parameters === 'string'
+      ? JSON.parse(row.parameters)
+      : Array.isArray(row.parameters)
+        ? row.parameters
+        : []
+    if (Array.isArray(raw) && raw.length > 0) {
+      paramLines = raw.map((p: Record<string, unknown>) => {
+        const req = p['required'] ? 'required' : 'optional'
+        return `  - ${p['name']} (${p['type']}, ${req}): ${p['description'] ?? ''}`
+      }).join('\n')
+    }
+  } catch {
+    // parameters field absent or not parseable — omit param block
+  }
+
+  const lines: string[] = [
+    `## Tool Contract: ${name}`,
+  ]
+  if (desc) lines.push(`**Description**: ${desc}`)
+  if (paramLines) lines.push('**Parameters**:', paramLines)
+  if (providers) lines.push(`**Provider examples**: ${providers}`)
+
+  return { body: lines.join('\n'), latencyMs }
+}
+
 // ─── Skill body fetcher ───────────────────────────────────────────────────
 
 /**
  * Fetch skill body from PhantomSkill node. Strategy (priority order):
  *   1. node.body property (inline body, preferred for short skills)
- *   2. node.body_uri pointer (fs:// or vault://; resolved via lookup helper)
- *   3. fallback: empty body, log warn
+ *   2. body_uri with tool:// scheme — resolved via resolveToolUri()
+ *   3. body_uri with fs:// or vault:// scheme — reserved for future
+ *   4. fallback: empty body, log warn
  *
  * Returns the body + provenance + latency.
  */
@@ -160,14 +248,27 @@ async function fetchSkillBody(
     return { body: row.body, from: 'graph_property', latencyMs }
   }
 
-  // Fallback: body_uri pointer
+  // body_uri pointer resolution
   const bodyUri = typeof row.body_uri === 'string' ? row.body_uri : null
   if (bodyUri && bodyUri !== 'pending') {
-    // P2.b' future: resolve fs://, vault:// URIs.
-    // For v0, treat unresolved URI as fallback.
+    // tool:// scheme — canonical tool-definition contract loaded from PhantomSkill fields
+    if (bodyUri.startsWith('tool://')) {
+      const resolved = await resolveToolUri(
+        bodyUri,
+        skillId,
+        `psr-jit-tool-uri-${skillId.slice(0, 16)}-${Date.now()}`
+      )
+      if (resolved && resolved.body.length > 0) {
+        return { body: resolved.body, from: 'tool_uri', latencyMs: latencyMs + resolved.latencyMs }
+      }
+      logger.warn({ skillId, body_uri: bodyUri }, '[psr-jit] tool:// resolution returned empty; fallback')
+      return { body: '', from: 'fallback_empty', latencyMs }
+    }
+
+    // fs:// / vault:// / other URI schemes reserved for future
     logger.warn(
       { skillId, body_uri: bodyUri },
-      '[psr-jit] body_uri resolution not implemented in v0; fallback empty'
+      '[psr-jit] body_uri scheme not yet supported (only tool:// implemented); fallback empty'
     )
     return { body: '', from: 'fallback_empty', latencyMs }
   }
