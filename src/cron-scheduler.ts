@@ -2148,4 +2148,56 @@ export function registerDefaultLoops(): void {
       }],
     },
   })
+
+  // ── Phase Ε E6 — Decision BOM tier-5 claim canary ────────────────────
+  //
+  // Checks 5 invariants (I1-I5) per decision-bom-canary.ts on every run.
+  // 3 consecutive passes → claim:decision-bom-end-to-end L3 promotion eligible.
+  // Backend endpoint: POST /api/cron/decision-bom-canary (WidgeTDC cronRoutes.ts)
+  // Handler: apps/backend/src/cron/decisionBomCanaryCron.ts
+  // Scripts: WidgeTDC/scripts/decision-bom-canary.ts (REPO_ROOT-fixed: PR #4989)
+  registerCronJob({
+    id: 'decision-bom-canary',
+    name: 'Decision BOM Tier-5 Claim Canary (Phase Ε E6 streak gate)',
+    schedule: '0 */6 * * *',  // every 6h at :00 UTC
+    enabled: true,
+    chain: {
+      name: 'Decision BOM Canary',
+      mode: 'sequential',
+      steps: [{
+        agent_id: 'orchestrator',
+        tool_name: 'backend.http_post',
+        arguments: {
+          path: '/api/cron/decision-bom-canary',
+          body: {},
+        },
+      }],
+    },
+  })
+
+  // ── Async-Reasoning tier-5 claim canary ──────────────────────────────
+  //
+  // Checks 4 invariants against :ReasoningJob production substrate.
+  // 3 consecutive passes → claim:async-reasoning-decoupling L3 promotion eligible.
+  // Backend endpoint: POST /api/cron/async-reasoning-canary (WidgeTDC cronRoutes.ts)
+  // Handler: apps/backend/src/cron/asyncReasoningCanaryCron.ts (NEW, PR #4989)
+  // Script: WidgeTDC/scripts/async-reasoning-canary.ts (runCanary() added PR #4989)
+  registerCronJob({
+    id: 'async-reasoning-canary',
+    name: 'Async Reasoning Tier-5 Claim Canary (claim:async-reasoning-decoupling L3 gate)',
+    schedule: '30 */6 * * *',  // every 6h at :30 UTC (offset 30min from decision-bom)
+    enabled: true,
+    chain: {
+      name: 'Async Reasoning Canary',
+      mode: 'sequential',
+      steps: [{
+        agent_id: 'orchestrator',
+        tool_name: 'backend.http_post',
+        arguments: {
+          path: '/api/cron/async-reasoning-canary',
+          body: {},
+        },
+      }],
+    },
+  })
 }
