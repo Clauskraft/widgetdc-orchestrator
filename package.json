@@ -35,6 +35,7 @@
     "helmet": "^8.1.0",
     "ioredis": "^5.10.0",
     "mammoth": "^1.12.0",
+    "neo4j-driver": "^5.28.3",
     "node-cron": "^4.2.1",
     "pdf-parse": "^2.4.5",
     "pino": "^9.0.0",

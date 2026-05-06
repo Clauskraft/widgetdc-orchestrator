@@ -177,6 +177,8 @@ const LOCAL_TOOLS = new Set([
   'adaptive_rag_dashboard', 'adaptive_rag_query', 'adaptive_rag_retrain',
   'critique_refine', 'context_fold', 'failure_harvest',
   'moa_query', 'judge_response',
+  // Graph writes (direct neo4j-driver — bypasses config.backendUrl which may be misconfigured)
+  'graph.write_cypher',
   // Graph hygiene
   'graph_hygiene_run',
   // Linear
